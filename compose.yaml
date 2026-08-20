@@ -1,0 +1,15 @@
+services:
+  gitadel:
+    build:
+      context: .
+    restart: unless-stopped
+    environment:
+      GITADEL_PUBLIC_URL: ${GITADEL_PUBLIC_URL:-http://localhost:3000}
+    ports:
+      - "${GITADEL_HTTP_PORT:-3000}:3000"
+      - "${GITADEL_SSH_PORT:-2222}:2222"
+    volumes:
+      - gitadel-data:/data
+
+volumes:
+  gitadel-data:

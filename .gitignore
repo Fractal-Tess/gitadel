@@ -1,0 +1,11 @@
+/target/
+/.devenv/
+/devenv.local.nix
+/gitadel.db
+/gitadel.db-*
+/data/
+
+/frontend/node_modules/
+/frontend/.svelte-kit/
+/frontend/build/*
+!/frontend/build/.gitkeep
