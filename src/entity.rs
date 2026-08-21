@@ -303,3 +303,23 @@ pub mod repository_favorite {
 
     impl ActiveModelBehavior for ActiveModel {}
 }
+
+pub mod lfs_lock {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "lfs_locks")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub repository_id: Uuid,
+        pub user_id: Uuid,
+        pub path: String,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}

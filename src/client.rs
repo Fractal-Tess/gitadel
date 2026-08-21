@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::config::{GitadelCommand, RepositoryCommand};
+use crate::config::RepositoryCommand;
 
 #[derive(Serialize)]
 struct CreateRepositoryRequest<'a> {
@@ -31,10 +31,8 @@ struct ErrorBody {
     message: String,
 }
 
-pub async fn run(command: &GitadelCommand) -> Result<()> {
-    match command {
-        GitadelCommand::Repo { command } => run_repository(command).await,
-    }
+pub async fn run(command: &RepositoryCommand) -> Result<()> {
+    run_repository(command).await
 }
 
 async fn run_repository(command: &RepositoryCommand) -> Result<()> {

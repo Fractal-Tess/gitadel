@@ -1,6 +1,7 @@
 use std::io::Read;
 
 mod api;
+mod archive;
 mod client;
 mod config;
 mod database;
@@ -27,9 +28,16 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     if let Some(command) = cli.command() {
-        return client::run(command).await;
+        return match command {
+            config::GitadelCommand::Repo { command } => client::run(command).await,
+            config::GitadelCommand::Backup { command } => {
+                let settings = Settings::load(&cli)?;
+                archive::run(command, &settings).await
+            }
+        };
     }
     let settings = Settings::load(&cli)?;
+    let _storage_lock = archive::acquire_storage_lock(&settings.database)?;
     let database = database::connect_and_migrate(&settings.database).await?;
     if let Some(username) = cli.bootstrap_admin() {
         if !cli.password_stdin() {

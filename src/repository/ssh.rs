@@ -30,7 +30,12 @@ struct SshServer {
 struct SshHandler {
     state: RepositoryState,
     actor_user_id: Option<Uuid>,
-    channels: HashMap<ChannelId, Channel<Msg>>,
+    channels: HashMap<ChannelId, SshChannel>,
+}
+
+struct SshChannel {
+    channel: Channel<Msg>,
+    git_protocol: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -126,7 +131,34 @@ impl russh::server::Handler for SshHandler {
     ) -> Result<(), Self::Error> {
         let id = channel.id();
         reply.accept().await;
-        self.channels.insert(id, channel);
+        self.channels.insert(
+            id,
+            SshChannel {
+                channel,
+                git_protocol: None,
+            },
+        );
+        Ok(())
+    }
+
+    async fn env_request(
+        &mut self,
+        channel_id: ChannelId,
+        variable_name: &str,
+        variable_value: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let accepted = variable_name == "GIT_PROTOCOL"
+            && variable_value == "version=2"
+            && self.channels.get_mut(&channel_id).is_some_and(|channel| {
+                channel.git_protocol = Some(variable_value.to_owned());
+                true
+            });
+        if accepted {
+            session.channel_success(channel_id)?;
+        } else {
+            session.channel_failure(channel_id)?;
+        }
         Ok(())
     }
 
@@ -139,7 +171,7 @@ impl russh::server::Handler for SshHandler {
         let Some(actor_user_id) = self.actor_user_id else {
             return reject(channel_id, session, "Authentication required.\n");
         };
-        let Some(channel) = self.channels.remove(&channel_id) else {
+        let Some(channel_state) = self.channels.remove(&channel_id) else {
             return reject(channel_id, session, "Invalid SSH channel.\n");
         };
         let Ok(command) = std::str::from_utf8(data) else {
@@ -236,6 +268,9 @@ impl russh::server::Handler for SshHandler {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        if let Some(git_protocol) = channel_state.git_protocol {
+            command.env("GIT_PROTOCOL", git_protocol);
+        }
         let child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -248,7 +283,7 @@ impl russh::server::Handler for SshHandler {
         let maintenance_path = matches!(service, GitService::ReceivePack).then_some(path);
         bridge_process(
             child,
-            channel,
+            channel_state.channel,
             format!("{namespace}/{name}"),
             maintenance_path,
         );
@@ -299,19 +334,32 @@ fn bridge_process(
             Duration::from_secs(30 * 60),
             child.wait(),
         ));
-        let result = tokio::select! {
-            result = &mut wait => result,
-            () = &mut input => (&mut wait).await,
+        let first_result = tokio::select! {
+            result = &mut wait => {
+                tracing::debug!(%repository, "Git SSH process exited");
+                Some(result)
+            },
+            () = &mut input => {
+                tracing::debug!(%repository, "Git SSH client input closed");
+                None
+            },
         };
         drop(input);
-        drop(wait);
+        drop(stdin);
         drop(channel_reader);
+        let result = match first_result {
+            Some(result) => result,
+            None => (&mut wait).await,
+        };
+        drop(wait);
         if result.is_err() {
             let _ = child.kill().await;
         }
         let _ = output.await;
+        tracing::debug!(%repository, "Git SSH process output closed");
         let successful = matches!(&result, Ok(Ok(status)) if status.success());
         let _ = errors.await;
+        tracing::debug!(%repository, "Git SSH process error output closed");
         let exit_status = match result {
             Ok(Ok(status)) => status
                 .code()

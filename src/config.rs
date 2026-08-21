@@ -68,6 +68,27 @@ pub enum GitadelCommand {
         #[command(subcommand)]
         command: RepositoryCommand,
     },
+    /// Create or restore an offline integrity-checked backup.
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BackupCommand {
+    /// Create a compressed backup. Gitadel must not be running against this database.
+    Create {
+        /// Destination `.tar.zst` archive.
+        #[arg(value_name = "OUTPUT")]
+        output: PathBuf,
+    },
+    /// Restore a backup into empty configured storage paths.
+    Restore {
+        /// Source `.tar.zst` archive.
+        #[arg(value_name = "INPUT")]
+        input: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
