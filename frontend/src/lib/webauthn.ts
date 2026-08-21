@@ -73,6 +73,14 @@ export function requestOptions(payload: Record<string, unknown>): PublicKeyCrede
 export async function createCredential(
 	options: PublicKeyCredentialCreationOptions
 ): Promise<Record<string, unknown>> {
+	if (
+		!globalThis.isSecureContext ||
+		typeof navigator === 'undefined' ||
+		typeof navigator.credentials?.create !== 'function' ||
+		typeof PublicKeyCredential === 'undefined'
+	) {
+		throw new Error('Passkeys require HTTPS and a supported browser.');
+	}
 	const created = await navigator.credentials.create({ publicKey: options });
 	if (!(created instanceof PublicKeyCredential)) throw new Error('Passkey creation was cancelled.');
 	if (!(created.response instanceof AuthenticatorAttestationResponse)) {
@@ -94,6 +102,14 @@ export async function createCredential(
 export async function getCredential(
 	options: PublicKeyCredentialRequestOptions
 ): Promise<Record<string, unknown>> {
+	if (
+		!globalThis.isSecureContext ||
+		typeof navigator === 'undefined' ||
+		typeof navigator.credentials?.get !== 'function' ||
+		typeof PublicKeyCredential === 'undefined'
+	) {
+		throw new Error('Passkeys require HTTPS and a supported browser.');
+	}
 	const received = await navigator.credentials.get({ publicKey: options });
 	if (!(received instanceof PublicKeyCredential)) throw new Error('Passkey login was cancelled.');
 	if (!(received.response instanceof AuthenticatorAssertionResponse)) {

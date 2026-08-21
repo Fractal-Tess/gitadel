@@ -19,7 +19,7 @@ export class AdminSettingsState {
   async initialize(): Promise<void> {
     await this.run(async () => {
       this.auditEvents = await requestJson(
-        "/api/v1/audit?limit=50",
+        "/api/v1/audit?limit=100",
         z.array(auditEventSchema),
       );
     });
@@ -37,7 +37,7 @@ export class AdminSettingsState {
       );
       this.invitation = response.token;
       this.auditEvents = await requestJson(
-        "/api/v1/audit?limit=50",
+        "/api/v1/audit?limit=100",
         z.array(auditEventSchema),
       );
     });

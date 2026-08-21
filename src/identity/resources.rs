@@ -605,6 +605,7 @@ async fn owned_organization(
 pub struct AuditEventResponse {
     id: i64,
     actor_user_id: Option<Uuid>,
+    actor_username: Option<String>,
     action: String,
     target: Option<String>,
     created_at: chrono::DateTime<Utc>,
@@ -624,15 +625,17 @@ pub async fn list_audit(
     }
     let limit = pagination.limit.unwrap_or(100).clamp(1, 500);
     let rows = audit_event::Entity::find()
+        .find_also_related(user::Entity)
         .order_by_desc(audit_event::Column::Id)
         .limit(limit)
         .all(state.database())
         .await?;
     Ok(Json(
         rows.into_iter()
-            .map(|row| AuditEventResponse {
+            .map(|(row, actor)| AuditEventResponse {
                 id: row.id,
                 actor_user_id: row.actor_user_id,
+                actor_username: actor.map(|actor| actor.username),
                 action: row.action,
                 target: row.target,
                 created_at: row.created_at,

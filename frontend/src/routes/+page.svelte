@@ -1,16 +1,25 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import { onMount } from 'svelte';
 	import { z } from 'zod';
-	import { Compass, GitBranch, GitFork, LockKeyhole, Search, Settings2, Sparkles, Star } from 'lucide-svelte';
+	import { Compass, GitBranch, GitFork, LockKeyhole, Plus, Search, Settings2, Sparkles, Star } from 'lucide-svelte';
 
 	import { Button } from '$lib/components/ui/button/index.js';
+	import * as Dialog from '$lib/components/ui/dialog/index.js';
+	import * as Field from '$lib/components/ui/field/index.js';
+	import { Input } from '$lib/components/ui/input/index.js';
+	import * as Select from '$lib/components/ui/select/index.js';
+	import { Textarea } from '$lib/components/ui/textarea/index.js';
 
 	import {
 		ApiFailure,
+		jsonBody,
+		organizationSchema,
 		repositorySchema,
 		requestJson,
+		type Organization,
 		type Repository
 	} from '$lib/api.js';
 	import { useAppState } from '$lib/state/app-state.svelte.js';
@@ -21,6 +30,16 @@
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let filter = $state<'all' | 'favorites' | 'recent'>('all');
+	let organizations = $state.raw<Organization[]>([]);
+	let createOpen = $state(false);
+	let creating = $state(false);
+	let createError = $state<string | null>(null);
+	let repositoryNamespace = $state(app.authStatus?.user?.username ?? '');
+	let repositoryName = $state('');
+	let repositoryDescription = $state('');
+	let repositoryVisibility = $state<'public' | 'private'>(
+		app.instance?.default_repository_visibility ?? 'private'
+	);
 
 	let visibleRepositories = $derived.by(() => {
 		const query = search.trim().toLowerCase();
@@ -52,9 +71,48 @@
 		}).format(new Date(value));
 	}
 
+	async function createRepository(): Promise<void> {
+		creating = true;
+		createError = null;
+		try {
+			const repository = await requestJson('/api/v1/repositories', repositorySchema, {
+				method: 'POST',
+				body: jsonBody({
+					namespace: repositoryNamespace,
+					name: repositoryName,
+					description: repositoryDescription || null,
+					visibility: repositoryVisibility,
+					object_format: 'sha1'
+				})
+			});
+			createOpen = false;
+			await goto(
+				resolve('/[namespace]/[name]', {
+					namespace: repository.namespace,
+					name: repository.name
+				})
+			);
+		} catch (caught) {
+			createError =
+				caught instanceof ApiFailure || caught instanceof Error
+					? caught.message
+					: 'Could not create repository.';
+		} finally {
+			creating = false;
+		}
+	}
+
 	onMount(async () => {
 		try {
-			repositories = await requestJson('/api/v1/repositories', z.array(repositorySchema));
+			const [loadedRepositories, loadedOrganizations] = await Promise.all([
+				requestJson('/api/v1/repositories', z.array(repositorySchema)),
+				app.authStatus?.authenticated
+					? requestJson('/api/v1/organizations', z.array(organizationSchema))
+					: Promise.resolve([])
+			]);
+			repositories = loadedRepositories;
+			organizations = loadedOrganizations.filter((organization) => organization.role === 'owner');
+			repositoryNamespace ||= app.authStatus?.user?.username ?? '';
 		} catch (caught) {
 			error = message(caught);
 		} finally {
@@ -151,7 +209,119 @@
 								{app.authStatus?.authenticated ? 'Public repositories and projects shared with you.' : 'Public projects available on this server.'}
 							</p>
 						</div>
-						<p class="text-xs tabular-nums text-muted-foreground">{visibleRepositories.length} total</p>
+						<div class="flex items-center gap-3">
+							<p class="text-xs tabular-nums text-muted-foreground">{visibleRepositories.length} total</p>
+							{#if app.authStatus?.authenticated}
+								<Dialog.Root bind:open={createOpen}>
+									<Dialog.Trigger>
+										{#snippet child({ props })}
+											<Button {...props} class="gap-2">
+												<Plus class="size-4" />
+												New repository
+											</Button>
+										{/snippet}
+									</Dialog.Trigger>
+									<Dialog.Content class="ring-foreground/20 sm:max-w-lg">
+										<Dialog.Header>
+											<Dialog.Title>Create a repository</Dialog.Title>
+											<Dialog.Description>
+												Create an empty Git repository, then push your project over SSH.
+											</Dialog.Description>
+										</Dialog.Header>
+										<form
+											class="grid gap-4"
+											onsubmit={(event) => {
+												event.preventDefault();
+												void createRepository();
+											}}
+										>
+											{#if createError}
+												<p class="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+													{createError}
+												</p>
+											{/if}
+											<div class="grid gap-4 sm:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
+												<Field.Field>
+													<Field.Label for="repository-namespace">Owner</Field.Label>
+													<Select.Root
+														type="single"
+														value={repositoryNamespace}
+														onValueChange={(value) => {
+															if (value) repositoryNamespace = value;
+														}}
+													>
+														<Select.Trigger id="repository-namespace" class="w-full">
+															{repositoryNamespace || 'Select an owner'}
+														</Select.Trigger>
+														<Select.Content>
+															{#if app.authStatus.user}
+																<Select.Item value={app.authStatus.user.username}>
+																	{app.authStatus.user.username}
+																</Select.Item>
+															{/if}
+															{#each organizations as organization (organization.id)}
+																<Select.Item value={organization.slug}>
+																	{organization.slug}
+																</Select.Item>
+															{/each}
+														</Select.Content>
+													</Select.Root>
+												</Field.Field>
+												<Field.Field>
+													<Field.Label for="repository-name">Repository name</Field.Label>
+													<Input
+														id="repository-name"
+														bind:value={repositoryName}
+														maxlength={100}
+														placeholder="project-name"
+														required
+													/>
+												</Field.Field>
+											</div>
+											<Field.Field>
+												<Field.Label for="repository-description">Description</Field.Label>
+												<Textarea
+													id="repository-description"
+													bind:value={repositoryDescription}
+													maxlength={512}
+													placeholder="What is this project for?"
+												/>
+											</Field.Field>
+											<Field.Field>
+												<Field.Label for="repository-visibility">Visibility</Field.Label>
+												<Select.Root
+													type="single"
+													value={repositoryVisibility}
+													onValueChange={(value) => {
+														if (value === 'public' || value === 'private') {
+															repositoryVisibility = value;
+														}
+													}}
+												>
+													<Select.Trigger id="repository-visibility" class="w-full">
+														{repositoryVisibility === 'private' ? 'Private' : 'Public'}
+													</Select.Trigger>
+													<Select.Content>
+														<Select.Item value="private">Private</Select.Item>
+														<Select.Item value="public">Public</Select.Item>
+													</Select.Content>
+												</Select.Root>
+											</Field.Field>
+											<Dialog.Footer>
+												<Dialog.Close>
+													{#snippet child({ props })}
+														<Button {...props} type="button" variant="outline">Cancel</Button>
+													{/snippet}
+												</Dialog.Close>
+												<Button type="submit" disabled={creating || !repositoryNamespace}>
+													{creating ? 'Creating…' : 'Create repository'}
+												</Button>
+											</Dialog.Footer>
+										</form>
+									</Dialog.Content>
+								</Dialog.Root>
+							{/if}
+						</div>
 					</div>
 
 					{#if loading}
@@ -200,7 +370,13 @@
 									<li class="grid place-items-center px-6 py-16 text-center">
 										<GitBranch class="size-7 text-muted-foreground/60" strokeWidth={1.4} />
 										<p class="mt-3 text-sm font-medium">{search ? 'No matching repositories' : 'No repositories yet'}</p>
-										<p class="mt-1 text-xs text-muted-foreground">{search ? 'Try a different search.' : 'Create one with the Gitadel CLI, then push over SSH.'}</p>
+										<p class="mt-1 text-xs text-muted-foreground">
+											{search
+												? 'Try a different search.'
+												: app.authStatus?.authenticated
+													? 'Use New repository above, then push your first commit over SSH.'
+													: 'Sign in to create a repository.'}
+										</p>
 									</li>
 								{/each}
 							</ul>

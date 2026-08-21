@@ -286,6 +286,7 @@ impl russh::server::Handler for SshHandler {
             channel_state.channel,
             format!("{namespace}/{name}"),
             maintenance_path,
+            matches!(service, GitService::ReceivePack).then(|| (self.state.clone(), actor_user_id)),
         );
         Ok(())
     }
@@ -305,6 +306,7 @@ fn bridge_process(
     mut channel: Channel<Msg>,
     repository: String,
     maintenance_path: Option<std::path::PathBuf>,
+    push_audit: Option<(RepositoryState, Uuid)>,
 ) {
     let Some(mut stdin) = child.stdin.take() else {
         return;
@@ -360,6 +362,19 @@ fn bridge_process(
         let successful = matches!(&result, Ok(Ok(status)) if status.success());
         let _ = errors.await;
         tracing::debug!(%repository, "Git SSH process error output closed");
+        if successful
+            && let Some((state, actor_user_id)) = push_audit
+            && let Err(error) = state
+                .identity()
+                .audit(
+                    Some(actor_user_id),
+                    "repository.push",
+                    Some(repository.clone()),
+                )
+                .await
+        {
+            tracing::warn!(%error, %repository, "could not record repository push");
+        }
         let exit_status = match result {
             Ok(Ok(status)) => status
                 .code()

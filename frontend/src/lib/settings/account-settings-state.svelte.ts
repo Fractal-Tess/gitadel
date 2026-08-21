@@ -1,3 +1,8 @@
+import {
+  getLocalTimeZone,
+  today,
+  type CalendarDate,
+} from "@internationalized/date";
 import { goto } from "$app/navigation";
 import { resolve } from "$app/paths";
 import { z } from "zod";
@@ -21,10 +26,7 @@ import {
   type SshKey,
 } from "$lib/api.js";
 import type { AppState } from "$lib/state/app-state.svelte.js";
-import {
-  createCredential,
-  creationOptions,
-} from "$lib/webauthn.js";
+import { createCredential, creationOptions } from "$lib/webauthn.js";
 
 export type AccountSettingsView = "security" | "organizations";
 
@@ -43,7 +45,7 @@ export class AccountSettingsState {
   tokenRead = $state(true);
   tokenWrite = $state(false);
   tokenSshKeys = $state(false);
-  tokenExpiryDays = $state("");
+  tokenExpiresOn = $state<CalendarDate | undefined>();
   createdToken = $state<string | null>(null);
   organizationSlug = $state("");
   organizationDisplayName = $state("");
@@ -114,7 +116,10 @@ export class AccountSettingsState {
     await this.run(async () => {
       const key = await requestJson("/api/v1/me/ssh-keys", sshKeySchema, {
         method: "POST",
-        body: jsonBody({ name: this.sshKeyName, public_key: this.sshPublicKey }),
+        body: jsonBody({
+          name: this.sshKeyName,
+          public_key: this.sshPublicKey,
+        }),
       });
       this.sshKeys = [...this.sshKeys, key];
       this.sshKeyName = "";
@@ -137,6 +142,8 @@ export class AccountSettingsState {
         this.tokenWrite && "write",
         this.tokenSshKeys && "ssh_keys",
       ].filter((scope): scope is string => Boolean(scope));
+      const expiresInDays =
+        this.tokenExpiresOn?.compare(today(getLocalTimeZone())) ?? null;
       const response = await requestJson(
         "/api/v1/me/tokens",
         createdTokenSchema,
@@ -145,15 +152,14 @@ export class AccountSettingsState {
           body: jsonBody({
             name: this.tokenName,
             scopes,
-            expires_in_days: this.tokenExpiryDays
-              ? Number(this.tokenExpiryDays)
-              : null,
+            expires_in_days: expiresInDays,
           }),
         },
       );
       this.tokens = [...this.tokens, response.details];
       this.createdToken = response.token;
       this.tokenName = "";
+      this.tokenExpiresOn = undefined;
     });
   }
 

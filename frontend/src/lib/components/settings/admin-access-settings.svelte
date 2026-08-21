@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Clipboard, UserPlus, UsersRound } from "lucide-svelte";
+  import { Activity, Clipboard, RefreshCw, UserPlus } from "lucide-svelte";
 
   import { Button } from "$lib/components/ui/button/index.js";
   import type { AdminSettingsState } from "$lib/settings/admin-settings-state.svelte.js";
@@ -7,10 +7,45 @@
   let { state }: { state: AdminSettingsState } = $props();
   const inputClass =
     "w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-2 focus:ring-ring/20";
+
+  const actionLabels: Record<string, string> = {
+    "account.register": "Account registered",
+    "admin.bootstrap": "Administrator created",
+    "api_token.create": "API token created",
+    "api_token.revoke": "API token revoked",
+    "auth.login.passkey": "Signed in with passkey",
+    "auth.login.password": "Signed in with password",
+    "auth.logout": "Signed out",
+    "instance.settings.update": "Instance settings updated",
+    "invitation.create": "Invitation created",
+    "organization.create": "Organization created",
+    "organization.member.add": "Organization member added",
+    "organization.member.remove": "Organization member removed",
+    "passkey.create": "Passkey created",
+    "passkey.delete": "Passkey removed",
+    "repository.collaborator.add": "Repository collaborator added",
+    "repository.collaborator.remove": "Repository collaborator removed",
+    "repository.create": "Repository created",
+    "repository.push": "Repository pushed",
+    "ssh_key.create": "SSH key created",
+    "ssh_key.delete": "SSH key removed",
+  };
+
+  function actionLabel(action: string): string {
+    return (
+      actionLabels[action] ??
+      action
+        .split(/[._]/u)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ")
+    );
+  }
 </script>
 
 {#if state.error}
-  <p class="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+  <p
+    class="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
+  >
     {state.error}
   </p>
 {/if}
@@ -34,7 +69,8 @@
             <Button
               variant="ghost"
               size="icon-sm"
-              onclick={() => navigator.clipboard.writeText(state.invitation ?? "")}
+              onclick={() =>
+                navigator.clipboard.writeText(state.invitation ?? "")}
               aria-label="Copy invitation token"
             >
               <Clipboard class="size-3.5" />
@@ -62,29 +98,55 @@
             bind:value={state.invitationHours}
           />
         </label>
-        <Button type="submit" disabled={state.working}>Create invitation</Button>
+        <Button type="submit" disabled={state.working}>Create invitation</Button
+        >
       </form>
     </div>
   </section>
 
-  <section class="rounded-md border bg-card/25">
-    <header class="flex items-center gap-3 border-b px-5 py-4">
-      <UsersRound class="size-4 text-muted-foreground" />
-      <h2 class="text-sm font-semibold">Recent audit events</h2>
+  <section class="rounded-md border bg-card/25 lg:col-span-2">
+    <header class="flex items-center justify-between gap-3 border-b px-5 py-4">
+      <div class="flex items-center gap-3">
+        <Activity class="size-4 text-muted-foreground" />
+        <div>
+          <h2 class="text-sm font-semibold">Instance activity</h2>
+          <p class="mt-0.5 text-xs text-muted-foreground">
+            Repository, authentication, and administration events.
+          </p>
+        </div>
+      </div>
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={state.working}
+        onclick={() => void state.initialize()}
+      >
+        <RefreshCw
+          class={state.working ? "size-3.5 animate-spin" : "size-3.5"}
+        />
+        Refresh
+      </Button>
     </header>
-    <ul class="max-h-96 space-y-2 overflow-auto p-5">
+    <ul class="max-h-[32rem] divide-y overflow-auto px-5" aria-live="polite">
       {#each state.auditEvents as event (event.id)}
-        <li class="border-b pb-2 text-sm last:border-0">
-          <span class="font-medium">{event.action}</span>
-          {#if event.target}
-            <span class="text-muted-foreground"> · {event.target}</span>
-          {/if}
-          <time class="block text-xs text-muted-foreground">
-            {new Date(event.created_at).toLocaleString()}
-          </time>
+        <li class="grid gap-1 py-3">
+          <div class="flex items-baseline justify-between gap-4">
+            <span class="font-medium">{actionLabel(event.action)}</span>
+            <time class="shrink-0 text-xs text-muted-foreground">
+              {new Date(event.created_at).toLocaleString()}
+            </time>
+          </div>
+          <p class="text-xs text-muted-foreground">
+            {event.actor_username ?? "System"}
+            {#if event.target}
+              <span> · {event.target}</span>
+            {/if}
+          </p>
         </li>
       {:else}
-        <li class="text-sm text-muted-foreground">No audit events yet.</li>
+        <li class="py-5 text-sm text-muted-foreground">
+          No instance activity yet.
+        </li>
       {/each}
     </ul>
   </section>
