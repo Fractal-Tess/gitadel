@@ -148,7 +148,7 @@ in
         RestrictRealtime = true;
         SystemCallArchitectures = "native";
       };
-      environment.PATH = lib.makeBinPath [ pkgs.git ];
+      path = [ pkgs.git ];
     };
 
     networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [
