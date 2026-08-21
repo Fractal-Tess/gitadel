@@ -19,7 +19,10 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use super::{LfsPermission, Permission, RepositoryState};
+use super::{
+    LfsPermission, Permission, RepositoryState,
+    resources::{CreateRepositoryOptions, create_owned_repository},
+};
 use crate::config::SshSettings;
 
 #[derive(Clone)]
@@ -232,9 +235,25 @@ impl russh::server::Handler for SshHandler {
                 return Ok(());
             }
         };
-        let repository = match self.state.find(&namespace, &name).await {
+        let repository = match repository_for_git_service(
+            &self.state,
+            actor_user_id,
+            service,
+            &namespace,
+            &name,
+        )
+        .await
+        {
             Ok(repository) => repository,
-            Err(_) => return reject(channel_id, session, "Repository not found.\n"),
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    %namespace,
+                    %name,
+                    "could not resolve repository for Git SSH service"
+                );
+                return reject(channel_id, session, "Repository not found.\n");
+            }
         };
         let permission = match service {
             GitService::UploadPack => Permission::Read,
@@ -298,6 +317,32 @@ impl russh::server::Handler for SshHandler {
     ) -> Result<(), Self::Error> {
         self.channels.remove(&channel);
         Ok(())
+    }
+}
+
+async fn repository_for_git_service(
+    state: &RepositoryState,
+    actor_user_id: Uuid,
+    service: GitService,
+    namespace: &str,
+    name: &str,
+) -> Result<crate::entity::repository::Model, crate::identity::ApiError> {
+    match state.find(namespace, name).await {
+        Ok(repository) => Ok(repository),
+        Err(error) if matches!(service, GitService::UploadPack) => Err(error),
+        Err(_) => {
+            let options = CreateRepositoryOptions {
+                namespace: namespace.to_owned(),
+                name: name.to_owned(),
+                description: None,
+                visibility: None,
+                object_format: None,
+            };
+            match create_owned_repository(state, actor_user_id, options).await {
+                Ok(repository) => Ok(repository),
+                Err(create_error) => state.find(namespace, name).await.map_err(|_| create_error),
+            }
+        }
     }
 }
 
@@ -506,5 +551,66 @@ fn load_or_create_host_key(path: &Path) -> Result<PrivateKey> {
         Err(error) => {
             Err(error).with_context(|| format!("could not create SSH host key {}", path.display()))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::{DatabaseSettings, Settings, StorageSettings},
+        database::connect_and_migrate,
+        identity::{IdentityState, bootstrap_admin},
+    };
+
+    #[tokio::test]
+    async fn receive_pack_should_create_missing_repository_in_owned_namespace() {
+        let test_root =
+            std::env::temp_dir().join(format!("gitadel-push-create-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&test_root).await.unwrap();
+        let database = connect_and_migrate(&DatabaseSettings {
+            url: format!(
+                "sqlite://{}?mode=rwc",
+                test_root.join("gitadel.db").display()
+            ),
+        })
+        .await
+        .unwrap();
+        let account = bootstrap_admin(&database, "archivist", "test-password".to_owned())
+            .await
+            .unwrap();
+        let settings = Settings::default();
+        let public_url = settings.server.public_url;
+        let identity = IdentityState::new(database, settings.auth, public_url.clone()).unwrap();
+        let state = RepositoryState::new(
+            identity,
+            StorageSettings {
+                repository_root: test_root.join("repositories"),
+                lfs_root: test_root.join("lfs"),
+            },
+            public_url,
+            2222,
+        )
+        .await
+        .unwrap();
+
+        let repository = repository_for_git_service(
+            &state,
+            account.id,
+            GitService::ReceivePack,
+            "archivist",
+            "created-from-push",
+        )
+        .await
+        .unwrap();
+        let repository_exists = state.repository_path(&repository).join("HEAD").is_file();
+        let actual = (repository.namespace, repository.name, repository_exists);
+        drop(state);
+        tokio::fs::remove_dir_all(test_root).await.unwrap();
+
+        assert_eq!(
+            actual,
+            ("archivist".to_owned(), "created-from-push".to_owned(), true)
+        );
     }
 }

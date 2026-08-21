@@ -108,6 +108,14 @@ pub struct CreateRepositoryRequest {
     object_format: Option<String>,
 }
 
+pub(super) struct CreateRepositoryOptions {
+    pub(super) namespace: String,
+    pub(super) name: String,
+    pub(super) description: Option<String>,
+    pub(super) visibility: Option<String>,
+    pub(super) object_format: Option<String>,
+}
+
 pub async fn create_repository(
     State(state): State<RepositoryState>,
     headers: HeaderMap,
@@ -118,9 +126,33 @@ pub async fn create_repository(
         .identity()
         .authenticate(&headers, &jar, SCOPE_WRITE)
         .await?;
-    let namespace_slug = validate_slug(&request.namespace, "Namespace")?;
-    let name = validate_repository_name(&request.name)?;
-    let description = request
+    let repository = create_owned_repository(
+        &state,
+        actor.user.id,
+        CreateRepositoryOptions {
+            namespace: request.namespace,
+            name: request.name,
+            description: request.description,
+            visibility: request.visibility,
+            object_format: request.object_format,
+        },
+    )
+    .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(RepositoryResponse::new(repository, &state, false)),
+    ))
+}
+
+pub(super) async fn create_owned_repository(
+    state: &RepositoryState,
+    actor_user_id: Uuid,
+    options: CreateRepositoryOptions,
+) -> Result<repository::Model, ApiError> {
+    let namespace_slug = validate_slug(&options.namespace, "Namespace")?;
+    let name = validate_repository_name(&options.name)?;
+    let description = options
         .description
         .map(|description| description.trim().to_owned())
         .filter(|description| !description.is_empty());
@@ -129,7 +161,7 @@ pub async fn create_repository(
             "Repository descriptions must be at most 512 characters.",
         ));
     }
-    let visibility = if let Some(visibility) = request.visibility {
+    let visibility = if let Some(visibility) = options.visibility {
         visibility
     } else {
         instance::Entity::find_by_id(1)
@@ -143,7 +175,7 @@ pub async fn create_repository(
             "Repository visibility must be public or private.",
         ));
     }
-    let (object_format, sley_format) = match request.object_format.as_deref().unwrap_or("sha1") {
+    let (object_format, sley_format) = match options.object_format.as_deref().unwrap_or("sha1") {
         "sha1" => ("sha1", ObjectFormat::Sha1),
         "sha256" => ("sha256", ObjectFormat::Sha256),
         _ => {
@@ -158,11 +190,11 @@ pub async fn create_repository(
         .await?
         .ok_or_else(ApiError::not_found)?;
     match owner.kind.as_str() {
-        "user" if owner.user_id == Some(actor.user.id) => {}
+        "user" if owner.user_id == Some(actor_user_id) => {}
         "organization" => {
             let organization_id = owner.organization_id.ok_or_else(ApiError::not_found)?;
             let membership =
-                organization_member::Entity::find_by_id((organization_id, actor.user.id))
+                organization_member::Entity::find_by_id((organization_id, actor_user_id))
                     .one(state.identity().database())
                     .await?
                     .filter(|membership| membership.role == "owner")
@@ -193,7 +225,7 @@ pub async fn create_repository(
         object_format: Set(object_format.to_owned()),
         default_branch: Set("main".to_owned()),
         storage_key: Set(storage_key),
-        created_by: Set(actor.user.id),
+        created_by: Set(actor_user_id),
         archived_at: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
@@ -210,7 +242,7 @@ pub async fn create_repository(
         .identity()
         .audit_on(
             &transaction,
-            Some(actor.user.id),
+            Some(actor_user_id),
             "repository.create",
             Some(format!("{namespace_slug}/{name}")),
         )
@@ -224,10 +256,7 @@ pub async fn create_repository(
         return Err(error.into());
     }
 
-    Ok((
-        StatusCode::CREATED,
-        Json(RepositoryResponse::new(repository, &state, false)),
-    ))
+    Ok(repository)
 }
 
 pub async fn get_repository(
