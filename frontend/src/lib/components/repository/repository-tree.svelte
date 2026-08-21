@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { ChevronRight, File, Folder, GitBranch, LoaderCircle } from "lucide-svelte";
+  import { ChevronRight, GitBranch, LoaderCircle } from "lucide-svelte";
+  import MaterialFileIcon from "$lib/components/repository/material-file-icon.svelte";
 
   import { formatSize } from "$lib/repository/format.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
@@ -43,10 +44,15 @@
                 ? "size-3.5 shrink-0 rotate-90 text-muted-foreground transition-transform"
                 : "size-3.5 shrink-0 text-muted-foreground transition-transform"}
             />
-            <Folder class="size-4 shrink-0 fill-current text-sky-600/80" />
+            <MaterialFileIcon
+              name={entry.name}
+              directory
+              expanded={state.expandedPaths.has(entry.path)}
+              class="size-4 shrink-0"
+            />
           {:else}
             <span class="size-3.5 shrink-0"></span>
-            <File class="size-4 shrink-0 text-muted-foreground" />
+            <MaterialFileIcon name={entry.name} class="size-4 shrink-0" />
           {/if}
           <span class="min-w-0 flex-1 truncate text-sm">{entry.name}</span>
           {#if entry.kind !== "tree"}

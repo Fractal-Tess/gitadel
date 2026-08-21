@@ -30,7 +30,7 @@
               cp -R node_modules $out/
               runHook postInstall
             '';
-            outputHash = "sha256-Vgjklx0L45GkPjYal9pKBRR9ZlGdw8ZULk/swldXWPg=";
+            outputHash = "sha256-3pgcCMpcREMBQzIoTgZFKedM+y9kej+bug4iKEioTwU=";
             outputHashAlgo = "sha256";
             outputHashMode = "recursive";
           };

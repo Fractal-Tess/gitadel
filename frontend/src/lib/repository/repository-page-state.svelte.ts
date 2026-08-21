@@ -23,13 +23,14 @@ import {
   type RepositoryRefs,
   type Tree,
 } from "$lib/api.js";
-import { highlight } from "$lib/repository/format.js";
+import { highlight, languageLabel } from "$lib/repository/format.js";
 
 export type RepositoryView = "overview" | "history" | "commit" | "tags";
 export type CopyTarget = "http" | "ssh";
 
 function errorMessage(caught: unknown): string {
-  if (caught instanceof ApiFailure || caught instanceof Error) return caught.message;
+  if (caught instanceof ApiFailure || caught instanceof Error)
+    return caught.message;
   return "The request failed.";
 }
 
@@ -67,9 +68,15 @@ export class RepositoryPageState {
   emptyRepository = $state(false);
   loading = $state(true);
 
-  totalCode = $derived(this.stats.reduce((sum, item) => sum + item.code, 0));
   highlighted = $derived(
     this.blob?.content ? highlight(this.blob.path, this.blob.content) : "",
+  );
+  selectedLanguage = $derived(this.blob ? languageLabel(this.blob.path) : "");
+  totalLines = $derived(
+    this.stats.reduce(
+      (sum, item) => sum + item.code + item.comments + item.blanks,
+      0,
+    ),
   );
 
   #repositoryRequestSequence = 0;
@@ -180,7 +187,8 @@ export class RepositoryPageState {
         this.error = errorMessage(caught);
       }
     } finally {
-      if (this.#viewRequestController === controller) this.#viewRequestController = null;
+      if (this.#viewRequestController === controller)
+        this.#viewRequestController = null;
     }
   }
 
@@ -216,7 +224,12 @@ export class RepositoryPageState {
       void this.toggleDirectory(entry.path);
       return;
     }
-    this.navigate("overview", { path: entry.path });
+    this.view = "overview";
+    this.repositoryPath = entry.path;
+    this.commitOid = "";
+    this.historyPage = 1;
+    this.#writeLocation();
+    void this.#selectBlob(entry.path);
   }
 
   async toggleDirectory(path: string): Promise<void> {
@@ -274,13 +287,43 @@ export class RepositoryPageState {
   }
 
   async copyCloneUrl(target: CopyTarget): Promise<void> {
-    const value = target === "http" ? this.httpCloneUrl : this.repository?.ssh_clone_url;
+    const value =
+      target === "http" ? this.httpCloneUrl : this.repository?.ssh_clone_url;
     if (!value) return;
     await navigator.clipboard.writeText(value);
     this.copied = target;
     window.setTimeout(() => {
       if (this.copied === target) this.copied = null;
     }, 1600);
+  }
+
+  async #selectBlob(path: string): Promise<void> {
+    this.#viewRequestController?.abort();
+    const controller = new AbortController();
+    this.#viewRequestController = controller;
+    this.error = null;
+    try {
+      const blob = await requestJson(
+        `${this.#api("/blob")}?${this.#query(path)}`,
+        blobSchema,
+        { signal: controller.signal },
+      );
+      if (
+        this.#viewRequestController === controller &&
+        this.repositoryPath === path
+      ) {
+        this.blob = blob;
+        this.readme = null;
+      }
+    } catch (caught) {
+      if (!(caught instanceof DOMException && caught.name === "AbortError")) {
+        this.error = errorMessage(caught);
+      }
+    } finally {
+      if (this.#viewRequestController === controller) {
+        this.#viewRequestController = null;
+      }
+    }
   }
 
   async #loadOverview(init: RequestInit): Promise<void> {
@@ -326,7 +369,8 @@ export class RepositoryPageState {
       }
 
       const readmeEntry = tree.entries.find(
-        (entry) => entry.kind === "blob" && /^readme(?:\.[^.]+)?$/i.test(entry.name),
+        (entry) =>
+          entry.kind === "blob" && /^readme(?:\.[^.]+)?$/i.test(entry.name),
       );
       if (readmeEntry) {
         this.readme = await requestJson(

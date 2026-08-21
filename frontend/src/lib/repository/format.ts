@@ -1,44 +1,105 @@
-import hljs from "highlight.js/lib/core";
-import bash from "highlight.js/lib/languages/bash";
-import css from "highlight.js/lib/languages/css";
-import javascript from "highlight.js/lib/languages/javascript";
-import json from "highlight.js/lib/languages/json";
-import markdown from "highlight.js/lib/languages/markdown";
-import python from "highlight.js/lib/languages/python";
-import rust from "highlight.js/lib/languages/rust";
-import typescript from "highlight.js/lib/languages/typescript";
-import xml from "highlight.js/lib/languages/xml";
-import yaml from "highlight.js/lib/languages/yaml";
+import hljs from "highlight.js/lib/common";
+import dockerfile from "highlight.js/lib/languages/dockerfile";
+import nix from "highlight.js/lib/languages/nix";
 
-hljs.registerLanguage("bash", bash);
-hljs.registerLanguage("css", css);
-hljs.registerLanguage("javascript", javascript);
-hljs.registerLanguage("json", json);
-hljs.registerLanguage("markdown", markdown);
-hljs.registerLanguage("python", python);
-hljs.registerLanguage("rust", rust);
-hljs.registerLanguage("typescript", typescript);
-hljs.registerLanguage("xml", xml);
-hljs.registerLanguage("yaml", yaml);
+hljs.registerLanguage("dockerfile", dockerfile);
+hljs.registerLanguage("nix", nix);
 
 const LANGUAGES: Record<string, string> = {
-  rs: "rust",
-  sh: "bash",
+  astro: "xml",
   bash: "bash",
+  c: "c",
+  cc: "cpp",
+  cpp: "cpp",
+  cs: "csharp",
   css: "css",
+  diff: "diff",
+  go: "go",
+  gql: "graphql",
+  graphql: "graphql",
+  h: "c",
+  hpp: "cpp",
+  html: "xml",
+  java: "java",
   js: "javascript",
   jsx: "javascript",
+  json: "json",
+  json5: "json",
+  kt: "kotlin",
+  kts: "kotlin",
+  less: "less",
+  lua: "lua",
+  markdown: "markdown",
+  md: "markdown",
+  mdx: "markdown",
+  nix: "nix",
+  patch: "diff",
+  php: "php",
+  pl: "perl",
+  pm: "perl",
+  py: "python",
+  r: "r",
+  rb: "ruby",
+  rs: "rust",
+  sass: "scss",
+  scss: "scss",
+  sh: "bash",
+  sql: "sql",
+  svelte: "xml",
+  svg: "xml",
+  swift: "swift",
+  toml: "ini",
   ts: "typescript",
   tsx: "typescript",
-  json: "json",
-  md: "markdown",
-  markdown: "markdown",
-  py: "python",
-  html: "xml",
+  vue: "xml",
+  wasm: "wasm",
   xml: "xml",
-  svg: "xml",
-  yml: "yaml",
   yaml: "yaml",
+  yml: "yaml",
+  zsh: "bash",
+};
+
+const FILE_LANGUAGES: Record<string, string> = {
+  containerfile: "dockerfile",
+  dockerfile: "dockerfile",
+  justfile: "makefile",
+  makefile: "makefile",
+};
+
+const LANGUAGE_LABELS: Record<string, string> = {
+  bash: "Shell",
+  c: "C",
+  cpp: "C++",
+  csharp: "C#",
+  css: "CSS",
+  diff: "Diff",
+  dockerfile: "Dockerfile",
+  go: "Go",
+  graphql: "GraphQL",
+  ini: "TOML / INI",
+  java: "Java",
+  javascript: "JavaScript",
+  json: "JSON",
+  kotlin: "Kotlin",
+  less: "Less",
+  lua: "Lua",
+  makefile: "Makefile",
+  markdown: "Markdown",
+  nix: "Nix",
+  perl: "Perl",
+  php: "PHP",
+  python: "Python",
+  r: "R",
+  ruby: "Ruby",
+  rust: "Rust",
+  scss: "Sass / SCSS",
+  sql: "SQL",
+  swift: "Swift",
+  typescript: "TypeScript",
+  vbnet: "Visual Basic",
+  wasm: "WebAssembly",
+  xml: "HTML / XML",
+  yaml: "YAML",
 };
 
 export function formatDate(timestamp: number): string {
@@ -55,12 +116,20 @@ export function formatSize(size: number | null): string {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function languageForPath(path: string): string | null {
+  const name = path.split("/").pop()?.toLowerCase() ?? "";
+  const extension = name.includes(".") ? (name.split(".").pop() ?? "") : "";
+  return FILE_LANGUAGES[name] ?? LANGUAGES[extension] ?? null;
+}
+
+export function languageLabel(path: string): string {
+  const language = languageForPath(path);
+  return language ? (LANGUAGE_LABELS[language] ?? language) : "Plain text";
+}
+
 export function highlight(path: string, source: string): string {
-  const extension = path.split(".").pop()?.toLowerCase() ?? "";
-  const language = LANGUAGES[extension];
-  return language
-    ? hljs.highlight(source, { language, ignoreIllegals: true }).value
-    : hljs.highlightAuto(source).value;
+  const language = languageForPath(path) ?? "plaintext";
+  return hljs.highlight(source, { language, ignoreIllegals: true }).value;
 }
 
 export function dayKey(timestamp: number): string {

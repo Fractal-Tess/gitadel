@@ -16,16 +16,26 @@
 </script>
 
 <aside class="order-first flex min-w-0 flex-col xl:order-none">
-  <section class="order-last border-t p-4 xl:order-first xl:border-t-0 xl:border-b">
-    <h2 class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+  <section
+    class="order-last border-t p-4 xl:order-first xl:border-t-0 xl:border-b"
+  >
+    <h2
+      class="text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+    >
       Clone
     </h2>
     <div class="mt-3 space-y-2">
       {#each cloneKinds as kind (kind.id)}
         <div>
-          <p class="mb-1 text-[10px] font-medium text-muted-foreground">{kind.label}</p>
-          <div class="flex items-center overflow-hidden rounded-md border bg-background">
-            <code class="min-w-0 flex-1 truncate px-3 py-2 text-xs text-muted-foreground">
+          <p class="mb-1 text-[10px] font-medium text-muted-foreground">
+            {kind.label}
+          </p>
+          <div
+            class="flex items-center overflow-hidden rounded-md border bg-background"
+          >
+            <code
+              class="min-w-0 flex-1 truncate px-3 py-2 text-xs text-muted-foreground"
+            >
               {kind.id === "http"
                 ? state.httpCloneUrl
                 : state.repository?.ssh_clone_url}
@@ -50,7 +60,9 @@
   </section>
 
   <section class="order-first p-4 xl:order-2">
-    <h2 class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+    <h2
+      class="text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+    >
       About
     </h2>
     <p class="mt-3 text-sm leading-6">
@@ -84,14 +96,14 @@
         <BarChart3 class="size-3.5" />Statistics
       </h2>
       <span class="text-[11px] tabular-nums text-muted-foreground">
-        {state.totalCode.toLocaleString()} LOC total
+        {state.totalLines.toLocaleString()} lines total
       </span>
     </div>
     {#if state.stats.length}
       <div class="mt-4 flex h-1.5 overflow-hidden rounded-full bg-muted">
         {#each state.stats as item, index (item.language)}
           <span
-            style={`width:${state.totalCode ? (item.code / state.totalCode) * 100 : 0}%;background:hsl(${(index * 67 + 218) % 360} 62% 52%)`}
+            style={`width:${state.totalLines ? ((item.code + item.comments + item.blanks) / state.totalLines) * 100 : 0}%;background:hsl(${(index * 67 + 218) % 360} 62% 52%)`}
           ></span>
         {/each}
       </div>
@@ -106,12 +118,15 @@
                 ></span>
                 <span class="truncate">{item.language}</span>
               </span>
-              <span class="shrink-0 tabular-nums">{item.code.toLocaleString()} LOC</span>
+              <span class="shrink-0 tabular-nums"
+                >{(item.code + item.comments + item.blanks).toLocaleString()} lines</span
+              >
             </div>
             <div
               class="mt-1 flex flex-wrap gap-x-2 pl-4 text-[10px] text-muted-foreground"
             >
               <span>{item.files} file{item.files === 1 ? "" : "s"}</span>
+              <span>{item.code.toLocaleString()} code</span>
               <span>{item.comments.toLocaleString()} comments</span>
               <span>{item.blanks.toLocaleString()} blank</span>
             </div>
@@ -119,7 +134,9 @@
         {/each}
       </ul>
     {:else}
-      <p class="mt-3 text-xs text-muted-foreground">No recognized source files.</p>
+      <p class="mt-3 text-xs text-muted-foreground">
+        No recognized source files.
+      </p>
     {/if}
   </section>
 </aside>

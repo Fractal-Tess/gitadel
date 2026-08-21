@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { Braces, Download, FileCode2 } from "lucide-svelte";
+  import { Braces, Download } from "lucide-svelte";
+  import MaterialFileIcon from "$lib/components/repository/material-file-icon.svelte";
 
   import { Button } from "$lib/components/ui/button/index.js";
   import { trustedHtml } from "$lib/repository/format.js";
@@ -14,8 +15,13 @@
       class="flex flex-wrap items-center justify-between gap-3 border-b px-5 py-3 text-sm font-semibold"
     >
       <span class="flex min-w-0 items-center gap-2">
-        <FileCode2 class="size-4 shrink-0 text-muted-foreground" />
+        <MaterialFileIcon name={state.blob.path} class="size-4 shrink-0" />
         <span class="truncate">{state.blob.path}</span>
+        <span
+          class="shrink-0 rounded border bg-muted/45 px-1.5 py-0.5 font-mono text-[10px] font-normal text-muted-foreground"
+        >
+          {state.selectedLanguage}
+        </span>
         <span class="shrink-0 text-xs font-normal text-muted-foreground">
           {state.blob.size.toLocaleString()} B
         </span>
@@ -43,11 +49,15 @@
     </header>
 
     {#if state.blob.binary}
-      <div class="grid min-h-80 place-items-center p-8 text-sm text-muted-foreground">
+      <div
+        class="grid min-h-80 place-items-center p-8 text-sm text-muted-foreground"
+      >
         Binary files cannot be previewed.
       </div>
     {:else if state.blob.too_large}
-      <div class="grid min-h-80 place-items-center p-8 text-center text-sm text-muted-foreground">
+      <div
+        class="grid min-h-80 place-items-center p-8 text-center text-sm text-muted-foreground"
+      >
         <div>
           <p>This file is too large to render inline.</p>
           <Button
@@ -68,11 +78,13 @@
       <pre
         class={state.wrapLines
           ? "overflow-auto whitespace-pre-wrap break-words bg-background/35 p-5 font-mono text-xs leading-5"
-          : "overflow-auto whitespace-pre bg-background/35 p-5 font-mono text-xs leading-5"}
-      ><code {@attach trustedHtml(state.highlighted)}></code></pre>
+          : "overflow-auto whitespace-pre bg-background/35 p-5 font-mono text-xs leading-5"}><code
+          {@attach trustedHtml(state.highlighted)}></code></pre>
     {/if}
   {:else if state.readme?.rendered_html}
-    <header class="flex items-center gap-2 border-b px-5 py-3 text-sm font-semibold">
+    <header
+      class="flex items-center gap-2 border-b px-5 py-3 text-sm font-semibold"
+    >
       <Braces class="size-4 text-muted-foreground" />{state.readme.path}
     </header>
     <div
@@ -80,7 +92,9 @@
       {@attach trustedHtml(state.readme.rendered_html)}
     ></div>
   {:else}
-    <div class="grid min-h-64 place-items-center p-8 text-sm text-muted-foreground">
+    <div
+      class="grid min-h-64 place-items-center p-8 text-sm text-muted-foreground"
+    >
       Select a file to preview it.
     </div>
   {/if}
