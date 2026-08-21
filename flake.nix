@@ -62,6 +62,7 @@
           cargoLock.lockFile = ./Cargo.lock;
           nativeBuildInputs = [
             pkgs.cmake
+            pkgs.git
             pkgs.makeWrapper
             pkgs.perl
             pkgs.pkg-config
