@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/gitadel-logo.png" alt="Gitadel" width="160" />
+  <img src="assets/gitadel-favicon.svg" alt="Gitadel" width="160" />
 </p>
 
 <p align="center">
