@@ -7,7 +7,7 @@ use axum::{
     response::IntoResponse,
 };
 use axum_extra::extract::cookie::CookieJar;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
     sea_query::Expr,
@@ -20,8 +20,8 @@ use uuid::Uuid;
 use super::{Permission, RepositoryState, validate_repository_name};
 use crate::{
     entity::{
-        instance, namespace, organization_member, repository, repository_collaborator,
-        repository_favorite, user,
+        instance, namespace, organization_member, repository, repository_alias,
+        repository_collaborator, repository_favorite, user,
     },
     identity::{ApiError, SCOPE_READ, SCOPE_WRITE, validate_slug},
 };
@@ -40,10 +40,12 @@ pub struct RepositoryResponse {
     updated_at: chrono::DateTime<Utc>,
     favorited: bool,
     ssh_clone_url: String,
+    can_manage: bool,
 }
 
 pub(super) struct AccessibleRepositories {
     pub(super) favorite_ids: HashSet<Uuid>,
+    pub(super) manageable_ids: HashSet<Uuid>,
     pub(super) repositories: Vec<repository::Model>,
 }
 
@@ -52,6 +54,7 @@ impl RepositoryResponse {
         repository: repository::Model,
         state: &RepositoryState,
         favorited: bool,
+        can_manage: bool,
     ) -> Self {
         let ssh_clone_url = state.ssh_clone_url(&repository);
         Self {
@@ -67,6 +70,7 @@ impl RepositoryResponse {
             updated_at: repository.updated_at,
             favorited,
             ssh_clone_url,
+            can_manage,
         }
     }
 }
@@ -82,7 +86,8 @@ pub async fn list_repositories(
         .into_iter()
         .map(|repository| {
             let favorited = accessible.favorite_ids.contains(&repository.id);
-            RepositoryResponse::new(repository, &state, favorited)
+            let can_manage = accessible.manageable_ids.contains(&repository.id);
+            RepositoryResponse::new(repository, &state, favorited, can_manage)
         })
         .collect();
     Ok(Json(response))
@@ -110,20 +115,29 @@ pub(super) async fn accessible_repositories(
         HashSet::new()
     };
     let repositories = repository::Entity::find()
+        .filter(repository::Column::DeletedAt.is_null())
         .order_by_desc(repository::Column::UpdatedAt)
         .all(state.identity().database())
         .await?;
     let mut accessible = Vec::with_capacity(repositories.len());
+    let mut manageable_ids = HashSet::new();
     for repository in repositories {
         if state
             .can_access(&repository, user_id, Permission::Read)
             .await?
         {
+            if state
+                .can_access(&repository, user_id, Permission::Manage)
+                .await?
+            {
+                manageable_ids.insert(repository.id);
+            }
             accessible.push(repository);
         }
     }
     Ok(AccessibleRepositories {
         favorite_ids,
+        manageable_ids,
         repositories: accessible,
     })
 }
@@ -170,7 +184,7 @@ pub async fn create_repository(
 
     Ok((
         StatusCode::CREATED,
-        Json(RepositoryResponse::new(repository, &state, false)),
+        Json(RepositoryResponse::new(repository, &state, false, true)),
     ))
 }
 
@@ -233,15 +247,7 @@ pub(super) async fn create_owned_repository(
         _ => return Err(ApiError::not_found()),
     }
 
-    if repository::Entity::find()
-        .filter(repository::Column::Namespace.eq(&namespace_slug))
-        .filter(repository::Column::Name.eq(&name))
-        .one(state.identity().database())
-        .await?
-        .is_some()
-    {
-        return Err(ApiError::conflict("That repository already exists."));
-    }
+    ensure_location_available(state, &namespace_slug, &name).await?;
 
     let storage_key = Uuid::new_v4();
     let now = Utc::now();
@@ -256,6 +262,7 @@ pub(super) async fn create_owned_repository(
         storage_key: Set(storage_key),
         created_by: Set(actor_user_id),
         archived_at: Set(None),
+        deleted_at: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
     };
@@ -339,7 +346,406 @@ pub async fn get_repository(
     } else {
         false
     };
-    Ok(Json(RepositoryResponse::new(repository, &state, favorited)))
+    let can_manage = state
+        .can_access(&repository, user_id, Permission::Manage)
+        .await?;
+    Ok(Json(RepositoryResponse::new(
+        repository, &state, favorited, can_manage,
+    )))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateRepositoryControlRequest {
+    description: Option<Option<String>>,
+    visibility: Option<String>,
+    default_branch: Option<String>,
+    name: Option<String>,
+    namespace: Option<String>,
+}
+
+pub async fn update_repository_control(
+    State(state): State<RepositoryState>,
+    AxumPath((namespace, name)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(request): Json<UpdateRepositoryControlRequest>,
+) -> Result<Json<RepositoryResponse>, ApiError> {
+    let actor = state
+        .identity()
+        .authenticate(&headers, &jar, SCOPE_WRITE)
+        .await?;
+    let repository = state.find(&namespace, &name).await?;
+    state
+        .authorize(&repository, Some(actor.user.id), Permission::Manage)
+        .await?;
+    if request.description.is_none()
+        && request.visibility.is_none()
+        && request.default_branch.is_none()
+        && request.name.is_none()
+        && request.namespace.is_none()
+    {
+        return Err(ApiError::bad_request(
+            "Provide at least one repository control change.",
+        ));
+    }
+
+    let description = request.description.map(normalize_description).transpose()?;
+    let visibility = request.visibility.map(validate_visibility).transpose()?;
+    let next_name = request
+        .name
+        .map(|value| validate_repository_name(&value))
+        .transpose()?;
+    let next_namespace = request
+        .namespace
+        .map(|value| validate_slug(&value, "Namespace"))
+        .transpose()?;
+    if next_namespace.is_some() && next_name.is_none() {
+        return Err(ApiError::bad_request(
+            "Transfers must include a repository name.",
+        ));
+    }
+    let moved = next_name.is_some() || next_namespace.is_some();
+    let target_name = next_name.unwrap_or_else(|| repository.name.clone());
+    let target_namespace = next_namespace.unwrap_or_else(|| repository.namespace.clone());
+    if moved {
+        ensure_owned_namespace(&state, actor.user.id, &target_namespace).await?;
+        if target_namespace != repository.namespace || target_name != repository.name {
+            ensure_location_available(&state, &target_namespace, &target_name).await?;
+        }
+    }
+
+    if let Some(default_branch) = request.default_branch.as_deref() {
+        set_default_branch(&state, &repository, default_branch).await?;
+    }
+
+    let transaction = state.identity().database().begin().await?;
+    let mut active: repository::ActiveModel = repository.clone().into();
+    if let Some(description) = description {
+        active.description = Set(description);
+    }
+    if let Some(visibility) = visibility {
+        active.visibility = Set(visibility);
+    }
+    if moved {
+        if target_namespace != repository.namespace || target_name != repository.name {
+            repository_alias::ActiveModel {
+                repository_id: Set(repository.id),
+                namespace: Set(repository.namespace.clone()),
+                name: Set(repository.name.clone()),
+                created_at: Set(Utc::now()),
+            }
+            .insert(&transaction)
+            .await?;
+        }
+        active.namespace = Set(target_namespace.clone());
+        active.name = Set(target_name.clone());
+        repository_collaborator::Entity::delete_many()
+            .filter(repository_collaborator::Column::RepositoryId.eq(repository.id))
+            .exec(&transaction)
+            .await?;
+    }
+    if let Some(default_branch) = request.default_branch {
+        active.default_branch = Set(default_branch);
+    }
+    active.updated_at = Set(Utc::now());
+    let updated = active.update(&transaction).await?;
+    let action = if moved {
+        "repository.transfer"
+    } else {
+        "repository.update"
+    };
+    state
+        .identity()
+        .audit_on(
+            &transaction,
+            Some(actor.user.id),
+            action,
+            Some(format!("{}/{}", updated.namespace, updated.name)),
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(Json(RepositoryResponse::new(updated, &state, false, true)))
+}
+
+pub async fn archive_repository(
+    State(state): State<RepositoryState>,
+    AxumPath((namespace, name)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<StatusCode, ApiError> {
+    update_archive_state(&state, &headers, &jar, &namespace, &name, true).await
+}
+
+pub async fn unarchive_repository(
+    State(state): State<RepositoryState>,
+    AxumPath((namespace, name)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<StatusCode, ApiError> {
+    update_archive_state(&state, &headers, &jar, &namespace, &name, false).await
+}
+
+pub async fn soft_delete_repository(
+    State(state): State<RepositoryState>,
+    AxumPath((namespace, name)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<StatusCode, ApiError> {
+    let (actor, repository) =
+        managed_repository(&state, &headers, &jar, &namespace, &name, false).await?;
+    let transaction = state.identity().database().begin().await?;
+    let mut active: repository::ActiveModel = repository.clone().into();
+    active.deleted_at = Set(Some(Utc::now()));
+    active.updated_at = Set(Utc::now());
+    active.update(&transaction).await?;
+    state
+        .identity()
+        .audit_on(
+            &transaction,
+            Some(actor.user.id),
+            "repository.delete",
+            Some(format!("{namespace}/{name}")),
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn restore_repository(
+    State(state): State<RepositoryState>,
+    AxumPath((namespace, name)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<StatusCode, ApiError> {
+    let (actor, repository) =
+        managed_repository(&state, &headers, &jar, &namespace, &name, true).await?;
+    let deleted_at = repository
+        .deleted_at
+        .ok_or_else(|| ApiError::bad_request("This repository is not deleted."))?;
+    if deleted_at < Utc::now() - Duration::days(30) {
+        return Err(ApiError::bad_request(
+            "This repository’s 30-day recovery period has ended.",
+        ));
+    }
+    let transaction = state.identity().database().begin().await?;
+    let mut active: repository::ActiveModel = repository.clone().into();
+    active.deleted_at = Set(None);
+    active.updated_at = Set(Utc::now());
+    active.update(&transaction).await?;
+    state
+        .identity()
+        .audit_on(
+            &transaction,
+            Some(actor.user.id),
+            "repository.restore",
+            Some(format!("{}/{}", repository.namespace, repository.name)),
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct PurgeRepositoryRequest {
+    confirmation: String,
+}
+
+pub async fn purge_repository(
+    State(state): State<RepositoryState>,
+    AxumPath((namespace, name)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(request): Json<PurgeRepositoryRequest>,
+) -> Result<StatusCode, ApiError> {
+    if request.confirmation != "purge" {
+        return Err(ApiError::bad_request(
+            "Confirm permanent deletion with confirmation: purge.",
+        ));
+    }
+    let (actor, repository) =
+        managed_repository(&state, &headers, &jar, &namespace, &name, true).await?;
+    if repository.deleted_at.is_none() {
+        return Err(ApiError::bad_request(
+            "Soft-delete the repository before permanently purging it.",
+        ));
+    }
+    let transaction = state.identity().database().begin().await?;
+    state
+        .identity()
+        .audit_on(
+            &transaction,
+            Some(actor.user.id),
+            "repository.purge",
+            Some(format!("{}/{}", repository.namespace, repository.name)),
+        )
+        .await?;
+    repository::Entity::delete_by_id(repository.id)
+        .exec(&transaction)
+        .await?;
+    transaction.commit().await?;
+    cleanup_repository(&state.repository_path(&repository)).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn update_archive_state(
+    state: &RepositoryState,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+    namespace: &str,
+    name: &str,
+    archived: bool,
+) -> Result<StatusCode, ApiError> {
+    let (actor, repository) =
+        managed_repository(state, headers, jar, namespace, name, false).await?;
+    let transaction = state.identity().database().begin().await?;
+    let mut active: repository::ActiveModel = repository.into();
+    active.archived_at = Set(archived.then(Utc::now));
+    active.updated_at = Set(Utc::now());
+    active.update(&transaction).await?;
+    state
+        .identity()
+        .audit_on(
+            &transaction,
+            Some(actor.user.id),
+            if archived {
+                "repository.archive"
+            } else {
+                "repository.unarchive"
+            },
+            Some(format!("{namespace}/{name}")),
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn managed_repository(
+    state: &RepositoryState,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+    namespace: &str,
+    name: &str,
+    include_deleted: bool,
+) -> Result<(crate::identity::AuthenticatedUser, repository::Model), ApiError> {
+    let actor = state
+        .identity()
+        .authenticate(headers, jar, SCOPE_WRITE)
+        .await?;
+    let repository = if include_deleted {
+        state.find_including_deleted(namespace, name).await?
+    } else {
+        state.find(namespace, name).await?
+    };
+    if repository.deleted_at.is_some() && !include_deleted {
+        return Err(ApiError::not_found());
+    }
+    let owner = namespace::Entity::find_by_id(&repository.namespace)
+        .one(state.identity().database())
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let allowed = match owner.kind.as_str() {
+        "user" => owner.user_id == Some(actor.user.id),
+        "organization" => match owner.organization_id {
+            Some(id) => organization_member::Entity::find_by_id((id, actor.user.id))
+                .one(state.identity().database())
+                .await?
+                .is_some_and(|member| member.role == "owner"),
+            None => false,
+        },
+        _ => false,
+    };
+    if !allowed {
+        return Err(ApiError::not_found());
+    }
+    Ok((actor, repository))
+}
+
+async fn ensure_owned_namespace(
+    state: &RepositoryState,
+    actor_user_id: Uuid,
+    slug: &str,
+) -> Result<(), ApiError> {
+    let owner = namespace::Entity::find_by_id(slug)
+        .one(state.identity().database())
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    match owner.kind.as_str() {
+        "user" if owner.user_id == Some(actor_user_id) => Ok(()),
+        "organization" => {
+            let id = owner.organization_id.ok_or_else(ApiError::not_found)?;
+            organization_member::Entity::find_by_id((id, actor_user_id))
+                .one(state.identity().database())
+                .await?
+                .filter(|member| member.role == "owner")
+                .map(|_| ())
+                .ok_or_else(ApiError::not_found)
+        }
+        _ => Err(ApiError::not_found()),
+    }
+}
+
+async fn ensure_location_available(
+    state: &RepositoryState,
+    namespace: &str,
+    name: &str,
+) -> Result<(), ApiError> {
+    let database = state.identity().database();
+    if repository::Entity::find()
+        .filter(repository::Column::Namespace.eq(namespace))
+        .filter(repository::Column::Name.eq(name))
+        .one(database)
+        .await?
+        .is_some()
+        || repository_alias::Entity::find_by_id((namespace.to_owned(), name.to_owned()))
+            .one(database)
+            .await?
+            .is_some()
+    {
+        return Err(ApiError::conflict(
+            "That repository location is already in use.",
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_description(value: Option<String>) -> Result<Option<String>, ApiError> {
+    let value = value
+        .map(|description| description.trim().to_owned())
+        .filter(|description| !description.is_empty());
+    if value
+        .as_ref()
+        .is_some_and(|description| description.len() > 512)
+    {
+        return Err(ApiError::bad_request(
+            "Repository descriptions must be at most 512 characters.",
+        ));
+    }
+    Ok(value)
+}
+
+fn validate_visibility(value: String) -> Result<String, ApiError> {
+    match value.as_str() {
+        "public" | "private" => Ok(value),
+        _ => Err(ApiError::bad_request(
+            "Repository visibility must be public or private.",
+        )),
+    }
+}
+
+async fn set_default_branch(
+    state: &RepositoryState,
+    repository: &repository::Model,
+    branch: &str,
+) -> Result<(), ApiError> {
+    let path = state.repository_path(repository);
+    run_git(&path, &["check-ref-format", "--branch", branch])
+        .await
+        .map_err(|_| ApiError::bad_request("Default branch is not a valid branch name."))?;
+    let reference = format!("refs/heads/{branch}");
+    run_git(&path, &["show-ref", "--verify", "--quiet", &reference])
+        .await
+        .map_err(|_| ApiError::bad_request("Default branch must already exist."))?;
+    run_git(&path, &["symbolic-ref", "HEAD", &reference]).await
 }
 
 pub async fn favorite_repository(

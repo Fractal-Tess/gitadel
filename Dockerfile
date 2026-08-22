@@ -13,6 +13,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src/ ./src/
 COPY --from=frontend /build/frontend/build ./frontend/build/
+COPY --from=frontend /build/frontend/static ./frontend/static/
 RUN cargo build --release --locked \
     && strip target/release/gitadel
 

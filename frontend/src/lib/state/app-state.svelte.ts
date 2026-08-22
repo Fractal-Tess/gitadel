@@ -16,7 +16,17 @@ export class AppState {
   loading = $state(true);
   error = $state<string | null>(null);
 
+  #initializedAt = 0;
+
   async initialize(): Promise<AuthStatus> {
+    if (
+      this.authStatus &&
+      this.instance &&
+      Date.now() - this.#initializedAt < 30_000
+    ) {
+      return this.authStatus;
+    }
+
     this.loading = true;
     this.error = null;
     try {
@@ -26,6 +36,7 @@ export class AppState {
       ]);
       this.authStatus = status;
       this.instance = instance;
+      this.#initializedAt = Date.now();
       return status;
     } catch (caught) {
       this.error =
@@ -51,9 +62,11 @@ export class AppState {
     try {
       const status = await requestJson("/api/v1/auth/status", authStatusSchema);
       this.authStatus = status;
+      this.#initializedAt = Date.now();
       return status;
     } catch (caught) {
-      this.error = caught instanceof Error ? caught.message : "Could not load Gitadel.";
+      this.error =
+        caught instanceof Error ? caught.message : "Could not load Gitadel.";
       throw caught;
     } finally {
       this.loading = false;

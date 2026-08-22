@@ -4,6 +4,8 @@ mod gitea;
 mod lfs;
 mod resources;
 mod ssh;
+mod topics;
+mod webhooks;
 
 use std::{
     collections::HashMap,
@@ -24,7 +26,9 @@ use uuid::Uuid;
 
 use crate::{
     config::StorageSettings,
-    entity::{namespace, organization_member, repository, repository_collaborator, user},
+    entity::{
+        namespace, organization_member, repository, repository_alias, repository_collaborator, user,
+    },
     identity::{ApiError, AuthenticatedUser, IdentityState},
 };
 
@@ -37,6 +41,7 @@ pub struct RepositoryState {
     public_url: Arc<Url>,
     ssh_port: u16,
     lfs_tokens: Arc<RwLock<HashMap<String, LfsAuthorization>>>,
+    webhook_client: reqwest::Client,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +82,7 @@ impl RepositoryState {
             public_url: Arc::new(public_url),
             ssh_port,
             lfs_tokens: Arc::new(RwLock::new(HashMap::new())),
+            webhook_client: webhooks::webhook_client()?,
         })
     }
 
@@ -106,6 +112,10 @@ impl RepositoryState {
         endpoint.set_query(None);
         endpoint.set_fragment(None);
         endpoint.to_string().trim_end_matches('/').to_owned()
+    }
+
+    pub(super) fn webhook_client(&self) -> &reqwest::Client {
+        &self.webhook_client
     }
 
     pub(super) fn http_clone_url(&self, repository: &repository::Model) -> String {
@@ -182,9 +192,31 @@ impl RepositoryState {
     }
 
     pub async fn find(&self, namespace: &str, name: &str) -> Result<repository::Model, ApiError> {
-        repository::Entity::find()
+        let repository = self.find_including_deleted(namespace, name).await?;
+        if repository.deleted_at.is_some() {
+            return Err(ApiError::not_found());
+        }
+        Ok(repository)
+    }
+
+    pub async fn find_including_deleted(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<repository::Model, ApiError> {
+        if let Some(repository) = repository::Entity::find()
             .filter(repository::Column::Namespace.eq(namespace))
             .filter(repository::Column::Name.eq(name))
+            .one(self.identity.database())
+            .await?
+        {
+            return Ok(repository);
+        }
+        let alias = repository_alias::Entity::find_by_id((namespace.to_owned(), name.to_owned()))
+            .one(self.identity.database())
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        repository::Entity::find_by_id(alias.repository_id)
             .one(self.identity.database())
             .await?
             .ok_or_else(ApiError::not_found)
@@ -212,6 +244,9 @@ impl RepositoryState {
         user_id: Option<Uuid>,
         permission: Permission,
     ) -> Result<bool, ApiError> {
+        if repository.deleted_at.is_some() {
+            return Ok(false);
+        }
         if permission == Permission::Read && repository.visibility == "public" {
             return Ok(true);
         }
@@ -302,9 +337,35 @@ pub fn router() -> Router<RepositoryState> {
             get(resources::get_repository),
         )
         .route(
+            "/repositories/{namespace}/{name}/control",
+            axum::routing::patch(resources::update_repository_control),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/archive",
+            axum::routing::post(resources::archive_repository)
+                .delete(resources::unarchive_repository),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/delete",
+            axum::routing::post(resources::soft_delete_repository),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/restore",
+            axum::routing::post(resources::restore_repository),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/purge",
+            delete(resources::purge_repository),
+        )
+        .route(
             "/repositories/{namespace}/{name}/favorite",
             delete(resources::unfavorite_repository).put(resources::favorite_repository),
         )
+        .route(
+            "/repositories/{namespace}/{name}/topics",
+            get(topics::list_topics).put(topics::replace_topics),
+        )
+        .route("/topics", get(topics::suggest_topics))
         .route("/repositories/{namespace}/{name}/refs", get(browser::refs))
         .route(
             "/repositories/{namespace}/{name}/activity",
@@ -336,6 +397,20 @@ pub fn router() -> Router<RepositoryState> {
         .route(
             "/repositories/{namespace}/{name}/collaborators/{username}",
             delete(resources::remove_collaborator),
+        )
+        .route(
+            "/repos/{namespace}/{name}/hooks",
+            get(webhooks::list_webhooks).post(webhooks::create_webhook),
+        )
+        .route(
+            "/repos/{namespace}/{name}/hooks/{id}",
+            get(webhooks::get_webhook)
+                .patch(webhooks::update_webhook)
+                .delete(webhooks::delete_webhook),
+        )
+        .route(
+            "/repos/{namespace}/{name}/hooks/{id}/pings",
+            axum::routing::post(webhooks::ping_webhook),
         )
         .route("/user/repos", get(gitea::list_user_repositories))
         .route(

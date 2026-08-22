@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use sley::ReferenceTarget;
 
 use super::{Permission, RepositoryState, browser};
-use crate::{entity::repository, identity::ApiError, identity::SCOPE_READ};
+use crate::{
+    entity::repository,
+    identity::{ApiError, SCOPE_REPOSITORY_READ},
+};
 
 #[derive(Default, Deserialize)]
 pub struct GiteaPagination {
@@ -55,10 +58,12 @@ pub async fn list_user_repositories(
 ) -> Result<Json<Vec<GiteaRepositoryResponse>>, ApiError> {
     let actor = state
         .identity()
-        .authenticate(&headers, &jar, SCOPE_READ)
+        .authenticate(&headers, &jar, SCOPE_REPOSITORY_READ)
         .await?;
     let repositories = repository::Entity::find()
-        .order_by_desc(repository::Column::UpdatedAt)
+        .order_by_asc(repository::Column::Namespace)
+        .order_by_asc(repository::Column::Name)
+        .order_by_asc(repository::Column::Id)
         .all(state.identity().database())
         .await?;
     let mut accessible = Vec::with_capacity(repositories.len());
@@ -101,7 +106,7 @@ pub async fn list_branches(
 ) -> Result<Json<Vec<GiteaBranchResponse>>, ApiError> {
     let actor = state
         .identity()
-        .authenticate(&headers, &jar, SCOPE_READ)
+        .authenticate(&headers, &jar, SCOPE_REPOSITORY_READ)
         .await?;
     let repository = state.find(&namespace, &name).await?;
     state

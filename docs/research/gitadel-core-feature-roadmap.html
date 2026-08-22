@@ -1,0 +1,1242 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Gitadel core feature roadmap</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0d0d0c;
+        --panel: #151512;
+        --panel-2: #1b1a16;
+        --line: #343129;
+        --line-soft: #25231e;
+        --text: #f2efe8;
+        --muted: #aaa397;
+        --faint: #777166;
+        --accent: #f97316;
+        --accent-soft: #3b2112;
+        --green: #75c58b;
+        --green-soft: #14291a;
+        --yellow: #e9bd58;
+        --yellow-soft: #302611;
+        --red: #ed7d73;
+        --red-soft: #321715;
+        --blue: #82b5eb;
+        --blue-soft: #142539;
+        --radius: 10px;
+        --shadow: 0 20px 70px rgba(0, 0, 0, 0.28);
+        --mono:
+          ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        --sans:
+          ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        --serif: ui-serif, Georgia, Cambria, "Times New Roman", serif;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 15px/1.65 var(--sans);
+      }
+      a {
+        color: var(--blue);
+        text-underline-offset: 3px;
+      }
+      a:hover {
+        color: #b5d6f8;
+      }
+      code {
+        font-family: var(--mono);
+        font-size: 0.9em;
+        color: #ffd2b3;
+      }
+      .shell {
+        display: grid;
+        grid-template-columns: 240px minmax(0, 930px);
+        gap: 56px;
+        max-width: 1260px;
+        margin: 0 auto;
+        padding: 36px 30px 96px;
+      }
+      aside {
+        position: sticky;
+        top: 28px;
+        align-self: start;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 28px;
+        font: 700 13px/1 var(--mono);
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+      .brand-mark {
+        width: 18px;
+        height: 18px;
+        border: 2px solid var(--accent);
+        transform: rotate(45deg);
+        box-shadow: inset 0 0 0 3px var(--bg);
+        background: var(--accent);
+      }
+      nav {
+        display: grid;
+        gap: 3px;
+      }
+      nav a {
+        color: var(--muted);
+        text-decoration: none;
+        padding: 7px 9px;
+        border-left: 1px solid var(--line);
+        font-size: 13px;
+      }
+      nav a:hover {
+        color: var(--text);
+        border-color: var(--accent);
+        background: var(--panel);
+      }
+      .aside-note {
+        margin-top: 28px;
+        padding: 14px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+      main {
+        min-width: 0;
+      }
+      header {
+        padding: 46px 0 42px;
+        border-bottom: 1px solid var(--line);
+      }
+      .eyebrow {
+        color: var(--accent);
+        font: 700 12px/1 var(--mono);
+        letter-spacing: 0.13em;
+        text-transform: uppercase;
+      }
+      h1 {
+        max-width: 850px;
+        margin: 18px 0 16px;
+        font: 600 clamp(42px, 7vw, 76px)/0.97 var(--serif);
+        letter-spacing: -0.045em;
+      }
+      .dek {
+        max-width: 760px;
+        margin: 0;
+        color: var(--muted);
+        font-size: 19px;
+        line-height: 1.55;
+      }
+      .meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 9px;
+        margin-top: 24px;
+      }
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 6px 9px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+        font: 12px/1 var(--mono);
+      }
+      .dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--accent);
+      }
+      section {
+        padding: 54px 0 10px;
+        scroll-margin-top: 20px;
+      }
+      h2 {
+        margin: 0 0 18px;
+        font: 600 34px/1.1 var(--serif);
+        letter-spacing: -0.025em;
+      }
+      h3 {
+        margin: 0 0 8px;
+        font-size: 17px;
+        line-height: 1.35;
+      }
+      p {
+        margin: 0 0 16px;
+      }
+      .lead {
+        color: var(--muted);
+        font-size: 17px;
+        max-width: 790px;
+      }
+      .verdict {
+        margin-top: 24px;
+        padding: 24px 26px;
+        border: 1px solid #68401f;
+        background: linear-gradient(135deg, var(--accent-soft), var(--panel));
+        border-radius: var(--radius);
+        box-shadow: var(--shadow);
+      }
+      .verdict strong {
+        display: block;
+        margin-bottom: 8px;
+        font: 700 13px/1 var(--mono);
+        color: #ffad73;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      .verdict p {
+        margin: 0;
+        font: 500 23px/1.38 var(--serif);
+      }
+      .three {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 12px;
+        margin-top: 18px;
+      }
+      .principle {
+        min-height: 160px;
+        padding: 20px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--panel);
+      }
+      .principle .n {
+        color: var(--accent);
+        font: 700 12px/1 var(--mono);
+      }
+      .principle h3 {
+        margin-top: 22px;
+      }
+      .principle p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .callout {
+        padding: 16px 18px;
+        border-left: 3px solid var(--yellow);
+        background: var(--yellow-soft);
+        color: #e7d5a7;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 20px;
+        border: 1px solid var(--line);
+        background: var(--panel);
+      }
+      th,
+      td {
+        padding: 14px 15px;
+        border-bottom: 1px solid var(--line-soft);
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        color: var(--faint);
+        background: #11110f;
+        font: 700 11px/1.3 var(--mono);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      td {
+        font-size: 13px;
+      }
+      tr:last-child td {
+        border-bottom: 0;
+      }
+      .status {
+        display: inline-flex;
+        align-items: center;
+        min-width: 78px;
+        justify-content: center;
+        padding: 4px 8px;
+        border-radius: 999px;
+        font: 700 10px/1 var(--mono);
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+      .strong {
+        color: var(--green);
+        background: var(--green-soft);
+        border: 1px solid #285535;
+      }
+      .partial {
+        color: var(--yellow);
+        background: var(--yellow-soft);
+        border: 1px solid #5c481d;
+      }
+      .thin {
+        color: var(--red);
+        background: var(--red-soft);
+        border: 1px solid #65302c;
+      }
+      .wip {
+        color: var(--blue);
+        background: var(--blue-soft);
+        border: 1px solid #294d70;
+      }
+      .priority-grid {
+        display: grid;
+        gap: 14px;
+        margin-top: 24px;
+      }
+      .priority {
+        display: grid;
+        grid-template-columns: 84px minmax(0, 1fr) 120px;
+        gap: 18px;
+        padding: 22px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--panel);
+      }
+      .priority:hover {
+        border-color: #514b3f;
+        background: var(--panel-2);
+      }
+      .rank {
+        font: 700 34px/1 var(--serif);
+        color: var(--accent);
+      }
+      .rank small {
+        display: block;
+        margin-top: 8px;
+        font: 700 10px/1 var(--mono);
+        color: var(--faint);
+        letter-spacing: 0.08em;
+      }
+      .priority p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .accept {
+        margin-top: 10px;
+        padding-left: 18px;
+        color: #c7c0b4;
+        font-size: 13px;
+      }
+      .accept li {
+        margin: 4px 0;
+      }
+      .effort {
+        align-self: start;
+        justify-self: end;
+        color: var(--faint);
+        font: 11px/1.4 var(--mono);
+        text-align: right;
+      }
+      .effort b {
+        display: block;
+        color: var(--text);
+        font-size: 12px;
+      }
+      .sequence {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 0;
+        margin-top: 26px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+      .phase {
+        padding: 22px;
+        background: var(--panel);
+        border-right: 1px solid var(--line);
+      }
+      .phase:last-child {
+        border-right: 0;
+      }
+      .phase span {
+        color: var(--accent);
+        font: 700 10px/1 var(--mono);
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+      }
+      .phase h3 {
+        margin-top: 12px;
+      }
+      .phase ul {
+        margin: 12px 0 0;
+        padding-left: 17px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .risk-list {
+        display: grid;
+        gap: 10px;
+        margin-top: 20px;
+      }
+      .risk {
+        display: grid;
+        grid-template-columns: 120px 1fr;
+        gap: 18px;
+        padding: 16px 18px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+      }
+      .risk b {
+        font: 700 11px/1.4 var(--mono);
+        color: var(--red);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .risk p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .keep-out {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 18px;
+      }
+      .keep-out span {
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        background: var(--panel);
+        border-radius: 6px;
+        color: var(--muted);
+        font: 12px/1 var(--mono);
+      }
+      .sources {
+        display: grid;
+        gap: 9px;
+        margin-top: 20px;
+        padding: 0;
+        list-style: none;
+      }
+      .sources li {
+        padding: 12px 14px;
+        border: 1px solid var(--line-soft);
+        background: var(--panel);
+        color: var(--muted);
+        font-size: 13px;
+        overflow-wrap: anywhere;
+      }
+      .sources b {
+        color: var(--text);
+      }
+      footer {
+        margin-top: 58px;
+        padding-top: 20px;
+        border-top: 1px solid var(--line);
+        color: var(--faint);
+        font: 11px/1.6 var(--mono);
+      }
+      @media (max-width: 900px) {
+        .shell {
+          grid-template-columns: 1fr;
+          gap: 0;
+          padding: 22px 20px 70px;
+        }
+        aside {
+          position: static;
+        }
+        nav,
+        .aside-note {
+          display: none;
+        }
+        .three,
+        .sequence {
+          grid-template-columns: 1fr;
+        }
+        .phase {
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+        .phase:last-child {
+          border-bottom: 0;
+        }
+        .priority {
+          grid-template-columns: 62px 1fr;
+        }
+        .effort {
+          grid-column: 2;
+          justify-self: start;
+          text-align: left;
+        }
+      }
+      @media (max-width: 650px) {
+        header {
+          padding-top: 28px;
+        }
+        h1 {
+          font-size: 46px;
+        }
+        .priority {
+          grid-template-columns: 1fr;
+        }
+        .rank {
+          font-size: 25px;
+        }
+        .effort {
+          grid-column: 1;
+        }
+        .risk {
+          grid-template-columns: 1fr;
+          gap: 6px;
+        }
+        table {
+          display: block;
+          overflow-x: auto;
+        }
+      }
+      @media print {
+        :root {
+          color-scheme: light;
+          --bg: #fff;
+          --panel: #fff;
+          --panel-2: #f7f4ed;
+          --line: #bbb4a8;
+          --line-soft: #ddd8cf;
+          --text: #171512;
+          --muted: #504b43;
+          --faint: #716b61;
+          --accent-soft: #fff0e5;
+          --yellow-soft: #fff7dc;
+          --red-soft: #fff0ef;
+          --green-soft: #edf8ef;
+          --blue-soft: #eef6ff;
+        }
+        .shell {
+          display: block;
+          max-width: none;
+          padding: 0;
+        }
+        aside {
+          display: none;
+        }
+        header {
+          padding-top: 0;
+        }
+        section {
+          break-inside: avoid;
+        }
+        .priority,
+        .principle,
+        table {
+          break-inside: avoid;
+        }
+        a {
+          color: #174e82;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <aside aria-label="Report navigation">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span> Gitadel audit
+        </div>
+        <nav>
+          <a href="#tldr">TL;DR</a>
+          <a href="#position">Product position</a>
+          <a href="#baseline">Current baseline</a>
+          <a href="#priorities">Priorities</a>
+          <a href="#sequence">Build sequence</a>
+          <a href="#risks">Risks found</a>
+          <a href="#non-goals">Non-goals</a>
+          <a href="#sources">Sources</a>
+        </nav>
+        <div class="aside-note">
+          Audit target: the live working tree on 2026-08-22. Several repository
+          webhook and settings files were being changed concurrently and are
+          treated as work in progress.
+        </div>
+      </aside>
+
+      <main>
+        <header>
+          <div class="eyebrow">
+            Core feature investigation · v0.1 working tree
+          </div>
+          <h1>Build deeper,<br />not broader.</h1>
+          <p class="dek">
+            Gitadel already has enough forge surface. Its next features should
+            make repositories easier to control, replicate, verify, and
+            recover—not make people collaborate inside it.
+          </p>
+          <div class="meta">
+            <span class="chip"
+              ><span class="dot"></span> Codebase + git history</span
+            >
+            <span class="chip">7 comparable products</span>
+            <span class="chip">28 primary-source URLs checked</span>
+          </div>
+        </header>
+
+        <section id="tldr">
+          <h2>TL;DR</h2>
+          <p class="lead">
+            The right category is not “small GitHub.” It is a
+            <strong>self-hosted repository appliance</strong>: Git transport,
+            durable identity and access, high-quality read-only browsing,
+            replication, and provable recovery.
+          </p>
+          <div class="verdict">
+            <strong>Recommendation</strong>
+            <p>
+              Complete repository lifecycle first; add preservation and
+              machine-access primitives second; harden the in-progress webhook
+              work on top of a durable jobs/outbox layer.
+            </p>
+          </div>
+          <div class="three">
+            <article class="principle">
+              <span class="n">01</span>
+              <h3>Control</h3>
+              <p>
+                Default branch, archive, rename, transfer, delayed delete, and
+                explicit permissions.
+              </p>
+            </article>
+            <article class="principle">
+              <span class="n">02</span>
+              <h3>Preserve</h3>
+              <p>
+                One-shot import, portable export, mirrors, integrity checks, and
+                restore drills.
+              </p>
+            </article>
+            <article class="principle">
+              <span class="n">03</span>
+              <h3>Integrate</h3>
+              <p>
+                HTTPS push, deploy keys, protected refs, signed webhooks, and a
+                named API profile.
+              </p>
+            </article>
+          </div>
+        </section>
+
+        <section id="position">
+          <h2>The product lane</h2>
+          <p class="lead">
+            Gitadel sits cleanly between cgit/Gitolite and Forgejo/Gitea: more
+            integrated than a browser plus ACL layer, dramatically narrower than
+            a collaboration suite. Soft Serve is the closest scope comparator;
+            Gitadel's stronger differentiator is its portable instance and
+            integrity-checked backup model.
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>Category</th>
+                <th>What it optimizes for</th>
+                <th>Gitadel's stance</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>cgit / gitweb</td>
+                <td>Fast read-only browsing and source distribution</td>
+                <td>
+                  Keep their restraint; add integrated identity and lifecycle.
+                </td>
+              </tr>
+              <tr>
+                <td>Gitolite</td>
+                <td>SSH authorization and ref-level policy</td>
+                <td>
+                  Borrow protected-ref semantics, not its configuration model.
+                </td>
+              </tr>
+              <tr>
+                <td>Soft Serve</td>
+                <td>
+                  Small, self-hosted Git service with import/mirrors/webhooks
+                </td>
+                <td>
+                  Closest feature boundary; compete on preservation and web
+                  browse quality.
+                </td>
+              </tr>
+              <tr>
+                <td>Forgejo / Gitea / GitLab</td>
+                <td>Full software-development platform</td>
+                <td>
+                  Borrow operational patterns only; reject collaboration
+                  subsystems.
+                </td>
+              </tr>
+              <tr>
+                <td>Radicle</td>
+                <td>Location-independent, verifiable replication</td>
+                <td>
+                  Borrow stable identity and independently verifiable copies,
+                  not P2P.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="baseline">
+          <h2>Current baseline</h2>
+          <p class="lead">
+            The data plane is already credible. The control plane and operator
+            plane are where the product still feels like v0.1.
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>Area</th>
+                <th>Status</th>
+                <th>Finding</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Git + LFS transport</td>
+                <td><span class="status strong">Strong</span></td>
+                <td>
+                  SSH push/clone, Smart HTTP fetch, private token-authenticated
+                  HTTP fetch, LFS and locks. Smart HTTP push is missing.
+                </td>
+              </tr>
+              <tr>
+                <td>Source browsing</td>
+                <td><span class="status strong">Strong</span></td>
+                <td>
+                  Tree, blob, raw, branches, tags, commits, diffs, Markdown,
+                  highlighting, activity, and language stats.
+                </td>
+              </tr>
+              <tr>
+                <td>Identity and human access</td>
+                <td><span class="status strong">Strong</span></td>
+                <td>
+                  Passwords, passkeys, sessions, API tokens, SSH keys, OAuth,
+                  invitations, organizations, collaborators, and audit records.
+                </td>
+              </tr>
+              <tr>
+                <td>Repository lifecycle</td>
+                <td><span class="status thin">Thin</span></td>
+                <td>
+                  The schema models default branch and archive state, but there
+                  are no shipped controls for default-branch repair,
+                  archive/unarchive, rename, transfer, or delete/restore.
+                </td>
+              </tr>
+              <tr>
+                <td>Preservation</td>
+                <td><span class="status partial">Partial</span></td>
+                <td>
+                  Instance backups are checksum-manifested and restore into
+                  empty storage. There is no portable per-repository
+                  export/import, fsck workflow, or automated restore proof.
+                </td>
+              </tr>
+              <tr>
+                <td>Automation</td>
+                <td><span class="status wip">In progress</span></td>
+                <td>
+                  OAuth and narrow Gitea discovery support Dokploy. Uncommitted
+                  webhook code exists, but is not ready to ship safely.
+                </td>
+              </tr>
+              <tr>
+                <td>Operations and scale</td>
+                <td><span class="status thin">Thin</span></td>
+                <td>
+                  Database health only, no rate/concurrency/storage limits, no
+                  metrics, no CI workflow, and expensive all-repository overview
+                  work.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="callout" style="margin-top: 18px">
+            <strong>Important asymmetry:</strong> the README says HTTP fetch is
+            public-only, but the current Git HTTP code accepts scoped tokens for
+            private repositories. Document and test that behavior; do not
+            rebuild it.
+          </div>
+        </section>
+
+        <section id="priorities">
+          <h2>What to add</h2>
+          <p class="lead">
+            These are ordered by product fit and risk reduction, not by novelty.
+            The first three are the heart of the product.
+          </p>
+          <div class="priority-grid">
+            <article class="priority">
+              <div class="rank">01<small>P0 · NOW</small></div>
+              <div>
+                <h3>Repository lifecycle and correct <code>HEAD</code></h3>
+                <p>
+                  Add owner-managed description, visibility, default branch,
+                  archive/unarchive, atomic rename/transfer, and delayed
+                  delete/restore/purge. The immediate bug to eliminate is
+                  hard-wiring every new repository to <code>main</code>, which
+                  makes a first push to <code>master</code> browse incorrectly.
+                </p>
+                <ul class="accept">
+                  <li>
+                    Changing the default branch updates symbolic
+                    <code>HEAD</code>.
+                  </li>
+                  <li>
+                    Archive remains browsable/cloneable and rejects all writes.
+                  </li>
+                  <li>
+                    Rename/transfer preserve immutable repository ID and storage
+                    key.
+                  </li>
+                  <li>
+                    Delete is reversible before an audited purge deadline.
+                  </li>
+                </ul>
+              </div>
+              <div class="effort"><b>Medium–Large</b>Highest product value</div>
+            </article>
+
+            <article class="priority">
+              <div class="rank">02<small>P0 · NOW</small></div>
+              <div>
+                <h3>Preservation: import, export, verify, restore</h3>
+                <p>
+                  Add a one-shot remote import and a Gitadel-independent
+                  per-repository export: full Git bundle, <code>HEAD</code>,
+                  versioned metadata, and referenced LFS objects. Add
+                  <code>git fsck --strict</code>, LFS digest verification,
+                  backup verify-only, and a clean-host restore test.
+                </p>
+                <ul class="accept">
+                  <li>
+                    Import preserves every branch, tag, note, default branch,
+                    and LFS object.
+                  </li>
+                  <li>
+                    Export can be cloned or restored without a Gitadel server.
+                  </li>
+                  <li>
+                    A restore drill compares every advertised ref/OID and
+                    exercises SSH + HTTP clone.
+                  </li>
+                  <li>
+                    Interrupted restore has rollback or a documented resumable
+                    recovery path.
+                  </li>
+                </ul>
+              </div>
+              <div class="effort"><b>Large</b>Core differentiator</div>
+            </article>
+
+            <article class="priority">
+              <div class="rank">03<small>P0 · FOUNDATION</small></div>
+              <div>
+                <h3>Durable jobs/outbox layer</h3>
+                <p>
+                  Build one bounded, persistent mechanism for post-push work.
+                  Use it for webhook delivery, mirror synchronization, integrity
+                  checks, Git maintenance, and expensive stats refresh. This
+                  prevents each feature from inventing its own detached task and
+                  retry behavior.
+                </p>
+                <ul class="accept">
+                  <li>
+                    Persisted job state, attempts, next-run time, last error,
+                    and idempotency key.
+                  </li>
+                  <li>
+                    Per-repository serialization where mutation is involved.
+                  </li>
+                  <li>
+                    Global concurrency, timeout, backoff, and retention
+                    controls.
+                  </li>
+                  <li>Queue depth and failure metrics.</li>
+                </ul>
+              </div>
+              <div class="effort"><b>Medium</b>Unblocks 4 epics</div>
+            </article>
+
+            <article class="priority">
+              <div class="rank">04<small>P0 · BEFORE 1.0</small></div>
+              <div>
+                <h3>Machine access and write safety</h3>
+                <p>
+                  Add scoped-token Smart HTTP push, repository deploy keys
+                  (read-only by default), and minimal protected refs. This gives
+                  CI/deploy systems a least-privilege path without introducing
+                  reviews or branch workflows.
+                </p>
+                <ul class="accept">
+                  <li>
+                    <code>receive-pack</code> requires write scope and
+                    repository authorization.
+                  </li>
+                  <li>
+                    Deploy keys are repository-scoped, expiring/revocable,
+                    audited, and show last use.
+                  </li>
+                  <li>
+                    Default branch and selected patterns can reject force-push
+                    and deletion.
+                  </li>
+                  <li>
+                    Protocol v2, shallow clone, fetch, and push have transport
+                    integration tests.
+                  </li>
+                </ul>
+              </div>
+              <div class="effort"><b>Large</b>Transport parity</div>
+            </article>
+
+            <article class="priority">
+              <div class="rank">05<small>P0 · BEFORE MERGE</small></div>
+              <div>
+                <h3>Finish webhooks as an external automation boundary</h3>
+                <p>
+                  The live uncommitted webhook implementation is directionally
+                  right—push-only JSON, optional HMAC, no arbitrary server
+                  hooks—but it must move onto the outbox and adopt strict
+                  destination policy before shipping.
+                </p>
+                <ul class="accept">
+                  <li>
+                    Block loopback, link-local, metadata, and private-network
+                    destinations by default; revalidate DNS and redirects.
+                  </li>
+                  <li>
+                    Persist delivery history; retry with backoff; support
+                    bounded replay.
+                  </li>
+                  <li>Stream/cap response bytes and delivery concurrency.</li>
+                  <li>
+                    Emit the exact Gitea/GitHub fields and headers required by
+                    the named Dokploy contract.
+                  </li>
+                </ul>
+              </div>
+              <div class="effort"><b>Medium</b>Code already WIP</div>
+            </article>
+
+            <article class="priority">
+              <div class="rank">06<small>P0 · BEFORE 1.0</small></div>
+              <div>
+                <h3>Operational guardrails</h3>
+                <p>
+                  Bound the work that public browse, Git subprocesses, LFS,
+                  imports, and downloads can consume. Split liveness from
+                  readiness and expose a small protected metrics surface.
+                </p>
+                <ul class="accept">
+                  <li>
+                    Rate, body, process-concurrency, LFS object/batch,
+                    repository, and disk-watermark limits.
+                  </li>
+                  <li>
+                    Paginated repository lists and cached/precomputed overview
+                    statistics.
+                  </li>
+                  <li>
+                    Streaming raw/diff/archive responses with time and size
+                    limits.
+                  </li>
+                  <li>
+                    Readiness covers database, repository/LFS storage, key
+                    material, and disk space.
+                  </li>
+                </ul>
+              </div>
+              <div class="effort"><b>Medium–Large</b>Internet safety</div>
+            </article>
+
+            <article class="priority">
+              <div class="rank">07<small>P1 · NEXT</small></div>
+              <div>
+                <h3>Admin recovery and permission repair</h3>
+                <p>
+                  Add user list/disable/enable, session revocation, invitation
+                  revocation, admin promotion, and a locked-out-admin recovery
+                  command. Clarify or fix organization semantics: today every
+                  organization member can write every organization repository,
+                  while repository collaborators work only for personal
+                  repositories.
+                </p>
+              </div>
+              <div class="effort"><b>Medium</b>Operator confidence</div>
+            </article>
+
+            <article class="priority">
+              <div class="rank">08<small>P1 · NEXT</small></div>
+              <div>
+                <h3>Read-only distribution and discovery</h3>
+                <p>
+                  Add immutable-revision source archives
+                  (<code>tar.gz</code>/<code>zip</code>), blame,
+                  repository/branch/tag pagination, repository size/LFS
+                  inventory, and bounded path or commit-message search. Add full
+                  code search only after measured demand.
+                </p>
+              </div>
+              <div class="effort"><b>Small–Large</b>Incremental</div>
+            </article>
+          </div>
+        </section>
+
+        <section id="sequence">
+          <h2>Suggested build sequence</h2>
+          <p class="lead">
+            Avoid parallel feature islands. Establish lifecycle invariants and
+            one background-work primitive first.
+          </p>
+          <div class="sequence">
+            <article class="phase">
+              <span>Phase 1 · Control</span>
+              <h3>Make repository state real</h3>
+              <ul>
+                <li>Default branch + <code>HEAD</code></li>
+                <li>Archive/unarchive</li>
+                <li>Rename/transfer</li>
+                <li>Delayed delete/restore</li>
+                <li>Jobs/outbox schema</li>
+              </ul>
+            </article>
+            <article class="phase">
+              <span>Phase 2 · Preserve</span>
+              <h3>Prove the archive promise</h3>
+              <ul>
+                <li>Full-ref import</li>
+                <li>Bundle + LFS export</li>
+                <li><code>fsck</code> + LFS verification</li>
+                <li>Atomic/resumable restore</li>
+                <li>Restore drill in CI</li>
+              </ul>
+            </article>
+            <article class="phase">
+              <span>Phase 3 · Integrate</span>
+              <h3>Serve machines safely</h3>
+              <ul>
+                <li>Smart HTTP push</li>
+                <li>Deploy keys</li>
+                <li>Protected refs</li>
+                <li>Durable signed webhooks</li>
+                <li>Pull mirror, then push mirror</li>
+              </ul>
+            </article>
+          </div>
+          <p style="margin-top: 18px; color: var(--muted)">
+            <strong>Release gate for every phase:</strong> backend tests, Svelte
+            check/build, formatter + Clippy, Docker smoke, NixOS smoke against
+            the real <code>/healthz</code> route, and transport/backup
+            end-to-end tests in committed CI.
+          </p>
+        </section>
+
+        <section id="risks">
+          <h2>Risks found during the audit</h2>
+          <p class="lead">
+            These are not reasons to widen scope; they are reasons to make the
+            existing scope dependable.
+          </p>
+          <div class="risk-list">
+            <div class="risk">
+              <b>Webhook SSRF</b>
+              <p>
+                The uncommitted URL validator accepts any HTTP(S) host,
+                including loopback/private/metadata targets. Detached deliveries
+                are unbounded and not durable. Do not merge as-is.
+              </p>
+            </div>
+            <div class="risk">
+              <b>Unbounded browse</b>
+              <p>
+                The overview traverses every accessible repository and reachable
+                history; raw blobs and diff subprocess output are buffered;
+                caches and Git process counts are unbounded.
+              </p>
+            </div>
+            <div class="risk">
+              <b>Restore split-brain</b>
+              <p>
+                Restore verifies archive checksums but installs repositories,
+                LFS, database, and host key through separate renames. A
+                mid-install failure can leave a partial target that blocks a
+                clean retry.
+              </p>
+            </div>
+            <div class="risk">
+              <b>Permission surprise</b>
+              <p>
+                Every organization member currently receives write access to
+                every organization repository. Per-repository collaborators are
+                restricted to personal repositories.
+              </p>
+            </div>
+            <div class="risk">
+              <b>Address mismatch</b>
+              <p>
+                Clone URLs use the internal SSH bind port. A custom externally
+                published Docker Compose SSH port can produce the wrong URL.
+              </p>
+            </div>
+            <div class="risk">
+              <b>Quality gate</b>
+              <p>
+                No committed CI workflow exists. The audited tree passed 12 Rust
+                tests and Svelte diagnostics/build, but Rust emitted dead-code
+                warnings and the frontend bundle reported oversized chunks.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section id="non-goals">
+          <h2>Keep these out</h2>
+          <p class="lead">
+            A useful rule: if a feature needs conversations, assignments,
+            approvals, notifications between people, or repository-owned code
+            execution, it does not belong in Gitadel.
+          </p>
+          <div class="keep-out">
+            <span>Pull requests</span><span>Issues</span><span>Reviews</span
+            ><span>Comments</span><span>Social graphs</span
+            ><span>Fork networks</span><span>Wikis</span
+            ><span>Browser editing</span><span>CI runners</span
+            ><span>Package registries</span><span>User shell hooks</span
+            ><span>Full Gitea parity</span><span>Release objects—for now</span>
+          </div>
+          <p style="margin-top: 20px; color: var(--muted)">
+            Use tags, immutable source archives, raw files, Git LFS, and signed
+            webhooks instead. Those cover source distribution and automation
+            without creating a second collaboration platform.
+          </p>
+        </section>
+
+        <section id="sources">
+          <h2>Sources</h2>
+          <p class="lead">
+            Synthesis used the live working tree, recent project history, and
+            primary product documentation. Web content was treated as untrusted
+            source material.
+          </p>
+          <ul class="sources">
+            <li>
+              <b>Gitadel product:</b> <code>README.md</code>,
+              <code>CHANGELOG.md</code>, commits <code>072667e</code> through
+              <code>a29bb93</code>.
+            </li>
+            <li>
+              <b>Gitadel server:</b>
+              <code
+                >src/repository/{mod,resources,browser,git_http,ssh,lfs,gitea,webhooks}.rs</code
+              >, <code>src/identity/</code>, <code>src/archive.rs</code>,
+              <code>src/server.rs</code>, <code>src/config.rs</code>,
+              <code>src/entity.rs</code>.
+            </li>
+            <li>
+              <b>Gitadel UI/deploy:</b> <code>frontend/src/routes/</code>,
+              <code>frontend/src/lib/api.ts</code>, repository/settings
+              components, <code>Dockerfile</code>, <code>compose.yaml</code>,
+              <code>flake.nix</code>, <code>nix/module.nix</code>.
+            </li>
+            <li>
+              <b>Competitive research note:</b>
+              <code>docs/research/minimal-git-forge-feature-landscape.md</code>
+              (28 validated primary-source URLs).
+            </li>
+            <li>
+              <b>Git:</b>
+              <a href="https://git-scm.com/docs/git-http-backend"
+                >Smart HTTP backend</a
+              >, <a href="https://git-scm.com/docs/protocol-v2">protocol v2</a>,
+              <a href="https://git-scm.com/docs/git-clone"
+                >clone/shallow behavior</a
+              >, <a href="https://git-scm.com/docs/git-bundle">bundle</a>,
+              <a href="https://git-scm.com/docs/git-fsck">fsck</a>,
+              <a href="https://git-scm.com/docs/git-archive">archive</a>.
+            </li>
+            <li>
+              <b>Forgejo:</b>
+              <a href="https://forgejo.org/docs/latest/user/repo-mirror/"
+                >repository mirrors</a
+              >,
+              <a
+                href="https://forgejo.org/docs/latest/admin/config-cheat-sheet/"
+                >operations/security configuration</a
+              >,
+              <a href="https://forgejo.org/docs/latest/admin/command-line/"
+                >CLI/doctor/dump</a
+              >.
+            </li>
+            <li>
+              <b>Gitea:</b>
+              <a
+                href="https://docs.gitea.com/administration/backup-and-restore/"
+                >backup and restore</a
+              >,
+              <a href="https://docs.gitea.com/usage/repository/webhooks/"
+                >webhooks</a
+              >,
+              <a href="https://docs.gitea.com/development/api-usage/"
+                >API usage</a
+              >.
+            </li>
+            <li>
+              <b>GitLab:</b>
+              <a href="https://docs.gitlab.com/api/projects/"
+                >project lifecycle API</a
+              >,
+              <a href="https://docs.gitlab.com/user/project/deploy_keys/"
+                >deploy keys</a
+              >,
+              <a
+                href="https://docs.gitlab.com/administration/settings/user_and_ip_rate_limits/"
+                >rate limits</a
+              >,
+              <a
+                href="https://docs.gitlab.com/administration/monitoring/health_check/"
+                >health checks</a
+              >.
+            </li>
+            <li>
+              <b>Minimal comparators:</b>
+              <a href="https://git.zx2c4.com/cgit/tree/cgitrc.5.txt"
+                >cgit configuration</a
+              >, <a href="https://git-scm.com/docs/gitweb">gitweb</a>,
+              <a
+                href="https://github.com/charmbracelet/soft-serve/blob/main/README.md"
+                >Soft Serve</a
+              >,
+              <a href="https://gitolite.com/gitolite/overview.html">Gitolite</a
+              >,
+              <a href="https://radicle.xyz/guides/protocol">Radicle protocol</a
+              >.
+            </li>
+          </ul>
+        </section>
+
+        <footer>
+          Last updated 2026-08-22 10:05 UTC · Generated as a self-contained
+          research artifact · Working-tree changes outside the two research
+          files were not modified by this investigation.
+        </footer>
+      </main>
+    </div>
+  </body>
+</html>

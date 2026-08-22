@@ -212,23 +212,21 @@ This section describes the local working tree observed on 2026-08-22. Several fi
 ### Present in the in-progress working tree
 
 - OAuth application CRUD and a one-time client-secret response: `src/identity/oauth.rs:35-166`; UI at `frontend/src/lib/components/settings/oauth-application-settings.svelte:33-185`.
-- Authorization endpoint, exact app/redirect lookup, login resumption, consent, supported Dokploy scopes, opaque state echo, and a ten-minute code: `src/identity/oauth.rs:168-315, 436-519`; `frontend/src/routes/login/+page.svelte:24-39`.
-- Authorization-code token exchange and hashed persistent access tokens: `src/identity/oauth.rs:317-434`; tables/entities at `src/migration/m20260822_000007_create_oauth_provider.rs:9-169` and `src/entity.rs:133-199`.
-- Both `Bearer` and lowercase `token` authorization schemes, with OAuth-token lookup and disabled-user checks: `src/identity/mod.rs:241-255, 286-348`.
+- Authorization endpoint, exact app/redirect lookup, login resumption, consent, supported Dokploy scopes, opaque state echo, owner-only application authorization, and a ten-minute code: `src/identity/oauth.rs`; `frontend/src/routes/login/+page.svelte`.
+- Authorization-code token exchange and hashed persistent access tokens: `src/identity/oauth.rs`; tables/entities at `src/migration/m20260822_000007_create_oauth_provider.rs` and `src/entity.rs`.
+- Both `Bearer` and lowercase `token` authorization schemes, with OAuth-token lookup, disabled-user checks, and repository-scope enforcement for discovery, clone, and LFS: `src/identity/mod.rs`, `src/repository/gitea.rs`, `src/repository/git_http.rs`, and `src/repository/lfs.rs`.
 - Gitea repository and branch aliases under `/api/v1`, 1-based pagination clamped to 50, accessible-repository filtering, the needed DTO fields, and raw arrays: `src/repository/mod.rs:293-345`; `src/repository/gitea.rs:14-165`.
 - HTTP clone URL generation and OAuth-token Basic-password authentication for private repositories: `src/repository/mod.rs:111-120`; `src/repository/git_http.rs:159-201`.
 
-The current `cargo test --workspace` run passed all 9 unit tests, including scope normalization and pagination. This is compile/unit evidence only; no live Dokploy OAuth/discovery/clone/webhook end-to-end test was present or run.
+The current `cargo test --workspace` run passed all 10 unit tests, including scope normalization and pagination. A subsequent local end-to-end check also completed the exact Dokploy OAuth scope request, exchanged and replay-rejected a code, discovered a private repository and its branch with `Authorization: token`, shallow-cloned it with `oauth2:{access_token}` over smart HTTP, and confirmed application deletion revoked the token. This validates Gitadel's side of the core contract; it does not replace a test against a running Dokploy instance or cover outgoing webhooks.
 
 ### Remaining core-MVP work or validation
 
 1. **Finish and commit the in-progress compatibility code.** At research time the main OAuth module, Gitea adapter, migration, and related UI were uncommitted. A release cannot rely on a transient working tree.
 2. **Run a real Dokploy end-to-end test.** Create the app using Dokploy's exact callback, complete consent in a fresh signed-out browser, discover private/personal/organization/collaborator repositories across more than 50 results, list more than 50 branches, and clone a selected private branch using the public and internal URL variants.
 3. **Decide the token lifetime contract explicitly.** The current response returns `access_token`, `token_type`, and `scope`, with no expiry or refresh token (`src/identity/oauth.rs:326-331, 428-433`). That is compatible with current Dokploy but intentionally below Gitea parity. If access tokens become expiring, implement refresh grants first; otherwise Dokploy will eventually retain and retry a dead token.
-4. **Preserve single-use code semantics under contention.** The current read-delete-insert transaction is directionally correct (`src/identity/oauth.rs:377-426`), but acceptance testing should attempt simultaneous exchanges and prove exactly one access token is committed.
-5. **Clarify scope enforcement.** The code records the textual Dokploy scope but grants the same internal read bit to every accepted OAuth token (`src/identity/oauth.rs:409-415, 492-508`). This works for Dokploy's two repository APIs, but is not granular Gitea scope enforcement. Any future user/organization routes must enforce the corresponding textual scope.
-6. **Add the conventional settings redirect.** `/user/settings/applications` should redirect an authenticated user to Gitadel's Applications settings tab. The existing `/settings` page defaults to Security and the selected tab is not URL-addressable (`frontend/src/routes/settings/+page.svelte:51-99`). This is setup usability, not a wire-protocol blocker.
-7. **Treat DTO deviations as deliberate.** Gitadel currently serializes repository UUIDs as strings (`src/repository/gitea.rs:36-48, 137-164`), while Gitea specifies numeric IDs. Current Dokploy does not depend on numeric arithmetic, but a broader compatibility claim should supply a stable numeric compatibility ID or document the divergence.
+4. **Preserve single-use code semantics under contention.** The current read-delete-insert transaction rejects replay and a concurrent 20-request review produced one success, but this should remain covered by a permanent integration test.
+5. **Treat DTO deviations as deliberate.** Gitadel currently serializes repository UUIDs as strings (`src/repository/gitea.rs`), while Gitea specifies numeric IDs. Current Dokploy does not depend on numeric arithmetic, but a broader compatibility claim should supply a stable numeric compatibility ID or document the divergence.
 
 ### Remaining automatic-deploy MVP work
 

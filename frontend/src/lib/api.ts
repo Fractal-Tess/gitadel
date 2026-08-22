@@ -131,6 +131,34 @@ export const repositorySchema = z.object({
   updated_at: z.string(),
   favorited: z.boolean(),
   ssh_clone_url: z.string(),
+  can_manage: z.boolean(),
+});
+
+export const topicsSchema = z.object({
+  topics: z.array(z.string()),
+});
+
+export const webhookSchema = z.object({
+  id: z.uuid(),
+  type: z.literal("Repository"),
+  name: z.literal("web"),
+  active: z.boolean(),
+  events: z.tuple([z.literal("push")]),
+  config: z.object({
+    url: z.url(),
+    content_type: z.literal("json"),
+    insecure_ssl: z.literal("0"),
+  }),
+  url: z.url(),
+  ping_url: z.url(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  last_delivery_at: z.string().nullable(),
+  last_response: z.object({
+    code: z.number().int().nullable(),
+    status: z.enum(["ok", "failed", "unused"]),
+    message: z.string().nullable(),
+  }),
 });
 
 export const repositoryActivitySchema = z.object({
@@ -159,7 +187,9 @@ export const repositoryOverviewItemSchema = repositorySchema.extend({
 
 export const repositoryOverviewSchema = z.object({
   repositories: z.array(repositoryOverviewItemSchema),
-  activity: repositoryActivitySchema,
+  page: z.number().int().positive(),
+  per_page: z.number().int().positive(),
+  has_next: z.boolean(),
 });
 
 export const refSchema = z.object({
@@ -249,6 +279,7 @@ export type Organization = z.infer<typeof organizationSchema>;
 export type Member = z.infer<typeof memberSchema>;
 export type AuditEvent = z.infer<typeof auditEventSchema>;
 export type Repository = z.infer<typeof repositorySchema>;
+export type Webhook = z.infer<typeof webhookSchema>;
 export type RepositoryOverviewItem = z.infer<
   typeof repositoryOverviewItemSchema
 >;
@@ -269,7 +300,7 @@ export async function requestJson<T>(
 ): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("accept", "application/json");
-  if (init.body !== undefined) {
+  if (init.body !== undefined && !headers.has("content-type")) {
     headers.set("content-type", "application/json");
   }
   const response = await fetch(path, {
@@ -305,7 +336,7 @@ export async function requestEmpty(
 ): Promise<void> {
   const headers = new Headers(init.headers);
   headers.set("accept", "application/json");
-  if (init.body !== undefined) {
+  if (init.body !== undefined && !headers.has("content-type")) {
     headers.set("content-type", "application/json");
   }
   const response = await fetch(path, {

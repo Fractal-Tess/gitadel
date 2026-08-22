@@ -32,8 +32,11 @@
         window.location.assign(returnTo);
       } else if (returnTo?.startsWith("/admin")) {
         await goto(resolve("/admin"));
-      } else if (returnTo?.startsWith("/settings")) {
-        await goto(resolve("/settings"));
+      } else if (
+        returnTo === "/settings" ||
+        returnTo?.startsWith("/settings?")
+      ) {
+        await goto(returnTo);
       } else {
         await goto(resolve("/"));
       }

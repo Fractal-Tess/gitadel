@@ -9,7 +9,9 @@
     "w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-2 focus:ring-ring/20";
 
   const actionLabels: Record<string, string> = {
+    "account.password.update": "Password updated",
     "account.register": "Account registered",
+    "account.username.update": "Username updated",
     "admin.bootstrap": "Administrator created",
     "api_token.create": "API token created",
     "api_token.revoke": "API token revoked",
@@ -21,6 +23,9 @@
     "organization.create": "Organization created",
     "organization.member.add": "Organization member added",
     "organization.member.remove": "Organization member removed",
+    "oauth_application.authorize": "OAuth application authorized",
+    "oauth_application.create": "OAuth application created",
+    "oauth_application.delete": "OAuth application revoked",
     "passkey.create": "Passkey created",
     "passkey.delete": "Passkey removed",
     "repository.collaborator.add": "Repository collaborator added",

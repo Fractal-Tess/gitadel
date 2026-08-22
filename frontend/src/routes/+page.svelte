@@ -4,7 +4,6 @@
   import { resolve } from "$app/paths";
   import { onMount } from "svelte";
   import { toast } from "svelte-sonner";
-  import { z } from "zod";
   import {
     Braces,
     Check,
@@ -17,7 +16,7 @@
     Star,
   } from "lucide-svelte";
 
-  import ActivityChart from "$lib/components/repository/activity-chart.svelte";
+  import BrandMark from "$lib/components/brand-mark.svelte";
   import RepositoryActivityChart from "$lib/components/repository/repository-activity-chart.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
@@ -29,29 +28,40 @@
   import {
     ApiFailure,
     jsonBody,
-    organizationSchema,
-    repositoryOverviewSchema,
     repositorySchema,
     requestEmpty,
     requestJson,
     type Organization,
-    type RepositoryActivity,
     type RepositoryOverviewItem,
   } from "$lib/api.js";
+  import {
+    invalidateExplore,
+    loadOrganizations,
+    peekExplore,
+    refreshExplore,
+    preloadAccountSettings,
+  } from "$lib/navigation-cache.js";
   import { languageColor } from "$lib/repository/language-colors.js";
+  import { preloadRepository } from "$lib/repository/repository-preload.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
   const app = useAppState();
-  const activityWindows = [7, 14, 30, 90] as const;
-  type ActivityWindow = (typeof activityWindows)[number];
+  const viewer = app.authStatus?.user?.username;
+  const repositoryPageSize = 20;
+  const cachedExplore = peekExplore(1, repositoryPageSize, viewer);
   type CloneTarget = "ssh" | "http";
-  let repositories = $state.raw<RepositoryOverviewItem[]>([]);
-  let activity = $state.raw<RepositoryActivity | null>(null);
-  let activityDays = $state<ActivityWindow>(14);
-  let activityLoading = $state(false);
-  let activityError = $state<string | null>(null);
+  let repositories = $state.raw<RepositoryOverviewItem[]>(
+    cachedExplore?.repositories ?? [],
+  );
+  let nextPage = $state((cachedExplore?.page ?? 1) + 1);
+  let hasNextPage = $state(cachedExplore?.has_next ?? true);
+  let loadingMore = $state(false);
+  let loadMoreError = $state<string | null>(null);
+  let loadMoreQueued = false;
+  let refreshingFirstPage = true;
+  let activeLoadMore: Promise<boolean> | null = null;
   let search = $state(page.url.searchParams.get("q") ?? "");
-  let loading = $state(true);
+  let loading = $state(!cachedExplore);
   let error = $state<string | null>(null);
   let favoriteError = $state<string | null>(null);
   let favoritePending = $state.raw<string[]>([]);
@@ -102,30 +112,84 @@
     return value.toLocaleString();
   }
 
-  async function changeActivityWindow(value: string): Promise<void> {
-    const days = Number(value);
-    if (
-      !activityWindows.some((window) => window === days) ||
-      days === activityDays
-    ) {
-      return;
+  function loadMoreRepositories() {
+    if (loading || refreshingFirstPage || !hasNextPage) {
+      return Promise.resolve(false);
     }
+    if (activeLoadMore) return activeLoadMore;
 
-    activityDays = days as ActivityWindow;
-    activityLoading = true;
-    activityError = null;
-    try {
-      const overview = await requestJson(
-        `/api/v1/repositories/overview?${new URLSearchParams({ activity_days: String(days) })}`,
-        repositoryOverviewSchema,
-      );
-      repositories = overview.repositories;
-      activity = overview.activity;
-    } catch (caught) {
-      activityError = message(caught);
-    } finally {
-      activityLoading = false;
+    loadingMore = true;
+    loadMoreError = null;
+    activeLoadMore = (async () => {
+      try {
+        const overview = await refreshExplore(
+          nextPage,
+          repositoryPageSize,
+          viewer,
+        );
+        const loadedIds = new Set(
+          repositories.map((repository) => repository.id),
+        );
+        repositories = [
+          ...repositories,
+          ...overview.repositories.filter(
+            (repository) => !loadedIds.has(repository.id),
+          ),
+        ];
+        nextPage = overview.page + 1;
+        hasNextPage = overview.has_next;
+        return true;
+      } catch (caught) {
+        loadMoreError = message(caught);
+        return false;
+      } finally {
+        loadingMore = false;
+        activeLoadMore = null;
+      }
+    })();
+    return activeLoadMore;
+  }
+
+  async function loadAllRepositories() {
+    while (hasNextPage) {
+      if (!(await loadMoreRepositories())) break;
     }
+  }
+
+  async function refreshVisibleRepositories() {
+    if (refreshingFirstPage) return;
+    refreshingFirstPage = true;
+    loadMoreError = null;
+    try {
+      const overview = await refreshExplore(1, repositoryPageSize, viewer);
+      repositories = overview.repositories;
+      nextPage = overview.page + 1;
+      hasNextPage = overview.has_next;
+      error = null;
+    } catch (caught) {
+      loadMoreError = message(caught);
+    } finally {
+      refreshingFirstPage = false;
+      if (search.trim() || filter === "favorites") {
+        void loadAllRepositories();
+      }
+    }
+  }
+
+  function observeLoadMore(element: HTMLDivElement) {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        if (loading || refreshingFirstPage) {
+          loadMoreQueued = true;
+          return;
+        }
+        void loadMoreRepositories();
+      },
+      { root: element.parentElement, rootMargin: "320px 0px" },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
   }
 
   function cloneUrl(
@@ -185,6 +249,7 @@
         `/api/v1/repositories/${encodeURIComponent(repository.namespace)}/${encodeURIComponent(repository.name)}/favorite`,
         { method: favorited ? "PUT" : "DELETE" },
       );
+      invalidateExplore(viewer);
       repositories = repositories.map((item) =>
         item.id === repository.id ? { ...item, favorited } : item,
       );
@@ -214,6 +279,7 @@
         },
       );
       createOpen = false;
+      invalidateExplore(viewer);
       await goto(
         resolve("/[namespace]/[name]", {
           namespace: repository.namespace,
@@ -230,30 +296,41 @@
     }
   }
 
-  onMount(async () => {
-    try {
-      const [overview, loadedOrganizations] = await Promise.all([
-        requestJson(
-          "/api/v1/repositories/overview?activity_days=14",
-          repositoryOverviewSchema,
-        ),
-        app.authStatus?.authenticated
-          ? requestJson("/api/v1/organizations", z.array(organizationSchema))
-          : Promise.resolve([]),
-      ]);
-      repositories = overview.repositories;
-      activity = overview.activity;
-      organizations = loadedOrganizations.filter(
-        (organization) => organization.role === "owner",
-      );
-      repositoryNamespace ||= app.authStatus?.user?.username ?? "";
-    } catch (caught) {
-      error = message(caught);
-    } finally {
-      loading = false;
-    }
+  onMount(() => {
+    void (async () => {
+      try {
+        const [overview, loadedOrganizations] = await Promise.all([
+          refreshExplore(1, repositoryPageSize, viewer),
+          app.authStatus?.authenticated
+            ? loadOrganizations(viewer)
+            : Promise.resolve([]),
+        ]);
+        repositories = overview.repositories;
+        nextPage = overview.page + 1;
+        hasNextPage = overview.has_next;
+        organizations = loadedOrganizations.filter(
+          (organization) => organization.role === "owner",
+        );
+        repositoryNamespace ||= app.authStatus?.user?.username ?? "";
+      } catch (caught) {
+        if (cachedExplore) loadMoreError = message(caught);
+        else error = message(caught);
+      } finally {
+        loading = false;
+        refreshingFirstPage = false;
+        const shouldLoadMore = loadMoreQueued;
+        loadMoreQueued = false;
+        if (search.trim() || filter === "favorites") {
+          void loadAllRepositories();
+        } else if (shouldLoadMore) {
+          void loadMoreRepositories();
+        }
+      }
+    })();
   });
 </script>
+
+<svelte:window onfocus={() => void refreshVisibleRepositories()} />
 
 <svelte:head>
   <title>{app.instance?.site_name ?? "Gitadel"} · Project archive</title>
@@ -272,6 +349,7 @@
         href={resolve("/")}
         aria-label={`${app.instance?.site_name ?? "Gitadel"} home`}
       >
+        <BrandMark />
         <strong class="text-sm font-bold tracking-[-0.035em]"
           >{app.instance?.site_name ?? "GITADEL"}</strong
         >
@@ -287,6 +365,9 @@
         <input
           class="h-10 w-full rounded-md border bg-input/45 pl-10 pr-3 text-sm outline-none placeholder:text-muted-foreground/70 focus:border-ring focus:ring-2 focus:ring-ring/15"
           bind:value={search}
+          oninput={() => {
+            if (search.trim()) void loadAllRepositories();
+          }}
           placeholder="Search repositories..."
         />
       </label>
@@ -305,6 +386,9 @@
         <Button
           href={resolve("/settings")}
           variant="ghost"
+          onpointerenter={() => preloadAccountSettings(viewer)}
+          onpointerdown={() => preloadAccountSettings(viewer)}
+          onfocus={() => preloadAccountSettings(viewer)}
           class="gap-2 text-muted-foreground hover:text-foreground"
         >
           <Settings2 class="size-4" />
@@ -335,7 +419,10 @@
           class={filter === "favorites"
             ? "flex h-9 w-full items-center gap-3 rounded-md bg-accent px-3 text-sm font-medium"
             : "flex h-9 w-full items-center gap-3 rounded-md px-3 text-sm text-muted-foreground hover:bg-accent hover:text-foreground"}
-          onclick={() => (filter = "favorites")}
+          onclick={() => {
+            filter = "favorites";
+            void loadAllRepositories();
+          }}
         >
           <Star class="size-4" />
           Favorites
@@ -353,13 +440,14 @@
           <input
             class="h-10 w-full rounded-md border bg-input/45 pl-10 pr-3 text-sm outline-none placeholder:text-muted-foreground/70 focus:border-ring focus:ring-2 focus:ring-ring/15"
             bind:value={search}
+            oninput={() => {
+              if (search.trim()) void loadAllRepositories();
+            }}
             placeholder="Search repositories..."
           />
         </label>
 
-        <div
-          class="grid min-h-0 flex-1 items-stretch gap-6 lg:grid-cols-[minmax(0,1fr)_9.5rem]"
-        >
+        <div class="min-h-0 flex-1">
           <section
             id="repositories"
             class="flex min-h-0 flex-col"
@@ -381,32 +469,9 @@
                 </p>
               </div>
               <div class="flex items-center gap-3">
-                <Select.Root
-                  type="single"
-                  value={String(activityDays)}
-                  disabled={activityLoading}
-                  onValueChange={(value) => {
-                    if (value) void changeActivityWindow(value);
-                  }}
-                >
-                  <Select.Trigger
-                    class="h-8 w-auto min-w-28 text-xs"
-                    aria-label="Commit activity window"
-                  >
-                    {activityLoading
-                      ? "Updating…"
-                      : `Last ${activityDays} days`}
-                  </Select.Trigger>
-                  <Select.Content align="end">
-                    {#each activityWindows as days (days)}
-                      <Select.Item value={String(days)}
-                        >Last {days} days</Select.Item
-                      >
-                    {/each}
-                  </Select.Content>
-                </Select.Root>
                 <p class="text-xs tabular-nums text-muted-foreground">
-                  {visibleRepositories.length} total
+                  {repositories.length}
+                  {hasNextPage ? "loaded" : "total"}
                 </p>
                 {#if app.authStatus?.authenticated}
                   <Dialog.Root bind:open={createOpen}>
@@ -557,14 +622,6 @@
               </p>
             {/if}
 
-            {#if activityError}
-              <p
-                class="mb-3 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
-              >
-                {activityError}
-              </p>
-            {/if}
-
             <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain">
               {#if loading}
                 <div
@@ -594,6 +651,18 @@
                             namespace: repository.namespace,
                             name: repository.name,
                           })}
+                          onpointerenter={() =>
+                            preloadRepository(
+                              repository.namespace,
+                              repository.name,
+                              repository.default_branch,
+                            )}
+                          onfocus={() =>
+                            preloadRepository(
+                              repository.namespace,
+                              repository.name,
+                              repository.default_branch,
+                            )}
                         >
                           <div class="min-w-0 py-3">
                             <div class="flex items-center gap-2">
@@ -751,21 +820,28 @@
                   </ul>
                 </div>
               {/if}
+
+              <div
+                class="h-px"
+                aria-hidden="true"
+                {@attach observeLoadMore}
+              ></div>
+              {#if loadingMore}
+                <p class="py-5 text-center text-xs text-muted-foreground">
+                  Loading more repositories…
+                </p>
+              {:else if loadMoreError}
+                <div class="py-4 text-center">
+                  <button
+                    class="text-xs text-destructive hover:underline"
+                    onclick={() => void loadMoreRepositories()}
+                  >
+                    {loadMoreError} Retry
+                  </button>
+                </div>
+              {/if}
             </div>
           </section>
-          <aside
-            class="hidden h-full min-w-0 justify-self-end lg:block"
-            aria-label="Commit activity"
-          >
-            {#if activity}
-              <ActivityChart {activity} />
-            {:else if loading}
-              <div
-                class="h-full w-full animate-pulse rounded-md bg-muted/20"
-                aria-label="Loading commit activity"
-              ></div>
-            {/if}
-          </aside>
         </div>
       </div>
     </main>

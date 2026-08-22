@@ -1,14 +1,49 @@
 <script lang="ts">
-  import { BarChart3, Check, Copy } from "lucide-svelte";
+  import { BarChart3, Check, Copy, Pencil } from "lucide-svelte";
 
+  import RepositoryTopics from "$lib/components/repository/repository-topics.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
+  import { Textarea } from "$lib/components/ui/textarea/index.js";
   import { languageColor } from "$lib/repository/language-colors.js";
   import type {
     CopyTarget,
     RepositoryPageState,
   } from "$lib/repository/repository-page-state.svelte.js";
 
-  let { state }: { state: RepositoryPageState } = $props();
+  let { state: repository }: { state: RepositoryPageState } = $props();
+
+  let editingDescription = $state(false);
+  let descriptionDraft = $state("");
+  let descriptionField = $state<HTMLTextAreaElement | null>(null);
+
+  function startEditingDescription(): void {
+    descriptionDraft = repository.repository?.description ?? "";
+    editingDescription = true;
+  }
+
+  function cancelEditingDescription(): void {
+    editingDescription = false;
+    descriptionDraft = "";
+  }
+
+  async function saveDescription(event: SubmitEvent): Promise<void> {
+    event.preventDefault();
+    const next = descriptionDraft.trim();
+    if (next === (repository.repository?.description ?? "")) {
+      cancelEditingDescription();
+      return;
+    }
+    try {
+      await repository.updateRepositoryControl({ description: next || null });
+      cancelEditingDescription();
+    } catch {
+      // updateRepositoryControl surfaces the message; keep the draft editable.
+    }
+  }
+
+  $effect(() => {
+    if (editingDescription) descriptionField?.focus();
+  });
 
   const cloneKinds: Array<{ id: CopyTarget; label: string }> = [
     { id: "http", label: "HTTP" },
@@ -64,17 +99,17 @@
               class="min-w-0 flex-1 truncate px-3 py-2 text-xs text-muted-foreground"
             >
               {kind.id === "http"
-                ? state.httpCloneUrl
-                : state.repository?.ssh_clone_url}
+                ? repository.httpCloneUrl
+                : repository.repository?.ssh_clone_url}
             </code>
             <Button
               variant="ghost"
               size="icon-sm"
               class="shrink-0 rounded-none border-l text-muted-foreground"
-              onclick={() => void state.copyCloneUrl(kind.id)}
+              onclick={() => void repository.copyCloneUrl(kind.id)}
               aria-label={`Copy ${kind.label} clone URL`}
             >
-              {#if state.copied === kind.id}
+              {#if repository.copied === kind.id}
                 <Check class="size-3.5 text-emerald-500" />
               {:else}
                 <Copy class="size-3.5" />
@@ -87,30 +122,82 @@
   </section>
 
   <section class="order-first p-4 xl:order-2">
-    <h2
-      class="text-xs font-semibold uppercase tracking-wider text-muted-foreground"
-    >
-      About
-    </h2>
-    <p class="mt-3 text-sm leading-6">
-      {state.repository?.description ?? "No description provided."}
-    </p>
+    <div class="flex min-h-6 items-center justify-between gap-2">
+      <h2
+        class="text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+      >
+        Description
+      </h2>
+      {#if repository.repository?.can_manage && !editingDescription}
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          class="text-muted-foreground"
+          aria-label="Edit description"
+          onclick={startEditingDescription}
+        >
+          <Pencil class="size-3.5" />
+        </Button>
+      {/if}
+    </div>
+
+    {#if editingDescription}
+      <form class="mt-3" onsubmit={saveDescription}>
+        <Textarea
+          bind:value={descriptionDraft}
+          bind:ref={descriptionField}
+          class="min-h-20 text-sm"
+          maxlength={512}
+          placeholder="Describe this repository"
+          aria-label="Repository description"
+          onkeydown={(event) => {
+            if (event.key === "Escape") cancelEditingDescription();
+          }}
+        />
+        <div class="mt-2 flex items-center justify-end gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onclick={cancelEditingDescription}
+          >
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            size="sm"
+            disabled={repository.repositoryControlPending}
+          >
+            {repository.repositoryControlPending ? "Saving…" : "Save"}
+          </Button>
+        </div>
+      </form>
+    {:else if repository.repository?.description}
+      <p class="mt-3 text-sm leading-6">{repository.repository.description}</p>
+    {:else}
+      <p class="mt-3 text-sm leading-6 text-muted-foreground">
+        No description provided.
+      </p>
+    {/if}
+
+    <RepositoryTopics state={repository} />
+
     <dl class="mt-5 space-y-3 border-t pt-4 text-xs">
       <div class="flex justify-between gap-4">
         <dt class="text-muted-foreground">Default branch</dt>
-        <dd class="font-mono">{state.repository?.default_branch}</dd>
+        <dd class="font-mono">{repository.repository?.default_branch}</dd>
       </div>
       <div class="flex justify-between gap-4">
         <dt class="text-muted-foreground">Object format</dt>
-        <dd>{state.repository?.object_format.toUpperCase()}</dd>
+        <dd>{repository.repository?.object_format.toUpperCase()}</dd>
       </div>
       <div class="flex justify-between gap-4">
         <dt class="text-muted-foreground">Branches</dt>
-        <dd>{state.refs?.branches.length ?? 0}</dd>
+        <dd>{repository.refs?.branches.length ?? 0}</dd>
       </div>
       <div class="flex justify-between gap-4">
         <dt class="text-muted-foreground">Tags</dt>
-        <dd>{state.refs?.tags.length ?? 0}</dd>
+        <dd>{repository.refs?.tags.length ?? 0}</dd>
       </div>
     </dl>
   </section>
@@ -124,22 +211,22 @@
       </h2>
       <span
         class="text-[11px] tabular-nums text-muted-foreground"
-        title={`${state.totalLines.toLocaleString()} non-blank lines`}
+        title={`${repository.totalLines.toLocaleString()} non-blank lines`}
       >
-        {compactCount(state.totalLines)}
+        {compactCount(repository.totalLines)}
       </span>
     </div>
-    {#if state.stats.length}
+    {#if repository.stats.length}
       <div class="mt-4 flex h-1.5 overflow-hidden rounded-full bg-muted">
-        {#each state.stats as item (item.language)}
+        {#each repository.stats as item (item.language)}
           <span
-            style:width={`${state.totalLines ? ((item.code + item.comments) / state.totalLines) * 100 : 0}%`}
+            style:width={`${repository.totalLines ? ((item.code + item.comments) / repository.totalLines) * 100 : 0}%`}
             style:background={languageColor(item.language)}
           ></span>
         {/each}
       </div>
       <ul class="mt-4 space-y-3">
-        {#each state.stats as item (item.language)}
+        {#each repository.stats as item (item.language)}
           <li>
             <div class="flex items-center justify-between gap-3 text-xs">
               <span class="flex min-w-0 items-center gap-2 font-medium">

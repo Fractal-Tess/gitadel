@@ -22,6 +22,7 @@ use uuid::Uuid;
 use super::{
     LfsPermission, Permission, RepositoryState,
     resources::{CreateRepositoryOptions, create_owned_repository, record_push},
+    webhooks::{RefSnapshot, dispatch_push, snapshot_refs},
 };
 use crate::config::SshSettings;
 
@@ -280,6 +281,18 @@ impl russh::server::Handler for SshHandler {
             GitService::UploadPack => "git-upload-pack",
             GitService::ReceivePack => "git-receive-pack",
         };
+        let push_context = if matches!(service, GitService::ReceivePack) {
+            let refs = match snapshot_refs(&path).await {
+                Ok(refs) => Some(refs),
+                Err(error) => {
+                    tracing::warn!(%error, %namespace, %name, "could not snapshot refs before push");
+                    None
+                }
+            };
+            Some((self.state.clone(), repository.clone(), actor_user_id, refs))
+        } else {
+            None
+        };
         let mut command = Command::new(program);
         command
             .arg(&path)
@@ -305,8 +318,7 @@ impl russh::server::Handler for SshHandler {
             channel_state.channel,
             format!("{namespace}/{name}"),
             maintenance_path,
-            matches!(service, GitService::ReceivePack)
-                .then(|| (self.state.clone(), repository.id, actor_user_id)),
+            push_context,
         );
         Ok(())
     }
@@ -352,7 +364,12 @@ fn bridge_process(
     mut channel: Channel<Msg>,
     repository: String,
     maintenance_path: Option<std::path::PathBuf>,
-    push_audit: Option<(RepositoryState, Uuid, Uuid)>,
+    push_audit: Option<(
+        RepositoryState,
+        crate::entity::repository::Model,
+        Uuid,
+        Option<RefSnapshot>,
+    )>,
 ) {
     let Some(mut stdin) = child.stdin.take() else {
         return;
@@ -408,12 +425,17 @@ fn bridge_process(
         let successful = matches!(&result, Ok(Ok(status)) if status.success());
         let _ = errors.await;
         tracing::debug!(%repository, "Git SSH process error output closed");
-        if successful
-            && let Some((state, repository_id, actor_user_id)) = push_audit
-            && let Err(error) =
-                record_push(&state, repository_id, actor_user_id, repository.clone()).await
-        {
-            tracing::warn!(%error, %repository, "could not record repository push");
+        if successful && let Some((state, model, actor_user_id, refs_before)) = push_audit {
+            if let Err(error) =
+                record_push(&state, model.id, actor_user_id, repository.clone()).await
+            {
+                tracing::warn!(%error, %repository, "could not record repository push");
+            }
+            if let Some(refs_before) = refs_before
+                && let Err(error) = dispatch_push(&state, &model, actor_user_id, refs_before).await
+            {
+                tracing::warn!(%error, %repository, "could not queue repository webhooks");
+            }
         }
         let exit_status = match result {
             Ok(Ok(status)) => status

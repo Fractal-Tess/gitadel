@@ -26,7 +26,7 @@ use uuid::Uuid;
 use super::{LfsPermission, Permission, RepositoryState};
 use crate::{
     entity::{lfs_lock, repository, user},
-    identity::{ApiError, SCOPE_READ, SCOPE_WRITE},
+    identity::{ApiError, SCOPE_REPOSITORY_READ, SCOPE_WRITE},
 };
 
 const LFS_MEDIA_TYPE: &str = "application/vnd.git-lfs+json";
@@ -413,7 +413,7 @@ async fn authorized_repository(
         .authenticate_token(
             &token,
             match permission {
-                LfsPermission::Read => SCOPE_READ,
+                LfsPermission::Read => SCOPE_REPOSITORY_READ,
                 LfsPermission::Write => SCOPE_WRITE,
             },
         )

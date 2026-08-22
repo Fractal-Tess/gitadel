@@ -12,9 +12,10 @@ use std::{
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use axum::{
     Json, Router,
+    extract::DefaultBodyLimit,
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -44,6 +45,7 @@ const SESSION_COOKIE: &str = "gitadel_session";
 pub const SCOPE_READ: i32 = 1;
 pub const SCOPE_WRITE: i32 = 1 << 1;
 pub const SCOPE_SSH_KEYS: i32 = 1 << 2;
+pub const SCOPE_REPOSITORY_READ: i32 = 1 << 3;
 const CHALLENGE_LIFETIME: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone)]
@@ -180,6 +182,16 @@ impl IdentityState {
         settings: AuthSettings,
         public_url: Url,
     ) -> Result<Self, anyhow::Error> {
+        if public_url.path() != "/"
+            || public_url.query().is_some()
+            || public_url.fragment().is_some()
+            || !public_url.username().is_empty()
+            || public_url.password().is_some()
+        {
+            return Err(anyhow::anyhow!(
+                "public URL must be an origin without a path, query, fragment, or credentials"
+            ));
+        }
         let rp_id = public_url
             .host_str()
             .ok_or_else(|| anyhow::anyhow!("public URL must contain a host"))?;
@@ -297,7 +309,12 @@ impl IdentityState {
             .await?
             .filter(|token| token.expires_at.is_none_or(|expires_at| expires_at > now))
         {
-            if stored.scopes & required_scope != required_scope {
+            let required_api_scope = if required_scope & SCOPE_REPOSITORY_READ != 0 {
+                (required_scope & !SCOPE_REPOSITORY_READ) | SCOPE_READ
+            } else {
+                required_scope
+            };
+            if stored.scopes & required_api_scope != required_api_scope {
                 return Err(ApiError::forbidden(
                     "The API token does not have the required scope.",
                 ));
@@ -540,10 +557,16 @@ pub fn router() -> Router<IdentityState> {
     Router::new()
         .route("/auth/status", get(auth::status))
         .route("/instance", get(admin::public_instance_settings))
+        .route(
+            "/instance/favicon/{theme}",
+            get(admin::public_instance_favicon),
+        )
         .route("/setup", post(auth::setup))
         .route("/register", post(auth::register))
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
+        .route("/me/username", put(auth::update_username))
+        .route("/me/password", put(auth::update_password))
         .route(
             "/auth/passkeys/login/start",
             post(auth::start_passkey_login),
@@ -597,6 +620,12 @@ pub fn router() -> Router<IdentityState> {
         .route(
             "/admin/instance",
             get(admin::get_instance_settings).put(admin::update_instance_settings),
+        )
+        .route(
+            "/admin/instance/favicon/{theme}",
+            put(admin::update_instance_favicon)
+                .delete(admin::delete_instance_favicon)
+                .layer(DefaultBodyLimit::max(admin::MAX_FAVICON_BYTES)),
         )
 }
 

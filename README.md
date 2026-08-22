@@ -1,30 +1,27 @@
 <p align="center">
-  <img src="assets/gitadel-logo.png" alt="Gitadel" width="280" />
+  <img src="assets/gitadel-logo.png" alt="Gitadel" width="160" />
 </p>
 
 <h1 align="center">Gitadel</h1>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-f97316.svg" alt="MIT license" /></a>
-  <img src="https://img.shields.io/badge/Rust-1.97-2b2b2b?logo=rust" alt="Rust 1.97" />
-  <img src="https://img.shields.io/badge/Svelte-5-ff3e00?logo=svelte&logoColor=white" alt="Svelte 5" />
+  A small self-hosted Git server for projects you want to keep.
 </p>
 
-Gitadel is a small self-hosted Git server for projects you want to keep, browse, and occasionally clone.
+<p align="center">
+  <a href="https://github.com/Fractal-Tess/gitadel/releases"><img src="https://img.shields.io/github/v/release/Fractal-Tess/gitadel?display_name=tag&sort=semver&color=f97316" alt="Latest release" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2b2b2b.svg" alt="MIT license" /></a>
+</p>
 
-It keeps the useful parts of a forge without turning into another collaboration platform. Push over SSH, browse source and history in the web UI, and keep the whole instance in one portable data directory.
+Gitadel keeps the useful parts of a forge without becoming another collaboration platform. It is for individuals and small teams that want to push repositories over SSH, browse them on the web, and keep the entire instance in one portable data directory.
 
-- Public and private repositories under `user-or-org/repository` namespaces
-- SSH push and clone, public HTTP fetch, Git LFS, and LFS file locks
-- Branches, tags, commit history, diffs, Markdown, syntax highlighting, and language statistics
-- Passkeys, password sessions, API tokens, invitations, and per-repository access grants
-- Integrity-checked offline backups for the database, repositories, LFS objects, and SSH host key
+- **Store** public and private repositories under user or organization namespaces, with Git LFS and file locks.
+- **Browse** branches, tags, history, diffs, rendered Markdown, syntax-highlighted source, topics, and language statistics.
+- **Control access** with passwords, passkeys, invitations, SSH keys, scoped API tokens, OAuth applications, and repository grants.
 
 Gitadel deliberately leaves out pull requests, issues, social features, and in-browser editing.
 
-## Run it
-
-### Docker Compose
+## Quick start
 
 ```bash
 git clone https://github.com/Fractal-Tess/gitadel.git
@@ -32,105 +29,29 @@ cd gitadel
 docker compose up --build
 ```
 
-Open [http://localhost:3000/register](http://localhost:3000/register) to create the first administrator. SSH listens on port `2222`; application data lives in the `gitadel-data` volume.
+Open [http://localhost:3000/register](http://localhost:3000/register) to create the first administrator. HTTP listens on `3000`, SSH listens on `2222`, and persistent state is stored in the `gitadel-data` volume.
 
-Set the public URL and exposed ports when the defaults do not match your host:
-
-```bash
-GITADEL_PUBLIC_URL=https://git.example.com \
-GITADEL_HTTP_PORT=3000 \
-GITADEL_SSH_PORT=2222 \
-docker compose up -d --build
-```
-
-TLS and internet-facing access belong at the reverse proxy. Gitadel serves HTTP and SSH directly but does not manage certificates.
-
-### NixOS
-
-Add the flake and enable the bundled module:
-
-```nix
-{
-  inputs.gitadel.url = "github:Fractal-Tess/gitadel";
-
-  outputs = { nixpkgs, gitadel, ... }: {
-    nixosConfigurations.archive = nixpkgs.lib.nixosSystem {
-      system = "x86_64-linux";
-      modules = [
-        gitadel.nixosModules.default
-        {
-          services.gitadel = {
-            enable = true;
-            package = gitadel.packages.x86_64-linux.default;
-            publicUrl = "https://git.example.com";
-            openFirewall = true;
-          };
-        }
-      ];
-    };
-  };
-}
-```
-
-The module stores persistent state in `/var/lib/gitadel` and runs Gitadel as a hardened systemd service.
-
-## Create and push a repository
-
-Create an API token with write access in **Settings**, then use the CLI:
+Use **New repository** in the web UI, add your SSH key under **Account settings**, and push:
 
 ```bash
-export GITADEL_SERVER=https://git.example.com
-export GITADEL_TOKEN=your-token
-gitadel repo create archivist/old-project --private
-```
-
-Add the SSH key from your account settings and push an existing project:
-
-```bash
-git remote add archive ssh://git@git.example.com:2222/archivist/old-project.git
+git remote add archive ssh://git@localhost:2222/archivist/old-project.git
 git push archive main
 ```
 
-## Connect Dokploy
+See [INSTALL.md](INSTALL.md) for Docker, NixOS, configuration, reverse-proxy, and backup instructions.
 
-Gitadel implements the Gitea OAuth and repository APIs used by Dokploy.
+## Dokploy
 
-1. In Dokploy, open **Settings → Git Providers**, add a **Gitea** provider, and copy its Redirect URI.
-2. In Gitadel, open **Account settings → Applications** and create an OAuth application with that exact Redirect URI.
-3. Copy the generated Client ID and Client Secret into Dokploy. Use Gitadel's public URL as the Gitea URL. If both services share a private network, you can also set Dokploy's optional Internal URL.
-4. Finish the authorization in the Gitadel window. Dokploy can then list branches and clone repositories the authorizing account can read.
+Gitadel implements the Gitea OAuth and repository APIs used by Dokploy. Dokploy can discover accessible repositories and branches, clone them with repository-scoped OAuth tokens, and receive signed push webhooks for automatic deployments.
 
-Deleting the OAuth application in Gitadel revokes Dokploy's access immediately.
+See [the Dokploy integration guide](docs/dokploy.md) for setup.
 
-## Back up the instance
+## Project documentation
 
-Backups are offline by design. Stop the server so the storage lock can guarantee one consistent snapshot:
-
-```bash
-docker compose stop gitadel
-docker compose run --rm gitadel backup create /data/gitadel-backup.tar.zst
-docker compose start gitadel
-```
-
-Each archive includes a SHA-256 manifest. Restore refuses changed, missing, or extra files and only writes into empty storage paths.
-
-## Develop
-
-The repository pins Bun, Rust, and native dependencies through devenv:
-
-```bash
-devenv shell
-frontend-install
-frontend       # SvelteKit on :5173
-backend        # Gitadel on :3000, SSH on :2222
-```
-
-Build the production binary and embedded frontend with:
-
-```bash
-release-build
-```
+- [Installation and operations](INSTALL.md)
+- [Development and contributing](CONTRIBUTING.md)
+- [Release history](CHANGELOG.md)
 
 ## License
 
-[MIT](LICENSE)
+MIT. See [LICENSE](LICENSE).

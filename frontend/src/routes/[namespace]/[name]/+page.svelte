@@ -7,6 +7,7 @@
   import RepositoryHeader from "$lib/components/repository/repository-header.svelte";
   import RepositoryHistory from "$lib/components/repository/repository-history.svelte";
   import RepositoryOverview from "$lib/components/repository/repository-overview.svelte";
+  import RepositorySettings from "$lib/components/repository/repository-settings.svelte";
   import RepositoryTags from "$lib/components/repository/repository-tags.svelte";
   import RepositoryToolbar from "$lib/components/repository/repository-toolbar.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -61,8 +62,18 @@
       {#if state.error}
         <div
           class="mb-5 rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive"
+          role="alert"
         >
           {state.error}
+        </div>
+      {/if}
+      {#if state.notice}
+        <div
+          class="mb-5 rounded-lg border bg-muted/60 p-4 text-sm"
+          role="status"
+          aria-live="polite"
+        >
+          {state.notice}
         </div>
       {/if}
 
@@ -74,6 +85,8 @@
         <RepositoryCommit {state} />
       {:else if state.view === "tags"}
         <RepositoryTags {state} />
+      {:else if state.view === "settings"}
+        <RepositorySettings {state} />
       {/if}
     {/if}
   </main>

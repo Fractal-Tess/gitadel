@@ -10,8 +10,8 @@ use axum_extra::extract::cookie::CookieJar;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter,
+    QueryOrder, Set, TransactionTrait, sea_query::Expr,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -25,7 +25,7 @@ use super::{
     bootstrap_admin, hash_password, hash_secret, random_secret, validate_name, validate_slug,
     verify_password,
 };
-use crate::entity::{invitation, namespace, passkey, user};
+use crate::entity::{invitation, namespace, passkey, repository, session, user};
 
 #[derive(Serialize)]
 pub struct AuthStatusResponse {
@@ -116,6 +116,159 @@ pub async fn logout(
         state.audit(Some(actor.id), "auth.logout", None).await?;
     }
     Ok((StatusCode::NO_CONTENT, jar.remove(removal)))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateUsernameRequest {
+    username: String,
+    current_password: String,
+}
+
+pub async fn update_username(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(request): Json<UpdateUsernameRequest>,
+) -> Result<Json<AuthResponse>, ApiError> {
+    let actor = state
+        .authenticate(&headers, &jar, super::SCOPE_WRITE)
+        .await?;
+    require_browser_session(actor.via_api_token)?;
+    verify_current_password(&actor.user, request.current_password).await?;
+
+    let username = validate_slug(&request.username, "Username")?;
+    if username == actor.user.username {
+        return Ok(Json(AuthResponse {
+            user: actor.user.into(),
+        }));
+    }
+
+    let account = rename_account(&state, actor.user, username).await?;
+    Ok(Json(AuthResponse {
+        user: account.into(),
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct UpdatePasswordRequest {
+    current_password: String,
+    new_password: String,
+}
+
+pub async fn update_password(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(request): Json<UpdatePasswordRequest>,
+) -> Result<StatusCode, ApiError> {
+    let actor = state
+        .authenticate(&headers, &jar, super::SCOPE_WRITE)
+        .await?;
+    require_browser_session(actor.via_api_token)?;
+    verify_current_password(&actor.user, request.current_password).await?;
+    if verify_password(
+        request.new_password.clone(),
+        actor.user.password_hash.clone(),
+    )
+    .await?
+    {
+        return Err(ApiError::bad_request(
+            "Choose a password that differs from your current password.",
+        ));
+    }
+
+    let password_hash = hash_password(request.new_password).await?;
+    let current_session_hash = jar
+        .get(super::SESSION_COOKIE)
+        .map(|cookie| super::hash_secret(cookie.value()))
+        .ok_or_else(ApiError::unauthorized)?;
+    let transaction = state.database().begin().await?;
+    let mut account: user::ActiveModel = actor.user.clone().into();
+    account.password_hash = Set(password_hash);
+    account.updated_at = Set(Utc::now());
+    account.update(&transaction).await?;
+    session::Entity::delete_many()
+        .filter(session::Column::UserId.eq(actor.user.id))
+        .filter(session::Column::TokenHash.ne(current_session_hash))
+        .exec(&transaction)
+        .await?;
+    state
+        .audit_on(
+            &transaction,
+            Some(actor.user.id),
+            "account.password.update",
+            None,
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn verify_current_password(
+    account: &user::Model,
+    current_password: String,
+) -> Result<(), ApiError> {
+    if !verify_password(current_password, account.password_hash.clone()).await? {
+        return Err(ApiError::bad_request("The current password is incorrect."));
+    }
+    Ok(())
+}
+
+fn require_browser_session(via_api_token: bool) -> Result<(), ApiError> {
+    if via_api_token {
+        return Err(ApiError::forbidden(
+            "Update account credentials from a browser session.",
+        ));
+    }
+    Ok(())
+}
+
+async fn rename_account(
+    state: &IdentityState,
+    account: user::Model,
+    username: String,
+) -> Result<user::Model, ApiError> {
+    let transaction = state.database().begin().await?;
+    if namespace::Entity::find_by_id(&username)
+        .one(&transaction)
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::conflict("That username is already in use."));
+    }
+
+    transaction
+        .execute_unprepared("PRAGMA defer_foreign_keys = ON")
+        .await?;
+    repository::Entity::update_many()
+        .col_expr(repository::Column::Namespace, Expr::value(username.clone()))
+        .filter(repository::Column::Namespace.eq(&account.username))
+        .exec(&transaction)
+        .await?;
+    let namespace_update = namespace::Entity::update_many()
+        .col_expr(namespace::Column::Slug, Expr::value(username.clone()))
+        .filter(namespace::Column::UserId.eq(account.id))
+        .exec(&transaction)
+        .await?;
+    if namespace_update.rows_affected != 1 {
+        return Err(ApiError::internal("the user namespace is missing"));
+    }
+
+    let previous_username = account.username.clone();
+    let mut active: user::ActiveModel = account.into();
+    active.username = Set(username.clone());
+    active.updated_at = Set(Utc::now());
+    let account = active.update(&transaction).await?;
+    state
+        .audit_on(
+            &transaction,
+            Some(account.id),
+            "account.username.update",
+            Some(format!("{previous_username} -> {username}")),
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(account)
 }
 
 #[derive(Deserialize)]
@@ -531,5 +684,159 @@ fn invalid_credentials() -> ApiError {
         status: StatusCode::UNAUTHORIZED,
         code: "invalid_credentials",
         message: "The username or credential was not accepted.".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::{DatabaseSettings, Settings},
+        database::connect_and_migrate,
+        identity::bootstrap_admin,
+    };
+
+    #[tokio::test]
+    async fn rename_account_should_move_personal_repository_namespace() {
+        let test_root =
+            std::env::temp_dir().join(format!("gitadel-username-update-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&test_root).await.unwrap();
+        let database = connect_and_migrate(&DatabaseSettings {
+            url: format!(
+                "sqlite://{}?mode=rwc",
+                test_root.join("gitadel.db").display()
+            ),
+        })
+        .await
+        .unwrap();
+        let account = bootstrap_admin(&database, "archivist", "test-password".to_owned())
+            .await
+            .unwrap();
+        let now = Utc::now();
+        repository::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            namespace: Set(account.username.clone()),
+            name: Set("notes".to_owned()),
+            description: Set(None),
+            visibility: Set("private".to_owned()),
+            object_format: Set("sha1".to_owned()),
+            default_branch: Set("main".to_owned()),
+            storage_key: Set(Uuid::new_v4()),
+            created_by: Set(account.id),
+            archived_at: Set(None),
+            deleted_at: Set(None),
+            created_at: Set(now),
+            updated_at: Set(now),
+        }
+        .insert(&database)
+        .await
+        .unwrap();
+        let settings = Settings::default();
+        let state =
+            IdentityState::new(database, settings.auth, settings.server.public_url).unwrap();
+
+        let renamed = rename_account(&state, account, "curator".to_owned())
+            .await
+            .unwrap();
+        let old_namespace = namespace::Entity::find_by_id("archivist")
+            .one(state.database())
+            .await
+            .unwrap();
+        let new_namespace = namespace::Entity::find_by_id("curator")
+            .one(state.database())
+            .await
+            .unwrap()
+            .unwrap();
+        let stored_repository = repository::Entity::find()
+            .one(state.database())
+            .await
+            .unwrap()
+            .unwrap();
+        let actual = (
+            renamed.username,
+            old_namespace.is_none(),
+            new_namespace.user_id,
+            stored_repository.namespace,
+        );
+        let expected = (
+            "curator".to_owned(),
+            true,
+            Some(renamed.id),
+            "curator".to_owned(),
+        );
+        drop(state);
+        tokio::fs::remove_dir_all(test_root).await.unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn update_password_should_keep_only_current_browser_session() {
+        let test_root =
+            std::env::temp_dir().join(format!("gitadel-password-update-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&test_root).await.unwrap();
+        let database = connect_and_migrate(&DatabaseSettings {
+            url: format!(
+                "sqlite://{}?mode=rwc",
+                test_root.join("gitadel.db").display()
+            ),
+        })
+        .await
+        .unwrap();
+        let account = bootstrap_admin(&database, "archivist", "test-password".to_owned())
+            .await
+            .unwrap();
+        let settings = Settings::default();
+        let state =
+            IdentityState::new(database, settings.auth, settings.server.public_url).unwrap();
+        let (current_token, current_cookie) = state.create_session(account.id).await.unwrap();
+        state.create_session(account.id).await.unwrap();
+        let jar = CookieJar::new().add(current_cookie);
+
+        let status = update_password(
+            State(state.clone()),
+            HeaderMap::new(),
+            jar,
+            Json(UpdatePasswordRequest {
+                current_password: "test-password".to_owned(),
+                new_password: "replacement-password".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        let sessions = session::Entity::find()
+            .filter(session::Column::UserId.eq(account.id))
+            .all(state.database())
+            .await
+            .unwrap();
+        let stored_account = user::Entity::find_by_id(account.id)
+            .one(state.database())
+            .await
+            .unwrap()
+            .unwrap();
+        let new_password_works = verify_password(
+            "replacement-password".to_owned(),
+            stored_account.password_hash.clone(),
+        )
+        .await
+        .unwrap();
+        let old_password_works =
+            verify_password("test-password".to_owned(), stored_account.password_hash)
+                .await
+                .unwrap();
+        let current_token_hash = hash_secret(&current_token);
+        let actual = (
+            status,
+            sessions.len(),
+            sessions.first().map(|row| row.token_hash.as_str())
+                == Some(current_token_hash.as_str()),
+            new_password_works,
+            old_password_works,
+        );
+        let expected = (StatusCode::NO_CONTENT, 1, true, true, false);
+        drop(state);
+        tokio::fs::remove_dir_all(test_root).await.unwrap();
+
+        assert_eq!(actual, expected);
     }
 }

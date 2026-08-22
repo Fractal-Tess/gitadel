@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Gitadel shield and tower mark">
+  <path fill="#000" d="M256 8C318 50 377 63 496 72v184c0 113-83 201-240 248C99 457 16 369 16 256V72c119-9 178-22 240-64Z"/>
+  <path fill="#fff" d="M142 112h70v44h22v-44h44v44h22v-44h70v78l-22 22v174h-70v-76a22 22 0 0 0-44 0v76h-70V212l-22-22v-78Z"/>
+</svg>

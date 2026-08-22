@@ -10,6 +10,11 @@
     Tag,
   } from "lucide-svelte";
 
+  import BrandMark from "$lib/components/brand-mark.svelte";
+  import {
+    preloadAccountSettings,
+    preloadExplore,
+  } from "$lib/navigation-cache.js";
   import type {
     RepositoryPageState,
     RepositoryView,
@@ -34,14 +39,25 @@
   <div class="flex h-[64px] items-center gap-4 px-4 sm:px-5">
     <div class="flex min-w-0 flex-1 items-center gap-2 text-sm">
       <a
-        class="max-w-24 truncate font-bold tracking-[-0.035em] sm:max-w-none"
+        class="flex shrink-0 items-center gap-2 font-bold tracking-[-0.035em]"
         href={resolve("/")}
-        aria-label={`${app.instance?.site_name ?? "Gitadel"} home`}>{app.instance?.site_name ?? "GITADEL"}</a
+        onpointerenter={() => preloadExplore(app.authStatus?.user?.username)}
+        onpointerdown={() => preloadExplore(app.authStatus?.user?.username)}
+        onfocus={() => preloadExplore(app.authStatus?.user?.username)}
+        aria-label={`${app.instance?.site_name ?? "Gitadel"} home`}
       >
+        <BrandMark />
+        <span class="max-w-24 truncate sm:max-w-none">
+          {app.instance?.site_name ?? "GITADEL"}
+        </span>
+      </a>
       <span class="text-muted-foreground">/</span>
       <a
         class="hidden truncate text-muted-foreground hover:text-foreground sm:inline"
-        href={resolve("/")}>{state.namespace}</a
+        href={resolve("/")}
+        onpointerenter={() => preloadExplore(app.authStatus?.user?.username)}
+        onfocus={() => preloadExplore(app.authStatus?.user?.username)}
+        >{state.namespace}</a
       >
       <span class="hidden text-muted-foreground sm:inline">/</span>
       <strong class="max-w-40 truncate sm:max-w-56">{state.name}</strong>
@@ -101,6 +117,11 @@
     <a
       class="inline-flex size-9 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
       href={resolve("/settings")}
+      onpointerenter={() =>
+        preloadAccountSettings(app.authStatus?.user?.username)}
+      onpointerdown={() =>
+        preloadAccountSettings(app.authStatus?.user?.username)}
+      onfocus={() => preloadAccountSettings(app.authStatus?.user?.username)}
       aria-label="Settings"
       title="Settings"
     >
@@ -108,7 +129,10 @@
     </a>
   </div>
   {#if state.repository}
-    <nav class="grid h-11 grid-cols-3 border-t sm:hidden" aria-label="Repository sections">
+    <nav
+      class="grid h-11 grid-cols-3 border-t sm:hidden"
+      aria-label="Repository sections"
+    >
       {#each sections as item (item.id)}
         <button
           class={state.view === item.id ||

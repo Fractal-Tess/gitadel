@@ -21,6 +21,25 @@ pub mod instance {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod instance_asset {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "instance_assets")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub name: String,
+        pub content_type: String,
+        pub content: Vec<u8>,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod user {
     use super::*;
 
@@ -336,8 +355,29 @@ pub mod repository {
         pub storage_key: Uuid,
         pub created_by: Uuid,
         pub archived_at: Option<DateTimeUtc>,
+        pub deleted_at: Option<DateTimeUtc>,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod repository_alias {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "repository_aliases")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub namespace: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub name: String,
+        pub repository_id: Uuid,
+        pub created_at: DateTimeUtc,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -357,6 +397,69 @@ pub mod repository_collaborator {
         #[sea_orm(primary_key, auto_increment = false)]
         pub user_id: Uuid,
         pub role: String,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod repository_webhook {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "repository_webhooks")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub repository_id: Uuid,
+        pub url: String,
+        pub secret: Option<String>,
+        pub active: bool,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+        pub last_delivery_at: Option<DateTimeUtc>,
+        pub last_response_status: Option<i32>,
+        pub last_response_message: Option<String>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod topic {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "topics")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        #[sea_orm(unique)]
+        pub name: String,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod repository_topic {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "repository_topics")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub repository_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub topic_id: Uuid,
         pub created_at: DateTimeUtc,
     }
 

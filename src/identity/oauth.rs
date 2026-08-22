@@ -3,7 +3,7 @@ use std::time::Instant;
 use axum::{
     Form, Json,
     extract::{OriginalUri, Query, State},
-    http::StatusCode,
+    http::{HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -16,7 +16,8 @@ use url::Url;
 use uuid::Uuid;
 
 use super::{
-    ApiError, IdentityState, SCOPE_READ, SCOPE_WRITE, hash_secret, random_secret, validate_name,
+    ApiError, IdentityState, SCOPE_READ, SCOPE_REPOSITORY_READ, SCOPE_WRITE, hash_secret,
+    random_secret, validate_name,
 };
 use crate::entity::{oauth_access_token, oauth_application, oauth_authorization_code};
 
@@ -231,6 +232,15 @@ pub async fn authorize(
         Err(error) => return error.into_response(),
     };
 
+    if application.user_id != account.id {
+        return authorization_error_redirect(
+            &query.redirect_uri,
+            "access_denied",
+            "Gitadel OAuth applications can authorize only their owner.",
+            query.state.as_deref(),
+        );
+    }
+
     let consent_token = random_secret(32);
     state.authorization_requests().await.insert(
         hash_secret(&consent_token),
@@ -244,13 +254,12 @@ pub async fn authorize(
         },
     );
 
-    Html(consent_page(
+    consent_response(consent_page(
         &application.name,
         &account.username,
         &scope,
         &consent_token,
     ))
-    .into_response()
 }
 
 #[derive(Deserialize)]
@@ -304,6 +313,10 @@ pub async fn approve(
 
     let code = format!("goc_{}", random_secret(32));
     let now = Utc::now();
+    let transaction = match state.database().begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => return ApiError::from(error).into_response(),
+    };
     let stored = oauth_authorization_code::ActiveModel {
         code_hash: Set(hash_secret(&code)),
         application_id: Set(request.application_id),
@@ -313,9 +326,23 @@ pub async fn approve(
         expires_at: Set(now + AUTHORIZATION_CODE_LIFETIME),
         created_at: Set(now),
     }
-    .insert(state.database())
+    .insert(&transaction)
     .await;
     if let Err(error) = stored {
+        return ApiError::from(error).into_response();
+    }
+    if let Err(error) = state
+        .audit_on(
+            &transaction,
+            Some(request.user_id),
+            "oauth_application.authorize",
+            Some(request.application_id.to_string()),
+        )
+        .await
+    {
+        return error.into_response();
+    }
+    if let Err(error) = transaction.commit().await {
         return ApiError::from(error).into_response();
     }
 
@@ -392,12 +419,8 @@ pub async fn access_token(
         .one(&transaction)
         .await
     {
-        Ok(Some(stored))
-            if stored.expires_at > Utc::now() && stored.redirect_uri == request.redirect_uri =>
-        {
-            stored
-        }
-        Ok(_) => {
+        Ok(Some(stored)) => stored,
+        Ok(None) => {
             return oauth_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_grant",
@@ -406,6 +429,22 @@ pub async fn access_token(
         }
         Err(error) => return ApiError::from(error).into_response(),
     };
+    if stored.expires_at <= Utc::now() || stored.redirect_uri != request.redirect_uri {
+        if let Err(error) = oauth_authorization_code::Entity::delete_by_id(code_hash)
+            .exec(&transaction)
+            .await
+        {
+            return ApiError::from(error).into_response();
+        }
+        if let Err(error) = transaction.commit().await {
+            return ApiError::from(error).into_response();
+        }
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "The authorization code is invalid or expired.",
+        );
+    }
     let deleted = match oauth_authorization_code::Entity::delete_by_id(code_hash)
         .exec(&transaction)
         .await
@@ -426,7 +465,7 @@ pub async fn access_token(
         token_hash: Set(hash_secret(&raw_token)),
         application_id: Set(application.id),
         user_id: Set(stored.user_id),
-        scopes: Set(SCOPE_READ),
+        scopes: Set(oauth_scope_bits(&stored.scope)),
         scope: Set(stored.scope.clone()),
         created_at: Set(Utc::now()),
         last_used_at: Set(None),
@@ -441,12 +480,19 @@ pub async fn access_token(
         return ApiError::from(error).into_response();
     }
 
-    Json(TokenResponse {
+    let mut response = Json(TokenResponse {
         access_token: raw_token,
         token_type: "Bearer",
         scope: stored.scope,
     })
-    .into_response()
+    .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+        .headers_mut()
+        .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    response
 }
 
 async fn find_application(
@@ -494,6 +540,17 @@ fn authorize_query_lengths_valid(query: &AuthorizeQuery) -> bool {
     .into_iter()
     .flatten()
     .any(|value| value.is_empty() || value.len() > MAX_OAUTH_PARAMETER_LENGTH)
+}
+
+fn oauth_scope_bits(scope: &str) -> i32 {
+    if scope
+        .split_ascii_whitespace()
+        .any(|scope| matches!(scope, "read:repository" | "repo"))
+    {
+        SCOPE_REPOSITORY_READ
+    } else {
+        0
+    }
 }
 
 fn normalize_scope(scope: &str) -> Result<String, &'static str> {
@@ -560,6 +617,31 @@ fn oauth_error(status: StatusCode, error: &str, description: &str) -> Response {
         .into_response()
 }
 
+fn consent_response(page: String) -> Response {
+    let mut response = Html(page).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+        ),
+    );
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
+        .headers_mut()
+        .insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    response
+}
+
 fn consent_page(application: &str, username: &str, scope: &str, consent_token: &str) -> String {
     let application = escape_html(application);
     let username = escape_html(username);
@@ -601,6 +683,15 @@ mod tests {
     fn normalize_scope_should_accept_dokploy_scopes() {
         let scope = normalize_scope("read:repository read:user read:organization").unwrap();
         assert_eq!(scope, "read:repository read:user read:organization");
+    }
+
+    #[test]
+    fn oauth_scope_bits_should_require_repository_scope_for_repository_access() {
+        assert_eq!(oauth_scope_bits("read:user"), 0);
+        assert_eq!(
+            oauth_scope_bits("read:user read:repository"),
+            SCOPE_REPOSITORY_READ
+        );
     }
 
     #[test]

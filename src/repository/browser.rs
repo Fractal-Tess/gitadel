@@ -12,7 +12,7 @@ use axum::{
     response::Response,
 };
 use axum_extra::extract::cookie::CookieJar;
-use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use comrak::{Options, markdown_to_html};
 use serde::{Deserialize, Serialize};
 use sley::{
@@ -35,6 +35,8 @@ const MAX_TEXT_BLOB_BYTES: usize = 2 * 1024 * 1024;
 const MAX_DIFF_BYTES: usize = 5 * 1024 * 1024;
 const DEFAULT_REPOSITORY_ACTIVITY_DAYS: u16 = 14;
 const MAX_REPOSITORY_ACTIVITY_DAYS: u16 = 365;
+const DEFAULT_OVERVIEW_PER_PAGE: usize = 20;
+const MAX_OVERVIEW_PER_PAGE: usize = 50;
 
 #[derive(Deserialize)]
 pub struct BrowseQuery {
@@ -54,8 +56,10 @@ pub struct HistoryQuery {
 
 #[derive(Deserialize)]
 pub struct OverviewQuery {
-    #[serde(default = "default_repository_activity_days")]
-    activity_days: u16,
+    #[serde(default = "default_page")]
+    page: usize,
+    #[serde(default = "default_overview_per_page")]
+    per_page: usize,
 }
 
 #[derive(Deserialize)]
@@ -159,7 +163,9 @@ impl LanguageStatResponse {
 #[derive(Serialize)]
 pub struct RepositoryOverviewResponse {
     repositories: Vec<RepositoryOverviewItemResponse>,
-    activity: ActivityResponse,
+    page: usize,
+    per_page: usize,
+    has_next: bool,
 }
 
 #[derive(Serialize)]
@@ -205,28 +211,27 @@ pub async fn overview(
     Query(query): Query<OverviewQuery>,
 ) -> Result<Json<RepositoryOverviewResponse>, ApiError> {
     let accessible = accessible_repositories(&state, &headers, &jar).await?;
-    let end_date = Utc::now().date_naive();
-    let repository_activity_start = activity_start_date(end_date, query.activity_days)?;
-    let start_date =
-        end_date - Duration::days(i64::from(end_date.weekday().num_days_from_sunday()) + 52 * 7);
-    let mut repositories = Vec::with_capacity(accessible.repositories.len());
-    let mut activity = BTreeMap::<NaiveDate, usize>::new();
+    let page = query.page.max(1);
+    let per_page = query.per_page.clamp(1, MAX_OVERVIEW_PER_PAGE);
+    let offset = (page - 1).saturating_mul(per_page);
+    let mut page_repositories = accessible
+        .repositories
+        .into_iter()
+        .skip(offset)
+        .take(per_page + 1)
+        .collect::<Vec<_>>();
+    let has_next = page_repositories.len() > per_page;
+    page_repositories.truncate(per_page);
 
-    for repository in accessible.repositories {
+    let end_date = Utc::now().date_naive();
+    let start_date = activity_start_date(end_date, DEFAULT_REPOSITORY_ACTIVITY_DAYS)?;
+    let mut repositories = Vec::with_capacity(page_repositories.len());
+
+    for repository in page_repositories {
         let git_overview =
             read_repository_overview(&state, &repository, start_date, end_date).await?;
-        let repository_activity = activity_response(
-            repository_activity_start,
-            end_date,
-            git_overview
-                .activity
-                .range(repository_activity_start..=end_date)
-                .map(|(&date, &count)| (date, count))
-                .collect(),
-        );
-        for (date, count) in git_overview.activity {
-            *activity.entry(date).or_default() += count;
-        }
+        let repository_activity =
+            activity_response(start_date, end_date, git_overview.activity);
         let stats = match git_overview.head {
             Some((commit_oid, tree_oid)) => {
                 let cache_key = format!("{}:{commit_oid}", repository.storage_key);
@@ -263,18 +268,23 @@ pub async fn overview(
         });
         languages.truncate(3);
         let favorited = accessible.favorite_ids.contains(&repository.id);
+        let can_manage = accessible.manageable_ids.contains(&repository.id);
         repositories.push(RepositoryOverviewItemResponse {
             activity: repository_activity,
             branch_count: git_overview.branch_count,
             total_lines,
             languages,
-            repository: resources::RepositoryResponse::new(repository, &state, favorited),
+            repository: resources::RepositoryResponse::new(
+                repository, &state, favorited, can_manage,
+            ),
         });
     }
 
     Ok(Json(RepositoryOverviewResponse {
         repositories,
-        activity: activity_response(start_date, end_date, activity),
+        page,
+        per_page,
+        has_next,
     }))
 }
 
@@ -882,6 +892,10 @@ fn collect_tree_stats(
 
 const fn default_repository_activity_days() -> u16 {
     DEFAULT_REPOSITORY_ACTIVITY_DAYS
+}
+
+const fn default_overview_per_page() -> usize {
+    DEFAULT_OVERVIEW_PER_PAGE
 }
 
 fn activity_start_date(end_date: NaiveDate, days: u16) -> Result<NaiveDate, ApiError> {

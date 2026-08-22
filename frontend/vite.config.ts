@@ -3,6 +3,7 @@ import { sveltekit } from '@sveltejs/kit/vite';
 import { generateManifest } from 'material-icon-theme';
 import * as linguistLanguages from 'linguist-languages';
 import type { Language as LinguistLanguage } from 'linguist-languages';
+import { fileURLToPath, URL } from 'node:url';
 import { defineConfig } from 'vite';
 
 const materialIconManifest = generateManifest({
@@ -52,6 +53,13 @@ export default defineConfig({
 		__MATERIAL_ICON_THEME__: JSON.stringify(materialIconTheme)
 	},
 	plugins: [tailwindcss(), sveltekit()],
+	resolve: {
+		alias: {
+			'@pierre/diffs/web-components': fileURLToPath(
+				new URL('./node_modules/@pierre/diffs/dist/components/web-components.js', import.meta.url)
+			)
+		}
+	},
 	server: {
 		allowedHosts: ['kiwi.netbird.cloud'],
 		proxy: {

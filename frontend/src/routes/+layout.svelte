@@ -12,13 +12,30 @@
   const app = provideAppState();
   let ready = $state(false);
   let guardSequence = 0;
+  let faviconVersion = $derived(
+    encodeURIComponent(app.instance?.updated_at ?? "default"),
+  );
 
   $effect(() => {
     const url = page.url;
     const sequence = ++guardSequence;
-    ready = false;
+    ready = canRenderWhileGuarding(url);
     void guardRoute(url, sequence);
   });
+
+  function canRenderWhileGuarding(url: URL) {
+    const status = app.authStatus;
+    if (!status || !app.instance) return false;
+    if (status.setup_required) return url.pathname === "/register";
+    if (url.pathname === "/register" && !url.searchParams.has("token")) {
+      return false;
+    }
+    if (url.pathname === "/login" && status.authenticated) return false;
+    if (url.pathname === "/settings" && !status.authenticated) return false;
+    if (url.pathname.startsWith("/admin"))
+      return Boolean(status.user?.is_admin);
+    return true;
+  }
 
   async function guardRoute(url: URL, sequence: number): Promise<void> {
     try {
@@ -69,13 +86,28 @@
   }
 </script>
 
+<svelte:head>
+  <link
+    rel="icon"
+    href={`/api/v1/instance/favicon/light?v=${faviconVersion}&r=2`}
+    media="(prefers-color-scheme: light)"
+  />
+  <link
+    rel="icon"
+    href={`/api/v1/instance/favicon/dark?v=${faviconVersion}&r=2`}
+    media="(prefers-color-scheme: dark)"
+  />
+</svelte:head>
+
 <!-- The theme is dark-only, so pin it rather than reading mode-watcher. -->
 <Toaster theme="dark" position="bottom-right" />
 
 {#if ready}
   {@render children()}
 {:else}
-  <div class="grid min-h-screen place-items-center bg-background text-sm text-muted-foreground">
+  <div
+    class="grid min-h-screen place-items-center bg-background text-sm text-muted-foreground"
+  >
     Loading Gitadel…
   </div>
 {/if}

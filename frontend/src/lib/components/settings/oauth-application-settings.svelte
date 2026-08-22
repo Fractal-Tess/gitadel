@@ -1,6 +1,8 @@
 <script lang="ts">
   import { Check, Clipboard, KeyRound, Trash2 } from "lucide-svelte";
+  import { toast } from "svelte-sonner";
 
+  import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Card from "$lib/components/ui/card/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
@@ -8,24 +10,43 @@
   import type { AccountSettingsState } from "$lib/settings/account-settings-state.svelte.js";
 
   let { state: account }: { state: AccountSettingsState } = $props();
+  let revokeDialogOpen = $state(false);
+  let pendingApplication = $state<{ id: string; name: string } | null>(null);
 
   async function copyCredential(value: string, label: string) {
     try {
-      await navigator.clipboard.writeText(value);
-      account.notice = `${label} copied.`;
-      account.error = null;
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+      } else {
+        const carrier = document.createElement("textarea");
+        carrier.value = value;
+        carrier.setAttribute("readonly", "");
+        carrier.style.position = "fixed";
+        carrier.style.opacity = "0";
+        document.body.append(carrier);
+        carrier.select();
+        document.execCommand("copy");
+        carrier.remove();
+      }
+      toast.success(`${label} copied`);
     } catch {
-      account.error = `Could not copy the ${label.toLowerCase()}. Select it manually instead.`;
+      toast.error(`Could not copy the ${label.toLowerCase()}`, {
+        description: "Select it and copy it manually instead.",
+      });
     }
   }
 
-  function deleteApplication(id: string, name: string) {
-    if (
-      globalThis.confirm(
-        `Revoke “${name}”? Dokploy and any other connected client will lose access immediately.`,
-      )
-    ) {
-      void account.deleteOauthApplication(id);
+  function requestRevoke(id: string, name: string) {
+    pendingApplication = { id, name };
+    revokeDialogOpen = true;
+  }
+
+  async function revokeApplication() {
+    if (!pendingApplication) return;
+    await account.deleteOauthApplication(pendingApplication.id);
+    if (!account.error) {
+      revokeDialogOpen = false;
+      pendingApplication = null;
     }
   }
 </script>
@@ -38,7 +59,7 @@
         <div>
           <Card.Title>OAuth applications</Card.Title>
           <Card.Description>
-            Let Dokploy discover and clone repositories on your behalf.
+            Register clients that need access to your Gitadel account.
           </Card.Description>
         </div>
       </div>
@@ -56,8 +77,8 @@
                 Save these credentials now
               </h3>
               <p class="mt-1 text-xs leading-5 text-muted-foreground">
-                The client secret is shown once. Paste both values into Dokploy
-                before leaving this page.
+                The client secret is shown once. Copy both values into your
+                client before leaving this page.
               </p>
             </div>
           </div>
@@ -138,16 +159,15 @@
               size="sm"
               variant="outline"
               class="shrink-0 gap-2"
-              onclick={() =>
-                deleteApplication(application.id, application.name)}
+              onclick={() => requestRevoke(application.id, application.name)}
             >
               <Trash2 class="size-3.5" />Revoke
             </Button>
           </li>
         {:else}
           <li class="p-5 text-sm text-muted-foreground">
-            No OAuth applications yet. Create one with the callback URL shown by
-            Dokploy.
+            No OAuth applications yet. Create one with the redirect URI provided
+            by the client you want to connect.
           </li>
         {/each}
       </ul>
@@ -156,24 +176,24 @@
 
   <div class="grid content-start gap-5">
     <section class="rounded-lg border bg-muted/25 p-5">
-      <h2 class="text-sm font-semibold">Connect Dokploy</h2>
+      <h2 class="text-sm font-semibold">Connect a client</h2>
       <ol class="mt-3 grid gap-2 text-sm leading-6 text-muted-foreground">
         <li>
-          <strong class="text-foreground">1.</strong> In Dokploy, add a Gitea provider
-          and copy its Redirect URI.
+          <strong class="text-foreground">1.</strong> Copy the redirect URI from the
+          client you want to connect.
         </li>
         <li>
           <strong class="text-foreground">2.</strong> Create an application below
           using that exact URI.
         </li>
         <li>
-          <strong class="text-foreground">3.</strong> Paste the generated Client ID
-          and secret into Dokploy.
+          <strong class="text-foreground">3.</strong> Copy the generated client ID
+          and secret back into the client.
         </li>
       </ol>
       <p class="mt-3 text-xs leading-5 text-muted-foreground">
-        Use this Gitadel installation as the Gitea URL. Dokploy will request
-        read-only repository access during authorization.
+        Use this Gitadel installation as the server URL. The client will request
+        access when you authorize it.
       </p>
     </section>
 
@@ -187,8 +207,8 @@
       <div>
         <h2 class="text-sm font-semibold">Create application</h2>
         <p class="mt-1 text-xs leading-5 text-muted-foreground">
-          The redirect URI must match Dokploy exactly, including scheme and
-          path.
+          The redirect URI must match the client's value exactly, including the
+          scheme and path.
         </p>
       </div>
       <Field.Field>
@@ -196,7 +216,7 @@
         <Input
           id="oauth-application-name"
           bind:value={account.oauthApplicationName}
-          placeholder="Dokploy"
+          placeholder="My integration"
           maxlength={128}
           required
         />
@@ -207,12 +227,12 @@
           id="oauth-redirect-uri"
           type="url"
           bind:value={account.oauthRedirectUri}
-          placeholder="https://dokploy.example/api/providers/gitea/callback"
+          placeholder="https://app.example.com/oauth/callback"
           autocomplete="url"
           required
         />
         <Field.Description>
-          Find this value in Dokploy’s Gitea provider dialog.
+          This value is provided by the client you are connecting.
         </Field.Description>
       </Field.Field>
       <Button type="submit" disabled={account.working}>
@@ -220,4 +240,27 @@
       </Button>
     </form>
   </div>
+
+  <AlertDialog.Root bind:open={revokeDialogOpen}>
+    <AlertDialog.Content>
+      <AlertDialog.Header>
+        <AlertDialog.Title>
+          Revoke {pendingApplication?.name ?? "application"}?
+        </AlertDialog.Title>
+        <AlertDialog.Description>
+          This client will lose access immediately.
+        </AlertDialog.Description>
+      </AlertDialog.Header>
+      <AlertDialog.Footer>
+        <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+        <AlertDialog.Action
+          variant="destructive"
+          disabled={account.working}
+          onclick={() => void revokeApplication()}
+        >
+          Revoke application
+        </AlertDialog.Action>
+      </AlertDialog.Footer>
+    </AlertDialog.Content>
+  </AlertDialog.Root>
 </div>

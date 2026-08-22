@@ -17,7 +17,7 @@ use tokio::{
 use tokio_util::io::ReaderStream;
 
 use super::{Permission, RepositoryState};
-use crate::{entity::repository, identity::SCOPE_READ};
+use crate::{entity::repository, identity::SCOPE_REPOSITORY_READ};
 
 #[derive(Deserialize)]
 struct InfoRefsQuery {
@@ -178,7 +178,7 @@ async fn authorized_repository(
     let token = token_from_headers(headers).ok_or_else(authentication_required)?;
     let actor = state
         .identity()
-        .authenticate_token(&token, SCOPE_READ)
+        .authenticate_token(&token, SCOPE_REPOSITORY_READ)
         .await
         .map_err(|_| authentication_required())?;
     state
