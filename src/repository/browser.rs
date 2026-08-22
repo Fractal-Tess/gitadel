@@ -230,8 +230,7 @@ pub async fn overview(
     for repository in page_repositories {
         let git_overview =
             read_repository_overview(&state, &repository, start_date, end_date).await?;
-        let repository_activity =
-            activity_response(start_date, end_date, git_overview.activity);
+        let repository_activity = activity_response(start_date, end_date, git_overview.activity);
         let stats = match git_overview.head {
             Some((commit_oid, tree_oid)) => {
                 let cache_key = format!("{}:{commit_oid}", repository.storage_key);

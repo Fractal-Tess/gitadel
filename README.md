@@ -2,15 +2,15 @@
   <img src="assets/gitadel-logo.png" alt="Gitadel" width="160" />
 </p>
 
+<p align="center">
+  <a href="https://github.com/Fractal-Tess/gitadel/releases"><img src="https://img.shields.io/github/v/release/Fractal-Tess/gitadel?display_name=tag&sort=semver&color=f97316" alt="Latest release" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2b2b2b.svg" alt="MIT license" /></a>
+</p>
+
 <h1 align="center">Gitadel</h1>
 
 <p align="center">
   A small self-hosted Git server for projects you want to keep.
-</p>
-
-<p align="center">
-  <a href="https://github.com/Fractal-Tess/gitadel/releases"><img src="https://img.shields.io/github/v/release/Fractal-Tess/gitadel?display_name=tag&sort=semver&color=f97316" alt="Latest release" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2b2b2b.svg" alt="MIT license" /></a>
 </p>
 
 Gitadel keeps the useful parts of a forge without becoming another collaboration platform. It is for individuals and small teams that want to push repositories over SSH, browse them on the web, and keep the entire instance in one portable data directory.
