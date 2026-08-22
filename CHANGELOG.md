@@ -4,6 +4,24 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-22
+
+### Added
+
+- Added a changelog page that renders the release notes embedded in the running binary, so an instance always documents the version it is serving.
+
+### Changed
+
+- Committed repository topics as soon as Enter, space, or comma is pressed and removed the save and cancel buttons, so editing a topic list no longer needs a separate confirmation step.
+- Outlined topic badges so they separate from the sidebar background.
+- Turned the default branch setting into a list of the repository's existing branches instead of a free-text field.
+- Split repository settings into General, Location, Webhooks, and Danger zone tabs.
+- Moved editing the repository description out of the settings page, leaving the in-place editor on the repository itself as the only place it is changed.
+
+### Fixed
+
+- Rendered sanitized HTML, images, badges, and repository-relative links in Markdown files and repository READMEs.
+
 ## [0.2.0] - 2026-08-22
 
 ### Added
@@ -55,6 +73,7 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Fractal-Tess/gitadel/releases/tag/v0.1.0

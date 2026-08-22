@@ -86,7 +86,6 @@ export class RepositoryPageState {
   webhookPingingId = $state<string | null>(null);
   webhookDeletingId = $state<string | null>(null);
   repositoryControlPending = $state(false);
-  topicsPending = $state(false);
   lifecyclePending = $state(false);
   error = $state<string | null>(null);
   notice = $state<string | null>(null);
@@ -365,7 +364,6 @@ export class RepositoryPageState {
   }
 
   async saveTopics(topics: string[]): Promise<void> {
-    this.topicsPending = true;
     this.error = null;
     try {
       const saved = await requestJson(this.#api("/topics"), topicsSchema, {
@@ -377,8 +375,6 @@ export class RepositoryPageState {
     } catch (caught) {
       this.error = errorMessage(caught);
       throw caught;
-    } finally {
-      this.topicsPending = false;
     }
   }
 

@@ -143,6 +143,12 @@
         >
           Account settings
         </a>
+        <a
+          class="text-muted-foreground hover:text-foreground"
+          href={resolve("/changelog")}
+        >
+          Changelog
+        </a>
       </nav>
     </div>
   </header>

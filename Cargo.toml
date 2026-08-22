@@ -1,6 +1,6 @@
 [package]
 name = "gitadel"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.97.1"
 description = "A self-hosted Git service."
@@ -12,6 +12,7 @@ name = "gitadel"
 path = "src/main.rs"
 
 [dependencies]
+ammonia = "4.1.4"
 anyhow = "1.0.100"
 async-trait = "0.1.89"
 argon2 = "0.5.3"

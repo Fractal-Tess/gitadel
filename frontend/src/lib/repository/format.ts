@@ -178,9 +178,78 @@ export function diffClass(line: string): string {
   return "block min-h-5 whitespace-pre px-5 text-foreground/80";
 }
 
-export function trustedHtml(html: string): (node: HTMLElement) => void {
+export type MarkdownSource = {
+  namespace: string;
+  name: string;
+  revision: string;
+  path: string;
+};
+
+function resolveRepositoryReference(source: MarkdownSource, reference: string) {
+  if (
+    !reference ||
+    reference.startsWith("#") ||
+    reference.startsWith("?") ||
+    reference.startsWith("/")
+  ) {
+    return null;
+  }
+
+  try {
+    const encodedPath = source.path
+      .split("/")
+      .map((segment) => encodeURIComponent(segment))
+      .join("/");
+    const base = new URL(`https://repository.invalid/${encodedPath}`);
+    const resolved = new URL(reference, base);
+    if (resolved.origin !== base.origin) return null;
+    return {
+      path: decodeURIComponent(resolved.pathname.slice(1)),
+      hash: resolved.hash,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function rewriteMarkdownReferences(node: HTMLElement, source: MarkdownSource) {
+  const api = `/api/v1/repositories/${encodeURIComponent(source.namespace)}/${encodeURIComponent(source.name)}`;
+  const repository = `/${encodeURIComponent(source.namespace)}/${encodeURIComponent(source.name)}`;
+
+  for (const image of node.querySelectorAll<HTMLImageElement>("img[src]")) {
+    const resolved = resolveRepositoryReference(
+      source,
+      image.getAttribute("src") ?? "",
+    );
+    if (!resolved) continue;
+    const parameters = new URLSearchParams({
+      rev: source.revision,
+      path: resolved.path,
+    });
+    image.src = `${api}/raw?${parameters}`;
+  }
+
+  for (const anchor of node.querySelectorAll<HTMLAnchorElement>("a[href]")) {
+    const resolved = resolveRepositoryReference(
+      source,
+      anchor.getAttribute("href") ?? "",
+    );
+    if (!resolved) continue;
+    const parameters = new URLSearchParams({
+      rev: source.revision,
+      path: resolved.path,
+    });
+    anchor.href = `${repository}?${parameters}${resolved.hash}`;
+  }
+}
+
+export function trustedHtml(
+  html: string,
+  markdownSource?: MarkdownSource,
+): (node: HTMLElement) => void {
   return (node) => {
     node.innerHTML = html;
+    if (markdownSource) rewriteMarkdownReferences(node, markdownSource);
     for (const code of node.querySelectorAll<HTMLElement>("pre code")) {
       const requestedLanguage = Array.from(code.classList)
         .find((className) => className.startsWith("language-"))

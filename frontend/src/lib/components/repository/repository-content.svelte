@@ -71,8 +71,13 @@
       </div>
     {:else if state.blob.rendered_html}
       <div
-        class="prose prose-invert max-w-none p-6 prose-code:before:content-none prose-code:after:content-none lg:p-8"
-        {@attach trustedHtml(state.blob.rendered_html)}
+        class="prose prose-invert max-w-none p-6 prose-img:my-0 prose-img:inline-block prose-code:before:content-none prose-code:after:content-none lg:p-8"
+        {@attach trustedHtml(state.blob.rendered_html, {
+          namespace: state.namespace,
+          name: state.name,
+          revision: state.blob.revision,
+          path: state.blob.path,
+        })}
       ></div>
     {:else}
       <pre
@@ -88,8 +93,13 @@
       <Braces class="size-4 text-muted-foreground" />{state.readme.path}
     </header>
     <div
-      class="prose prose-invert max-w-none p-6 prose-code:before:content-none prose-code:after:content-none lg:p-8"
-      {@attach trustedHtml(state.readme.rendered_html)}
+      class="prose prose-invert max-w-none p-6 prose-img:my-0 prose-img:inline-block prose-code:before:content-none prose-code:after:content-none lg:p-8"
+      {@attach trustedHtml(state.readme.rendered_html, {
+        namespace: state.namespace,
+        name: state.name,
+        revision: state.readme.revision,
+        path: state.readme.path,
+      })}
     ></div>
   {:else}
     <div

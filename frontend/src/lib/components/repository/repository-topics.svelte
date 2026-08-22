@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Pencil, Plus, X } from "lucide-svelte";
+  import { Check, Pencil, Plus, X } from "lucide-svelte";
 
   import { Badge } from "$lib/components/ui/badge/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -11,44 +11,48 @@
   const MAX_TOPICS = 25;
 
   let editing = $state(false);
-  let draft = $state.raw<string[]>([]);
   let entry = $state("");
   let entryField = $state<HTMLInputElement | null>(null);
   let suggestions = $state.raw<string[]>([]);
 
+  // Each edit persists on its own, so an optimistic copy keeps the chips in
+  // place while the request is in flight. Cleared once the newest save settles.
+  let optimistic = $state.raw<string[] | null>(null);
+  let queue: Promise<unknown> = Promise.resolve();
+
+  const topics = $derived(optimistic ?? repository.topics);
   const available = $derived(
-    suggestions.filter((topic) => !draft.includes(topic)),
+    suggestions.filter((topic) => !topics.includes(topic)),
   );
-  const full = $derived(draft.length >= MAX_TOPICS);
-
-  function startEditing(): void {
-    draft = [...repository.topics];
-    entry = "";
-    suggestions = [];
-    editing = true;
-  }
-
-  function cancelEditing(): void {
-    editing = false;
-    draft = [];
-    entry = "";
-    suggestions = [];
-  }
+  const full = $derived(topics.length >= MAX_TOPICS);
 
   /** Mirrors the server's normalization so the badge preview matches what is stored. */
   function normalize(value: string): string {
     return value.trim().toLowerCase();
   }
 
+  function commit(next: string[]): void {
+    optimistic = next;
+    queue = queue
+      .then(() => repository.saveTopics(next))
+      .catch(() => {
+        // saveTopics surfaces the message; fall back to the server's list.
+      })
+      .finally(() => {
+        // Only the most recent edit may hand rendering back to server state.
+        if (optimistic === next) optimistic = null;
+      });
+  }
+
   function addTopic(value: string): void {
     const topic = normalize(value);
-    if (!topic || draft.includes(topic) || full) return;
-    draft = [...draft, topic].sort();
     entry = "";
+    if (!topic || topics.includes(topic) || full) return;
+    commit([...topics, topic].sort());
   }
 
   function removeTopic(topic: string): void {
-    draft = draft.filter((existing) => existing !== topic);
+    commit(topics.filter((existing) => existing !== topic));
   }
 
   function handleKeydown(event: KeyboardEvent): void {
@@ -59,30 +63,25 @@
     }
     if (event.key === "Escape") {
       event.preventDefault();
-      cancelEditing();
+      editing = false;
+      entry = "";
       return;
     }
-    if (event.key === "Backspace" && !entry && draft.length) {
-      draft = draft.slice(0, -1);
+    if (event.key === "Backspace" && !entry && topics.length) {
+      removeTopic(topics[topics.length - 1]);
     }
   }
 
-  async function save(): Promise<void> {
-    const pending = normalize(entry);
-    const next = pending && !draft.includes(pending) ? [...draft, pending].sort() : draft;
-    if (
-      next.length === repository.topics.length &&
-      next.every((topic, index) => topic === repository.topics[index])
-    ) {
-      cancelEditing();
-      return;
-    }
-    try {
-      await repository.saveTopics(next);
-      cancelEditing();
-    } catch {
-      // saveTopics surfaces the message; keep the draft editable.
-    }
+  function startEditing(): void {
+    entry = "";
+    suggestions = [];
+    editing = true;
+  }
+
+  function finishEditing(): void {
+    addTopic(entry);
+    editing = false;
+    suggestions = [];
   }
 
   $effect(() => {
@@ -117,29 +116,41 @@
     >
       Topics
     </h2>
-    {#if repository.repository?.can_manage && !editing}
-      <Button
-        variant="ghost"
-        size="icon-xs"
-        class="text-muted-foreground"
-        aria-label={repository.topics.length ? "Edit topics" : "Add topics"}
-        onclick={startEditing}
-      >
-        {#if repository.topics.length}
-          <Pencil class="size-3.5" />
-        {:else}
-          <Plus class="size-3.5" />
-        {/if}
-      </Button>
+    {#if repository.repository?.can_manage}
+      {#if editing}
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          class="text-muted-foreground"
+          aria-label="Done editing topics"
+          onclick={finishEditing}
+        >
+          <Check class="size-3.5" />
+        </Button>
+      {:else}
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          class="text-muted-foreground"
+          aria-label={topics.length ? "Edit topics" : "Add topics"}
+          onclick={startEditing}
+        >
+          {#if topics.length}
+            <Pencil class="size-3.5" />
+          {:else}
+            <Plus class="size-3.5" />
+          {/if}
+        </Button>
+      {/if}
     {/if}
   </div>
 
   {#if editing}
     <div class="mt-3">
-      {#if draft.length}
+      {#if topics.length}
         <div class="mb-2 flex flex-wrap gap-1.5">
-          {#each draft as topic (topic)}
-            <Badge variant="secondary" class="pr-1">
+          {#each topics as topic (topic)}
+            <Badge variant="secondary" class="border-border pr-1">
               {topic}
               <button
                 type="button"
@@ -171,7 +182,7 @@
             <li>
               <Badge
                 variant="outline"
-                class="cursor-pointer hover:bg-muted"
+                class="cursor-pointer border-dashed text-muted-foreground hover:bg-muted hover:text-foreground"
                 role="button"
                 tabindex={0}
                 onclick={() => addTopic(topic)}
@@ -188,20 +199,11 @@
           {/each}
         </ul>
       {/if}
-
-      <div class="mt-2 flex items-center justify-end gap-2">
-        <Button type="button" variant="ghost" size="sm" onclick={cancelEditing}>
-          Cancel
-        </Button>
-        <Button size="sm" disabled={repository.topicsPending} onclick={() => void save()}>
-          {repository.topicsPending ? "Saving…" : "Save"}
-        </Button>
-      </div>
     </div>
-  {:else if repository.topics.length}
+  {:else if topics.length}
     <div class="mt-3 flex flex-wrap gap-1.5">
-      {#each repository.topics as topic (topic)}
-        <Badge variant="secondary">{topic}</Badge>
+      {#each topics as topic (topic)}
+        <Badge variant="secondary" class="border-border">{topic}</Badge>
       {/each}
     </div>
   {:else}

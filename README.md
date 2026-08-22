@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Fractal-Tess/gitadel/releases"><img src="https://img.shields.io/github/v/release/Fractal-Tess/gitadel?display_name=tag&sort=semver&color=f97316" alt="Latest release" /></a>
+  <a href="https://github.com/Fractal-Tess/gitadel/tags"><img src="https://img.shields.io/github/v/tag/Fractal-Tess/gitadel?sort=semver&color=f97316" alt="Latest version" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2b2b2b.svg" alt="MIT license" /></a>
 </p>
 

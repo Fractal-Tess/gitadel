@@ -53,6 +53,7 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<(
     .context("could not initialize repository storage")?;
     let api_router = Router::new()
         .route("/", get(api::version))
+        .route("/changelog", get(api::changelog))
         .merge(identity::router().with_state(identity_state.clone()))
         .merge(repository::router().with_state(repository_state.clone()));
     let app = Router::new()

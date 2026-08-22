@@ -7,6 +7,8 @@ mod ssh;
 mod topics;
 mod webhooks;
 
+pub(crate) use browser::render_markdown;
+
 use std::{
     collections::HashMap,
     path::PathBuf,

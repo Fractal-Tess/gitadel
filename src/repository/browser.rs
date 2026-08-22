@@ -818,14 +818,24 @@ fn is_markdown_path(path: &str) -> bool {
         })
 }
 
-fn render_markdown(markdown: &str) -> String {
+pub(crate) fn render_markdown(markdown: &str) -> String {
     let mut options = Options::default();
     options.extension.strikethrough = true;
     options.extension.tagfilter = true;
     options.extension.table = true;
     options.extension.autolink = true;
     options.extension.tasklist = true;
-    markdown_to_html(markdown, &options)
+    options.render.r#unsafe = true;
+
+    let rendered = markdown_to_html(markdown, &options);
+    let mut sanitizer = ammonia::Builder::default();
+    sanitizer
+        .add_generic_attributes(&["align", "class", "id"])
+        .add_tags(&["input"])
+        .add_tag_attributes("input", &["checked", "disabled", "type"])
+        .set_tag_attribute_value("input", "disabled", "")
+        .set_tag_attribute_value("input", "type", "checkbox");
+    sanitizer.clean(&rendered).to_string()
 }
 
 fn compute_stats(
@@ -966,5 +976,29 @@ mod tests {
         };
 
         assert_eq!(stats.non_blank_lines(), 24);
+    }
+
+    #[test]
+    fn markdown_should_preserve_task_lists() {
+        let rendered = render_markdown("- [x] Shipped");
+
+        assert!(rendered.contains("<input type=\"checkbox\" checked=\"\" disabled=\"\">"));
+    }
+
+    #[test]
+    fn markdown_should_render_safe_html_images() {
+        let rendered = render_markdown(
+            r#"<p align="center">
+  <a href="https://example.com"><img src="assets/logo.png" alt="Logo" width="160" /></a>
+</p>
+<script>alert("no")</script>
+<img src="javascript:alert('no')" onerror="alert('no')">"#,
+        );
+
+        assert!(rendered.contains("<p align=\"center\">"));
+        assert!(rendered.contains("<img src=\"assets/logo.png\" alt=\"Logo\" width=\"160\">"));
+        assert!(!rendered.contains("<script"));
+        assert!(!rendered.contains("javascript:"));
+        assert!(!rendered.contains("onerror"));
     }
 }

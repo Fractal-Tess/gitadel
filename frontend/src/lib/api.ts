@@ -38,6 +38,11 @@ export const instanceSettingsSchema = z.object({
   updated_at: z.string(),
 });
 
+export const changelogSchema = z.object({
+  application_version: z.string(),
+  rendered_html: z.string(),
+});
+
 export const invitationSchema = z.object({
   token: z.string(),
   expires_at: z.string(),
@@ -271,6 +276,7 @@ export const languageStatSchema = z.object({
 export type AuthStatus = z.infer<typeof authStatusSchema>;
 export type User = z.infer<typeof userSchema>;
 export type InstanceSettings = z.infer<typeof instanceSettingsSchema>;
+export type Changelog = z.infer<typeof changelogSchema>;
 export type SshKey = z.infer<typeof sshKeySchema>;
 export type ApiToken = z.infer<typeof tokenSchema>;
 export type PasskeySummary = z.infer<typeof passkeySchema>;
