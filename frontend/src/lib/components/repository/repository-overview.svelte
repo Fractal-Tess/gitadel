@@ -77,11 +77,13 @@ git push -u origin main`;
     </div>
   </section>
 {:else}
-  <div
-    class="grid overflow-hidden rounded-md border bg-card/20 xl:grid-cols-[18rem_minmax(0,1fr)_18rem]"
-  >
-    <RepositoryTree {state} />
-    <RepositoryContent {state} />
-    <RepositorySidebar {state} />
+  <div class="space-y-5">
+    <div
+      class="grid overflow-hidden rounded-md border bg-card/20 xl:grid-cols-[18rem_minmax(0,1fr)_18rem]"
+    >
+      <RepositoryTree {state} />
+      <RepositoryContent {state} />
+      <RepositorySidebar {state} />
+    </div>
   </div>
 {/if}

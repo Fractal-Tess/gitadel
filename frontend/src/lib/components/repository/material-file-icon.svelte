@@ -1,6 +1,4 @@
 <script lang="ts">
-  import Icon from "@iconify/svelte";
-
   import {
     materialFileIcon,
     materialFolderIcon,
@@ -23,4 +21,18 @@
   );
 </script>
 
-<Icon {icon} class={className} aria-hidden="true" />
+{#await icon}
+  <span class={["inline-block", className]} aria-hidden="true"></span>
+{:then source}
+  {#if source}
+    <img
+      src={source}
+      alt=""
+      draggable={false}
+      class={className}
+      aria-hidden="true"
+    />
+  {:else}
+    <span class={["inline-block", className]} aria-hidden="true"></span>
+  {/if}
+{/await}

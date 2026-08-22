@@ -130,6 +130,74 @@ pub mod ssh_key {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod oauth_application {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "oauth_applications")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub user_id: Uuid,
+        pub name: String,
+        #[sea_orm(unique)]
+        pub client_id: String,
+        pub client_secret_hash: String,
+        pub redirect_uri: String,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod oauth_authorization_code {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "oauth_authorization_codes")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub code_hash: String,
+        pub application_id: Uuid,
+        pub user_id: Uuid,
+        pub redirect_uri: String,
+        pub scope: String,
+        pub expires_at: DateTimeUtc,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod oauth_access_token {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "oauth_access_tokens")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub token_hash: String,
+        pub application_id: Uuid,
+        pub user_id: Uuid,
+        pub scopes: i32,
+        pub scope: String,
+        pub created_at: DateTimeUtc,
+        pub last_used_at: Option<DateTimeUtc>,
+        pub revoked_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod api_token {
     use super::*;
 

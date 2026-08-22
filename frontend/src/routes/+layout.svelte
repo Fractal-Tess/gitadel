@@ -5,6 +5,7 @@
   import { page } from "$app/state";
   import { resolve } from "$app/paths";
 
+  import { Toaster } from "$lib/components/ui/sonner/index.js";
   import { provideAppState } from "$lib/state/app-state.svelte.js";
 
   let { children } = $props();
@@ -67,6 +68,9 @@
     }
   }
 </script>
+
+<!-- The theme is dark-only, so pin it rather than reading mode-watcher. -->
+<Toaster theme="dark" position="bottom-right" />
 
 {#if ready}
   {@render children()}

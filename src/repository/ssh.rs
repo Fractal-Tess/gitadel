@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use super::{
     LfsPermission, Permission, RepositoryState,
-    resources::{CreateRepositoryOptions, create_owned_repository},
+    resources::{CreateRepositoryOptions, create_owned_repository, record_push},
 };
 use crate::config::SshSettings;
 
@@ -305,7 +305,8 @@ impl russh::server::Handler for SshHandler {
             channel_state.channel,
             format!("{namespace}/{name}"),
             maintenance_path,
-            matches!(service, GitService::ReceivePack).then(|| (self.state.clone(), actor_user_id)),
+            matches!(service, GitService::ReceivePack)
+                .then(|| (self.state.clone(), repository.id, actor_user_id)),
         );
         Ok(())
     }
@@ -351,7 +352,7 @@ fn bridge_process(
     mut channel: Channel<Msg>,
     repository: String,
     maintenance_path: Option<std::path::PathBuf>,
-    push_audit: Option<(RepositoryState, Uuid)>,
+    push_audit: Option<(RepositoryState, Uuid, Uuid)>,
 ) {
     let Some(mut stdin) = child.stdin.take() else {
         return;
@@ -408,15 +409,9 @@ fn bridge_process(
         let _ = errors.await;
         tracing::debug!(%repository, "Git SSH process error output closed");
         if successful
-            && let Some((state, actor_user_id)) = push_audit
-            && let Err(error) = state
-                .identity()
-                .audit(
-                    Some(actor_user_id),
-                    "repository.push",
-                    Some(repository.clone()),
-                )
-                .await
+            && let Some((state, repository_id, actor_user_id)) = push_audit
+            && let Err(error) =
+                record_push(&state, repository_id, actor_user_id, repository.clone()).await
         {
             tracing::warn!(%error, %repository, "could not record repository push");
         }

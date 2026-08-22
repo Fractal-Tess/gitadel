@@ -59,8 +59,9 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<(
         .merge(
             Router::new()
                 .route("/healthz", get(health))
-                .with_state(identity_state),
+                .with_state(identity_state.clone()),
         )
+        .merge(identity::oauth_router().with_state(identity_state))
         .nest("/api/v1", api_router)
         .merge(repository::git_http_router().with_state(repository_state.clone()))
         .fallback(get(frontend))

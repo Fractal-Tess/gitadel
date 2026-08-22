@@ -45,14 +45,14 @@
                 : "size-3.5 shrink-0 text-muted-foreground transition-transform"}
             />
             <MaterialFileIcon
-              name={entry.name}
+              name={entry.path}
               directory
               expanded={state.expandedPaths.has(entry.path)}
               class="size-4 shrink-0"
             />
           {:else}
             <span class="size-3.5 shrink-0"></span>
-            <MaterialFileIcon name={entry.name} class="size-4 shrink-0" />
+            <MaterialFileIcon name={entry.path} class="size-4 shrink-0" />
           {/if}
           <span class="min-w-0 flex-1 truncate text-sm">{entry.name}</span>
           {#if entry.kind !== "tree"}

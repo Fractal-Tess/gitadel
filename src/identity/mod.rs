@@ -1,5 +1,6 @@
 mod admin;
 mod auth;
+mod oauth;
 mod resources;
 
 use std::{
@@ -36,7 +37,7 @@ use webauthn_rs::{
 
 use crate::{
     config::AuthSettings,
-    entity::{api_token, audit_event, namespace, session, ssh_key, user},
+    entity::{api_token, audit_event, namespace, oauth_access_token, session, ssh_key, user},
 };
 
 const SESSION_COOKIE: &str = "gitadel_session";
@@ -53,6 +54,7 @@ pub struct IdentityState {
     webauthn: Webauthn,
     registration_challenges: Arc<Mutex<HashMap<String, RegistrationChallenge>>>,
     authentication_challenges: Arc<Mutex<HashMap<String, AuthenticationChallenge>>>,
+    authorization_requests: Arc<Mutex<HashMap<String, oauth::AuthorizationRequest>>>,
 }
 
 pub struct RegistrationChallenge {
@@ -192,6 +194,7 @@ impl IdentityState {
             webauthn,
             registration_challenges: Arc::new(Mutex::new(HashMap::new())),
             authentication_challenges: Arc::new(Mutex::new(HashMap::new())),
+            authorization_requests: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -227,6 +230,14 @@ impl IdentityState {
         challenges
     }
 
+    async fn authorization_requests(
+        &self,
+    ) -> tokio::sync::MutexGuard<'_, HashMap<String, oauth::AuthorizationRequest>> {
+        let mut requests = self.authorization_requests.lock().await;
+        requests.retain(|_, request| request.created_at.elapsed() < CHALLENGE_LIFETIME);
+        requests
+    }
+
     pub async fn authenticate(
         &self,
         headers: &HeaderMap,
@@ -239,6 +250,7 @@ impl IdentityState {
                 .map_err(|_| ApiError::unauthorized())?;
             let token = authorization
                 .strip_prefix("Bearer ")
+                .or_else(|| authorization.strip_prefix("token "))
                 .ok_or_else(ApiError::unauthorized)?;
             return self.authenticate_token(token, required_scope).await;
         }
@@ -278,20 +290,46 @@ impl IdentityState {
     ) -> Result<AuthenticatedUser, ApiError> {
         let token_hash = hash_secret(token);
         let now = Utc::now();
-        let stored = api_token::Entity::find()
-            .filter(api_token::Column::TokenHash.eq(token_hash))
+        if let Some(stored) = api_token::Entity::find()
+            .filter(api_token::Column::TokenHash.eq(&token_hash))
             .filter(api_token::Column::RevokedAt.is_null())
             .one(&self.database)
             .await?
             .filter(|token| token.expires_at.is_none_or(|expires_at| expires_at > now))
-            .ok_or_else(ApiError::unauthorized)?;
-
-        if stored.scopes & required_scope != required_scope {
-            return Err(ApiError::forbidden(
-                "The API token does not have the required scope.",
-            ));
+        {
+            if stored.scopes & required_scope != required_scope {
+                return Err(ApiError::forbidden(
+                    "The API token does not have the required scope.",
+                ));
+            }
+            let account = self
+                .enabled_user(stored.user_id)
+                .await?
+                .ok_or_else(ApiError::unauthorized)?;
+            if stored
+                .last_used_at
+                .is_none_or(|last_used_at| now - last_used_at > ChronoDuration::minutes(5))
+            {
+                let mut active: api_token::ActiveModel = stored.into();
+                active.last_used_at = Set(Some(now));
+                active.update(&self.database).await?;
+            }
+            return Ok(AuthenticatedUser {
+                user: account,
+                via_api_token: true,
+            });
         }
 
+        let stored = oauth_access_token::Entity::find_by_id(token_hash)
+            .filter(oauth_access_token::Column::RevokedAt.is_null())
+            .one(&self.database)
+            .await?
+            .ok_or_else(ApiError::unauthorized)?;
+        if stored.scopes & required_scope != required_scope {
+            return Err(ApiError::forbidden(
+                "The OAuth token does not have the required scope.",
+            ));
+        }
         let account = self
             .enabled_user(stored.user_id)
             .await?
@@ -300,7 +338,7 @@ impl IdentityState {
             .last_used_at
             .is_none_or(|last_used_at| now - last_used_at > ChronoDuration::minutes(5))
         {
-            let mut active: api_token::ActiveModel = stored.into();
+            let mut active: oauth_access_token::ActiveModel = stored.into();
             active.last_used_at = Set(Some(now));
             active.update(&self.database).await?;
         }
@@ -536,6 +574,14 @@ pub fn router() -> Router<IdentityState> {
         )
         .route("/me/tokens/{id}", delete(resources::revoke_token))
         .route(
+            "/me/oauth-applications",
+            get(oauth::list_applications).post(oauth::create_application),
+        )
+        .route(
+            "/me/oauth-applications/{id}",
+            delete(oauth::delete_application),
+        )
+        .route(
             "/organizations",
             get(resources::list_organizations).post(resources::create_organization),
         )
@@ -552,6 +598,19 @@ pub fn router() -> Router<IdentityState> {
             "/admin/instance",
             get(admin::get_instance_settings).put(admin::update_instance_settings),
         )
+}
+
+pub fn oauth_router() -> Router<IdentityState> {
+    Router::new()
+        .route(
+            "/user/settings/applications",
+            get(oauth::applications_settings_redirect),
+        )
+        .route(
+            "/login/oauth/authorize",
+            get(oauth::authorize).post(oauth::approve),
+        )
+        .route("/login/oauth/access_token", post(oauth::access_token))
 }
 
 pub fn random_secret(bytes: usize) -> String {

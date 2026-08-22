@@ -28,7 +28,9 @@
       await task();
       await app.refreshAuth();
       const returnTo = page.url.searchParams.get("returnTo");
-      if (returnTo?.startsWith("/admin")) {
+      if (returnTo?.startsWith("/login/oauth/authorize?")) {
+        window.location.assign(returnTo);
+      } else if (returnTo?.startsWith("/admin")) {
         await goto(resolve("/admin"));
       } else if (returnTo?.startsWith("/settings")) {
         await goto(resolve("/settings"));
@@ -83,8 +85,12 @@
 
 <main class="grid min-h-screen place-items-center bg-background px-5 py-12">
   <section class="w-full max-w-md rounded-md border bg-card/25 p-6 shadow-sm">
-    <a class="text-sm font-bold tracking-[-0.035em]" href={resolve("/")}>{app.instance?.site_name ?? "GITADEL"}</a>
-    <p class="mt-8 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+    <a class="text-sm font-bold tracking-[-0.035em]" href={resolve("/")}
+      >{app.instance?.site_name ?? "GITADEL"}</a
+    >
+    <p
+      class="mt-8 text-xs font-medium uppercase tracking-wider text-muted-foreground"
+    >
       Account access
     </p>
     <h1 class="mt-2 text-2xl font-semibold">Sign in</h1>
@@ -93,7 +99,9 @@
     </p>
 
     {#if error}
-      <p class="mt-5 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+      <p
+        class="mt-5 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
+      >
         {error}
       </p>
     {/if}
@@ -128,7 +136,9 @@
     </form>
 
     <div class="my-5 flex items-center gap-3 text-xs text-muted-foreground">
-      <span class="h-px flex-1 bg-border"></span>or<span class="h-px flex-1 bg-border"></span>
+      <span class="h-px flex-1 bg-border"></span>or<span
+        class="h-px flex-1 bg-border"
+      ></span>
     </div>
     <Button
       class="w-full gap-2"

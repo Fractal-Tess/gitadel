@@ -8,12 +8,15 @@ hljs.registerLanguage("nix", nix);
 const LANGUAGES: Record<string, string> = {
   astro: "xml",
   bash: "bash",
+  console: "bash",
   c: "c",
   cc: "cpp",
   cpp: "cpp",
   cs: "csharp",
   css: "css",
   diff: "diff",
+  docker: "dockerfile",
+  dockerfile: "dockerfile",
   go: "go",
   gql: "graphql",
   graphql: "graphql",
@@ -38,14 +41,19 @@ const LANGUAGES: Record<string, string> = {
   pl: "perl",
   pm: "perl",
   py: "python",
+  plaintext: "plaintext",
   r: "r",
   rb: "ruby",
   rs: "rust",
   sass: "scss",
   scss: "scss",
   sh: "bash",
+  shell: "bash",
+  "shell-session": "bash",
   sql: "sql",
   svelte: "xml",
+  text: "plaintext",
+  txt: "plaintext",
   svg: "xml",
   swift: "swift",
   toml: "ini",
@@ -116,10 +124,16 @@ export function formatSize(size: number | null): string {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function languageForName(name: string): string | null {
+  const normalized = name.toLowerCase();
+  const language = LANGUAGES[normalized] ?? normalized;
+  return hljs.getLanguage(language) ? language : null;
+}
+
 function languageForPath(path: string): string | null {
   const name = path.split("/").pop()?.toLowerCase() ?? "";
   const extension = name.includes(".") ? (name.split(".").pop() ?? "") : "";
-  return FILE_LANGUAGES[name] ?? LANGUAGES[extension] ?? null;
+  return languageForName(FILE_LANGUAGES[name] ?? extension);
 }
 
 export function languageLabel(path: string): string {
@@ -167,5 +181,23 @@ export function diffClass(line: string): string {
 export function trustedHtml(html: string): (node: HTMLElement) => void {
   return (node) => {
     node.innerHTML = html;
+    for (const code of node.querySelectorAll<HTMLElement>("pre code")) {
+      const requestedLanguage = Array.from(code.classList)
+        .find((className) => className.startsWith("language-"))
+        ?.slice("language-".length);
+      const language = requestedLanguage
+        ? languageForName(requestedLanguage)
+        : null;
+      const source = code.textContent ?? "";
+      const highlighted = requestedLanguage
+        ? hljs.highlight(source, {
+            language: language ?? "plaintext",
+            ignoreIllegals: true,
+          })
+        : hljs.highlightAuto(source);
+      code.innerHTML = highlighted.value;
+      code.classList.add("hljs");
+      code.dataset.highlighted = "yes";
+    }
   };
 }

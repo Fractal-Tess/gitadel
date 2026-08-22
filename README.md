@@ -91,6 +91,17 @@ git remote add archive ssh://git@git.example.com:2222/archivist/old-project.git
 git push archive main
 ```
 
+## Connect Dokploy
+
+Gitadel implements the Gitea OAuth and repository APIs used by Dokploy.
+
+1. In Dokploy, open **Settings → Git Providers**, add a **Gitea** provider, and copy its Redirect URI.
+2. In Gitadel, open **Account settings → Applications** and create an OAuth application with that exact Redirect URI.
+3. Copy the generated Client ID and Client Secret into Dokploy. Use Gitadel's public URL as the Gitea URL. If both services share a private network, you can also set Dokploy's optional Internal URL.
+4. Finish the authorization in the Gitadel window. Dokploy can then list branches and clone repositories the authorizing account can read.
+
+Deleting the OAuth application in Gitadel revokes Dokploy's access immediately.
+
 ## Back up the instance
 
 Backups are offline by design. Stop the server so the storage lock can guarantee one consistent snapshot:

@@ -2,6 +2,7 @@
   import { BarChart3, Check, Copy } from "lucide-svelte";
 
   import { Button } from "$lib/components/ui/button/index.js";
+  import { languageColor } from "$lib/repository/language-colors.js";
   import type {
     CopyTarget,
     RepositoryPageState,
@@ -13,6 +14,32 @@
     { id: "http", label: "HTTP" },
     { id: "ssh", label: "SSH" },
   ];
+
+  const compactUnits = [
+    { threshold: 1_000, suffix: "k" },
+    { threshold: 1_000_000, suffix: "m" },
+    { threshold: 1_000_000_000, suffix: "b" },
+  ] as const;
+  const compactDecimal = new Intl.NumberFormat("en", {
+    maximumFractionDigits: 1,
+  });
+
+  function compactCount(value: number): string {
+    let unitIndex = -1;
+    for (let index = 0; index < compactUnits.length; index += 1) {
+      if (value < compactUnits[index].threshold) break;
+      unitIndex = index;
+    }
+    if (unitIndex < 0) return value.toLocaleString("en");
+
+    let unit = compactUnits[unitIndex];
+    let rounded = Math.ceil((value / unit.threshold) * 10) / 10;
+    if (rounded >= 1_000 && unitIndex < compactUnits.length - 1) {
+      unit = compactUnits[unitIndex + 1];
+      rounded = Math.ceil((value / unit.threshold) * 10) / 10;
+    }
+    return `${compactDecimal.format(rounded)}${unit.suffix}`;
+  }
 </script>
 
 <aside class="order-first flex min-w-0 flex-col xl:order-none">
@@ -95,40 +122,46 @@
       >
         <BarChart3 class="size-3.5" />Statistics
       </h2>
-      <span class="text-[11px] tabular-nums text-muted-foreground">
-        {state.totalLines.toLocaleString()} lines total
+      <span
+        class="text-[11px] tabular-nums text-muted-foreground"
+        title={`${state.totalLines.toLocaleString()} non-blank lines`}
+      >
+        {compactCount(state.totalLines)}
       </span>
     </div>
     {#if state.stats.length}
       <div class="mt-4 flex h-1.5 overflow-hidden rounded-full bg-muted">
-        {#each state.stats as item, index (item.language)}
+        {#each state.stats as item (item.language)}
           <span
-            style={`width:${state.totalLines ? ((item.code + item.comments + item.blanks) / state.totalLines) * 100 : 0}%;background:hsl(${(index * 67 + 218) % 360} 62% 52%)`}
+            style:width={`${state.totalLines ? ((item.code + item.comments) / state.totalLines) * 100 : 0}%`}
+            style:background={languageColor(item.language)}
           ></span>
         {/each}
       </div>
       <ul class="mt-4 space-y-3">
-        {#each state.stats as item, index (item.language)}
+        {#each state.stats as item (item.language)}
           <li>
             <div class="flex items-center justify-between gap-3 text-xs">
               <span class="flex min-w-0 items-center gap-2 font-medium">
                 <span
                   class="size-2 shrink-0 rounded-full"
-                  style={`background:hsl(${(index * 67 + 218) % 360} 62% 52%)`}
+                  style:background={languageColor(item.language)}
                 ></span>
                 <span class="truncate">{item.language}</span>
               </span>
-              <span class="shrink-0 tabular-nums"
-                >{(item.code + item.comments + item.blanks).toLocaleString()} lines</span
+              <span
+                class="shrink-0 tabular-nums"
+                title={`${(item.code + item.comments).toLocaleString()} non-blank lines`}
               >
+                {compactCount(item.code + item.comments)}
+              </span>
             </div>
             <div
               class="mt-1 flex flex-wrap gap-x-2 pl-4 text-[10px] text-muted-foreground"
             >
               <span>{item.files} file{item.files === 1 ? "" : "s"}</span>
-              <span>{item.code.toLocaleString()} code</span>
-              <span>{item.comments.toLocaleString()} comments</span>
-              <span>{item.blanks.toLocaleString()} blank</span>
+              <span>{compactCount(item.code)} code</span>
+              <span>{compactCount(item.comments)} comments</span>
             </div>
           </li>
         {/each}

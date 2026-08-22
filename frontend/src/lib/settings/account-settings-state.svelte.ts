@@ -9,9 +9,11 @@ import { z } from "zod";
 
 import {
   ApiFailure,
+  createdOauthApplicationSchema,
   createdTokenSchema,
   jsonBody,
   memberSchema,
+  oauthApplicationSchema,
   organizationSchema,
   passkeySchema,
   requestEmpty,
@@ -21,6 +23,7 @@ import {
   webauthnCreationSchema,
   type ApiToken,
   type Member,
+  type OauthApplication,
   type Organization,
   type PasskeySummary,
   type SshKey,
@@ -28,13 +31,14 @@ import {
 import type { AppState } from "$lib/state/app-state.svelte.js";
 import { createCredential, creationOptions } from "$lib/webauthn.js";
 
-export type AccountSettingsView = "security" | "organizations";
+export type AccountSettingsView = "security" | "applications" | "organizations";
 
 export class AccountSettingsState {
   view = $state<AccountSettingsView>("security");
   passkeys = $state.raw<PasskeySummary[]>([]);
   sshKeys = $state.raw<SshKey[]>([]);
   tokens = $state.raw<ApiToken[]>([]);
+  oauthApplications = $state.raw<OauthApplication[]>([]);
   organizations = $state.raw<Organization[]>([]);
   selectedOrganization = $state.raw<Organization | null>(null);
   members = $state.raw<Member[]>([]);
@@ -47,6 +51,10 @@ export class AccountSettingsState {
   tokenSshKeys = $state(false);
   tokenExpiresOn = $state<CalendarDate | undefined>();
   createdToken = $state<string | null>(null);
+  oauthApplicationName = $state("");
+  oauthRedirectUri = $state("");
+  createdOauthClientId = $state<string | null>(null);
+  createdOauthClientSecret = $state<string | null>(null);
   organizationSlug = $state("");
   organizationDisplayName = $state("");
   memberUsername = $state("");
@@ -61,15 +69,21 @@ export class AccountSettingsState {
   async initialize(): Promise<void> {
     this.loading = true;
     await this.run(async () => {
-      const [passkeys, sshKeys, tokens, organizations] = await Promise.all([
-        requestJson("/api/v1/me/passkeys", z.array(passkeySchema)),
-        requestJson("/api/v1/me/ssh-keys", z.array(sshKeySchema)),
-        requestJson("/api/v1/me/tokens", z.array(tokenSchema)),
-        requestJson("/api/v1/organizations", z.array(organizationSchema)),
-      ]);
+      const [passkeys, sshKeys, tokens, oauthApplications, organizations] =
+        await Promise.all([
+          requestJson("/api/v1/me/passkeys", z.array(passkeySchema)),
+          requestJson("/api/v1/me/ssh-keys", z.array(sshKeySchema)),
+          requestJson("/api/v1/me/tokens", z.array(tokenSchema)),
+          requestJson(
+            "/api/v1/me/oauth-applications",
+            z.array(oauthApplicationSchema),
+          ),
+          requestJson("/api/v1/organizations", z.array(organizationSchema)),
+        ]);
       this.passkeys = passkeys;
       this.sshKeys = sshKeys;
       this.tokens = tokens;
+      this.oauthApplications = oauthApplications;
       this.organizations = organizations;
     });
     this.loading = false;
@@ -167,6 +181,52 @@ export class AccountSettingsState {
     await this.run(async () => {
       await requestEmpty(`/api/v1/me/tokens/${id}`, { method: "DELETE" });
       this.tokens = this.tokens.filter((token) => token.id !== id);
+    });
+  }
+
+  async createOauthApplication() {
+    await this.run(async () => {
+      const response = await requestJson(
+        "/api/v1/me/oauth-applications",
+        createdOauthApplicationSchema,
+        {
+          method: "POST",
+          body: jsonBody({
+            name: this.oauthApplicationName,
+            redirect_uri: this.oauthRedirectUri,
+          }),
+        },
+      );
+      this.oauthApplications = [
+        ...this.oauthApplications,
+        response.application,
+      ];
+      this.createdOauthClientId = response.application.client_id;
+      this.createdOauthClientSecret = response.client_secret;
+      this.oauthApplicationName = "";
+      this.oauthRedirectUri = "";
+      this.notice = "OAuth application created. Save the client secret now.";
+    });
+  }
+
+  async deleteOauthApplication(id: string) {
+    await this.run(async () => {
+      await requestEmpty(`/api/v1/me/oauth-applications/${id}`, {
+        method: "DELETE",
+      });
+      this.oauthApplications = this.oauthApplications.filter(
+        (application) => application.id !== id,
+      );
+      if (
+        this.createdOauthClientId &&
+        !this.oauthApplications.some(
+          (application) => application.client_id === this.createdOauthClientId,
+        )
+      ) {
+        this.createdOauthClientId = null;
+        this.createdOauthClientSecret = null;
+      }
+      this.notice = "OAuth application revoked.";
     });
   }
 

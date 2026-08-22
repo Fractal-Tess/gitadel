@@ -1,3 +1,5 @@
+import { SvelteSet } from "svelte/reactivity";
+
 import { z } from "zod";
 
 import {
@@ -46,8 +48,8 @@ export class RepositoryPageState {
   refs = $state.raw<RepositoryRefs | null>(null);
   repositoryTree = $state.raw<Tree | null>(null);
   expandedTrees = $state.raw<Record<string, Tree>>({});
-  expandedPaths = $state.raw<Set<string>>(new Set());
-  loadingPaths = $state.raw<Set<string>>(new Set());
+  expandedPaths = new SvelteSet<string>();
+  loadingPaths = new SvelteSet<string>();
   selectedPath = $state("");
   blob = $state.raw<Blob | null>(null);
   history = $state.raw<History | null>(null);
@@ -73,10 +75,7 @@ export class RepositoryPageState {
   );
   selectedLanguage = $derived(this.blob ? languageLabel(this.blob.path) : "");
   totalLines = $derived(
-    this.stats.reduce(
-      (sum, item) => sum + item.code + item.comments + item.blanks,
-      0,
-    ),
+    this.stats.reduce((sum, item) => sum + item.code + item.comments, 0),
   );
 
   #repositoryRequestSequence = 0;
@@ -142,8 +141,8 @@ export class RepositoryPageState {
     this.emptyRepository = false;
     this.repositoryTree = null;
     this.expandedTrees = {};
-    this.expandedPaths = new Set();
-    this.loadingPaths = new Set();
+    this.expandedPaths = new SvelteSet();
+    this.loadingPaths = new SvelteSet();
     this.selectedPath = this.repositoryPath;
     this.blob = null;
     this.history = null;
@@ -233,7 +232,7 @@ export class RepositoryPageState {
   }
 
   async toggleDirectory(path: string): Promise<void> {
-    const expanded = new Set(this.expandedPaths);
+    const expanded = new SvelteSet(this.expandedPaths);
     if (expanded.has(path)) {
       expanded.delete(path);
       this.expandedPaths = expanded;
@@ -243,7 +242,7 @@ export class RepositoryPageState {
     this.expandedPaths = expanded;
     if (this.expandedTrees[path] || this.loadingPaths.has(path)) return;
 
-    const loading = new Set(this.loadingPaths);
+    const loading = new SvelteSet(this.loadingPaths);
     loading.add(path);
     this.loadingPaths = loading;
     const requestedRevision = this.revision;
@@ -258,7 +257,7 @@ export class RepositoryPageState {
     } catch (caught) {
       this.error = errorMessage(caught);
     } finally {
-      const nextLoading = new Set(this.loadingPaths);
+      const nextLoading = new SvelteSet(this.loadingPaths);
       nextLoading.delete(path);
       this.loadingPaths = nextLoading;
     }
@@ -361,7 +360,7 @@ export class RepositoryPageState {
           ),
         ]);
         this.blob = blob;
-        this.expandedPaths = new Set(parentPaths);
+        this.expandedPaths = new SvelteSet(parentPaths);
         this.expandedTrees = Object.fromEntries(
           parentPaths.map((path, index) => [path, parentTrees[index]!]),
         );

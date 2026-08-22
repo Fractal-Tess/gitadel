@@ -1,8 +1,10 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { resolve } from "$app/paths";
-  import { Building2, KeyRound, ShieldCheck } from "lucide-svelte";
+  import { page } from "$app/state";
+  import { AppWindow, Building2, KeyRound, ShieldCheck } from "lucide-svelte";
 
+  import OauthApplicationSettings from "$lib/components/settings/oauth-application-settings.svelte";
   import OrganizationSettings from "$lib/components/settings/organization-settings.svelte";
   import SecuritySettings from "$lib/components/settings/security-settings.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -13,6 +15,9 @@
   const state = new AccountSettingsState(app);
 
   onMount(() => {
+    if (page.url.searchParams.get("view") === "applications") {
+      state.view = "applications";
+    }
     void state.initialize();
   });
 </script>
@@ -23,12 +28,16 @@
 
 <div class="min-h-screen bg-background">
   <header class="border-b bg-background/95">
-    <div class="mx-auto flex min-h-16 max-w-6xl flex-wrap items-center justify-between gap-4 px-5 py-3">
+    <div
+      class="mx-auto flex min-h-16 max-w-6xl flex-wrap items-center justify-between gap-4 px-5 py-3"
+    >
       <a class="text-sm font-bold tracking-[-0.035em]" href={resolve("/")}>
         {app.instance?.site_name ?? "GITADEL"}
       </a>
       <div class="flex items-center gap-3">
-        <span class="text-sm text-muted-foreground">{app.authStatus?.user?.username}</span>
+        <span class="text-sm text-muted-foreground"
+          >{app.authStatus?.user?.username}</span
+        >
         <Button
           variant="outline"
           size="sm"
@@ -41,7 +50,9 @@
 
   <main class="mx-auto max-w-6xl px-5 py-10">
     <div class="mb-8">
-      <p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+      <p
+        class="text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+      >
         Personal
       </p>
       <h1 class="mt-2 text-2xl font-semibold">Account settings</h1>
@@ -54,6 +65,13 @@
         onclick={() => (state.view = "security")}
       >
         <KeyRound class="size-4" />Security
+      </Button>
+      <Button
+        class="gap-2"
+        variant={state.view === "applications" ? "default" : "outline"}
+        onclick={() => (state.view = "applications")}
+      >
+        <AppWindow class="size-4" />Applications
       </Button>
       <Button
         class="gap-2"
@@ -70,7 +88,9 @@
     </nav>
 
     {#if state.error}
-      <p class="mb-5 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+      <p
+        class="mb-5 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
+      >
         {state.error}
       </p>
     {/if}
@@ -84,6 +104,8 @@
       </div>
     {:else if state.view === "security"}
       <SecuritySettings {state} />
+    {:else if state.view === "applications"}
+      <OauthApplicationSettings {state} />
     {:else}
       <OrganizationSettings {state} />
     {/if}

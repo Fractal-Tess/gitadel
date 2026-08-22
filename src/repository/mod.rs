@@ -1,5 +1,6 @@
 mod browser;
 mod git_http;
+mod gitea;
 mod lfs;
 mod resources;
 mod ssh;
@@ -105,6 +106,17 @@ impl RepositoryState {
         endpoint.set_query(None);
         endpoint.set_fragment(None);
         endpoint.to_string().trim_end_matches('/').to_owned()
+    }
+
+    pub(super) fn http_clone_url(&self, repository: &repository::Model) -> String {
+        let mut endpoint = self.public_url.as_ref().clone();
+        endpoint.set_path(&format!(
+            "/{}/{}.git",
+            repository.namespace, repository.name
+        ));
+        endpoint.set_query(None);
+        endpoint.set_fragment(None);
+        endpoint.to_string()
     }
 
     pub(super) fn ssh_clone_url(&self, repository: &repository::Model) -> String {
@@ -284,6 +296,7 @@ pub fn router() -> Router<RepositoryState> {
             "/repositories",
             get(resources::list_repositories).post(resources::create_repository),
         )
+        .route("/repositories/overview", get(browser::overview))
         .route(
             "/repositories/{namespace}/{name}",
             get(resources::get_repository),
@@ -293,6 +306,10 @@ pub fn router() -> Router<RepositoryState> {
             delete(resources::unfavorite_repository).put(resources::favorite_repository),
         )
         .route("/repositories/{namespace}/{name}/refs", get(browser::refs))
+        .route(
+            "/repositories/{namespace}/{name}/activity",
+            get(browser::activity),
+        )
         .route("/repositories/{namespace}/{name}/tree", get(browser::tree))
         .route("/repositories/{namespace}/{name}/blob", get(browser::blob))
         .route("/repositories/{namespace}/{name}/raw", get(browser::raw))
@@ -319,6 +336,11 @@ pub fn router() -> Router<RepositoryState> {
         .route(
             "/repositories/{namespace}/{name}/collaborators/{username}",
             delete(resources::remove_collaborator),
+        )
+        .route("/user/repos", get(gitea::list_user_repositories))
+        .route(
+            "/repos/{namespace}/{name}/branches",
+            get(gitea::list_branches),
         )
 }
 

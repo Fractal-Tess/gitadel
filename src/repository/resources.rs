@@ -10,6 +10,7 @@ use axum_extra::extract::cookie::CookieJar;
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
+    sea_query::Expr,
 };
 use serde::{Deserialize, Serialize};
 use sley::{ObjectFormat, Repository as SleyRepository};
@@ -41,8 +42,17 @@ pub struct RepositoryResponse {
     ssh_clone_url: String,
 }
 
+pub(super) struct AccessibleRepositories {
+    pub(super) favorite_ids: HashSet<Uuid>,
+    pub(super) repositories: Vec<repository::Model>,
+}
+
 impl RepositoryResponse {
-    fn new(repository: repository::Model, state: &RepositoryState, favorited: bool) -> Self {
+    pub(super) fn new(
+        repository: repository::Model,
+        state: &RepositoryState,
+        favorited: bool,
+    ) -> Self {
         let ssh_clone_url = state.ssh_clone_url(&repository);
         Self {
             id: repository.id,
@@ -66,9 +76,26 @@ pub async fn list_repositories(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<Vec<RepositoryResponse>>, ApiError> {
+    let accessible = accessible_repositories(&state, &headers, &jar).await?;
+    let response = accessible
+        .repositories
+        .into_iter()
+        .map(|repository| {
+            let favorited = accessible.favorite_ids.contains(&repository.id);
+            RepositoryResponse::new(repository, &state, favorited)
+        })
+        .collect();
+    Ok(Json(response))
+}
+
+pub(super) async fn accessible_repositories(
+    state: &RepositoryState,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+) -> Result<AccessibleRepositories, ApiError> {
     let user_id = state
         .identity()
-        .optional_user(&headers, &jar, SCOPE_READ)
+        .optional_user(headers, jar, SCOPE_READ)
         .await?
         .map(|account| account.id);
     let favorite_ids = if let Some(user_id) = user_id {
@@ -78,7 +105,7 @@ pub async fn list_repositories(
             .await?
             .into_iter()
             .map(|favorite| favorite.repository_id)
-            .collect::<HashSet<_>>()
+            .collect()
     } else {
         HashSet::new()
     };
@@ -86,17 +113,19 @@ pub async fn list_repositories(
         .order_by_desc(repository::Column::UpdatedAt)
         .all(state.identity().database())
         .await?;
-    let mut response = Vec::with_capacity(repositories.len());
+    let mut accessible = Vec::with_capacity(repositories.len());
     for repository in repositories {
         if state
             .can_access(&repository, user_id, Permission::Read)
             .await?
         {
-            let favorited = favorite_ids.contains(&repository.id);
-            response.push(RepositoryResponse::new(repository, &state, favorited));
+            accessible.push(repository);
         }
     }
-    Ok(Json(response))
+    Ok(AccessibleRepositories {
+        favorite_ids,
+        repositories: accessible,
+    })
 }
 
 #[derive(Deserialize)]
@@ -257,6 +286,31 @@ pub(super) async fn create_owned_repository(
     }
 
     Ok(repository)
+}
+
+pub(super) async fn record_push(
+    state: &RepositoryState,
+    repository_id: Uuid,
+    actor_user_id: Uuid,
+    target: String,
+) -> Result<(), ApiError> {
+    let transaction = state.identity().database().begin().await?;
+    repository::Entity::update_many()
+        .col_expr(repository::Column::UpdatedAt, Expr::value(Utc::now()))
+        .filter(repository::Column::Id.eq(repository_id))
+        .exec(&transaction)
+        .await?;
+    state
+        .identity()
+        .audit_on(
+            &transaction,
+            Some(actor_user_id),
+            "repository.push",
+            Some(target),
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(())
 }
 
 pub async fn get_repository(
@@ -546,5 +600,90 @@ async fn cleanup_repository(path: &Path) {
         && error.kind() != std::io::ErrorKind::NotFound
     {
         tracing::error!(%error, path = %path.display(), "could not clean up repository directory");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::{
+        config::{DatabaseSettings, Settings, StorageSettings},
+        database::connect_and_migrate,
+        identity::{IdentityState, bootstrap_admin},
+    };
+
+    #[tokio::test]
+    async fn record_push_should_move_repository_to_front_of_updated_order() {
+        let test_root = std::env::temp_dir().join(format!("gitadel-push-order-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&test_root).await.unwrap();
+        let database = connect_and_migrate(&DatabaseSettings {
+            url: format!(
+                "sqlite://{}?mode=rwc",
+                test_root.join("gitadel.db").display()
+            ),
+        })
+        .await
+        .unwrap();
+        let account = bootstrap_admin(&database, "archivist", "test-password".to_owned())
+            .await
+            .unwrap();
+        let settings = Settings::default();
+        let public_url = settings.server.public_url;
+        let identity = IdentityState::new(database, settings.auth, public_url.clone()).unwrap();
+        let state = RepositoryState::new(
+            identity,
+            StorageSettings {
+                repository_root: test_root.join("repositories"),
+                lfs_root: test_root.join("lfs"),
+            },
+            public_url,
+            2222,
+        )
+        .await
+        .unwrap();
+        let first = create_owned_repository(
+            &state,
+            account.id,
+            CreateRepositoryOptions {
+                namespace: account.username.clone(),
+                name: "first".to_owned(),
+                description: None,
+                visibility: None,
+                object_format: None,
+            },
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        create_owned_repository(
+            &state,
+            account.id,
+            CreateRepositoryOptions {
+                namespace: account.username,
+                name: "second".to_owned(),
+                description: None,
+                visibility: None,
+                object_format: None,
+            },
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+
+        record_push(&state, first.id, account.id, "archivist/first".to_owned())
+            .await
+            .unwrap();
+        let repositories = repository::Entity::find()
+            .order_by_desc(repository::Column::UpdatedAt)
+            .all(state.identity().database())
+            .await
+            .unwrap();
+        let actual = repositories[0].id;
+        drop(state);
+        tokio::fs::remove_dir_all(test_root).await.unwrap();
+
+        assert_eq!(actual, first.id);
     }
 }

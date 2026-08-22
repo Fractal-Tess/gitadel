@@ -12,6 +12,7 @@ use axum::{
     response::Response,
 };
 use axum_extra::extract::cookie::CookieJar;
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use comrak::{Options, markdown_to_html};
 use serde::{Deserialize, Serialize};
 use sley::{
@@ -21,7 +22,10 @@ use sley::{
 use tokei::{Config as TokeiConfig, LanguageType};
 use tokio::process::Command;
 
-use super::{Permission, RepositoryState};
+use super::{
+    Permission, RepositoryState,
+    resources::{self, accessible_repositories},
+};
 use crate::{
     entity::repository,
     identity::{ApiError, SCOPE_READ},
@@ -29,6 +33,8 @@ use crate::{
 
 const MAX_TEXT_BLOB_BYTES: usize = 2 * 1024 * 1024;
 const MAX_DIFF_BYTES: usize = 5 * 1024 * 1024;
+const DEFAULT_REPOSITORY_ACTIVITY_DAYS: u16 = 14;
+const MAX_REPOSITORY_ACTIVITY_DAYS: u16 = 365;
 
 #[derive(Deserialize)]
 pub struct BrowseQuery {
@@ -44,6 +50,18 @@ pub struct HistoryQuery {
     page: usize,
     #[serde(default = "default_per_page")]
     per_page: usize,
+}
+
+#[derive(Deserialize)]
+pub struct OverviewQuery {
+    #[serde(default = "default_repository_activity_days")]
+    activity_days: u16,
+}
+
+#[derive(Deserialize)]
+pub struct ActivityQuery {
+    #[serde(default = "default_repository_activity_days")]
+    days: u16,
 }
 
 #[derive(Serialize)]
@@ -130,6 +148,150 @@ pub struct LanguageStatResponse {
     code: usize,
     comments: usize,
     blanks: usize,
+}
+
+impl LanguageStatResponse {
+    const fn non_blank_lines(&self) -> usize {
+        self.code + self.comments
+    }
+}
+
+#[derive(Serialize)]
+pub struct RepositoryOverviewResponse {
+    repositories: Vec<RepositoryOverviewItemResponse>,
+    activity: ActivityResponse,
+}
+
+#[derive(Serialize)]
+struct RepositoryOverviewItemResponse {
+    #[serde(flatten)]
+    repository: resources::RepositoryResponse,
+    branch_count: usize,
+    total_lines: usize,
+    languages: Vec<OverviewLanguageResponse>,
+    activity: ActivityResponse,
+}
+
+#[derive(Serialize)]
+struct OverviewLanguageResponse {
+    language: String,
+    lines: usize,
+}
+
+#[derive(Serialize)]
+pub struct ActivityResponse {
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    total_commits: usize,
+    days: Vec<ActivityDayResponse>,
+}
+
+#[derive(Serialize)]
+struct ActivityDayResponse {
+    date: NaiveDate,
+    count: usize,
+}
+
+struct GitOverview {
+    branch_count: usize,
+    head: Option<(String, ObjectId)>,
+    activity: BTreeMap<NaiveDate, usize>,
+}
+
+pub async fn overview(
+    State(state): State<RepositoryState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Query(query): Query<OverviewQuery>,
+) -> Result<Json<RepositoryOverviewResponse>, ApiError> {
+    let accessible = accessible_repositories(&state, &headers, &jar).await?;
+    let end_date = Utc::now().date_naive();
+    let repository_activity_start = activity_start_date(end_date, query.activity_days)?;
+    let start_date =
+        end_date - Duration::days(i64::from(end_date.weekday().num_days_from_sunday()) + 52 * 7);
+    let mut repositories = Vec::with_capacity(accessible.repositories.len());
+    let mut activity = BTreeMap::<NaiveDate, usize>::new();
+
+    for repository in accessible.repositories {
+        let git_overview =
+            read_repository_overview(&state, &repository, start_date, end_date).await?;
+        let repository_activity = activity_response(
+            repository_activity_start,
+            end_date,
+            git_overview
+                .activity
+                .range(repository_activity_start..=end_date)
+                .map(|(&date, &count)| (date, count))
+                .collect(),
+        );
+        for (date, count) in git_overview.activity {
+            *activity.entry(date).or_default() += count;
+        }
+        let stats = match git_overview.head {
+            Some((commit_oid, tree_oid)) => {
+                let cache_key = format!("{}:{commit_oid}", repository.storage_key);
+                if let Some(cached) = state.cached_stats(&cache_key).await {
+                    cached
+                } else {
+                    let path = state.repository_path(&repository);
+                    let computed = read_git(path, move |git| compute_stats(git, tree_oid)).await?;
+                    state.cache_stats(cache_key, computed.clone()).await;
+                    computed
+                }
+            }
+            None => Vec::new(),
+        };
+        let total_lines = stats
+            .iter()
+            .map(LanguageStatResponse::non_blank_lines)
+            .sum();
+        let mut languages = stats
+            .into_iter()
+            .map(|stat| {
+                let lines = stat.non_blank_lines();
+                OverviewLanguageResponse {
+                    language: stat.language,
+                    lines,
+                }
+            })
+            .collect::<Vec<_>>();
+        languages.sort_unstable_by(|left, right| {
+            right
+                .lines
+                .cmp(&left.lines)
+                .then_with(|| left.language.cmp(&right.language))
+        });
+        languages.truncate(3);
+        let favorited = accessible.favorite_ids.contains(&repository.id);
+        repositories.push(RepositoryOverviewItemResponse {
+            activity: repository_activity,
+            branch_count: git_overview.branch_count,
+            total_lines,
+            languages,
+            repository: resources::RepositoryResponse::new(repository, &state, favorited),
+        });
+    }
+
+    Ok(Json(RepositoryOverviewResponse {
+        repositories,
+        activity: activity_response(start_date, end_date, activity),
+    }))
+}
+
+pub async fn activity(
+    State(state): State<RepositoryState>,
+    AxumPath((namespace, name)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Query(query): Query<ActivityQuery>,
+) -> Result<Json<ActivityResponse>, ApiError> {
+    let repository = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
+    let end_date = Utc::now().date_naive();
+    let start_date = activity_start_date(end_date, query.days)?;
+    let activity = read_repository_overview(&state, &repository, start_date, end_date)
+        .await?
+        .activity;
+    Ok(Json(activity_response(start_date, end_date, activity)))
 }
 
 pub async fn refs(
@@ -477,6 +639,67 @@ pub async fn stats(
     Ok(Json(computed))
 }
 
+async fn read_repository_overview(
+    state: &RepositoryState,
+    repository: &repository::Model,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> Result<GitOverview, ApiError> {
+    let path = state.repository_path(repository);
+    let default_reference = format!("refs/heads/{}", repository.default_branch);
+    read_git(path, move |git| {
+        let references = git.references().list_refs_with_prefix("refs/heads/")?;
+        let branch_count = references.len();
+        let mut roots = Vec::with_capacity(branch_count);
+        let mut default_index = None;
+        for reference in references {
+            let ReferenceTarget::Direct(target) = reference.target else {
+                continue;
+            };
+            let commit_oid = git.peel_to_commit_oid(target)?;
+            if reference.name == default_reference {
+                default_index = Some(roots.len());
+            }
+            roots.push(commit_oid);
+        }
+        let head = if let Some(index) = default_index {
+            let commit_oid = &roots[index];
+            let commit = git.read_commit(commit_oid)?;
+            Some((commit_oid.to_hex(), commit.tree))
+        } else {
+            None
+        };
+        let mut activity = BTreeMap::new();
+        if !roots.is_empty() {
+            git.rev_graph().stream_reachable_commits(
+                roots,
+                ReachableCommitOptions::new(),
+                |metadata| {
+                    let commit = git.read_commit(&metadata.oid)?;
+                    if let Some(signature) = commit.author_signature()
+                        && let Some(timestamp) =
+                            DateTime::<Utc>::from_timestamp(signature.time.seconds, 0)
+                    {
+                        let date = (timestamp
+                            + Duration::minutes(i64::from(signature.time.timezone_offset_minutes)))
+                        .date_naive();
+                        if date >= start_date && date <= end_date {
+                            *activity.entry(date).or_default() += 1;
+                        }
+                    }
+                    Ok(StreamControl::Continue)
+                },
+            )?;
+        }
+        Ok(GitOverview {
+            branch_count,
+            head,
+            activity,
+        })
+    })
+    .await
+}
+
 async fn readable_repository(
     state: &RepositoryState,
     headers: &HeaderMap,
@@ -496,7 +719,7 @@ async fn readable_repository(
     Ok(repository)
 }
 
-async fn read_git<T, F>(path: PathBuf, operation: F) -> Result<T, ApiError>
+pub(super) async fn read_git<T, F>(path: PathBuf, operation: F) -> Result<T, ApiError>
 where
     T: Send + 'static,
     F: FnOnce(&GitRepository) -> sley::Result<T> + Send + 'static,
@@ -657,10 +880,78 @@ fn collect_tree_stats(
     Ok(())
 }
 
+const fn default_repository_activity_days() -> u16 {
+    DEFAULT_REPOSITORY_ACTIVITY_DAYS
+}
+
+fn activity_start_date(end_date: NaiveDate, days: u16) -> Result<NaiveDate, ApiError> {
+    if !(1..=MAX_REPOSITORY_ACTIVITY_DAYS).contains(&days) {
+        return Err(ApiError::bad_request(format!(
+            "Activity window must be between 1 and {MAX_REPOSITORY_ACTIVITY_DAYS} days."
+        )));
+    }
+    Ok(end_date - Duration::days(i64::from(days - 1)))
+}
+
+fn activity_response(
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    activity: BTreeMap<NaiveDate, usize>,
+) -> ActivityResponse {
+    let total_commits = activity.values().sum();
+    let days = activity
+        .into_iter()
+        .map(|(date, count)| ActivityDayResponse { date, count })
+        .collect();
+    ActivityResponse {
+        start_date,
+        end_date,
+        total_commits,
+        days,
+    }
+}
+
 const fn default_page() -> usize {
     1
 }
 
 const fn default_per_page() -> usize {
     30
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn activity_window_should_include_requested_days() {
+        let end_date = NaiveDate::from_ymd_opt(2026, 8, 21).unwrap();
+
+        assert_eq!(
+            activity_start_date(end_date, 14).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 8, 8).unwrap()
+        );
+    }
+
+    #[test]
+    fn activity_window_should_reject_out_of_range_days() {
+        assert!(
+            [0, MAX_REPOSITORY_ACTIVITY_DAYS + 1]
+                .into_iter()
+                .all(|days| activity_start_date(NaiveDate::MIN, days).is_err())
+        );
+    }
+
+    #[test]
+    fn language_stats_should_exclude_blank_lines_from_totals() {
+        let stats = LanguageStatResponse {
+            language: "Rust".to_owned(),
+            files: 1,
+            code: 21,
+            comments: 3,
+            blanks: 8,
+        };
+
+        assert_eq!(stats.non_blank_lines(), 24);
+    }
 }

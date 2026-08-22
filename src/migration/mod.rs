@@ -4,6 +4,7 @@ mod m20260820_000003_create_repositories;
 mod m20260820_000004_create_repository_favorites;
 mod m20260820_000005_add_instance_settings;
 mod m20260820_000006_create_lfs_locks;
+mod m20260822_000007_create_oauth_provider;
 
 use sea_orm_migration::prelude::*;
 
@@ -19,6 +20,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260820_000004_create_repository_favorites::Migration),
             Box::new(m20260820_000005_add_instance_settings::Migration),
             Box::new(m20260820_000006_create_lfs_locks::Migration),
+            Box::new(m20260822_000007_create_oauth_provider::Migration),
         ]
     }
 }
