@@ -109,7 +109,7 @@
   }
 </script>
 
-<div class="mx-auto grid max-w-4xl gap-5">
+<div class="grid gap-5">
   <nav
     class="flex items-end gap-4 border-b sm:gap-5"
     aria-label="Repository settings sections"

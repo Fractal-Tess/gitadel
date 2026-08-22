@@ -2,6 +2,7 @@
   import { ChevronRight, GitBranch, LoaderCircle } from "lucide-svelte";
   import MaterialFileIcon from "$lib/components/repository/material-file-icon.svelte";
 
+  import * as Select from "$lib/components/ui/select/index.js";
   import { formatSize } from "$lib/repository/format.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
   import type { Tree } from "$lib/api.js";
@@ -9,18 +10,40 @@
   let { state }: { state: RepositoryPageState } = $props();
 </script>
 
-<aside class="min-w-0 border-b xl:border-b-0 xl:border-r">
+<aside
+  class="flex min-w-0 flex-col border-b xl:h-full xl:min-h-0 xl:border-b-0 xl:border-r"
+>
   {#if state.repositoryTree}
-    <header class="flex items-center justify-between border-b px-4 py-3">
-      <span class="flex items-center gap-2 text-sm font-semibold">
-        <GitBranch class="size-4 text-muted-foreground" />
-        {state.repositoryTree.revision}
-      </span>
-      <code class="text-xs text-muted-foreground">
-        {state.repositoryTree.commit_oid.slice(0, 8)}
-      </code>
-    </header>
-    {@render entries(state.repositoryTree, 0)}
+    <Select.Root
+      type="single"
+      value={state.revision}
+      onValueChange={(value) => {
+        if (value && value !== state.revision) state.changeRevision(value);
+      }}
+    >
+      <Select.Trigger
+        class="w-full shrink-0 rounded-none border-0 border-b px-4 font-medium shadow-none focus-visible:ring-2 data-[size=default]:h-12"
+        aria-label="Switch branch"
+      >
+        <span class="flex min-w-0 flex-1 items-center gap-2 text-sm">
+          <GitBranch class="size-4 text-muted-foreground" />
+          <span class="truncate">{state.repositoryTree.revision}</span>
+        </span>
+        <code class="shrink-0 text-xs font-normal text-muted-foreground">
+          {state.repositoryTree.commit_oid.slice(0, 8)}
+        </code>
+      </Select.Trigger>
+      <Select.Content align="start">
+        {#each state.refs?.branches ?? [] as branch (branch.name)}
+          <Select.Item value={branch.name}>{branch.name}</Select.Item>
+        {/each}
+      </Select.Content>
+    </Select.Root>
+    <!-- The branch picker stays pinned so it keeps forming the divider that runs
+         under the app header while the entries scroll beneath it. -->
+    <div class="min-h-0 flex-1 xl:overflow-y-auto xl:overscroll-contain">
+      {@render entries(state.repositoryTree, 0)}
+    </div>
   {/if}
 </aside>
 

@@ -111,11 +111,15 @@
 
 <div class="min-w-0">
   <div
-    class="text-right font-mono text-[10px] tabular-nums whitespace-nowrap text-muted-foreground"
+    class="flex items-baseline justify-end gap-1 whitespace-nowrap font-mono tabular-nums"
     aria-hidden="true"
   >
-    {activity.total_commits.toLocaleString()}
-    commit{activity.total_commits === 1 ? "" : "s"}
+    <span class="text-lg font-semibold leading-none text-foreground">
+      {activity.total_commits.toLocaleString()}
+    </span>
+    <span class="text-sm text-muted-foreground">
+      commit{activity.total_commits === 1 ? "" : "s"}
+    </span>
   </div>
 
   <div

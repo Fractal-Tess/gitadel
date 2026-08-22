@@ -2,7 +2,6 @@
   import { Copy, GitBranch } from "lucide-svelte";
 
   import RepositoryContent from "$lib/components/repository/repository-content.svelte";
-  import RepositorySidebar from "$lib/components/repository/repository-sidebar.svelte";
   import RepositoryTree from "$lib/components/repository/repository-tree.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Tabs from "$lib/components/ui/tabs/index.js";
@@ -49,41 +48,44 @@ git push -u origin main`;
 {/snippet}
 
 {#if state.emptyRepository}
-  <section class="min-h-72 rounded-lg border bg-card p-6 shadow-sm sm:p-8">
-    <div class="mx-auto max-w-3xl">
-      <div class="text-center">
-        <GitBranch
-          class="mx-auto size-9 text-muted-foreground"
-          strokeWidth={1.4}
-        />
-        <h2 class="mt-4 font-semibold">This repository is empty</h2>
-        <p class="mt-2 text-sm text-muted-foreground">
-          Push the first commit over SSH to begin the archive.
-        </p>
-      </div>
-
-      <Tabs.Root value="new" class="mt-7">
-        <Tabs.List class="grid w-full grid-cols-2">
-          <Tabs.Trigger value="new">Create a new project</Tabs.Trigger>
-          <Tabs.Trigger value="existing">Push an existing project</Tabs.Trigger>
-        </Tabs.List>
-        <Tabs.Content value="new" class="mt-3">
-          {@render commandBlock(initialRepositoryCommands())}
-        </Tabs.Content>
-        <Tabs.Content value="existing" class="mt-3">
-          {@render commandBlock(existingRepositoryCommands())}
-        </Tabs.Content>
-      </Tabs.Root>
-    </div>
-  </section>
-{:else}
-  <div class="space-y-5">
-    <div
-      class="grid overflow-hidden rounded-md border bg-card/20 xl:grid-cols-[18rem_minmax(0,1fr)_18rem]"
+  <div class="xl:h-full xl:overflow-y-auto xl:overscroll-contain">
+    <section
+      class="m-5 min-h-72 rounded-lg border bg-card p-6 shadow-sm sm:p-8"
     >
-      <RepositoryTree {state} />
-      <RepositoryContent {state} />
-      <RepositorySidebar {state} />
-    </div>
+      <div class="mx-auto max-w-3xl">
+        <div class="text-center">
+          <GitBranch
+            class="mx-auto size-9 text-muted-foreground"
+            strokeWidth={1.4}
+          />
+          <h2 class="mt-4 font-semibold">This repository is empty</h2>
+          <p class="mt-2 text-sm text-muted-foreground">
+            Push the first commit over SSH to begin the archive.
+          </p>
+        </div>
+
+        <Tabs.Root value="new" class="mt-7">
+          <Tabs.List class="grid w-full grid-cols-2">
+            <Tabs.Trigger value="new">Create a new project</Tabs.Trigger>
+            <Tabs.Trigger value="existing"
+              >Push an existing project</Tabs.Trigger
+            >
+          </Tabs.List>
+          <Tabs.Content value="new" class="mt-3">
+            {@render commandBlock(initialRepositoryCommands())}
+          </Tabs.Content>
+          <Tabs.Content value="existing" class="mt-3">
+            {@render commandBlock(existingRepositoryCommands())}
+          </Tabs.Content>
+        </Tabs.Root>
+      </div>
+    </section>
+  </div>
+{:else}
+  <div
+    class="grid bg-card/20 xl:h-full xl:min-h-0 xl:grid-cols-[18rem_minmax(0,1fr)]"
+  >
+    <RepositoryTree {state} />
+    <RepositoryContent {state} />
   </div>
 {/if}

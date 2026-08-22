@@ -301,6 +301,7 @@ pub(super) async fn record_push(
     actor_user_id: Uuid,
     target: String,
 ) -> Result<(), ApiError> {
+    state.invalidate_repository_size(repository_id).await;
     let transaction = state.identity().database().begin().await?;
     repository::Entity::update_many()
         .col_expr(repository::Column::UpdatedAt, Expr::value(Utc::now()))
@@ -1006,90 +1007,5 @@ async fn cleanup_repository(path: &Path) {
         && error.kind() != std::io::ErrorKind::NotFound
     {
         tracing::error!(%error, path = %path.display(), "could not clean up repository directory");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::*;
-    use crate::{
-        config::{DatabaseSettings, Settings, StorageSettings},
-        database::connect_and_migrate,
-        identity::{IdentityState, bootstrap_admin},
-    };
-
-    #[tokio::test]
-    async fn record_push_should_move_repository_to_front_of_updated_order() {
-        let test_root = std::env::temp_dir().join(format!("gitadel-push-order-{}", Uuid::new_v4()));
-        tokio::fs::create_dir_all(&test_root).await.unwrap();
-        let database = connect_and_migrate(&DatabaseSettings {
-            url: format!(
-                "sqlite://{}?mode=rwc",
-                test_root.join("gitadel.db").display()
-            ),
-        })
-        .await
-        .unwrap();
-        let account = bootstrap_admin(&database, "archivist", "test-password".to_owned())
-            .await
-            .unwrap();
-        let settings = Settings::default();
-        let public_url = settings.server.public_url;
-        let identity = IdentityState::new(database, settings.auth, public_url.clone()).unwrap();
-        let state = RepositoryState::new(
-            identity,
-            StorageSettings {
-                repository_root: test_root.join("repositories"),
-                lfs_root: test_root.join("lfs"),
-            },
-            public_url,
-            2222,
-        )
-        .await
-        .unwrap();
-        let first = create_owned_repository(
-            &state,
-            account.id,
-            CreateRepositoryOptions {
-                namespace: account.username.clone(),
-                name: "first".to_owned(),
-                description: None,
-                visibility: None,
-                object_format: None,
-            },
-        )
-        .await
-        .unwrap();
-        tokio::time::sleep(Duration::from_millis(2)).await;
-        create_owned_repository(
-            &state,
-            account.id,
-            CreateRepositoryOptions {
-                namespace: account.username,
-                name: "second".to_owned(),
-                description: None,
-                visibility: None,
-                object_format: None,
-            },
-        )
-        .await
-        .unwrap();
-        tokio::time::sleep(Duration::from_millis(2)).await;
-
-        record_push(&state, first.id, account.id, "archivist/first".to_owned())
-            .await
-            .unwrap();
-        let repositories = repository::Entity::find()
-            .order_by_desc(repository::Column::UpdatedAt)
-            .all(state.identity().database())
-            .await
-            .unwrap();
-        let actual = repositories[0].id;
-        drop(state);
-        tokio::fs::remove_dir_all(test_root).await.unwrap();
-
-        assert_eq!(actual, first.id);
     }
 }

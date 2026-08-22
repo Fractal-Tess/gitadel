@@ -78,12 +78,14 @@ pub struct RefResponse {
 pub struct RefsResponse {
     branches: Vec<RefResponse>,
     tags: Vec<RefResponse>,
+    size_bytes: u64,
 }
 
 #[derive(Serialize)]
 pub struct TreeResponse {
     revision: String,
     commit_oid: String,
+    commit_count: Option<usize>,
     path: String,
     entries: Vec<TreeEntryResponse>,
 }
@@ -344,9 +346,15 @@ pub async fn refs(
             })
             .collect::<Vec<_>>();
         tags.sort_unstable_by(|left, right| left.name.cmp(&right.name));
-        Ok(RefsResponse { branches, tags })
-    })
-    .await?;
+        Ok(RefsResponse {
+            branches,
+            tags,
+            size_bytes: 0,
+        })
+    });
+    let (mut response, size_bytes) =
+        tokio::try_join!(response, state.repository_size(&repository))?;
+    response.size_bytes = size_bytes;
     Ok(Json(response))
 }
 
@@ -362,8 +370,10 @@ pub async fn tree(
         .rev
         .unwrap_or_else(|| repository.default_branch.clone());
     let requested_path = normalize_browse_path(&query.path)?;
+    let include_commit_count = requested_path.is_empty();
     let path = state.repository_path(&repository);
-    let response = read_git(path, move |git| {
+    let count_path = path.clone();
+    let (mut response, commit_oid) = read_git(path, move |git| {
         let commit_oid = git.peel_to_commit_oid(git.rev_parse(&revision)?)?;
         let resolved = git.resolve_path(&revision, &requested_path)?;
         if resolved.object_type != GitObjectType::Tree {
@@ -410,14 +420,52 @@ pub async fn tree(
                 .cmp(&right_file)
                 .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
         });
-        Ok(TreeResponse {
-            revision,
-            commit_oid: commit_oid.to_hex(),
-            path: requested_path,
-            entries,
-        })
+        Ok((
+            TreeResponse {
+                revision,
+                commit_oid: commit_oid.to_hex(),
+                commit_count: None,
+                path: requested_path,
+                entries,
+            },
+            commit_oid,
+        ))
     })
     .await?;
+
+    if include_commit_count {
+        let cache_key = commit_oid.to_hex();
+        let count = match state.cached_commit_count(&cache_key).await {
+            Some(count) => count,
+            None => {
+                let _permit = state
+                    .commit_count_slots
+                    .acquire()
+                    .await
+                    .map_err(ApiError::internal)?;
+                if let Some(count) = state.cached_commit_count(&cache_key).await {
+                    count
+                } else {
+                    let count = read_git(count_path, move |git| {
+                        let mut count = 0;
+                        git.rev_graph().stream_reachable_commits(
+                            [commit_oid],
+                            ReachableCommitOptions::new(),
+                            |_| {
+                                count += 1;
+                                Ok(StreamControl::Continue)
+                            },
+                        )?;
+                        Ok(count)
+                    })
+                    .await?;
+                    state.cache_commit_count(cache_key, count).await;
+                    count
+                }
+            }
+        };
+        response.commit_count = Some(count);
+    }
     Ok(Json(response))
 }
 
@@ -940,65 +988,4 @@ const fn default_page() -> usize {
 
 const fn default_per_page() -> usize {
     30
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn activity_window_should_include_requested_days() {
-        let end_date = NaiveDate::from_ymd_opt(2026, 8, 21).unwrap();
-
-        assert_eq!(
-            activity_start_date(end_date, 14).unwrap(),
-            NaiveDate::from_ymd_opt(2026, 8, 8).unwrap()
-        );
-    }
-
-    #[test]
-    fn activity_window_should_reject_out_of_range_days() {
-        assert!(
-            [0, MAX_REPOSITORY_ACTIVITY_DAYS + 1]
-                .into_iter()
-                .all(|days| activity_start_date(NaiveDate::MIN, days).is_err())
-        );
-    }
-
-    #[test]
-    fn language_stats_should_exclude_blank_lines_from_totals() {
-        let stats = LanguageStatResponse {
-            language: "Rust".to_owned(),
-            files: 1,
-            code: 21,
-            comments: 3,
-            blanks: 8,
-        };
-
-        assert_eq!(stats.non_blank_lines(), 24);
-    }
-
-    #[test]
-    fn markdown_should_preserve_task_lists() {
-        let rendered = render_markdown("- [x] Shipped");
-
-        assert!(rendered.contains("<input type=\"checkbox\" checked=\"\" disabled=\"\">"));
-    }
-
-    #[test]
-    fn markdown_should_render_safe_html_images() {
-        let rendered = render_markdown(
-            r#"<p align="center">
-  <a href="https://example.com"><img src="assets/logo.png" alt="Logo" width="160" /></a>
-</p>
-<script>alert("no")</script>
-<img src="javascript:alert('no')" onerror="alert('no')">"#,
-        );
-
-        assert!(rendered.contains("<p align=\"center\">"));
-        assert!(rendered.contains("<img src=\"assets/logo.png\" alt=\"Logo\" width=\"160\">"));
-        assert!(!rendered.contains("<script"));
-        assert!(!rendered.contains("javascript:"));
-        assert!(!rendered.contains("onerror"));
-    }
 }

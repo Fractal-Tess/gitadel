@@ -11,7 +11,7 @@ pub(crate) use browser::render_markdown;
 
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -22,7 +22,10 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-use tokio::{fs, sync::RwLock};
+use tokio::{
+    fs,
+    sync::{RwLock, Semaphore},
+};
 use url::Url;
 use uuid::Uuid;
 
@@ -39,6 +42,11 @@ pub struct RepositoryState {
     identity: IdentityState,
     repository_root: Arc<PathBuf>,
     stats_cache: Arc<RwLock<HashMap<String, Vec<browser::LanguageStatResponse>>>>,
+    commit_count_cache: Arc<RwLock<HashMap<String, usize>>>,
+    commit_count_slots: Arc<Semaphore>,
+    size_cache: Arc<RwLock<HashMap<Uuid, CachedRepositorySize>>>,
+    size_generations: Arc<RwLock<HashMap<Uuid, u64>>>,
+    size_measurement_slots: Arc<Semaphore>,
     lfs_root: Arc<PathBuf>,
     public_url: Arc<Url>,
     ssh_port: u16,
@@ -67,6 +75,17 @@ struct LfsAuthorization {
     expires_at: Instant,
 }
 
+#[derive(Clone, Copy)]
+struct CachedRepositorySize {
+    bytes: u64,
+    measured_at: Instant,
+}
+
+const COMMIT_COUNT_CACHE_CAPACITY: usize = 4_096;
+const COMMIT_COUNT_CONCURRENCY: usize = 2;
+const REPOSITORY_SIZE_CACHE_LIFETIME: Duration = Duration::from_secs(5 * 60);
+const REPOSITORY_SIZE_MEASUREMENT_CONCURRENCY: usize = 2;
+
 impl RepositoryState {
     pub async fn new(
         identity: IdentityState,
@@ -80,6 +99,13 @@ impl RepositoryState {
             identity,
             repository_root: Arc::new(settings.repository_root),
             stats_cache: Arc::new(RwLock::new(HashMap::new())),
+            commit_count_cache: Arc::new(RwLock::new(HashMap::new())),
+            commit_count_slots: Arc::new(Semaphore::new(COMMIT_COUNT_CONCURRENCY)),
+            size_cache: Arc::new(RwLock::new(HashMap::new())),
+            size_generations: Arc::new(RwLock::new(HashMap::new())),
+            size_measurement_slots: Arc::new(Semaphore::new(
+                REPOSITORY_SIZE_MEASUREMENT_CONCURRENCY,
+            )),
             lfs_root: Arc::new(settings.lfs_root),
             public_url: Arc::new(public_url),
             ssh_port,
@@ -97,9 +123,12 @@ impl RepositoryState {
             .join(format!("{}.git", repository.storage_key))
     }
 
+    pub(super) fn lfs_repository_path(&self, repository: &repository::Model) -> PathBuf {
+        self.lfs_root.join(repository.storage_key.to_string())
+    }
+
     pub(super) fn lfs_object_path(&self, repository: &repository::Model, oid: &str) -> PathBuf {
-        self.lfs_root
-            .join(repository.storage_key.to_string())
+        self.lfs_repository_path(repository)
             .join(&oid[..2])
             .join(&oid[2..4])
             .join(oid)
@@ -191,6 +220,94 @@ impl RepositoryState {
 
     async fn cache_stats(&self, key: String, stats: Vec<browser::LanguageStatResponse>) {
         self.stats_cache.write().await.insert(key, stats);
+    }
+
+    async fn cached_commit_count(&self, key: &str) -> Option<usize> {
+        self.commit_count_cache.read().await.get(key).copied()
+    }
+
+    async fn cache_commit_count(&self, key: String, count: usize) {
+        let mut cache = self.commit_count_cache.write().await;
+        if cache.len() >= COMMIT_COUNT_CACHE_CAPACITY {
+            cache.clear();
+        }
+        cache.insert(key, count);
+    }
+
+    async fn repository_size(&self, repository: &repository::Model) -> Result<u64, ApiError> {
+        if let Some(cached) = self.fresh_cached_repository_size(repository.id).await {
+            return Ok(cached);
+        }
+
+        let _permit = self
+            .size_measurement_slots
+            .acquire()
+            .await
+            .map_err(ApiError::internal)?;
+        if let Some(cached) = self.fresh_cached_repository_size(repository.id).await {
+            return Ok(cached);
+        }
+
+        let generation = self
+            .size_generations
+            .read()
+            .await
+            .get(&repository.id)
+            .copied()
+            .unwrap_or_default();
+        let repository_path = self.repository_path(repository);
+        let lfs_path = self.lfs_repository_path(repository);
+        let bytes = tokio::task::spawn_blocking(move || {
+            let git_bytes = directory_size(&repository_path)?;
+            let lfs_bytes = directory_size(&lfs_path)?;
+            Ok::<_, anyhow::Error>(git_bytes.saturating_add(lfs_bytes))
+        })
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::internal)?;
+        let current_generation = self
+            .size_generations
+            .read()
+            .await
+            .get(&repository.id)
+            .copied()
+            .unwrap_or_default();
+        if current_generation == generation {
+            self.size_cache.write().await.insert(
+                repository.id,
+                CachedRepositorySize {
+                    bytes,
+                    measured_at: Instant::now(),
+                },
+            );
+            let generation_after_insert = self
+                .size_generations
+                .read()
+                .await
+                .get(&repository.id)
+                .copied()
+                .unwrap_or_default();
+            if generation_after_insert != generation {
+                self.size_cache.write().await.remove(&repository.id);
+            }
+        }
+        Ok(bytes)
+    }
+
+    async fn fresh_cached_repository_size(&self, repository_id: Uuid) -> Option<u64> {
+        self.size_cache
+            .read()
+            .await
+            .get(&repository_id)
+            .filter(|cached| cached.measured_at.elapsed() < REPOSITORY_SIZE_CACHE_LIFETIME)
+            .map(|cached| cached.bytes)
+    }
+
+    async fn invalidate_repository_size(&self, repository_id: Uuid) {
+        self.size_cache.write().await.remove(&repository_id);
+        let mut generations = self.size_generations.write().await;
+        let generation = generations.entry(repository_id).or_default();
+        *generation = generation.wrapping_add(1);
     }
 
     pub async fn find(&self, namespace: &str, name: &str) -> Result<repository::Model, ApiError> {
@@ -318,6 +435,21 @@ impl RepositoryState {
         }
         Ok(())
     }
+}
+
+fn directory_size(path: &Path) -> Result<u64, anyhow::Error> {
+    if !path.try_exists()? {
+        return Ok(0);
+    }
+
+    let mut bytes = 0u64;
+    for entry in walkdir::WalkDir::new(path).follow_links(false) {
+        let entry = entry?;
+        if entry.file_type().is_file() {
+            bytes = bytes.saturating_add(entry.metadata()?.len());
+        }
+    }
+    Ok(bytes)
 }
 
 fn lfs_token_key(token: &str) -> String {

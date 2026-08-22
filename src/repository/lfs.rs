@@ -370,6 +370,7 @@ async fn upload(
         let _ = fs::remove_file(&temporary).await;
     }
     result?;
+    state.invalidate_repository_size(repository.id).await;
     Ok(StatusCode::OK)
 }
 

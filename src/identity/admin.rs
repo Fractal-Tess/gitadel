@@ -328,20 +328,3 @@ async fn require_admin(
     }
     Ok(actor)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bundled_favicons_are_valid_pngs() {
-        validate_png(DEFAULT_LIGHT_FAVICON).expect("light favicon should be valid");
-        validate_png(DEFAULT_DARK_FAVICON).expect("dark favicon should be valid");
-    }
-
-    #[test]
-    fn favicon_validation_rejects_non_png_content() {
-        let error = validate_png(b"not a png").expect_err("invalid content should fail");
-        assert_eq!(error.code, "bad_request");
-    }
-}

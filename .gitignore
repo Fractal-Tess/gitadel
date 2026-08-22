@@ -1,6 +1,5 @@
 /target/
-/.devenv/
-/devenv.local.nix
+/.direnv/
 /gitadel.db
 /gitadel.db-*
 /data/

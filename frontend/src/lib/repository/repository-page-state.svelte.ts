@@ -1,4 +1,5 @@
 import { SvelteDate, SvelteSet } from "svelte/reactivity";
+import { toast } from "svelte-sonner";
 
 import { z } from "zod";
 
@@ -27,6 +28,7 @@ import {
   type Tree,
   type Webhook,
 } from "$lib/api.js";
+import { copyText } from "$lib/clipboard.js";
 import { highlight, languageLabel } from "$lib/repository/format.js";
 import {
   clearRepositoryPreload,
@@ -58,14 +60,15 @@ export class RepositoryPageState {
   refs = $state.raw<RepositoryRefs | null>(null);
   repositoryTree = $state.raw<Tree | null>(null);
   expandedTrees = $state.raw<Record<string, Tree>>({});
-  expandedPaths = new SvelteSet<string>();
-  loadingPaths = new SvelteSet<string>();
+  expandedPaths = $state.raw<SvelteSet<string>>(new SvelteSet());
+  loadingPaths = $state.raw<SvelteSet<string>>(new SvelteSet());
   selectedPath = $state("");
   blob = $state.raw<Blob | null>(null);
   history = $state.raw<History | null>(null);
   commit = $state.raw<Commit | null>(null);
   diff = $state.raw<Diff | null>(null);
   stats = $state.raw<LanguageStat[]>([]);
+  commitCount = $state.raw<number | null>(null);
   readme = $state.raw<Blob | null>(null);
   authStatus = $state.raw<AuthStatus | null>(null);
   webhooks = $state.raw<Webhook[]>([]);
@@ -110,10 +113,18 @@ export class RepositoryPageState {
 
   #repositoryRequestSequence = 0;
   #viewRequestController: AbortController | null = null;
+  #statsRevision = "";
+  #sidebarRevision = "";
 
   constructor(namespace: string, name: string) {
     this.namespace = namespace;
     this.name = name;
+  }
+
+  destroy(): void {
+    this.#repositoryRequestSequence += 1;
+    this.#viewRequestController?.abort();
+    this.#viewRequestController = null;
   }
 
   get httpCloneUrl(): string {
@@ -177,7 +188,19 @@ export class RepositoryPageState {
     this.commit = null;
     this.diff = null;
     this.readme = null;
-    this.stats = [];
+
+    // The sidebar describes the revision rather than the active view, so its
+    // figures survive tab changes and are only discarded once they belong to a
+    // revision that is no longer on screen.
+    if (this.#sidebarRevision !== this.revision) {
+      this.#sidebarRevision = this.revision;
+      this.stats = [];
+      this.commitCount = null;
+      this.#statsRevision = "";
+    }
+    // Only the overview fetches a tree, so every other view has to ask for the
+    // statistics on its own.
+    if (this.view !== "overview") void this.#loadStats(this.revision);
 
     try {
       switch (this.view) {
@@ -530,11 +553,22 @@ export class RepositoryPageState {
     const value =
       target === "http" ? this.httpCloneUrl : this.repository?.ssh_clone_url;
     if (!value) return;
-    await navigator.clipboard.writeText(value);
-    this.copied = target;
-    window.setTimeout(() => {
-      if (this.copied === target) this.copied = null;
-    }, 1600);
+
+    try {
+      await copyText(value);
+      this.copied = target;
+      toast.success(`${target.toUpperCase()} clone URL copied`, {
+        description: value,
+      });
+      window.setTimeout(() => {
+        if (this.copied === target) this.copied = null;
+      }, 1600);
+    } catch {
+      this.error = "The clone URL could not be copied.";
+      toast.error(this.error, {
+        description: "Select the URL and copy it manually instead.",
+      });
+    }
   }
 
   async #lifecycleRequest(
@@ -616,6 +650,27 @@ export class RepositoryPageState {
     }
   }
 
+  /**
+   * Fetches language statistics for a revision at most once. Stats outlive view
+   * changes, so this is a no-op whenever the sidebar already shows the numbers
+   * for the revision being asked about.
+   */
+  async #loadStats(revision: string): Promise<void> {
+    if (this.#statsRevision === revision) return;
+    this.#statsRevision = revision;
+    try {
+      const stats = await requestJson(
+        `${this.#api("/stats")}?${new URLSearchParams({ rev: revision })}`,
+        z.array(languageStatSchema),
+      );
+      if (this.revision === revision) this.stats = stats;
+    } catch {
+      // Statistics are supplementary, so a failure leaves the previous numbers
+      // in place and only clears the guard so a later view can retry.
+      if (this.#statsRevision === revision) this.#statsRevision = "";
+    }
+  }
+
   async #loadOverview(init: RequestInit): Promise<void> {
     try {
       const preloaded = this.repositoryPath
@@ -629,22 +684,20 @@ export class RepositoryPageState {
         const overview = await preloaded;
         if (init.signal?.aborted) return;
         this.repositoryTree = overview.tree;
+        this.commitCount = overview.tree?.commit_count ?? null;
         this.stats = overview.stats;
+        this.#statsRevision = this.revision;
         this.readme = overview.readme;
         this.emptyRepository = overview.emptyRepository;
         return;
       }
 
-      const [tree, stats] = await Promise.all([
+      const [tree] = await Promise.all([
         requestJson(`${this.#api("/tree")}?${this.#query()}`, treeSchema, init),
-        requestJson(
-          `${this.#api("/stats")}?${this.#query()}`,
-          z.array(languageStatSchema),
-          init,
-        ),
+        this.#loadStats(this.revision),
       ]);
       this.repositoryTree = tree;
-      this.stats = stats;
+      this.commitCount = tree.commit_count;
 
       if (this.repositoryPath) {
         const parts = this.repositoryPath.split("/");

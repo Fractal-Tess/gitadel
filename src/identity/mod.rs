@@ -1,5 +1,6 @@
 mod admin;
 mod auth;
+mod avatar;
 mod oauth;
 mod resources;
 
@@ -525,6 +526,7 @@ pub async fn bootstrap_admin(
         password_hash: Set(password_hash),
         is_admin: Set(true),
         disabled_at: Set(None),
+        avatar_updated_at: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
     }
@@ -565,6 +567,13 @@ pub fn router() -> Router<IdentityState> {
         .route("/register", post(auth::register))
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
+        .route("/users/{user_id}/avatar", get(avatar::public_avatar))
+        .route(
+            "/me/avatar",
+            put(avatar::update_avatar)
+                .delete(avatar::delete_avatar)
+                .layer(DefaultBodyLimit::max(avatar::MAX_AVATAR_REQUEST_BYTES)),
+        )
         .route("/me/username", put(auth::update_username))
         .route("/me/password", put(auth::update_password))
         .route(
@@ -721,6 +730,7 @@ pub struct UserResponse {
     pub id: Uuid,
     pub username: String,
     pub is_admin: bool,
+    pub avatar_updated_at: Option<chrono::DateTime<Utc>>,
 }
 
 impl From<user::Model> for UserResponse {
@@ -729,6 +739,7 @@ impl From<user::Model> for UserResponse {
             id: user.id,
             username: user.username,
             is_admin: user.is_admin,
+            avatar_updated_at: user.avatar_updated_at,
         }
     }
 }

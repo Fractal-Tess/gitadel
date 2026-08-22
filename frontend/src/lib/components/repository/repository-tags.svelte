@@ -6,8 +6,10 @@
   let { state }: { state: RepositoryPageState } = $props();
 </script>
 
-<section class="mx-auto max-w-5xl overflow-hidden rounded-md border bg-card/25">
-  <header class="flex items-center gap-2 border-b px-5 py-3 text-sm font-semibold">
+<section class="overflow-hidden rounded-md border bg-card/25">
+  <header
+    class="flex items-center gap-2 border-b px-5 py-3 text-sm font-semibold"
+  >
     <Tag class="size-4 text-muted-foreground" />Tags
   </header>
   <ul class="divide-y">
@@ -17,7 +19,9 @@
           class="font-mono text-sm font-medium hover:underline"
           onclick={() => state.changeRevision(item.name)}>{item.name}</button
         >
-        <code class="text-xs text-muted-foreground">{item.oid.slice(0, 12)}</code>
+        <code class="text-xs text-muted-foreground"
+          >{item.oid.slice(0, 12)}</code
+        >
       </li>
     {:else}
       <li class="p-10 text-center text-sm text-muted-foreground">

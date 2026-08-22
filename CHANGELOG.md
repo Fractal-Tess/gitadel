@@ -4,6 +4,38 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+### Added
+
+- Added a shared application shell with breadcrumbs, a collapsible desktop rail, mobile navigation, an account menu, and repository creation from anywhere in the signed-in interface.
+- Added a command palette, opened with Ctrl/Command+K or `/`, for searching repositories, reopening recent projects, and jumping to common destinations.
+- Added profile-picture upload, cropping, zooming, keyboard repositioning, removal, and cache-busted avatar display. Gitadel stores the finished 512-pixel PNG and records changes in the audit log.
+- Added repository storage size, including Git LFS objects, and commit totals to the repository metadata sidebar. Both calculations use bounded concurrency and server-side caches.
+- Added a frontend type-check command and a flake-native development shell with the Rust toolchain pinned from `rust-toolchain.toml`.
+
+### Changed
+
+- Redesigned the repository browser as a full-width, three-column workspace with independent scrolling for the tree, file preview, and metadata sidebar on wide screens.
+- Moved repository, account, and instance navigation into the shared rail, and simplified the Explore, Settings, Administration, and Changelog pages around the common shell.
+- Kept repository clone controls, description, topics, counts, and language statistics visible across repository views. Branch selection now lives in the tree or metadata toolbar instead of a duplicate default-branch row.
+- Made Explore search and favorites shareable through URL parameters, taught filtered views to load every available page, and made repository activity totals easier to scan.
+- Optimized release binaries with full link-time optimization, single-unit code generation, abort-on-panic behavior, and symbol stripping.
+- Replaced the devenv setup with direnv and `nix develop`, and made release builds install frozen frontend dependencies and require the Cargo lockfile.
+
+### Fixed
+
+- Added a selection-based clipboard fallback for clone URLs on plain HTTP or in browsers that deny the Clipboard API, with bottom-right Sonner notifications for success and failure.
+- Kept language statistics alive while switching repository tabs, loaded them when opening a non-code view directly, and cancelled obsolete repository requests after route changes.
+- Pointed Explore's infinite-scroll observer at the application shell's scroll container.
+- Kept long source lines and rendered README content inside their own preview scroller instead of stretching the repository page.
+- Invalidated cached repository sizes after pushes and LFS uploads.
+- Included the Pierre diff renderer dependency used by commit patch views.
+
+### Removed
+
+- Removed duplicated page headers, the old repository header, and route-local navigation and repository-creation controls now owned by the application shell.
+- Removed the devenv configuration files.
+- Removed the Rust test modules, Cargo test harness, Nix package checks, and NixOS virtual-machine test.
+
 ## [0.3.0] - 2026-08-22
 
 ### Added

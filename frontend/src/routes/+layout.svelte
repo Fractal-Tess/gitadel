@@ -5,15 +5,26 @@
   import { page } from "$app/state";
   import { resolve } from "$app/paths";
 
+  import AppHeader from "$lib/components/app/app-header.svelte";
+  import AppRail from "$lib/components/app/app-rail.svelte";
+  import CommandPalette from "$lib/components/app/command-palette.svelte";
+  import CreateRepositoryDialog from "$lib/components/app/create-repository-dialog.svelte";
   import { Toaster } from "$lib/components/ui/sonner/index.js";
   import { provideAppState } from "$lib/state/app-state.svelte.js";
+  import { provideShellState } from "$lib/state/shell-state.svelte.js";
 
   let { children } = $props();
   const app = provideAppState();
+  provideShellState();
   let ready = $state(false);
   let guardSequence = 0;
   let faviconVersion = $derived(
     encodeURIComponent(app.instance?.updated_at ?? "default"),
+  );
+  // Sign-in and registration are the only routes without the app shell: there
+  // is nothing to navigate to until the visitor is through them.
+  let bare = $derived(
+    page.url.pathname === "/login" || page.url.pathname === "/register",
   );
 
   $effect(() => {
@@ -102,8 +113,23 @@
 <!-- The theme is dark-only, so pin it rather than reading mode-watcher. -->
 <Toaster theme="dark" position="bottom-right" />
 
-{#if ready}
+{#if ready && bare}
   {@render children()}
+{:else if ready}
+  <div class="flex h-svh flex-col overflow-hidden bg-background">
+    <AppHeader />
+    <div class="flex min-h-0 flex-1">
+      <AppRail />
+      <main
+        class="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+        data-scroll-region
+      >
+        {@render children()}
+      </main>
+    </div>
+  </div>
+  <CommandPalette />
+  <CreateRepositoryDialog />
 {:else}
   <div
     class="grid min-h-screen place-items-center bg-background text-sm text-muted-foreground"

@@ -13,6 +13,7 @@
   import { onMount } from "svelte";
   import { toast } from "svelte-sonner";
 
+  import AccountAvatarSettings from "$lib/components/settings/account-avatar-settings.svelte";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import { Calendar } from "$lib/components/ui/calendar/index.js";
@@ -134,6 +135,8 @@
 <div
   class="divide-y divide-border overflow-hidden rounded-xl bg-card/20 ring-1 ring-foreground/15"
 >
+  <AccountAvatarSettings />
+
   <section
     class="grid gap-5 p-5 md:grid-cols-[minmax(12rem,0.72fr)_minmax(0,1.5fr)] md:gap-10 md:p-6"
     aria-labelledby="username-heading"

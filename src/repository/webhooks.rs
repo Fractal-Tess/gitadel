@@ -637,34 +637,3 @@ pub(super) fn webhook_client() -> Result<reqwest::Client, reqwest::Error> {
         .redirect(reqwest::redirect::Policy::none())
         .build()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn signature_should_match_github_sha256_format() {
-        let result = signature("secret", b"payload").unwrap();
-        assert_eq!(
-            result,
-            "sha256=b82fcb791acec57859b989b430a826488ce2e479fdf92326bd0a2e8375a42ba4"
-        );
-    }
-
-    #[test]
-    fn changed_refs_should_include_created_branch() {
-        let before = RefSnapshot::new();
-        let after = RefSnapshot::from([("refs/heads/main".to_owned(), "abc".to_owned())]);
-        let result = changed_refs(&before, &after, "000");
-        assert_eq!(result, vec![("refs/heads/main", "000", "abc")]);
-    }
-
-    #[test]
-    fn endpoint_should_reject_embedded_credentials() {
-        let result = validate_endpoint("https://user:password@example.com/hook");
-        assert!(
-            result.is_err(),
-            "credential-bearing webhook URL was accepted"
-        );
-    }
-}

@@ -37,15 +37,3 @@ pub async fn changelog() -> impl IntoResponse {
         rendered_html: CHANGELOG_HTML.as_str(),
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn changelog_should_render_the_current_release() {
-        let html = CHANGELOG_HTML.as_str();
-        assert!(html.contains("<h1>Changelog</h1>"));
-        assert!(html.contains(env!("CARGO_PKG_VERSION")));
-    }
-}

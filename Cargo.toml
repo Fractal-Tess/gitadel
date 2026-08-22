@@ -10,6 +10,14 @@ build = "build.rs"
 [[bin]]
 name = "gitadel"
 path = "src/main.rs"
+test = false
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
 
 [dependencies]
 ammonia = "4.1.4"

@@ -8,7 +8,7 @@
   let { state }: { state: RepositoryPageState } = $props();
 </script>
 
-<section class="mx-auto max-w-5xl">
+<section>
   <button
     class="mb-7 inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
     onclick={() => state.navigate("overview")}
@@ -41,17 +41,23 @@
               {item.title || "Untitled commit"}
             </p>
             <p class="mt-1.5 text-xs text-muted-foreground">
-              <span class="font-medium text-foreground/80">{item.author.name}</span>
+              <span class="font-medium text-foreground/80"
+                >{item.author.name}</span
+              >
               · {formatDate(item.committer.timestamp)}
             </p>
           </div>
-          <code class="rounded border bg-card px-2.5 py-1.5 text-xs text-muted-foreground">
+          <code
+            class="rounded border bg-card px-2.5 py-1.5 text-xs text-muted-foreground"
+          >
             {item.short_oid}
           </code>
         </button>
       </li>
     {:else}
-      <li class="py-16 text-center text-sm text-muted-foreground">No commits found.</li>
+      <li class="py-16 text-center text-sm text-muted-foreground">
+        No commits found.
+      </li>
     {/each}
   </ol>
 

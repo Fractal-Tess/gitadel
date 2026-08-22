@@ -21,6 +21,7 @@ const userSchema = z.object({
   id: z.uuid(),
   username: z.string(),
   is_admin: z.boolean(),
+  avatar_updated_at: z.string().nullable(),
 });
 
 export const authStatusSchema = z.object({
@@ -205,6 +206,7 @@ export const refSchema = z.object({
 export const refsSchema = z.object({
   branches: z.array(refSchema),
   tags: z.array(refSchema),
+  size_bytes: z.number().int().nonnegative(),
 });
 
 export const treeEntrySchema = z.object({
@@ -219,6 +221,7 @@ export const treeEntrySchema = z.object({
 export const treeSchema = z.object({
   revision: z.string(),
   commit_oid: z.string(),
+  commit_count: z.number().int().nonnegative().nullable(),
   path: z.string(),
   entries: z.array(treeEntrySchema),
 });
@@ -361,6 +364,12 @@ export async function requestEmpty(
       parsed.success ? parsed.data.error.code : "request_failed",
     );
   }
+}
+
+export function avatarUrl(userId: string, updatedAt: string | null) {
+  return updatedAt
+    ? `/api/v1/users/${userId}/avatar?v=${encodeURIComponent(updatedAt)}`
+    : null;
 }
 
 export function jsonBody(value: unknown): string {

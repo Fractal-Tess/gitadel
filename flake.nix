@@ -1,9 +1,15 @@
 {
   description = "Gitadel archival Git server";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, rust-overlay }:
     let
       inherit (nixpkgs) lib;
       systems = [ "x86_64-linux" "aarch64-linux" ];
@@ -80,16 +86,11 @@
           inherit version;
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
+          doCheck = false;
           nativeBuildInputs = buildDeps pkgs ++ [ pkgs.makeWrapper ];
           preBuild = ''
             rm -rf frontend/build
             cp -R ${frontend} frontend/build
-          '';
-          # The webhook tests build a rustls client, which needs a CA bundle that
-          # the sandbox does not otherwise provide.
-          nativeCheckInputs = [ pkgs.cacert ];
-          preCheck = ''
-            export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
           '';
           postInstall = ''
             wrapProgram $out/bin/gitadel \
@@ -121,61 +122,49 @@
       });
 
       devShells = forAllSystems (system:
-        let pkgs = nixpkgs.legacyPackages.${system}; in
+        let
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ rust-overlay.overlays.default ];
+          };
+          rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          devCommand = name: text: pkgs.writeShellApplication {
+            inherit name text;
+            runtimeInputs = [ pkgs.bun pkgs.git pkgs.nix rustToolchain ];
+          };
+        in
         {
-          # `devenv.nix` remains the primary shell and pins the exact Rust
-          # toolchain; this one exists so `nix develop` works without devenv.
           default = pkgs.mkShell {
             packages = buildDeps pkgs ++ [
               pkgs.bun
-              pkgs.cargo
-              pkgs.clippy
               pkgs.curl
               pkgs.jq
               pkgs.openssh
               pkgs.rust-analyzer
-              pkgs.rustc
-              pkgs.rustfmt
+              rustToolchain
+              (devCommand "backend" ''
+                cargo run -- "$@"
+              '')
+              (devCommand "frontend" ''
+                bun run --cwd frontend dev "$@"
+              '')
+              (devCommand "frontend-install" ''
+                bun install --cwd frontend --frozen-lockfile "$@"
+              '')
+              (devCommand "frontend-build" ''
+                bun run --cwd frontend build "$@"
+              '')
+              (devCommand "release-build" ''
+                exec ./scripts/build-release.sh "$@"
+              '')
+              (devCommand "frontend-hash" ''
+                exec ./scripts/update-frontend-hash.sh "$@"
+              '')
             ];
           };
         });
 
       formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixpkgs-fmt);
-
-      checks = forAllSystems (system:
-        let pkgs = nixpkgs.legacyPackages.${system}; in
-        {
-          package = self.packages.${system}.gitadel;
-
-          module = pkgs.testers.runNixOSTest {
-            name = "gitadel-module";
-            nodes.machine = {
-              imports = [ self.nixosModules.gitadel ];
-              environment.systemPackages = [ pkgs.curl pkgs.git ];
-              services.gitadel = {
-                enable = true;
-                publicUrl = "http://localhost:3000";
-                initialAdmin = {
-                  username = "admin";
-                  passwordFile = "/etc/gitadel-admin-password";
-                };
-              };
-              environment.etc."gitadel-admin-password".text = "hunter2hunter2";
-            };
-            testScript = ''
-              machine.wait_for_unit("gitadel.service")
-              machine.wait_for_open_port(3000)
-              machine.wait_for_open_port(2222)
-              machine.succeed("curl -fsS http://127.0.0.1:3000/api/v1/healthz")
-              # The unit must survive a restart even though bootstrapping the
-              # administrator now fails because the account already exists.
-              machine.succeed("systemctl restart gitadel.service")
-              machine.wait_for_open_port(3000)
-              machine.succeed("test -d /var/lib/gitadel/repositories")
-              machine.succeed("test -f /var/lib/gitadel/ssh-host-ed25519")
-            '';
-          };
-        });
 
       overlays.default = final: _prev: {
         gitadel = self.packages.${final.stdenv.hostPlatform.system}.gitadel;

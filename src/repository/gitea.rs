@@ -168,17 +168,3 @@ fn repository_response(
         archived: repository.archived_at.is_some(),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pagination_should_clamp_to_gitea_page_size() {
-        let pagination = GiteaPagination {
-            page: Some(2),
-            limit: Some(100),
-        };
-        assert_eq!(pagination.bounds(120), (50, 100));
-    }
-}

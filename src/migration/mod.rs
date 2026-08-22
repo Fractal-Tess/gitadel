@@ -10,6 +10,7 @@ mod m20260822_000009_create_repository_webhooks;
 mod m20260822_000010_repository_control;
 mod m20260822_000011_create_repository_topics;
 mod m20260822_000012_create_instance_assets;
+mod m20260822_000013_add_user_avatar;
 
 use sea_orm_migration::prelude::*;
 
@@ -31,6 +32,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260822_000010_repository_control::Migration),
             Box::new(m20260822_000011_create_repository_topics::Migration),
             Box::new(m20260822_000012_create_instance_assets::Migration),
+            Box::new(m20260822_000013_add_user_avatar::Migration),
         ]
     }
 }

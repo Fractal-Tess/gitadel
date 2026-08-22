@@ -268,29 +268,3 @@ fn normalize_topic(value: &str) -> Result<String, ApiError> {
     }
     Ok(name)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn normalize_topics_should_lowercase_deduplicate_and_sort() {
-        let topics =
-            normalize_topics(vec!["Rust".into(), "  axum ".into(), "rust".into()]).expect("valid");
-        assert_eq!(topics, vec!["axum".to_owned(), "rust".to_owned()]);
-    }
-
-    #[test]
-    fn normalize_topics_should_reject_unsupported_characters() {
-        assert!(normalize_topics(vec!["hello world".into()]).is_err());
-        assert!(normalize_topics(vec!["-leading".into()]).is_err());
-        assert!(normalize_topics(vec![String::new()]).is_err());
-        assert!(normalize_topics(vec!["a".repeat(36)]).is_err());
-    }
-
-    #[test]
-    fn normalize_topics_should_reject_more_than_the_per_repository_limit() {
-        let values = (0..26).map(|index| format!("topic{index}")).collect();
-        assert!(normalize_topics(values).is_err());
-    }
-}

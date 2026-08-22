@@ -4,10 +4,11 @@ Focused bug fixes and features that fit Gitadel's small-forge scope are welcome.
 
 ## Development environment
 
-The repository pins Bun, Rust, and native dependencies through [devenv](https://devenv.sh/):
+The Nix flake pins Bun, the Rust toolchain from `rust-toolchain.toml`, and all native dependencies. Enter it automatically with direnv or manually with Nix:
 
 ```bash
-devenv shell
+direnv allow
+# or: nix develop
 frontend-install
 ```
 
@@ -18,23 +19,17 @@ frontend       # SvelteKit on http://localhost:5173
 backend        # Gitadel HTTP on :3000 and SSH on :2222
 ```
 
-`nix develop` provides an equivalent shell without devenv, although it does not pin the Rust toolchain as precisely.
+The flake also provides `frontend-build`, `release-build`, and `frontend-hash` commands.
 
-## Checks
+## Validation
 
-Run formatting, linting, tests, and the frontend production build before submitting a change:
+Run formatting, linting, type checking, and the frontend production build before submitting a change:
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo clippy --bin gitadel --locked -- -D warnings
+bun run --cwd frontend check
 bun run --cwd frontend build
-```
-
-The complete Nix check builds the package and boots a VM that verifies the NixOS module can start Gitadel, bootstrap an administrator, and survive a restart:
-
-```bash
-nix flake check
 ```
 
 Nix only includes Git-tracked files in flake source inputs. Stage new source files before investigating a Nix build that cannot find them.

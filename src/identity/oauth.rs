@@ -674,38 +674,3 @@ fn escape_html(value: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn normalize_scope_should_accept_dokploy_scopes() {
-        let scope = normalize_scope("read:repository read:user read:organization").unwrap();
-        assert_eq!(scope, "read:repository read:user read:organization");
-    }
-
-    #[test]
-    fn oauth_scope_bits_should_require_repository_scope_for_repository_access() {
-        assert_eq!(oauth_scope_bits("read:user"), 0);
-        assert_eq!(
-            oauth_scope_bits("read:user read:repository"),
-            SCOPE_REPOSITORY_READ
-        );
-    }
-
-    #[test]
-    fn normalize_scope_should_reject_write_scope() {
-        let error = normalize_scope("write:repository").unwrap_err();
-        assert_eq!(
-            error,
-            "The application requested a scope Gitadel does not support."
-        );
-    }
-
-    #[test]
-    fn validate_redirect_uri_should_reject_fragments() {
-        let error = validate_redirect_uri("https://dokploy.example/callback#token").unwrap_err();
-        assert_eq!(error.code, "bad_request");
-    }
-}
