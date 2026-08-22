@@ -26,7 +26,10 @@
     refreshExplore,
   } from "$lib/navigation-cache.js";
   import { languageColor } from "$lib/repository/language-colors.js";
-  import { preloadRepository } from "$lib/repository/repository-preload.js";
+  import {
+    cancelRepositoryPreload,
+    scheduleRepositoryPreload,
+  } from "$lib/repository/repository-preload.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
   const app = useAppState();
@@ -373,16 +376,26 @@
                   name: repository.name,
                 })}
                 onpointerenter={() =>
-                  preloadRepository(
+                  scheduleRepositoryPreload(
                     repository.namespace,
                     repository.name,
                     repository.default_branch,
                   )}
+                onpointerleave={() =>
+                  cancelRepositoryPreload(
+                    repository.namespace,
+                    repository.name,
+                  )}
                 onfocus={() =>
-                  preloadRepository(
+                  scheduleRepositoryPreload(
                     repository.namespace,
                     repository.name,
                     repository.default_branch,
+                  )}
+                onblur={() =>
+                  cancelRepositoryPreload(
+                    repository.namespace,
+                    repository.name,
                   )}
               >
                 <div class="min-w-0 py-3">

@@ -10,7 +10,7 @@ mod webhooks;
 pub(crate) use browser::render_markdown;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -24,7 +24,7 @@ use axum_extra::extract::cookie::CookieJar;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use tokio::{
     fs,
-    sync::{RwLock, Semaphore},
+    sync::{Mutex, RwLock, Semaphore},
 };
 use url::Url;
 use uuid::Uuid;
@@ -41,11 +41,15 @@ use crate::{
 pub struct RepositoryState {
     identity: IdentityState,
     repository_root: Arc<PathBuf>,
+    analysis_slots: Arc<Semaphore>,
+    overview_cache: Arc<RwLock<HashMap<String, browser::GitOverview>>>,
     stats_cache: Arc<RwLock<HashMap<String, Vec<browser::LanguageStatResponse>>>>,
     commit_count_cache: Arc<RwLock<HashMap<String, usize>>>,
+    commit_count_refreshing: Arc<Mutex<HashSet<String>>>,
     commit_count_slots: Arc<Semaphore>,
     size_cache: Arc<RwLock<HashMap<Uuid, CachedRepositorySize>>>,
     size_generations: Arc<RwLock<HashMap<Uuid, u64>>>,
+    size_refreshing: Arc<Mutex<HashSet<Uuid>>>,
     size_measurement_slots: Arc<Semaphore>,
     lfs_root: Arc<PathBuf>,
     public_url: Arc<Url>,
@@ -81,6 +85,8 @@ struct CachedRepositorySize {
     measured_at: Instant,
 }
 
+const ANALYSIS_CACHE_CAPACITY: usize = 4_096;
+const ANALYSIS_CONCURRENCY: usize = 4;
 const COMMIT_COUNT_CACHE_CAPACITY: usize = 4_096;
 const COMMIT_COUNT_CONCURRENCY: usize = 2;
 const REPOSITORY_SIZE_CACHE_LIFETIME: Duration = Duration::from_secs(5 * 60);
@@ -98,11 +104,15 @@ impl RepositoryState {
         Ok(Self {
             identity,
             repository_root: Arc::new(settings.repository_root),
+            analysis_slots: Arc::new(Semaphore::new(ANALYSIS_CONCURRENCY)),
+            overview_cache: Arc::new(RwLock::new(HashMap::new())),
             stats_cache: Arc::new(RwLock::new(HashMap::new())),
             commit_count_cache: Arc::new(RwLock::new(HashMap::new())),
+            commit_count_refreshing: Arc::new(Mutex::new(HashSet::new())),
             commit_count_slots: Arc::new(Semaphore::new(COMMIT_COUNT_CONCURRENCY)),
             size_cache: Arc::new(RwLock::new(HashMap::new())),
             size_generations: Arc::new(RwLock::new(HashMap::new())),
+            size_refreshing: Arc::new(Mutex::new(HashSet::new())),
             size_measurement_slots: Arc::new(Semaphore::new(
                 REPOSITORY_SIZE_MEASUREMENT_CONCURRENCY,
             )),
@@ -214,12 +224,28 @@ impl RepositoryState {
             .then_some(authorization.user_id)
     }
 
+    async fn cached_overview(&self, key: &str) -> Option<browser::GitOverview> {
+        self.overview_cache.read().await.get(key).cloned()
+    }
+
+    async fn cache_overview(&self, key: String, overview: browser::GitOverview) {
+        let mut cache = self.overview_cache.write().await;
+        if cache.len() >= ANALYSIS_CACHE_CAPACITY {
+            cache.clear();
+        }
+        cache.insert(key, overview);
+    }
+
     async fn cached_stats(&self, key: &str) -> Option<Vec<browser::LanguageStatResponse>> {
         self.stats_cache.read().await.get(key).cloned()
     }
 
     async fn cache_stats(&self, key: String, stats: Vec<browser::LanguageStatResponse>) {
-        self.stats_cache.write().await.insert(key, stats);
+        let mut cache = self.stats_cache.write().await;
+        if cache.len() >= ANALYSIS_CACHE_CAPACITY {
+            cache.clear();
+        }
+        cache.insert(key, stats);
     }
 
     async fn cached_commit_count(&self, key: &str) -> Option<usize> {
@@ -234,20 +260,45 @@ impl RepositoryState {
         cache.insert(key, count);
     }
 
-    async fn repository_size(&self, repository: &repository::Model) -> Result<u64, ApiError> {
-        if let Some(cached) = self.fresh_cached_repository_size(repository.id).await {
-            return Ok(cached);
+    async fn repository_size(&self, repository: &repository::Model) -> Option<u64> {
+        let cached = self.size_cache.read().await.get(&repository.id).copied();
+        let should_refresh = cached
+            .is_none_or(|entry| entry.measured_at.elapsed() >= REPOSITORY_SIZE_CACHE_LIFETIME);
+        if should_refresh {
+            self.queue_repository_size_refresh(repository.clone()).await;
         }
+        cached.map(|entry| entry.bytes)
+    }
 
+    async fn queue_repository_size_refresh(&self, repository: repository::Model) {
+        let mut refreshing = self.size_refreshing.lock().await;
+        if !refreshing.insert(repository.id) {
+            return;
+        }
+        drop(refreshing);
+
+        let state = self.clone();
+        tokio::spawn(async move {
+            if let Err(error) = state.measure_repository_size(&repository).await {
+                tracing::warn!(
+                    %error,
+                    repository_id = %repository.id,
+                    "could not refresh repository size"
+                );
+            }
+            state.size_refreshing.lock().await.remove(&repository.id);
+        });
+    }
+
+    async fn measure_repository_size(
+        &self,
+        repository: &repository::Model,
+    ) -> Result<(), ApiError> {
         let _permit = self
             .size_measurement_slots
             .acquire()
             .await
             .map_err(ApiError::internal)?;
-        if let Some(cached) = self.fresh_cached_repository_size(repository.id).await {
-            return Ok(cached);
-        }
-
         let generation = self
             .size_generations
             .read()
@@ -291,23 +342,15 @@ impl RepositoryState {
                 self.size_cache.write().await.remove(&repository.id);
             }
         }
-        Ok(bytes)
-    }
-
-    async fn fresh_cached_repository_size(&self, repository_id: Uuid) -> Option<u64> {
-        self.size_cache
-            .read()
-            .await
-            .get(&repository_id)
-            .filter(|cached| cached.measured_at.elapsed() < REPOSITORY_SIZE_CACHE_LIFETIME)
-            .map(|cached| cached.bytes)
+        Ok(())
     }
 
     async fn invalidate_repository_size(&self, repository_id: Uuid) {
-        self.size_cache.write().await.remove(&repository_id);
         let mut generations = self.size_generations.write().await;
         let generation = generations.entry(repository_id).or_default();
         *generation = generation.wrapping_add(1);
+        drop(generations);
+        self.size_cache.write().await.remove(&repository_id);
     }
 
     pub async fn find(&self, namespace: &str, name: &str) -> Result<repository::Model, ApiError> {

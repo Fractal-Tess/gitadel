@@ -7,7 +7,10 @@
   import UserMenu from "$lib/components/app/user-menu.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Kbd from "$lib/components/ui/kbd/index.js";
-  import { preloadExplore } from "$lib/navigation-cache.js";
+  import {
+    preloadExplore,
+    preloadRepositoryIndex,
+  } from "$lib/navigation-cache.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
   import { useShellState } from "$lib/state/shell-state.svelte.js";
 
@@ -20,6 +23,19 @@
   const searchHint = /mac/i.test(globalThis.navigator?.platform ?? "")
     ? "⌘ K"
     : "Ctrl K";
+
+  $effect(() => {
+    const viewer = app.authStatus?.user?.username;
+    if (typeof window.requestIdleCallback === "function") {
+      const idle = window.requestIdleCallback(
+        () => preloadRepositoryIndex(viewer),
+        { timeout: 2_000 },
+      );
+      return () => window.cancelIdleCallback(idle);
+    }
+    const timer = window.setTimeout(() => preloadRepositoryIndex(viewer), 1_000);
+    return () => window.clearTimeout(timer);
+  });
 
   // Derived from the URL rather than published by each page, so the trail can
   // never fall out of sync with where the user actually is.
@@ -82,6 +98,8 @@
     type="button"
     class="group hidden h-9 w-56 shrink-0 items-center gap-2.5 rounded-lg border border-input/40 bg-input/20 px-2.5 text-left outline-none hover:border-input hover:bg-input/35 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 md:flex xl:w-72"
     aria-keyshortcuts="Control+K Meta+K /"
+    onpointerenter={() => preloadRepositoryIndex(app.authStatus?.user?.username)}
+    onfocus={() => preloadRepositoryIndex(app.authStatus?.user?.username)}
     onclick={() => (shell.paletteOpen = true)}
   >
     <span
@@ -106,6 +124,8 @@
     size="icon"
     class="shrink-0 text-muted-foreground hover:text-foreground md:hidden"
     aria-label="Search repositories"
+    onpointerenter={() => preloadRepositoryIndex(app.authStatus?.user?.username)}
+    onfocus={() => preloadRepositoryIndex(app.authStatus?.user?.username)}
     onclick={() => (shell.paletteOpen = true)}
   >
     <Search class="size-4" />

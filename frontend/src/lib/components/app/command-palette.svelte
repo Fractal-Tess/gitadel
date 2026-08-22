@@ -15,9 +15,15 @@
 
   import * as Command from "$lib/components/ui/command/index.js";
   import * as Kbd from "$lib/components/ui/kbd/index.js";
-  import type { RepositoryOverviewItem } from "$lib/api.js";
-  import { peekExplore, refreshExplore } from "$lib/navigation-cache.js";
-  import { preloadRepository } from "$lib/repository/repository-preload.js";
+  import type { Repository } from "$lib/api.js";
+  import {
+    loadRepositoryIndex,
+    peekRepositoryIndex,
+  } from "$lib/navigation-cache.js";
+  import {
+    cancelRepositoryPreload,
+    scheduleRepositoryPreload,
+  } from "$lib/repository/repository-preload.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
   import { recentRepositoryPaths } from "$lib/state/recent-repositories.js";
   import {
@@ -25,26 +31,17 @@
     type ShellIcon,
   } from "$lib/state/shell-state.svelte.js";
 
-  // Matches the explore page so the first page paints from its warm cache. The
-  // endpoint pages rather than returning everything, so the palette walks pages
-  // instead of searching only the first screenful and pretending that is all.
-  const palettePageSize = 20;
-  const paletteMaxPages = 10;
-  const paletteIndexLifetime = 60_000;
   const resultLimit = 24;
 
   const app = useAppState();
   const shell = useShellState();
   const viewer = $derived(app.authStatus?.user?.username);
 
-  let repositories = $state.raw<RepositoryOverviewItem[]>([]);
+  let repositories = $state.raw<Repository[]>([]);
   let recentPaths = $state.raw<string[]>([]);
   let query = $state("");
   let selected = $state("");
   let loading = $state(false);
-  let truncated = $state(false);
-  let indexedViewer = "";
-  let indexExpiresAt = 0;
 
   const relative = new Intl.RelativeTimeFormat(undefined, {
     numeric: "auto",
@@ -64,50 +61,19 @@
 
     query = "";
     recentPaths = recentRepositoryPaths();
-    const viewerKey = viewer ?? "";
-    if (indexedViewer === viewerKey && indexExpiresAt > Date.now()) {
-      loading = false;
-      return;
-    }
-    indexedViewer = "";
-    indexExpiresAt = 0;
-    truncated = false;
-
-    const cached = peekExplore(1, palettePageSize, viewer);
-    repositories = cached?.repositories ?? [];
+    const cached = peekRepositoryIndex(viewer);
+    repositories = cached ?? [];
     loading = !cached;
 
     let cancelled = false;
-    void (async () => {
-      const collected: RepositoryOverviewItem[] = [];
-      let pageNumber = 1;
-      try {
-        while (pageNumber <= paletteMaxPages) {
-          const overview = await refreshExplore(
-            pageNumber,
-            palettePageSize,
-            viewer,
-          );
-          if (cancelled) return;
-          collected.push(...overview.repositories);
-          repositories = [...collected];
-          loading = false;
-          if (!overview.has_next) {
-            indexedViewer = viewerKey;
-            indexExpiresAt = Date.now() + paletteIndexLifetime;
-            return;
-          }
-          pageNumber += 1;
-        }
-        truncated = true;
-        indexedViewer = viewerKey;
-        indexExpiresAt = Date.now() + paletteIndexLifetime;
-      } catch {
-        // Whatever pages did land are still worth searching.
-      } finally {
+    void loadRepositoryIndex(viewer)
+      .then((loaded) => {
+        if (!cancelled) repositories = loaded;
+      })
+      .catch(() => undefined)
+      .finally(() => {
         if (!cancelled) loading = false;
-      }
-    })();
+      });
 
     return () => {
       cancelled = true;
@@ -129,7 +95,7 @@
    * finds `web-team/billing` or anything that merely mentions the web.
    */
   function score(
-    repository: RepositoryOverviewItem,
+    repository: Repository,
     path: string,
     needle: string,
   ): number {
@@ -275,16 +241,16 @@
     repositoryRows + navigationActions.length + createActions.length > 0,
   );
   const countLabel = $derived.by(() => {
-    const total = `${repositories.length}${truncated ? "+" : ""}`;
-    if (loading && repositories.length === 0) return "Loading…";
+    const total = repositories.length;
+    if (loading && total === 0) return "Loading…";
     if (query.trim()) return `${results.matched} of ${total}`;
-    return `${total} ${repositories.length === 1 ? "repository" : "repositories"}`;
+    return `${total} ${total === 1 ? "repository" : "repositories"}`;
   });
 
   // Preloading the highlighted row means arrow keys warm the page up before
   // Enter is ever pressed.
   const rowIndex = $derived.by(() => {
-    const index = new Map<string, RepositoryOverviewItem>();
+    const index = new Map<string, Repository>();
     for (const repository of results.recent) {
       index.set(`recent:${repository.id}`, repository);
     }
@@ -296,13 +262,14 @@
 
   $effect(() => {
     const repository = rowIndex.get(selected);
-    if (repository) {
-      preloadRepository(
-        repository.namespace,
-        repository.name,
-        repository.default_branch,
-      );
-    }
+    if (!repository) return;
+    scheduleRepositoryPreload(
+      repository.namespace,
+      repository.name,
+      repository.default_branch,
+    );
+    return () =>
+      cancelRepositoryPreload(repository.namespace, repository.name);
   });
 
   function updatedLabel(value: string): string {
@@ -322,7 +289,7 @@
     action();
   }
 
-  function openRepository(repository: RepositoryOverviewItem): void {
+  function openRepository(repository: Repository): void {
     run(
       () =>
         void goto(
@@ -372,17 +339,19 @@
 
 <svelte:window onkeydown={handleShortcut} />
 
-{#snippet repositoryRow(repository: RepositoryOverviewItem, group: string)}
+{#snippet repositoryRow(repository: Repository, group: string)}
   <Command.Item
     class={rowClass}
     value={`${group}:${repository.id}`}
     onSelect={() => openRepository(repository)}
     onmouseenter={() =>
-      preloadRepository(
+      scheduleRepositoryPreload(
         repository.namespace,
         repository.name,
         repository.default_branch,
       )}
+    onmouseleave={() =>
+      cancelRepositoryPreload(repository.namespace, repository.name)}
   >
     <span class="min-w-0 flex-1 truncate font-mono text-[0.8rem]">
       <span class="text-muted-foreground">{repository.namespace}/</span><span

@@ -1,5 +1,4 @@
-// File and folder associations come from Material Icon Theme's generated VS Code manifest.
-type IconThemeManifest = {
+type MaterialIconManifest = {
   file?: string;
   folder?: string;
   folderExpanded?: string;
@@ -7,101 +6,99 @@ type IconThemeManifest = {
   fileExtensions?: Record<string, string>;
   folderNames?: Record<string, string>;
   folderNamesExpanded?: Record<string, string>;
-  iconDefinitions?: Record<string, { iconPath: string }>;
 };
 
-declare const __MATERIAL_ICON_THEME__: IconThemeManifest;
+declare const __MATERIAL_ICON_THEME_BASE__: string;
 
-const ICON_LOADERS = import.meta.glob<string>(
-  "../../../node_modules/material-icon-theme/icons/*.svg",
-  {
-    import: "default",
-    query: "?no-inline",
-  },
-);
+const manifestUrl = `${__MATERIAL_ICON_THEME_BASE__}/manifest.json`;
+let manifestRequest: Promise<MaterialIconManifest> | null = null;
+const fileIconCache = new Map<string, Promise<string>>();
+const folderIconCache = new Map<string, Promise<string>>();
 
-const ICON_PATH_PREFIX = "../../../node_modules/material-icon-theme/icons/";
-const iconCache = new Map<string, Promise<string>>();
-const missingIcon = Promise.resolve("");
-
-function normalizePath(path: string): string {
+function normalizePath(path: string) {
   return path
     .replaceAll("\\", "/")
     .replace(/^\/+|\/+$/g, "")
     .toLowerCase();
 }
 
-function basename(path: string): string {
+function basename(path: string) {
   return path.slice(path.lastIndexOf("/") + 1);
 }
 
 function association(
   associations: Record<string, string> | undefined,
   path: string,
-): string | undefined {
-  if (!associations) return undefined;
-
-  return associations[path] ?? associations[basename(path)];
+) {
+  return associations?.[path] ?? associations?.[basename(path)];
 }
 
-function extensionAssociation(path: string): string | undefined {
-  const extensions = __MATERIAL_ICON_THEME__.fileExtensions;
+function extensionAssociation(
+  extensions: Record<string, string> | undefined,
+  path: string,
+) {
   if (!extensions) return undefined;
-
-  const name = basename(path);
-  const segments = name.split(".");
+  const segments = basename(path).split(".");
   for (let index = 1; index < segments.length; index += 1) {
     const icon = extensions[segments.slice(index).join(".")];
     if (icon) return icon;
   }
-
   return undefined;
 }
 
-function loadIcon(filename: string): Promise<string> {
-  const path = `${ICON_PATH_PREFIX}${filename}`;
-  const cached = iconCache.get(path);
+function iconUrl(filename: string | undefined) {
+  return filename
+    ? `${__MATERIAL_ICON_THEME_BASE__}/${encodeURIComponent(filename)}`
+    : "";
+}
+
+function loadManifest() {
+  manifestRequest ??= fetch(manifestUrl, { cache: "force-cache" }).then(
+    async (response) => {
+      if (!response.ok) {
+        throw new Error(
+          `Could not load Material Icon Theme (${response.status})`,
+        );
+      }
+      return (await response.json()) as MaterialIconManifest;
+    },
+  );
+  return manifestRequest;
+}
+
+export function preloadMaterialIconTheme() {
+  return loadManifest();
+}
+
+export function materialFileIcon(path: string) {
+  const normalized = normalizePath(path);
+  const cached = fileIconCache.get(normalized);
   if (cached) return cached;
 
-  const loader = ICON_LOADERS[path];
-  if (!loader) return missingIcon;
-
-  const pending = loader();
-  iconCache.set(path, pending);
+  const pending = loadManifest().then((manifest) => {
+    const filename =
+      association(manifest.fileNames, normalized) ??
+      extensionAssociation(manifest.fileExtensions, normalized) ??
+      manifest.file;
+    return iconUrl(filename);
+  });
+  fileIconCache.set(normalized, pending);
   return pending;
 }
 
-function iconUrl(
-  icon: string | undefined,
-  fallback: string | undefined,
-): Promise<string> {
-  const definition =
-    __MATERIAL_ICON_THEME__.iconDefinitions?.[icon ?? ""] ??
-    __MATERIAL_ICON_THEME__.iconDefinitions?.[fallback ?? ""];
-  const filename = definition?.iconPath.split("/").pop();
-  return filename ? loadIcon(filename) : missingIcon;
-}
-
-export function materialFileIcon(path: string): Promise<string> {
+export function materialFolderIcon(path: string, expanded: boolean) {
   const normalized = normalizePath(path);
-  const icon =
-    association(__MATERIAL_ICON_THEME__.fileNames, normalized) ??
-    extensionAssociation(normalized);
+  const key = `${expanded ? "open" : "closed"}\0${normalized}`;
+  const cached = folderIconCache.get(key);
+  if (cached) return cached;
 
-  return iconUrl(icon, __MATERIAL_ICON_THEME__.file);
-}
-
-export function materialFolderIcon(
-  path: string,
-  expanded: boolean,
-): Promise<string> {
-  const normalized = normalizePath(path);
-  const associations = expanded
-    ? __MATERIAL_ICON_THEME__.folderNamesExpanded
-    : __MATERIAL_ICON_THEME__.folderNames;
-  const fallback = expanded
-    ? __MATERIAL_ICON_THEME__.folderExpanded
-    : __MATERIAL_ICON_THEME__.folder;
-
-  return iconUrl(association(associations, normalized), fallback);
+  const pending = loadManifest().then((manifest) => {
+    const associations = expanded
+      ? manifest.folderNamesExpanded
+      : manifest.folderNames;
+    const fallback = expanded ? manifest.folderExpanded : manifest.folder;
+    return iconUrl(association(associations, normalized) ?? fallback);
+  });
+  folderIconCache.set(key, pending);
+  return pending;
 }

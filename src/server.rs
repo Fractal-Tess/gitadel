@@ -13,7 +13,7 @@ use rust_embed::RustEmbed;
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use tokio::net::TcpListener;
-use tower_http::trace::TraceLayer;
+use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 use tracing::info;
 
 use crate::{
@@ -66,6 +66,7 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<(
         .nest("/api/v1", api_router)
         .merge(repository::git_http_router().with_state(repository_state.clone()))
         .fallback(get(frontend))
+        .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http());
 
     info!(address = %http_bind, "Gitadel HTTP server listening");
@@ -141,6 +142,16 @@ fn asset_response(path: &str, data: Cow<'static, [u8]>) -> Response {
         HeaderValue::from_str(mime.as_ref())
             .unwrap_or(HeaderValue::from_static("application/octet-stream")),
     );
+    let cache_control = if path.starts_with("_app/immutable/") {
+        HeaderValue::from_static("public, max-age=31536000, immutable")
+    } else if path == "index.html" {
+        HeaderValue::from_static("no-cache, max-age=0, must-revalidate")
+    } else {
+        HeaderValue::from_static("public, max-age=3600")
+    };
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, cache_control);
     response
 }
 

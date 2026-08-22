@@ -1,4 +1,8 @@
-use std::{collections::HashSet, path::Path, process::Stdio};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    process::Stdio,
+};
 
 use axum::{
     Json,
@@ -103,38 +107,87 @@ pub(super) async fn accessible_repositories(
         .optional_user(headers, jar, SCOPE_READ)
         .await?
         .map(|account| account.id);
-    let favorite_ids = if let Some(user_id) = user_id {
-        repository_favorite::Entity::find()
-            .filter(repository_favorite::Column::UserId.eq(user_id))
-            .all(state.identity().database())
-            .await?
-            .into_iter()
-            .map(|favorite| favorite.repository_id)
-            .collect()
-    } else {
-        HashSet::new()
+    let database = state.identity().database();
+
+    let Some(user_id) = user_id else {
+        let repositories = repository::Entity::find()
+            .filter(repository::Column::DeletedAt.is_null())
+            .filter(repository::Column::Visibility.eq("public"))
+            .order_by_desc(repository::Column::UpdatedAt)
+            .all(database)
+            .await?;
+        return Ok(AccessibleRepositories {
+            favorite_ids: HashSet::new(),
+            manageable_ids: HashSet::new(),
+            repositories,
+        });
     };
+
+    let favorites = repository_favorite::Entity::find()
+        .filter(repository_favorite::Column::UserId.eq(user_id))
+        .all(database);
+    let namespaces = namespace::Entity::find().all(database);
+    let memberships = organization_member::Entity::find()
+        .filter(organization_member::Column::UserId.eq(user_id))
+        .all(database);
+    let collaborators = repository_collaborator::Entity::find()
+        .filter(repository_collaborator::Column::UserId.eq(user_id))
+        .all(database);
     let repositories = repository::Entity::find()
         .filter(repository::Column::DeletedAt.is_null())
         .order_by_desc(repository::Column::UpdatedAt)
-        .all(state.identity().database())
-        .await?;
+        .all(database);
+    let (favorites, namespaces, memberships, collaborators, repositories) = tokio::try_join!(
+        favorites,
+        namespaces,
+        memberships,
+        collaborators,
+        repositories
+    )?;
+
+    let favorite_ids = favorites
+        .into_iter()
+        .map(|favorite| favorite.repository_id)
+        .collect();
+    let organization_roles: HashMap<Uuid, String> = memberships
+        .into_iter()
+        .map(|membership| (membership.organization_id, membership.role))
+        .collect();
+    let collaborator_ids: HashSet<Uuid> = collaborators
+        .into_iter()
+        .map(|collaborator| collaborator.repository_id)
+        .collect();
+    let mut readable_namespaces = HashSet::new();
+    let mut manageable_namespaces = HashSet::new();
+    for namespace in namespaces {
+        let personally_owned = namespace.user_id == Some(user_id);
+        let organization_role = namespace
+            .organization_id
+            .and_then(|id| organization_roles.get(&id));
+        if personally_owned || organization_role.is_some() {
+            readable_namespaces.insert(namespace.slug.clone());
+        }
+        if personally_owned || organization_role.is_some_and(|role| role == "owner") {
+            manageable_namespaces.insert(namespace.slug);
+        }
+    }
+
     let mut accessible = Vec::with_capacity(repositories.len());
     let mut manageable_ids = HashSet::new();
     for repository in repositories {
-        if state
-            .can_access(&repository, user_id, Permission::Read)
-            .await?
-        {
-            if state
-                .can_access(&repository, user_id, Permission::Manage)
-                .await?
-            {
-                manageable_ids.insert(repository.id);
-            }
-            accessible.push(repository);
+        let can_manage = manageable_namespaces.contains(&repository.namespace);
+        let can_read = repository.visibility == "public"
+            || readable_namespaces.contains(&repository.namespace)
+            || collaborator_ids.contains(&repository.id);
+        if !can_read {
+            continue;
         }
+        if can_manage {
+            manageable_ids.insert(repository.id);
+        }
+        accessible.push(repository);
     }
+
     Ok(AccessibleRepositories {
         favorite_ids,
         manageable_ids,

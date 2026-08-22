@@ -5,6 +5,7 @@ import {
   organizationSchema,
   passkeySchema,
   repositoryOverviewSchema,
+  repositorySchema,
   requestJson,
   sshKeySchema,
   tokenSchema,
@@ -103,17 +104,44 @@ export function peekExplore(
 }
 
 export function preloadExplore(username?: string | null) {
-  void refreshExplore(1, 20, username).catch(() => undefined);
+  const key = exploreKey(1, 20, username);
+  void cached(exploreCache, key, () => fetchExplore(1, 20)).promise.catch(
+    () => undefined,
+  );
 }
 
 export function invalidateExplore(username?: string | null) {
-  const prefix = `${viewerKey(username)}:`;
+  const viewer = viewerKey(username);
+  const prefix = `${viewer}:`;
   for (const key of exploreCache.keys()) {
     if (key.startsWith(prefix)) {
       exploreCache.delete(key);
       exploreRefreshes.delete(key);
     }
   }
+  repositoryIndexCache.delete(viewer);
+}
+
+const repositoryIndexCache = new Map<
+  string,
+  CacheEntry<Awaited<ReturnType<typeof fetchRepositoryIndex>>>
+>();
+
+function fetchRepositoryIndex() {
+  return requestJson("/api/v1/repositories", z.array(repositorySchema));
+}
+
+export function loadRepositoryIndex(username?: string | null) {
+  const key = viewerKey(username);
+  return cached(repositoryIndexCache, key, fetchRepositoryIndex).promise;
+}
+
+export function peekRepositoryIndex(username?: string | null) {
+  return peek(repositoryIndexCache, viewerKey(username));
+}
+
+export function preloadRepositoryIndex(username?: string | null) {
+  void loadRepositoryIndex(username).catch(() => undefined);
 }
 
 const organizationCache = new Map<

@@ -20,7 +20,7 @@ use sley::{
     Repository as GitRepository, StreamControl, TagQueryOptions,
 };
 use tokei::{Config as TokeiConfig, LanguageType};
-use tokio::process::Command;
+use tokio::{process::Command, task::JoinSet};
 
 use super::{
     Permission, RepositoryState,
@@ -78,7 +78,7 @@ pub struct RefResponse {
 pub struct RefsResponse {
     branches: Vec<RefResponse>,
     tags: Vec<RefResponse>,
-    size_bytes: u64,
+    size_bytes: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -200,10 +200,66 @@ struct ActivityDayResponse {
     count: usize,
 }
 
-struct GitOverview {
+#[derive(Clone)]
+pub(super) struct GitOverview {
     branch_count: usize,
     head: Option<(String, ObjectId)>,
     activity: BTreeMap<NaiveDate, usize>,
+}
+
+async fn repository_overview_item(
+    state: &RepositoryState,
+    repository: repository::Model,
+    favorited: bool,
+    can_manage: bool,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> Result<RepositoryOverviewItemResponse, ApiError> {
+    let git_overview = read_repository_overview(state, &repository, start_date, end_date).await?;
+    let activity = activity_response(start_date, end_date, git_overview.activity);
+    let stats = match git_overview.head {
+        Some((commit_oid, tree_oid)) => {
+            let cache_key = format!("{}:{commit_oid}", repository.storage_key);
+            if let Some(cached) = state.cached_stats(&cache_key).await {
+                cached
+            } else {
+                let path = state.repository_path(&repository);
+                let computed = read_git(path, move |git| compute_stats(git, tree_oid)).await?;
+                state.cache_stats(cache_key, computed.clone()).await;
+                computed
+            }
+        }
+        None => Vec::new(),
+    };
+    let total_lines = stats
+        .iter()
+        .map(LanguageStatResponse::non_blank_lines)
+        .sum();
+    let mut languages = stats
+        .into_iter()
+        .map(|stat| {
+            let lines = stat.non_blank_lines();
+            OverviewLanguageResponse {
+                language: stat.language,
+                lines,
+            }
+        })
+        .collect::<Vec<_>>();
+    languages.sort_unstable_by(|left, right| {
+        right
+            .lines
+            .cmp(&left.lines)
+            .then_with(|| left.language.cmp(&right.language))
+    });
+    languages.truncate(3);
+
+    Ok(RepositoryOverviewItemResponse {
+        activity,
+        branch_count: git_overview.branch_count,
+        total_lines,
+        languages,
+        repository: resources::RepositoryResponse::new(repository, state, favorited, can_manage),
+    })
 }
 
 pub async fn overview(
@@ -227,59 +283,34 @@ pub async fn overview(
 
     let end_date = Utc::now().date_naive();
     let start_date = activity_start_date(end_date, DEFAULT_REPOSITORY_ACTIVITY_DAYS)?;
-    let mut repositories = Vec::with_capacity(page_repositories.len());
-
-    for repository in page_repositories {
-        let git_overview =
-            read_repository_overview(&state, &repository, start_date, end_date).await?;
-        let repository_activity = activity_response(start_date, end_date, git_overview.activity);
-        let stats = match git_overview.head {
-            Some((commit_oid, tree_oid)) => {
-                let cache_key = format!("{}:{commit_oid}", repository.storage_key);
-                if let Some(cached) = state.cached_stats(&cache_key).await {
-                    cached
-                } else {
-                    let path = state.repository_path(&repository);
-                    let computed = read_git(path, move |git| compute_stats(git, tree_oid)).await?;
-                    state.cache_stats(cache_key, computed.clone()).await;
-                    computed
-                }
-            }
-            None => Vec::new(),
-        };
-        let total_lines = stats
-            .iter()
-            .map(LanguageStatResponse::non_blank_lines)
-            .sum();
-        let mut languages = stats
-            .into_iter()
-            .map(|stat| {
-                let lines = stat.non_blank_lines();
-                OverviewLanguageResponse {
-                    language: stat.language,
-                    lines,
-                }
-            })
-            .collect::<Vec<_>>();
-        languages.sort_unstable_by(|left, right| {
-            right
-                .lines
-                .cmp(&left.lines)
-                .then_with(|| left.language.cmp(&right.language))
-        });
-        languages.truncate(3);
+    let repository_count = page_repositories.len();
+    let mut pending = JoinSet::new();
+    for (index, repository) in page_repositories.into_iter().enumerate() {
         let favorited = accessible.favorite_ids.contains(&repository.id);
         let can_manage = accessible.manageable_ids.contains(&repository.id);
-        repositories.push(RepositoryOverviewItemResponse {
-            activity: repository_activity,
-            branch_count: git_overview.branch_count,
-            total_lines,
-            languages,
-            repository: resources::RepositoryResponse::new(
-                repository, &state, favorited, can_manage,
-            ),
+        let state = state.clone();
+        let slots = state.analysis_slots.clone();
+        pending.spawn(async move {
+            let _permit = slots.acquire_owned().await.map_err(ApiError::internal)?;
+            let item = repository_overview_item(
+                &state, repository, favorited, can_manage, start_date, end_date,
+            )
+            .await?;
+            Ok::<_, ApiError>((index, item))
         });
     }
+
+    let mut repositories = std::iter::repeat_with(|| None)
+        .take(repository_count)
+        .collect::<Vec<_>>();
+    while let Some(result) = pending.join_next().await {
+        let (index, item) = result.map_err(ApiError::internal)??;
+        repositories[index] = Some(item);
+    }
+    let repositories = repositories
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| ApiError::internal("repository overview task did not return a result"))?;
 
     Ok(Json(RepositoryOverviewResponse {
         repositories,
@@ -312,6 +343,7 @@ pub async fn refs(
     jar: CookieJar,
 ) -> Result<Json<RefsResponse>, ApiError> {
     let repository = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
+    let size_bytes = state.repository_size(&repository).await;
     let path = state.repository_path(&repository);
     let response = read_git(path, move |git| {
         let mut branches = git
@@ -349,12 +381,10 @@ pub async fn refs(
         Ok(RefsResponse {
             branches,
             tags,
-            size_bytes: 0,
+            size_bytes,
         })
-    });
-    let (mut response, size_bytes) =
-        tokio::try_join!(response, state.repository_size(&repository))?;
-    response.size_bytes = size_bytes;
+    })
+    .await?;
     Ok(Json(response))
 }
 
@@ -398,9 +428,10 @@ pub async fn tree(
                 "blob"
             };
             let size = if kind == "blob" || kind == "symlink" {
-                git.read_object(&entry.oid)
+                git.read_object_header(&entry.oid)
                     .ok()
-                    .map(|object| object.body.len() as u64)
+                    .flatten()
+                    .map(|(_, size)| size)
             } else {
                 None
             };
@@ -434,37 +465,51 @@ pub async fn tree(
     .await?;
 
     if include_commit_count {
-        let cache_key = commit_oid.to_hex();
-        let count = match state.cached_commit_count(&cache_key).await {
-            Some(count) => count,
-            None => {
-                let _permit = state
-                    .commit_count_slots
-                    .acquire()
-                    .await
-                    .map_err(ApiError::internal)?;
-                if let Some(count) = state.cached_commit_count(&cache_key).await {
-                    count
-                } else {
-                    let count = read_git(count_path, move |git| {
-                        let mut count = 0;
-                        git.rev_graph().stream_reachable_commits(
-                            [commit_oid],
-                            ReachableCommitOptions::new(),
-                            |_| {
-                                count += 1;
-                                Ok(StreamControl::Continue)
-                            },
-                        )?;
-                        Ok(count)
-                    })
-                    .await?;
-                    state.cache_commit_count(cache_key, count).await;
-                    count
-                }
+        let cache_key = format!("{}:{}", repository.storage_key, commit_oid.to_hex());
+        if let Some(count) = state.cached_commit_count(&cache_key).await {
+            response.commit_count = Some(count);
+        } else {
+            let mut refreshing = state.commit_count_refreshing.lock().await;
+            if refreshing.insert(cache_key.clone()) {
+                drop(refreshing);
+                let state = state.clone();
+                tokio::spawn(async move {
+                    let result = async {
+                        let _permit = state
+                            .commit_count_slots
+                            .acquire()
+                            .await
+                            .map_err(ApiError::internal)?;
+                        if state.cached_commit_count(&cache_key).await.is_none() {
+                            let count = read_git(count_path, move |git| {
+                                let mut count = 0;
+                                git.rev_graph().stream_reachable_commits(
+                                    [commit_oid],
+                                    ReachableCommitOptions::new(),
+                                    |_| {
+                                        count += 1;
+                                        Ok(StreamControl::Continue)
+                                    },
+                                )?;
+                                Ok(count)
+                            })
+                            .await?;
+                            state.cache_commit_count(cache_key.clone(), count).await;
+                        }
+                        Ok::<_, ApiError>(())
+                    }
+                    .await;
+                    if let Err(error) = result {
+                        tracing::warn!(%error, "could not refresh repository commit count");
+                    }
+                    state
+                        .commit_count_refreshing
+                        .lock()
+                        .await
+                        .remove(&cache_key);
+                });
             }
-        };
-        response.commit_count = Some(count);
+        }
     }
     Ok(Json(response))
 }
@@ -702,9 +747,17 @@ async fn read_repository_overview(
     start_date: NaiveDate,
     end_date: NaiveDate,
 ) -> Result<GitOverview, ApiError> {
+    let cache_key = format!(
+        "{}:{}:{}:{start_date}:{end_date}",
+        repository.storage_key, repository.updated_at, repository.default_branch
+    );
+    if let Some(cached) = state.cached_overview(&cache_key).await {
+        return Ok(cached);
+    }
+
     let path = state.repository_path(repository);
     let default_reference = format!("refs/heads/{}", repository.default_branch);
-    read_git(path, move |git| {
+    let overview = read_git(path, move |git| {
         let references = git.references().list_refs_with_prefix("refs/heads/")?;
         let branch_count = references.len();
         let mut roots = Vec::with_capacity(branch_count);
@@ -754,7 +807,9 @@ async fn read_repository_overview(
             activity,
         })
     })
-    .await
+    .await?;
+    state.cache_overview(cache_key, overview.clone()).await;
+    Ok(overview)
 }
 
 async fn readable_repository(

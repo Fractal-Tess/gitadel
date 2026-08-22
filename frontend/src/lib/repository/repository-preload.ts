@@ -15,6 +15,8 @@ import {
 } from "$lib/api.js";
 
 const preloadLifetime = 30_000;
+const preloadIntentDelay = 120;
+const preloadLimit = 64;
 
 function repositoryKey(namespace: string, name: string) {
   return `${namespace}\0${name}`;
@@ -80,12 +82,26 @@ type PreloadEntry = {
 };
 
 const preloads = new Map<string, PreloadEntry>();
+const preloadTimers = new Map<string, number>();
+
+function prunePreloads() {
+  const now = Date.now();
+  for (const [key, entry] of preloads) {
+    if (entry.expiresAt <= now) preloads.delete(key);
+  }
+  while (preloads.size >= preloadLimit) {
+    const oldest = preloads.keys().next().value;
+    if (oldest === undefined) break;
+    preloads.delete(oldest);
+  }
+}
 
 function getEntry(namespace: string, name: string) {
   const key = repositoryKey(namespace, name);
   const cached = preloads.get(key);
   if (cached && cached.expiresAt > Date.now()) return cached;
 
+  prunePreloads();
   const entry: PreloadEntry = {
     expiresAt: Date.now() + preloadLifetime,
     bootstrap: fetchBootstrap(namespace, name),
@@ -116,12 +132,38 @@ export function clearRepositoryPreload(namespace: string, name: string) {
   preloads.delete(repositoryKey(namespace, name));
 }
 
+export function scheduleRepositoryPreload(
+  namespace: string,
+  name: string,
+  knownRevision?: string,
+) {
+  const key = repositoryKey(namespace, name);
+  if ((preloads.get(key)?.expiresAt ?? 0) > Date.now()) return;
+  window.clearTimeout(preloadTimers.get(key));
+  preloadTimers.set(
+    key,
+    window.setTimeout(() => {
+      preloadTimers.delete(key);
+      preloadRepository(namespace, name, knownRevision);
+    }, preloadIntentDelay),
+  );
+}
+
+export function cancelRepositoryPreload(namespace: string, name: string) {
+  const key = repositoryKey(namespace, name);
+  window.clearTimeout(preloadTimers.get(key));
+  preloadTimers.delete(key);
+}
+
 export function preloadRepository(
   namespace: string,
   name: string,
   knownRevision?: string,
 ) {
   const entry = getEntry(namespace, name);
+  void import("$lib/repository/material-file-icons.js")
+    .then(({ preloadMaterialIconTheme }) => preloadMaterialIconTheme())
+    .catch(() => undefined);
 
   function preloadOverview(revision: string) {
     if (entry.overviews.has(revision)) return;

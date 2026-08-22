@@ -206,7 +206,7 @@ export const refSchema = z.object({
 export const refsSchema = z.object({
   branches: z.array(refSchema),
   tags: z.array(refSchema),
-  size_bytes: z.number().int().nonnegative(),
+  size_bytes: z.number().int().nonnegative().nullable(),
 });
 
 export const treeEntrySchema = z.object({

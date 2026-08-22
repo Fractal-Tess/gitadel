@@ -4,6 +4,8 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-22
+
 ### Added
 
 - Added a shared application shell with breadcrumbs, a collapsible desktop rail, mobile navigation, an account menu, and repository creation from anywhere in the signed-in interface.
@@ -19,6 +21,12 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 - Kept repository clone controls, description, topics, counts, and language statistics visible across repository views. Branch selection now lives in the tree or metadata toolbar instead of a duplicate default-branch row.
 - Made Explore search and favorites shareable through URL parameters, taught filtered views to load every available page, and made repository activity totals easier to scan.
 - Optimized release binaries with full link-time optimization, single-unit code generation, abort-on-panic behavior, and symbol stripping.
+- Made repository pages render their critical content before supplementary size and commit-count scans finish, then refresh those metrics in the background.
+- Reworked repository discovery to authorize repositories in bulk, parallelized overview analysis, bounded expensive Git work, and cached repository overviews, language statistics, commit totals, and storage measurements.
+- Added intent-based repository preloading, idle command-palette warming, cached repository indexes, and deduplicated application-state initialization.
+- Kept the complete Material Icon Theme while moving its manifest and 1,250 SVGs out of the JavaScript graph; versioned icons now load on demand and use immutable browser caching.
+- Added Brotli and gzip response compression plus immutable cache headers for versioned frontend assets.
+- Lazy-loaded syntax highlighting, bounded rich diff rendering, and added a fast unified fallback for large patches.
 - Replaced the devenv setup with direnv and `nix develop`, and made release builds install frozen frontend dependencies and require the Cargo lockfile.
 
 ### Fixed
@@ -29,6 +37,8 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 - Kept long source lines and rendered README content inside their own preview scroller instead of stretching the repository page.
 - Invalidated cached repository sizes after pushes and LFS uploads.
 - Included the Pierre diff renderer dependency used by commit patch views.
+- Prevented concurrent repository-size invalidation and background measurement from retaining stale results.
+- Prevented oversized source files and commit patches from monopolizing the browser main thread.
 
 ### Removed
 
@@ -105,7 +115,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Fractal-Tess/gitadel/releases/tag/v0.1.0

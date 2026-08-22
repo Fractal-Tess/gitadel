@@ -77,8 +77,8 @@
     return `${compactDecimal.format(rounded)}${unit.suffix}`;
   }
 
-  function formatRepositorySize(bytes: number | undefined) {
-    if (bytes === undefined) return "—";
+  function formatRepositorySize(bytes: number | null | undefined) {
+    if (bytes == null) return "—";
     if (bytes === 0) return "0 KB";
     if (bytes < 1_024) return "<1 KB";
     if (bytes < 1_024 ** 2) return `${compactDecimal.format(bytes / 1_024)} KB`;

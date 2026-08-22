@@ -1,9 +1,4 @@
-import hljs from "highlight.js/lib/common";
-import dockerfile from "highlight.js/lib/languages/dockerfile";
-import nix from "highlight.js/lib/languages/nix";
-
-hljs.registerLanguage("dockerfile", dockerfile);
-hljs.registerLanguage("nix", nix);
+const MAX_MARKDOWN_HIGHLIGHT_CHARACTERS = 50_000;
 
 const LANGUAGES: Record<string, string> = {
   astro: "xml",
@@ -32,6 +27,7 @@ const LANGUAGES: Record<string, string> = {
   kts: "kotlin",
   less: "less",
   lua: "lua",
+  makefile: "makefile",
   markdown: "markdown",
   md: "markdown",
   mdx: "markdown",
@@ -125,12 +121,10 @@ export function formatSize(size: number | null): string {
 }
 
 function languageForName(name: string): string | null {
-  const normalized = name.toLowerCase();
-  const language = LANGUAGES[normalized] ?? normalized;
-  return hljs.getLanguage(language) ? language : null;
+  return LANGUAGES[name.toLowerCase()] ?? null;
 }
 
-function languageForPath(path: string): string | null {
+export function languageForPath(path: string): string | null {
   const name = path.split("/").pop()?.toLowerCase() ?? "";
   const extension = name.includes(".") ? (name.split(".").pop() ?? "") : "";
   return languageForName(FILE_LANGUAGES[name] ?? extension);
@@ -141,9 +135,11 @@ export function languageLabel(path: string): string {
   return language ? (LANGUAGE_LABELS[language] ?? language) : "Plain text";
 }
 
-export function highlight(path: string, source: string): string {
-  const language = languageForPath(path) ?? "plaintext";
-  return hljs.highlight(source, { language, ignoreIllegals: true }).value;
+export function escapeHtml(source: string): string {
+  return source
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
 }
 
 export function dayKey(timestamp: number): string {
@@ -248,25 +244,38 @@ export function trustedHtml(
   markdownSource?: MarkdownSource,
 ): (node: HTMLElement) => void {
   return (node) => {
+    let cancelled = false;
     node.innerHTML = html;
     if (markdownSource) rewriteMarkdownReferences(node, markdownSource);
-    for (const code of node.querySelectorAll<HTMLElement>("pre code")) {
-      const requestedLanguage = Array.from(code.classList)
+    const blocks = Array.from(
+      node.querySelectorAll<HTMLElement>("pre code"),
+    ).map((code) => ({
+      code,
+      language: Array.from(code.classList)
         .find((className) => className.startsWith("language-"))
-        ?.slice("language-".length);
-      const language = requestedLanguage
-        ? languageForName(requestedLanguage)
-        : null;
-      const source = code.textContent ?? "";
-      const highlighted = requestedLanguage
-        ? hljs.highlight(source, {
-            language: language ?? "plaintext",
-            ignoreIllegals: true,
-          })
-        : hljs.highlightAuto(source);
-      code.innerHTML = highlighted.value;
-      code.classList.add("hljs");
-      code.dataset.highlighted = "yes";
+        ?.slice("language-".length),
+      source: code.textContent ?? "",
+    }));
+    for (const { code } of blocks) code.classList.add("hljs");
+
+    const highlightable = blocks.filter(
+      ({ language, source }) =>
+        language && source.length <= MAX_MARKDOWN_HIGHLIGHT_CHARACTERS,
+    );
+    if (highlightable.length > 0) {
+      void import("$lib/repository/syntax-highlight.js")
+        .then(({ highlightLanguage }) => {
+          if (cancelled) return;
+          for (const { code, language, source } of highlightable) {
+            if (!language || !code.isConnected) continue;
+            code.innerHTML = highlightLanguage(language, source);
+            code.dataset.highlighted = "yes";
+          }
+        })
+        .catch(() => undefined);
     }
+    return () => {
+      cancelled = true;
+    };
   };
 }

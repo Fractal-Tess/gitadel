@@ -17,6 +17,7 @@ export class AppState {
   error = $state<string | null>(null);
 
   #initializedAt = 0;
+  #initializing: Promise<AuthStatus> | null = null;
 
   async initialize(): Promise<AuthStatus> {
     if (
@@ -26,7 +27,17 @@ export class AppState {
     ) {
       return this.authStatus;
     }
+    if (this.#initializing) return this.#initializing;
 
+    this.#initializing = this.#loadInitialState();
+    try {
+      return await this.#initializing;
+    } finally {
+      this.#initializing = null;
+    }
+  }
+
+  async #loadInitialState(): Promise<AuthStatus> {
     this.loading = true;
     this.error = null;
     try {

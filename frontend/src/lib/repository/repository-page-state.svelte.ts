@@ -11,6 +11,7 @@ import {
   historySchema,
   jsonBody,
   languageStatSchema,
+  refsSchema,
   repositorySchema,
   requestEmpty,
   requestJson,
@@ -29,7 +30,7 @@ import {
   type Webhook,
 } from "$lib/api.js";
 import { copyText } from "$lib/clipboard.js";
-import { highlight, languageLabel } from "$lib/repository/format.js";
+import { escapeHtml, languageLabel } from "$lib/repository/format.js";
 import {
   clearRepositoryPreload,
   loadRepositoryBootstrap,
@@ -39,6 +40,8 @@ import {
 export type RepositoryView =
   "overview" | "history" | "commit" | "tags" | "settings";
 export type CopyTarget = "http" | "ssh";
+
+const MAX_HIGHLIGHT_CHARACTERS = 200_000;
 
 function errorMessage(caught: unknown): string {
   if (caught instanceof ApiFailure || caught instanceof Error)
@@ -97,10 +100,8 @@ export class RepositoryPageState {
   wrapLines = $state(false);
   emptyRepository = $state(false);
   loading = $state(true);
+  highlighted = $state("");
 
-  highlighted = $derived(
-    this.blob?.content ? highlight(this.blob.path, this.blob.content) : "",
-  );
   selectedLanguage = $derived(this.blob ? languageLabel(this.blob.path) : "");
   totalLines = $derived(
     this.stats.reduce((sum, item) => sum + item.code + item.comments, 0),
@@ -112,6 +113,8 @@ export class RepositoryPageState {
   );
 
   #repositoryRequestSequence = 0;
+  #highlightRequestSequence = 0;
+  #supplementaryRefreshTimers: number[] = [];
   #viewRequestController: AbortController | null = null;
   #statsRevision = "";
   #sidebarRevision = "";
@@ -125,6 +128,10 @@ export class RepositoryPageState {
     this.#repositoryRequestSequence += 1;
     this.#viewRequestController?.abort();
     this.#viewRequestController = null;
+    this.#supplementaryRefreshTimers.forEach((timer) =>
+      window.clearTimeout(timer),
+    );
+    this.#supplementaryRefreshTimers = [];
   }
 
   get httpCloneUrl(): string {
@@ -184,6 +191,8 @@ export class RepositoryPageState {
     this.loadingPaths = new SvelteSet();
     this.selectedPath = this.repositoryPath;
     this.blob = null;
+    this.highlighted = "";
+    this.#highlightRequestSequence += 1;
     this.history = null;
     this.commit = null;
     this.diff = null;
@@ -242,6 +251,7 @@ export class RepositoryPageState {
     } finally {
       if (this.#viewRequestController === controller)
         this.#viewRequestController = null;
+      this.#scheduleSupplementaryRefresh();
     }
   }
 
@@ -621,6 +631,26 @@ export class RepositoryPageState {
     }
   }
 
+  async #setBlob(blob: Blob) {
+    this.blob = blob;
+    const source = blob.content;
+    const sequence = ++this.#highlightRequestSequence;
+    this.highlighted = source ? escapeHtml(source) : "";
+    if (!source || source.length > MAX_HIGHLIGHT_CHARACTERS) return;
+
+    try {
+      const { highlight } = await import("$lib/repository/syntax-highlight.js");
+      if (
+        sequence === this.#highlightRequestSequence &&
+        this.blob?.oid === blob.oid
+      ) {
+        this.highlighted = highlight(blob.path, source);
+      }
+    } catch {
+      // The escaped plaintext is already visible if highlighting cannot load.
+    }
+  }
+
   async #selectBlob(path: string): Promise<void> {
     this.#viewRequestController?.abort();
     const controller = new AbortController();
@@ -636,7 +666,7 @@ export class RepositoryPageState {
         this.#viewRequestController === controller &&
         this.repositoryPath === path
       ) {
-        this.blob = blob;
+        void this.#setBlob(blob);
         this.readme = null;
       }
     } catch (caught) {
@@ -647,6 +677,51 @@ export class RepositoryPageState {
       if (this.#viewRequestController === controller) {
         this.#viewRequestController = null;
       }
+    }
+  }
+
+  #scheduleSupplementaryRefresh() {
+    this.#supplementaryRefreshTimers.forEach((timer) =>
+      window.clearTimeout(timer),
+    );
+    this.#supplementaryRefreshTimers = [];
+    if (this.refs?.size_bytes != null && this.commitCount != null) return;
+
+    const sequence = this.#repositoryRequestSequence;
+    const revision = this.revision;
+    for (const delay of [1_000, 5_000]) {
+      const timer = window.setTimeout(async () => {
+        if (
+          sequence !== this.#repositoryRequestSequence ||
+          revision !== this.revision
+        ) {
+          return;
+        }
+        const refsRequest =
+          this.refs?.size_bytes == null
+            ? requestJson(this.#api("/refs"), refsSchema)
+            : Promise.resolve(null);
+        const countRequest =
+          this.commitCount == null
+            ? requestJson(
+                `${this.#api("/tree")}?${new URLSearchParams({ rev: revision })}`,
+                treeSchema,
+              )
+            : Promise.resolve(null);
+        const [refs, tree] = await Promise.all([
+          refsRequest.catch(() => null),
+          countRequest.catch(() => null),
+        ]);
+        if (
+          sequence !== this.#repositoryRequestSequence ||
+          revision !== this.revision
+        ) {
+          return;
+        }
+        if (refs) this.refs = refs;
+        if (tree?.commit_count != null) this.commitCount = tree.commit_count;
+      }, delay);
+      this.#supplementaryRefreshTimers.push(timer);
     }
   }
 
@@ -720,7 +795,7 @@ export class RepositoryPageState {
             ),
           ),
         ]);
-        this.blob = blob;
+        void this.#setBlob(blob);
         this.expandedPaths = new SvelteSet(parentPaths);
         this.expandedTrees = Object.fromEntries(
           parentPaths.map((path, index) => [path, parentTrees[index]!]),

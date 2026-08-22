@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { File, Folder } from "lucide-svelte";
+
   import {
     materialFileIcon,
     materialFolderIcon,
@@ -19,20 +21,33 @@
   const icon = $derived(
     directory ? materialFolderIcon(name, expanded) : materialFileIcon(name),
   );
+  const FallbackIcon = $derived(directory ? Folder : File);
 </script>
 
 {#await icon}
-  <span class={["inline-block", className]} aria-hidden="true"></span>
+  <FallbackIcon
+    class={`${className} text-muted-foreground/70`}
+    aria-hidden="true"
+  />
 {:then source}
   {#if source}
     <img
       src={source}
       alt=""
       draggable={false}
+      decoding="async"
       class={className}
       aria-hidden="true"
     />
   {:else}
-    <span class={["inline-block", className]} aria-hidden="true"></span>
+    <FallbackIcon
+      class={`${className} text-muted-foreground/70`}
+      aria-hidden="true"
+    />
   {/if}
+{:catch}
+  <FallbackIcon
+    class={`${className} text-muted-foreground/70`}
+    aria-hidden="true"
+  />
 {/await}
