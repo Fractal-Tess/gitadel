@@ -5,7 +5,6 @@
     Database,
     ImageIcon,
     RotateCcw,
-    Save,
     Server,
     ShieldCheck,
   } from "lucide-svelte";
@@ -35,9 +34,9 @@
   let working = $state(false);
   let notice = $state<string | null>(null);
   let error = $state<string | null>(null);
-  let lightFavicon = $state<File | null>(null);
-  let darkFavicon = $state<File | null>(null);
   let faviconInputVersion = $state(0);
+  let settingsSaveQueued = false;
+  let savingSettings = false;
   let faviconVersion = $derived(
     encodeURIComponent(app.instance?.updated_at ?? "default"),
   );
@@ -55,6 +54,27 @@
     });
   }
 
+  async function saveFavicon(theme: FaviconTheme, file: File | null) {
+    if (!file) return;
+
+    working = true;
+    notice = null;
+    error = null;
+    try {
+      await uploadFavicon(theme, file);
+      await app.refreshInstance();
+      faviconInputVersion += 1;
+      notice = `${theme === "light" ? "Light" : "Dark"} favicon saved.`;
+    } catch (caught) {
+      error =
+        caught instanceof ApiFailure || caught instanceof Error
+          ? caught.message
+          : "Could not save the favicon.";
+    } finally {
+      working = false;
+    }
+  }
+
   async function restoreFavicon(theme: FaviconTheme) {
     working = true;
     notice = null;
@@ -64,8 +84,6 @@
         method: "DELETE",
       });
       await app.refreshInstance();
-      lightFavicon = null;
-      darkFavicon = null;
       faviconInputVersion += 1;
       notice = `${theme === "light" ? "Light" : "Dark"} favicon restored to the default.`;
     } catch (caught) {
@@ -79,36 +97,36 @@
   }
 
   async function saveSettings() {
-    working = true;
+    settingsSaveQueued = true;
+    if (savingSettings) return;
+
+    savingSettings = true;
     notice = null;
     error = null;
     try {
-      app.instance = await requestJson(
-        "/api/v1/admin/instance",
-        instanceSettingsSchema,
-        {
-          method: "PUT",
-          body: jsonBody({
-            site_name: siteName,
-            site_description: siteDescription || null,
-            default_repository_visibility: defaultVisibility,
-          }),
-        },
-      );
-      await uploadFavicon("light", lightFavicon);
-      await uploadFavicon("dark", darkFavicon);
-      if (lightFavicon || darkFavicon) await app.refreshInstance();
-      lightFavicon = null;
-      darkFavicon = null;
-      faviconInputVersion += 1;
-      notice = "Instance identity saved.";
+      while (settingsSaveQueued) {
+        settingsSaveQueued = false;
+        app.instance = await requestJson(
+          "/api/v1/admin/instance",
+          instanceSettingsSchema,
+          {
+            method: "PUT",
+            body: jsonBody({
+              site_name: siteName,
+              site_description: siteDescription || null,
+              default_repository_visibility: defaultVisibility,
+            }),
+          },
+        );
+      }
+      notice = "Settings saved automatically.";
     } catch (caught) {
       error =
         caught instanceof ApiFailure || caught instanceof Error
           ? caught.message
           : "Could not save instance settings.";
     } finally {
-      working = false;
+      savingSettings = false;
     }
   }
 </script>
@@ -164,6 +182,7 @@
             class="rounded-md border bg-background px-3 py-2 outline-none focus:border-ring focus:ring-2 focus:ring-ring/20"
             bind:value={siteName}
             maxlength="80"
+            onchange={() => void saveSettings()}
             required
           />
         </label>
@@ -172,7 +191,8 @@
           <textarea
             class="min-h-24 resize-y rounded-md border bg-background px-3 py-2 outline-none focus:border-ring focus:ring-2 focus:ring-ring/20"
             bind:value={siteDescription}
-            maxlength="280"></textarea>
+            maxlength="280"
+            onchange={() => void saveSettings()}></textarea>
         </label>
         <fieldset class="grid gap-4 border-t pt-5">
           <legend class="sr-only">Browser icons</legend>
@@ -201,9 +221,12 @@
                   class="min-w-0 text-xs font-normal text-muted-foreground file:mr-3 file:rounded-md file:border file:bg-background file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-foreground"
                   type="file"
                   accept="image/png,.png"
-                  onchange={(event) => {
-                    lightFavicon = event.currentTarget.files?.[0] ?? null;
-                  }}
+                  disabled={working}
+                  onchange={(event) =>
+                    void saveFavicon(
+                      "light",
+                      event.currentTarget.files?.[0] ?? null,
+                    )}
                 />
               {/key}
             </label>
@@ -234,9 +257,12 @@
                   class="min-w-0 text-xs font-normal text-muted-foreground file:mr-3 file:rounded-md file:border file:bg-background file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-foreground"
                   type="file"
                   accept="image/png,.png"
-                  onchange={(event) => {
-                    darkFavicon = event.currentTarget.files?.[0] ?? null;
-                  }}
+                  disabled={working}
+                  onchange={(event) =>
+                    void saveFavicon(
+                      "dark",
+                      event.currentTarget.files?.[0] ?? null,
+                    )}
                 />
               {/key}
             </label>
@@ -261,6 +287,7 @@
             onValueChange={(value) => {
               if (value === "public" || value === "private") {
                 defaultVisibility = value;
+                void saveSettings();
               }
             }}
           >
@@ -274,11 +301,6 @@
           </Select.Root>
         </label>
       </div>
-      <footer class="flex justify-end border-t px-5 py-4">
-        <Button class="gap-2" type="submit" disabled={working}>
-          <Save class="size-4" />Save settings
-        </Button>
-      </footer>
     </form>
 
     <section class="rounded-md border bg-card/25">

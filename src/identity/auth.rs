@@ -121,7 +121,6 @@ pub async fn logout(
 #[derive(Deserialize)]
 pub struct UpdateUsernameRequest {
     username: String,
-    current_password: String,
 }
 
 pub async fn update_username(
@@ -134,7 +133,6 @@ pub async fn update_username(
         .authenticate(&headers, &jar, super::SCOPE_WRITE)
         .await?;
     require_browser_session(actor.via_api_token)?;
-    verify_current_password(&actor.user, request.current_password).await?;
 
     let username = validate_slug(&request.username, "Username")?;
     if username == actor.user.username {

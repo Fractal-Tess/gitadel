@@ -4,6 +4,11 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+### Changed
+
+- Made username changes save on Enter without requiring the current password or a separate update button.
+- Made general instance settings and favicon uploads save as soon as they change, removing the separate save step.
+
 ## [0.4.0] - 2026-08-22
 
 ### Added

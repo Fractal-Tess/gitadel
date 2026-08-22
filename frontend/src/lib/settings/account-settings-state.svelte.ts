@@ -67,7 +67,6 @@ export class AccountSettingsState {
   memberUsername = $state("");
   memberRole = $state<"owner" | "member">("member");
   username = $state("");
-  usernamePassword = $state("");
   currentPassword = $state("");
   newPassword = $state("");
   confirmPassword = $state("");
@@ -113,30 +112,26 @@ export class AccountSettingsState {
   }
 
   async updateUsername() {
+    const username = this.username.trim().toLowerCase();
+    this.username = username;
+    const previousUsername = this.app.authStatus?.user?.username;
+    if (!username || username === previousUsername) return;
+
     await this.run(async () => {
-      const previousUsername = this.app.authStatus?.user?.username;
       const response = await requestJson(
         "/api/v1/me/username",
         authResponseSchema,
         {
           method: "PUT",
-          body: jsonBody({
-            username: this.username,
-            current_password: this.usernamePassword,
-          }),
+          body: jsonBody({ username }),
         },
       );
       this.username = response.user.username;
-      this.usernamePassword = "";
       await this.app.refreshAuth();
-      if (previousUsername === response.user.username) {
-        toast.info("Username unchanged");
-      } else {
-        toast.success("Username updated", {
-          description:
-            "Update remotes that use your previous repository namespace.",
-        });
-      }
+      toast.success("Username updated", {
+        description:
+          "Update remotes that use your previous repository namespace.",
+      });
     });
   }
 

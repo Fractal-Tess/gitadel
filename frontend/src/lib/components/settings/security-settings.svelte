@@ -165,28 +165,14 @@
           autocomplete="username"
           bind:value={account.username}
           maxlength={39}
+          disabled={account.working}
           required
         />
         <Field.Description>
-          Repository URLs change with your username. Update existing Git remotes
-          afterward.
+          Press Enter to save. Repository URLs change with your username, so
+          update existing Git remotes afterward.
         </Field.Description>
       </Field.Field>
-      <Field.Field>
-        <Field.Label for="username-current-password">
-          Current password
-        </Field.Label>
-        <Input
-          id="username-current-password"
-          type="password"
-          autocomplete="current-password"
-          bind:value={account.usernamePassword}
-          required
-        />
-      </Field.Field>
-      <Button class="w-fit" type="submit" disabled={account.working}>
-        Update username
-      </Button>
     </form>
   </section>
 
