@@ -1,5 +1,12 @@
 <script lang="ts">
-  import { BarChart3, Check, Copy, Pencil } from "lucide-svelte";
+  import {
+    ArrowRight,
+    BarChart3,
+    Check,
+    Copy,
+    Package,
+    Pencil,
+  } from "lucide-svelte";
 
   import RepositoryToolbar from "$lib/components/repository/repository-toolbar.svelte";
   import RepositoryTopics from "$lib/components/repository/repository-topics.svelte";
@@ -75,6 +82,14 @@
       rounded = Math.ceil((value / unit.threshold) * 10) / 10;
     }
     return `${compactDecimal.format(rounded)}${unit.suffix}`;
+  }
+
+  function formatReleaseDate(value: string) {
+    return new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    }).format(new Date(value));
   }
 
   function formatRepositorySize(bytes: number | null | undefined) {
@@ -227,6 +242,65 @@
           <dd>{repository.refs?.tags.length ?? 0}</dd>
         </div>
       </dl>
+    </section>
+
+    <section class="p-4">
+      <div class="flex items-center justify-between gap-3">
+        <h2
+          class="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+        >
+          <Package class="size-3.5" />Releases
+        </h2>
+        {#if repository.releases.length}
+          <button
+            type="button"
+            class="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+            onclick={() => repository.navigate("releases")}
+          >
+            {repository.releases.length} total<ArrowRight class="size-3" />
+          </button>
+        {/if}
+      </div>
+      {#if repository.releases[0]}
+        {@const latest =
+          repository.releases.find((release) => release.latest) ??
+          repository.releases[0]}
+        <button
+          type="button"
+          class="mt-3 block w-full text-left"
+          onclick={() => repository.navigate("releases")}
+        >
+          <span class="block truncate text-sm font-medium hover:underline"
+            >{latest.title}</span
+          >
+          <span
+            class="mt-1 flex items-center justify-between gap-3 text-xs text-muted-foreground"
+          >
+            <code class="truncate">{latest.target_revision}</code>
+            <span class="shrink-0"
+              >{formatReleaseDate(latest.published_at)}</span
+            >
+          </span>
+        </button>
+      {:else if repository.releasesLoading}
+        <p class="mt-3 text-xs text-muted-foreground">Loading releases…</p>
+      {:else if repository.releasesLoadFailed}
+        <button
+          type="button"
+          class="mt-3 text-left text-xs text-muted-foreground hover:text-foreground"
+          onclick={() => void repository.refreshReleases()}
+        >
+          Releases unavailable. Try again.
+        </button>
+      {:else}
+        <button
+          type="button"
+          class="mt-3 text-left text-xs text-muted-foreground hover:text-foreground"
+          onclick={() => repository.navigate("releases")}
+        >
+          No releases published.
+        </button>
+      {/if}
     </section>
 
     <section class="p-4">

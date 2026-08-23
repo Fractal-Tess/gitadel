@@ -21,6 +21,21 @@ backend        # Gitadel HTTP on :3000 and SSH on :2222
 
 The flake also provides `frontend-build`, `release-build`, and `frontend-hash` commands.
 
+### Single-port frontend watch
+
+To exercise flows that need the API and frontend on one origin (OAuth callbacks,
+cookies, passkeys), run:
+
+```bash
+./scripts/dev.sh
+```
+
+It starts `vite build --watch` and serves Gitadel on http://localhost:8080. In
+debug builds rust-embed reads assets from `frontend/build/` on every request,
+so frontend changes are live without restarting; Rust changes require a
+restart. Defaults can be overridden with the `GITADEL_*` environment variables
+used by the CLI.
+
 ## Validation
 
 Run formatting, linting, type checking, and the frontend production build before submitting a change:

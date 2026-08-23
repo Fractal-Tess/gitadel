@@ -167,6 +167,97 @@ export const webhookSchema = z.object({
   }),
 });
 
+export const webhookDeliverySchema = z.object({
+  id: z.uuid(),
+  event: z.string(),
+  status_code: z.number().int().nullable(),
+  status: z.enum(["ok", "failed"]),
+  delivered_at: z.string(),
+  duration_ms: z.number().int(),
+  payload: z.unknown(),
+  response_body: z.string().nullable(),
+});
+
+export const issueUserSchema = z.object({
+  id: z.uuid(),
+  username: z.string(),
+  avatar_updated_at: z.string().nullable(),
+});
+
+export const issueLabelSchema = z.object({
+  id: z.uuid(),
+  name: z.string(),
+  color: z.string(),
+  description: z.string(),
+});
+
+export const issueSchema = z.object({
+  id: z.uuid(),
+  number: z.number().int().positive(),
+  title: z.string(),
+  body: z.string(),
+  rendered_body: z.string(),
+  state: z.enum(["open", "closed"]),
+  author: issueUserSchema,
+  assignee: issueUserSchema.nullable(),
+  labels: z.array(issueLabelSchema),
+  comment_count: z.number().int().nonnegative(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  closed_at: z.string().nullable(),
+  can_edit: z.boolean(),
+  can_manage: z.boolean(),
+});
+
+export const issueCommentSchema = z.object({
+  id: z.uuid(),
+  body: z.string(),
+  rendered_body: z.string(),
+  author: issueUserSchema,
+  created_at: z.string(),
+  updated_at: z.string(),
+  can_edit: z.boolean(),
+});
+
+export const issueAttachmentSchema = z.object({
+  id: z.uuid(),
+  name: z.string(),
+  content_type: z.string(),
+  size_bytes: z.number().int().nonnegative(),
+  created_at: z.string(),
+  url: z.string(),
+});
+
+export const renderedMarkdownSchema = z.object({
+  rendered_html: z.string(),
+});
+
+export const releaseAssetSchema = z.object({
+  id: z.uuid(),
+  name: z.string(),
+  content_type: z.string(),
+  size_bytes: z.number().int().nonnegative(),
+  download_count: z.number().int().nonnegative(),
+  created_at: z.string(),
+  download_url: z.string(),
+});
+
+export const releaseSchema = z.object({
+  id: z.uuid(),
+  target_revision: z.string(),
+  target_oid: z.string(),
+  title: z.string(),
+  body: z.string(),
+  rendered_body: z.string(),
+  prerelease: z.boolean(),
+  latest: z.boolean(),
+  author: z.string(),
+  published_at: z.string(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  assets: z.array(releaseAssetSchema),
+});
+
 export const repositoryActivitySchema = z.object({
   start_date: z.iso.date(),
   end_date: z.iso.date(),
@@ -289,6 +380,14 @@ export type Member = z.infer<typeof memberSchema>;
 export type AuditEvent = z.infer<typeof auditEventSchema>;
 export type Repository = z.infer<typeof repositorySchema>;
 export type Webhook = z.infer<typeof webhookSchema>;
+export type WebhookDelivery = z.infer<typeof webhookDeliverySchema>;
+export type Issue = z.infer<typeof issueSchema>;
+export type IssueUser = z.infer<typeof issueUserSchema>;
+export type IssueComment = z.infer<typeof issueCommentSchema>;
+export type IssueLabel = z.infer<typeof issueLabelSchema>;
+export type IssueAttachment = z.infer<typeof issueAttachmentSchema>;
+export type Release = z.infer<typeof releaseSchema>;
+export type ReleaseAsset = z.infer<typeof releaseAssetSchema>;
 export type RepositoryOverviewItem = z.infer<
   typeof repositoryOverviewItemSchema
 >;

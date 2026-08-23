@@ -75,7 +75,9 @@
         <Settings2 />Account settings
       </DropdownMenu.Item>
       {#if app.authStatus.user?.is_admin}
-        <DropdownMenu.Item onclick={() => void goto(resolve("/admin"))}>
+        <DropdownMenu.Item
+          onclick={() => void goto(resolve("/settings?view=administration"))}
+        >
           <ShieldCheck />Administration
         </DropdownMenu.Item>
       {/if}

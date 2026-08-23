@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, path::Path, process::Stdio, time::Duration};
+use std::{
+    collections::BTreeMap,
+    path::Path,
+    process::Stdio,
+    time::{Duration, Instant},
+};
 
 use axum::{
     Json,
@@ -10,7 +15,8 @@ use axum_extra::extract::cookie::CookieJar;
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -21,11 +27,17 @@ use uuid::Uuid;
 
 use super::{Permission, RepositoryState};
 use crate::{
-    entity::{repository, repository_webhook, user},
+    entity::{repository, repository_webhook, repository_webhook_delivery, user},
     identity::{ApiError, SCOPE_READ, SCOPE_WRITE},
 };
 
 pub(super) type RefSnapshot = BTreeMap<String, String>;
+
+/// Maximum number of delivery records kept per webhook.
+const WEBHOOK_DELIVERY_HISTORY_LIMIT: usize = 50;
+
+/// Maximum number of response body characters stored per delivery.
+const WEBHOOK_DELIVERY_BODY_LIMIT: usize = 2048;
 
 #[derive(Serialize)]
 struct WebhookConfigResponse {
@@ -94,6 +106,41 @@ impl WebhookResponse {
             updated_at: hook.updated_at,
             last_delivery_at: hook.last_delivery_at,
             last_response,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct WebhookDeliveryResponse {
+    id: Uuid,
+    event: String,
+    status_code: Option<i32>,
+    status: &'static str,
+    delivered_at: chrono::DateTime<Utc>,
+    duration_ms: i32,
+    payload: Value,
+    response_body: Option<String>,
+}
+
+impl WebhookDeliveryResponse {
+    fn new(delivery: repository_webhook_delivery::Model) -> Self {
+        let status = if delivery
+            .response_status
+            .is_some_and(|code| (200..300).contains(&code))
+        {
+            "ok"
+        } else {
+            "failed"
+        };
+        Self {
+            id: delivery.id,
+            event: delivery.event,
+            status_code: delivery.response_status,
+            status,
+            delivered_at: delivery.created_at,
+            duration_ms: delivery.duration_ms,
+            payload: serde_json::from_str(&delivery.payload).unwrap_or(Value::Null),
+            response_body: delivery.response_body,
         }
     }
 }
@@ -310,6 +357,101 @@ pub async fn delete_webhook(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn list_webhook_deliveries(
+    State(state): State<RepositoryState>,
+    AxumPath((namespace, name, id)): AxumPath<(String, String, Uuid)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Json<Vec<WebhookDeliveryResponse>>, ApiError> {
+    let (_, repository) = state
+        .authenticated_repository(
+            &headers,
+            &jar,
+            &namespace,
+            &name,
+            Permission::Manage,
+            SCOPE_READ,
+        )
+        .await?;
+    find_hook(state.identity().database(), repository.id, id).await?;
+    let deliveries = repository_webhook_delivery::Entity::find()
+        .filter(repository_webhook_delivery::Column::WebhookId.eq(id))
+        .order_by_desc(repository_webhook_delivery::Column::CreatedAt)
+        .limit(WEBHOOK_DELIVERY_HISTORY_LIMIT as u64)
+        .all(state.identity().database())
+        .await?;
+    Ok(Json(
+        deliveries
+            .into_iter()
+            .map(WebhookDeliveryResponse::new)
+            .collect(),
+    ))
+}
+
+pub async fn get_webhook_delivery(
+    State(state): State<RepositoryState>,
+    AxumPath((namespace, name, id, delivery_id)): AxumPath<(String, String, Uuid, Uuid)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Json<WebhookDeliveryResponse>, ApiError> {
+    let (_, repository) = state
+        .authenticated_repository(
+            &headers,
+            &jar,
+            &namespace,
+            &name,
+            Permission::Manage,
+            SCOPE_READ,
+        )
+        .await?;
+    let hook = find_hook(state.identity().database(), repository.id, id).await?;
+    let delivery = find_delivery(state.identity().database(), hook.id, delivery_id).await?;
+    Ok(Json(WebhookDeliveryResponse::new(delivery)))
+}
+
+pub async fn redeliver_webhook_delivery(
+    State(state): State<RepositoryState>,
+    AxumPath((namespace, name, id, delivery_id)): AxumPath<(String, String, Uuid, Uuid)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<StatusCode, ApiError> {
+    let (actor, repository) = state
+        .authenticated_repository(
+            &headers,
+            &jar,
+            &namespace,
+            &name,
+            Permission::Manage,
+            SCOPE_WRITE,
+        )
+        .await?;
+    let hook = find_hook(state.identity().database(), repository.id, id).await?;
+    let delivery = find_delivery(state.identity().database(), hook.id, delivery_id).await?;
+    let payload = serde_json::from_str(&delivery.payload).unwrap_or(Value::Null);
+    state
+        .identity()
+        .audit(
+            Some(actor.user.id),
+            "repository.webhook.redeliver",
+            Some(format!("{namespace}/{name}/{id}/{delivery_id}")),
+        )
+        .await?;
+    queue_delivery(state, hook, delivery.event, payload);
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn find_delivery(
+    database: &DatabaseConnection,
+    webhook_id: Uuid,
+    id: Uuid,
+) -> Result<repository_webhook_delivery::Model, ApiError> {
+    repository_webhook_delivery::Entity::find_by_id(id)
+        .filter(repository_webhook_delivery::Column::WebhookId.eq(webhook_id))
+        .one(database)
+        .await?
+        .ok_or_else(ApiError::not_found)
+}
+
 pub async fn ping_webhook(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, id)): AxumPath<(String, String, Uuid)>,
@@ -393,7 +535,12 @@ pub(super) async fn dispatch_push(
             state, repository, &actor, reference, old_oid, new_oid, &zero,
         );
         for hook in &hooks {
-            queue_delivery(state.clone(), hook.clone(), "push", payload.clone());
+            queue_delivery(
+                state.clone(),
+                hook.clone(),
+                String::from("push"),
+                payload.clone(),
+            );
         }
     }
     Ok(())
@@ -412,17 +559,17 @@ fn queue_ping(
         "repository": repository_payload(&state, &repository),
         "sender": user_payload(&actor),
     });
-    queue_delivery(state, hook, "ping", payload);
+    queue_delivery(state, hook, String::from("ping"), payload);
 }
 
 fn queue_delivery(
     state: RepositoryState,
     hook: repository_webhook::Model,
-    event: &'static str,
+    event: String,
     payload: Value,
 ) {
     tokio::spawn(async move {
-        if let Err(error) = deliver(&state, &hook, event, &payload).await {
+        if let Err(error) = deliver(&state, &hook, &event, &payload).await {
             tracing::warn!(%error, webhook_id = %hook.id, %event, "webhook delivery failed");
         }
     });
@@ -450,26 +597,85 @@ async fn deliver(
         request = request.header("x-hub-signature-256", signature(secret, &body)?);
     }
 
-    let delivered_at = Utc::now();
-    let (status, message) = match request.send().await {
+    let started = Instant::now();
+    let (status, response_body) = match request.send().await {
         Ok(response) => {
             let status = i32::from(response.status().as_u16());
-            let message = response
-                .text()
-                .await
-                .unwrap_or_default()
-                .chars()
-                .take(512)
-                .collect::<String>();
-            (Some(status), (!message.is_empty()).then_some(message))
+            let text = response.text().await.unwrap_or_default();
+            (Some(status), (!text.is_empty()).then_some(text))
         }
         Err(error) => (None, Some(error.to_string())),
     };
+    let duration_ms = i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX);
+    record_delivery(
+        state,
+        hook.id,
+        event,
+        payload,
+        status,
+        duration_ms,
+        &response_body,
+    )
+    .await?;
+
     let mut active: repository_webhook::ActiveModel = hook.clone().into();
-    active.last_delivery_at = Set(Some(delivered_at));
+    active.last_delivery_at = Set(Some(Utc::now()));
     active.last_response_status = Set(status);
-    active.last_response_message = Set(message);
+    active.last_response_message = Set(response_body
+        .as_ref()
+        .map(|body| body.chars().take(512).collect::<String>()));
     active.update(state.identity().database()).await?;
+    Ok(())
+}
+
+async fn record_delivery(
+    state: &RepositoryState,
+    webhook_id: Uuid,
+    event: &str,
+    payload: &Value,
+    status: Option<i32>,
+    duration_ms: i32,
+    response_body: &Option<String>,
+) -> Result<(), ApiError> {
+    let database = state.identity().database();
+    repository_webhook_delivery::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        webhook_id: Set(webhook_id),
+        event: Set(event.to_owned()),
+        payload: Set(payload.to_string()),
+        response_status: Set(status),
+        response_body: Set(response_body.as_ref().map(|body| {
+            body.chars()
+                .take(WEBHOOK_DELIVERY_BODY_LIMIT)
+                .collect::<String>()
+        })),
+        duration_ms: Set(duration_ms),
+        created_at: Set(Utc::now()),
+    }
+    .insert(database)
+    .await?;
+    prune_deliveries(database, webhook_id).await?;
+    Ok(())
+}
+
+async fn prune_deliveries(database: &DatabaseConnection, webhook_id: Uuid) -> Result<(), ApiError> {
+    let keep = repository_webhook_delivery::Entity::find()
+        .filter(repository_webhook_delivery::Column::WebhookId.eq(webhook_id))
+        .order_by_desc(repository_webhook_delivery::Column::CreatedAt)
+        .limit(WEBHOOK_DELIVERY_HISTORY_LIMIT as u64)
+        .all(database)
+        .await?;
+    if keep.len() < WEBHOOK_DELIVERY_HISTORY_LIMIT {
+        return Ok(());
+    }
+    repository_webhook_delivery::Entity::delete_many()
+        .filter(repository_webhook_delivery::Column::WebhookId.eq(webhook_id))
+        .filter(
+            repository_webhook_delivery::Column::Id
+                .is_not_in(keep.into_iter().map(|d| d.id).collect::<Vec<_>>()),
+        )
+        .exec(database)
+        .await?;
     Ok(())
 }
 

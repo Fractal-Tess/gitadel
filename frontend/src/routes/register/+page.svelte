@@ -43,7 +43,7 @@
       );
       await app.refreshAuth();
       if (creatingAdministrator) {
-        await goto(resolve("/admin"));
+        await goto(resolve("/settings?view=administration"));
       } else {
         await goto(resolve("/"));
       }
@@ -59,19 +59,26 @@
 </script>
 
 <svelte:head>
-  <title>{setupRequired ? "Set up" : "Join"} · {app.instance?.site_name ?? "Gitadel"}</title>
+  <title
+    >{setupRequired ? "Set up" : "Join"} · {app.instance?.site_name ??
+      "Gitadel"}</title
+  >
 </svelte:head>
 
 <main class="grid min-h-screen place-items-center bg-background px-5 py-12">
   <section class="w-full max-w-md rounded-md border bg-card/25 p-6 shadow-sm">
-    <div class="flex size-10 items-center justify-center rounded-md border bg-background">
+    <div
+      class="flex size-10 items-center justify-center rounded-md border bg-background"
+    >
       {#if setupRequired}
         <ShieldCheck class="size-5" />
       {:else}
         <UserPlus class="size-5" />
       {/if}
     </div>
-    <p class="mt-7 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+    <p
+      class="mt-7 text-xs font-medium uppercase tracking-wider text-muted-foreground"
+    >
       {setupRequired ? "Initial setup" : "Invitation"}
     </p>
     <h1 class="mt-2 text-2xl font-semibold">
@@ -84,7 +91,9 @@
     </p>
 
     {#if error}
-      <p class="mt-5 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+      <p
+        class="mt-5 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
+      >
         {error}
       </p>
     {/if}
@@ -128,7 +137,11 @@
           required
         />
       </label>
-      <Button class="mt-2" type="submit" disabled={working || (!setupRequired && !invitationToken)}>
+      <Button
+        class="mt-2"
+        type="submit"
+        disabled={working || (!setupRequired && !invitationToken)}
+      >
         {setupRequired ? "Create administrator" : "Create account"}
       </Button>
     </form>

@@ -1,11 +1,21 @@
 <script lang="ts">
   import { page } from "$app/state";
   import { resolve } from "$app/paths";
-  import { ArrowLeft, FileCode2, History, Settings, Tag } from "lucide-svelte";
+  import {
+    ArrowLeft,
+    CircleDot,
+    FileCode2,
+    History,
+    Package,
+    Settings,
+    Tag,
+  } from "lucide-svelte";
 
   import RepositoryCommit from "$lib/components/repository/repository-commit.svelte";
   import RepositoryHistory from "$lib/components/repository/repository-history.svelte";
+  import RepositoryIssues from "$lib/components/repository/repository-issues.svelte";
   import RepositoryOverview from "$lib/components/repository/repository-overview.svelte";
+  import RepositoryReleases from "$lib/components/repository/repository-releases.svelte";
   import RepositorySettings from "$lib/components/repository/repository-settings.svelte";
   import RepositorySidebar from "$lib/components/repository/repository-sidebar.svelte";
   import RepositoryTags from "$lib/components/repository/repository-tags.svelte";
@@ -56,6 +66,20 @@
           icon: History,
           active: state.view === "history" || state.view === "commit",
           select: () => state.navigate("history"),
+        },
+        {
+          id: "issues",
+          label: "Issues",
+          icon: CircleDot,
+          active: state.view === "issues",
+          select: () => state.navigate("issues"),
+        },
+        {
+          id: "releases",
+          label: "Releases",
+          icon: Package,
+          active: state.view === "releases",
+          select: () => state.navigate("releases"),
         },
         {
           id: "tags",
@@ -154,6 +178,10 @@
           <RepositoryCommit {state} />
         {:else if state.view === "tags"}
           <RepositoryTags {state} />
+        {:else if state.view === "releases"}
+          <RepositoryReleases {state} />
+        {:else if state.view === "issues"}
+          <RepositoryIssues {state} />
         {:else if state.view === "settings"}
           <RepositorySettings {state} />
         {/if}

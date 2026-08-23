@@ -31,7 +31,7 @@
       if (returnTo?.startsWith("/login/oauth/authorize?")) {
         window.location.assign(returnTo);
       } else if (returnTo?.startsWith("/admin")) {
-        await goto(resolve("/admin"));
+        await goto(resolve("/settings?view=administration"));
       } else if (
         returnTo === "/settings" ||
         returnTo?.startsWith("/settings?")

@@ -2094,6 +2094,7 @@ dependencies = [
  "comrak",
  "config",
  "fs2",
+ "futures-util",
  "hmac 0.12.1",
  "http-body-util",
  "mime_guess",

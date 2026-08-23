@@ -4,7 +4,7 @@ use axum::{
     Form, Json,
     extract::{OriginalUri, Query, State},
     http::{HeaderValue, StatusCode, header},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
 use chrono::Utc;
@@ -254,12 +254,12 @@ pub async fn authorize(
         },
     );
 
-    consent_response(consent_page(
-        &application.name,
-        &account.username,
-        &scope,
-        &consent_token,
-    ))
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.append_pair("consent_token", &consent_token);
+    serializer.append_pair("application", &application.name);
+    serializer.append_pair("username", &account.username);
+    serializer.append_pair("scope", &scope);
+    Redirect::to(&format!("/oauth/consent?{}", serializer.finish())).into_response()
 }
 
 #[derive(Deserialize)]
@@ -354,8 +354,10 @@ pub struct TokenRequest {
     grant_type: String,
     client_id: String,
     client_secret: String,
-    code: String,
-    redirect_uri: String,
+    // Optional so an unsupported grant (Gitea clients try refresh_token) is
+    // answered with an OAuth error object instead of a form-decoding failure.
+    code: Option<String>,
+    redirect_uri: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -376,14 +378,16 @@ pub async fn access_token(
             "Gitadel supports only the authorization_code grant.",
         );
     }
-    if [
-        &request.client_id,
-        &request.client_secret,
-        &request.code,
-        &request.redirect_uri,
-    ]
-    .iter()
-    .any(|value| value.is_empty() || value.len() > MAX_OAUTH_PARAMETER_LENGTH)
+    let (Some(code), Some(redirect_uri)) = (request.code, request.redirect_uri) else {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "The token request is missing the code or redirect_uri parameter.",
+        );
+    };
+    if [&request.client_id, &request.client_secret, &code, &redirect_uri]
+        .iter()
+        .any(|value| value.is_empty() || value.len() > MAX_OAUTH_PARAMETER_LENGTH)
     {
         return oauth_error(
             StatusCode::BAD_REQUEST,
@@ -413,7 +417,7 @@ pub async fn access_token(
         Ok(transaction) => transaction,
         Err(error) => return ApiError::from(error).into_response(),
     };
-    let code_hash = hash_secret(&request.code);
+    let code_hash = hash_secret(&code);
     let stored = match oauth_authorization_code::Entity::find_by_id(&code_hash)
         .filter(oauth_authorization_code::Column::ApplicationId.eq(application.id))
         .one(&transaction)
@@ -429,7 +433,7 @@ pub async fn access_token(
         }
         Err(error) => return ApiError::from(error).into_response(),
     };
-    if stored.expires_at <= Utc::now() || stored.redirect_uri != request.redirect_uri {
+    if stored.expires_at <= Utc::now() || stored.redirect_uri != redirect_uri {
         if let Err(error) = oauth_authorization_code::Entity::delete_by_id(code_hash)
             .exec(&transaction)
             .await
@@ -615,62 +619,4 @@ fn oauth_error(status: StatusCode, error: &str, description: &str) -> Response {
         }),
     )
         .into_response()
-}
-
-fn consent_response(page: String) -> Response {
-    let mut response = Html(page).into_response();
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response.headers_mut().insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(
-            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
-        ),
-    );
-    response.headers_mut().insert(
-        header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
-    );
-    response.headers_mut().insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
-    response
-        .headers_mut()
-        .insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
-    response
-}
-
-fn consent_page(application: &str, username: &str, scope: &str, consent_token: &str) -> String {
-    let application = escape_html(application);
-    let username = escape_html(username);
-    let permissions = scope
-        .split_ascii_whitespace()
-        .map(scope_description)
-        .map(|permission| format!("<li>{permission}</li>"))
-        .collect::<String>();
-    format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Authorize {application} · Gitadel</title><style>\
-        :root{{color-scheme:dark;font-family:ui-sans-serif,system-ui,sans-serif;background:#0d0d0d;color:#f4f4f5}}*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px}}main{{width:min(100%,460px);border:1px solid #2b2b2f;border-radius:12px;background:#151516;padding:28px;box-shadow:0 24px 70px #0008}}p,li{{color:#a1a1aa;line-height:1.55}}h1{{font-size:24px;margin:8px 0}}.eyebrow{{font-size:12px;text-transform:uppercase;letter-spacing:.12em;color:#f97316}}ul{{padding-left:20px;margin:20px 0}}form{{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:24px}}button{{border:1px solid #34343a;border-radius:8px;padding:11px 14px;font:inherit;font-weight:600;cursor:pointer;background:#202024;color:#f4f4f5}}button[value=allow]{{background:#f4f4f5;color:#18181b;border-color:#f4f4f5}}small{{display:block;color:#71717a;margin-top:16px}}\
-        </style></head><body><main><div class=\"eyebrow\">OAuth authorization</div><h1>Authorize {application}?</h1><p>Signed in as <strong>{username}</strong>. This application is requesting permission to:</p><ul>{permissions}</ul><form method=\"post\" action=\"/login/oauth/authorize\"><input type=\"hidden\" name=\"consent_token\" value=\"{consent_token}\"><button type=\"submit\" name=\"decision\" value=\"deny\">Cancel</button><button type=\"submit\" name=\"decision\" value=\"allow\">Authorize</button></form><small>You can revoke access by deleting this OAuth application in account settings.</small></main></body></html>"
-    )
-}
-
-fn scope_description(scope: &str) -> &'static str {
-    match scope {
-        "read:repository" | "repo" => "Read and clone repositories you can access",
-        "read:user" | "user" => "Read your account identity",
-        "read:organization" => "Read your organization memberships",
-        _ => "Access your Gitadel account",
-    }
-}
-
-fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
 }

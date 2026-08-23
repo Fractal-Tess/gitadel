@@ -35,7 +35,9 @@
     timeZone: "UTC",
   });
 
-  let maxCount = $derived(Math.max(0, ...activity.days.map((day) => day.count)));
+  let maxCount = $derived(
+    Math.max(0, ...activity.days.map((day) => day.count)),
+  );
 
   function lastDayOfMonth(date: Date): number {
     return new Date(
@@ -168,7 +170,9 @@
     >
       Commit activity
     </p>
-    <p class="mt-1.5 font-mono text-2xl leading-none tracking-tight tabular-nums">
+    <p
+      class="mt-1.5 font-mono text-2xl leading-none tracking-tight tabular-nums"
+    >
       {activity.total_commits.toLocaleString()}
     </p>
     <p class="mt-1.5 text-[11px] leading-snug text-muted-foreground">

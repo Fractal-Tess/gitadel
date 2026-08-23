@@ -1,7 +1,9 @@
 mod browser;
 mod git_http;
 mod gitea;
+mod issues;
 mod lfs;
+mod releases;
 mod resources;
 mod ssh;
 mod topics;
@@ -545,6 +547,68 @@ pub fn router() -> Router<RepositoryState> {
         .route("/topics", get(topics::suggest_topics))
         .route("/repositories/{namespace}/{name}/refs", get(browser::refs))
         .route(
+            "/repositories/{namespace}/{name}/releases",
+            get(releases::list_releases).post(releases::create_release),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/releases/{id}",
+            get(releases::get_release)
+                .patch(releases::update_release)
+                .delete(releases::delete_release),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/releases/{id}/assets",
+            axum::routing::put(releases::upload_asset)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/releases/{release_id}/assets/{asset_id}",
+            get(releases::download_asset).delete(releases::delete_asset),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/issues",
+            get(issues::list_issues).post(issues::create_issue),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/issues/{number}",
+            get(issues::get_issue)
+                .patch(issues::update_issue)
+                .delete(issues::delete_issue),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/issues/{number}/comments",
+            get(issues::list_comments).post(issues::create_comment),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/issues/{number}/comments/{id}",
+            axum::routing::patch(issues::update_comment).delete(issues::delete_comment),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/issue-labels",
+            get(issues::list_labels).post(issues::create_label),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/issue-labels/{id}",
+            axum::routing::patch(issues::update_label).delete(issues::delete_label),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/assignable-users",
+            get(issues::list_assignable_users),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/markdown-preview",
+            axum::routing::post(issues::preview_markdown),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/issue-attachments",
+            axum::routing::put(issues::upload_attachment)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/issue-attachments/{attachment_id}",
+            get(issues::download_attachment),
+        )
+        .route(
             "/repositories/{namespace}/{name}/activity",
             get(browser::activity),
         )
@@ -588,6 +652,18 @@ pub fn router() -> Router<RepositoryState> {
         .route(
             "/repos/{namespace}/{name}/hooks/{id}/pings",
             axum::routing::post(webhooks::ping_webhook),
+        )
+        .route(
+            "/repos/{namespace}/{name}/hooks/{id}/deliveries",
+            get(webhooks::list_webhook_deliveries),
+        )
+        .route(
+            "/repos/{namespace}/{name}/hooks/{id}/deliveries/{delivery_id}",
+            get(webhooks::get_webhook_delivery),
+        )
+        .route(
+            "/repos/{namespace}/{name}/hooks/{id}/deliveries/{delivery_id}/attempts",
+            axum::routing::post(webhooks::redeliver_webhook_delivery),
         )
         .route("/user/repos", get(gitea::list_user_repositories))
         .route(

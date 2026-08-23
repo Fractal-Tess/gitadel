@@ -369,6 +369,7 @@ pub mod repository {
         pub visibility: String,
         pub object_format: String,
         pub default_branch: String,
+        pub issue_counter: i64,
         #[sea_orm(unique)]
         pub storage_key: Uuid,
         pub created_by: Uuid,
@@ -449,6 +450,29 @@ pub mod repository_webhook {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod repository_webhook_delivery {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "repository_webhook_deliveries")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub webhook_id: Uuid,
+        pub event: String,
+        pub payload: String,
+        pub response_status: Option<i32>,
+        pub response_body: Option<String>,
+        pub duration_ms: i32,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod topic {
     use super::*;
 
@@ -478,6 +502,163 @@ pub mod repository_topic {
         pub repository_id: Uuid,
         #[sea_orm(primary_key, auto_increment = false)]
         pub topic_id: Uuid,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod repository_issue {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "repository_issues")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub repository_id: Uuid,
+        pub number: i64,
+        pub author_user_id: Uuid,
+        pub title: String,
+        pub body: String,
+        pub state: String,
+        pub assignee_user_id: Option<Uuid>,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+        pub closed_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod issue_attachment {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "issue_attachments")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub repository_id: Uuid,
+        pub issue_id: Option<Uuid>,
+        pub uploader_user_id: Uuid,
+        pub name: String,
+        pub content_type: String,
+        pub size_bytes: i64,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod issue_comment {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "issue_comments")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub issue_id: Uuid,
+        pub author_user_id: Uuid,
+        pub body: String,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod issue_label {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "issue_labels")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub repository_id: Uuid,
+        pub name: String,
+        pub color: String,
+        pub description: String,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod issue_label_assignment {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "issue_label_assignments")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub issue_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub label_id: Uuid,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod repository_release {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "repository_releases")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub repository_id: Uuid,
+        pub author_user_id: Uuid,
+        pub target_revision: String,
+        pub target_oid: String,
+        pub title: String,
+        pub body: String,
+        pub prerelease: bool,
+        pub published_at: DateTimeUtc,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod release_asset {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "release_assets")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub release_id: Uuid,
+        pub name: String,
+        pub content_type: String,
+        pub size_bytes: i64,
+        pub download_count: i64,
         pub created_at: DateTimeUtc,
     }
 

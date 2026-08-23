@@ -33,7 +33,9 @@
   }
 
   function nextFrame() {
-    return new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    return new Promise<void>((resolve) =>
+      requestAnimationFrame(() => resolve()),
+    );
   }
 
   onMount(() => {
@@ -82,7 +84,10 @@
 
 {#if renderRichDiff}
   {#if rendering}
-    <p class="rounded-md border bg-card/25 px-4 py-3 text-sm text-muted-foreground" role="status">
+    <p
+      class="rounded-md border bg-card/25 px-4 py-3 text-sm text-muted-foreground"
+      role="status"
+    >
       Rendering changes…
     </p>
   {/if}
@@ -100,6 +105,9 @@
         Only the first 1 MB is displayed.
       {/if}
     </p>
-    <pre class="max-h-[70svh] overflow-auto p-4 font-mono text-xs leading-5"><code>{plainPatch}</code></pre>
+    <pre
+      class="max-h-[70svh] overflow-auto p-4 font-mono text-xs leading-5"><code
+        >{plainPatch}</code
+      ></pre>
   </div>
 {/if}

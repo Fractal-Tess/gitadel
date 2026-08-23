@@ -9,25 +9,41 @@ import {
   commitSchema,
   diffSchema,
   historySchema,
+  issueAttachmentSchema,
+  issueCommentSchema,
+  issueLabelSchema,
+  issueSchema,
+  issueUserSchema,
   jsonBody,
   languageStatSchema,
   refsSchema,
+  releaseAssetSchema,
+  releaseSchema,
+  renderedMarkdownSchema,
   repositorySchema,
   requestEmpty,
   requestJson,
   topicsSchema,
   treeSchema,
   webhookSchema,
+  webhookDeliverySchema,
   type AuthStatus,
   type Blob,
   type Commit,
   type Diff,
   type History,
+  type Issue,
+  type IssueAttachment,
+  type IssueComment,
+  type IssueLabel,
+  type IssueUser,
   type LanguageStat,
+  type Release,
   type Repository,
   type RepositoryRefs,
   type Tree,
   type Webhook,
+  type WebhookDelivery,
 } from "$lib/api.js";
 import { copyText } from "$lib/clipboard.js";
 import { escapeHtml, languageLabel } from "$lib/repository/format.js";
@@ -38,7 +54,13 @@ import {
 } from "$lib/repository/repository-preload.js";
 
 export type RepositoryView =
-  "overview" | "history" | "commit" | "tags" | "settings";
+  | "overview"
+  | "history"
+  | "commit"
+  | "tags"
+  | "releases"
+  | "issues"
+  | "settings";
 export type CopyTarget = "http" | "ssh";
 
 const MAX_HIGHLIGHT_CHARACTERS = 200_000;
@@ -50,9 +72,15 @@ function errorMessage(caught: unknown): string {
 }
 
 function isRepositoryView(value: string | null): value is RepositoryView {
-  return ["overview", "history", "commit", "tags", "settings"].includes(
-    value ?? "",
-  );
+  return [
+    "overview",
+    "history",
+    "commit",
+    "tags",
+    "releases",
+    "issues",
+    "settings",
+  ].includes(value ?? "");
 }
 
 export class RepositoryPageState {
@@ -75,6 +103,16 @@ export class RepositoryPageState {
   readme = $state.raw<Blob | null>(null);
   authStatus = $state.raw<AuthStatus | null>(null);
   webhooks = $state.raw<Webhook[]>([]);
+  webhookDeliveries = $state<Record<string, WebhookDelivery[]>>({});
+  expandedWebhookId = $state<string | null>(null);
+  webhookDeliveriesLoadingId = $state<string | null>(null);
+  redeliveringDeliveryId = $state<string | null>(null);
+  releases = $state.raw<Release[]>([]);
+  issues = $state.raw<Issue[]>([]);
+  selectedIssue = $state.raw<Issue | null>(null);
+  issueComments = $state.raw<IssueComment[]>([]);
+  issueLabels = $state.raw<IssueLabel[]>([]);
+  assignableUsers = $state.raw<IssueUser[]>([]);
   topics = $state.raw<string[]>([]);
   ownedNamespaces = $state.raw<string[]>([]);
   view = $state<RepositoryView>("overview");
@@ -82,11 +120,22 @@ export class RepositoryPageState {
   repositoryPath = $state("");
   commitOid = $state("");
   historyPage = $state(1);
+  issueNumber = $state<number | null>(null);
   webhookUrl = $state("");
   webhookSecret = $state("");
   webhookActive = $state(true);
   webhooksLoading = $state(false);
   webhooksLoaded = $state(false);
+  releasesLoading = $state(false);
+  releasesLoaded = $state(false);
+  releasesLoadFailed = $state(false);
+  releasePending = $state(false);
+  releaseAssetPending = $state(false);
+  issuesLoading = $state(false);
+  issuesLoaded = $state(false);
+  issuePending = $state(false);
+  commentPending = $state(false);
+  labelPending = $state(false);
   webhookCreating = $state(false);
   webhookUpdatingId = $state<string | null>(null);
   webhookPingingId = $state<string | null>(null);
@@ -168,6 +217,7 @@ export class RepositoryPageState {
           .map((organization) => organization.slug),
       ];
       this.#readLocation(repository);
+      void this.#loadReleases({}).catch(() => undefined);
       await this.loadView();
     } catch (caught) {
       if (sequence === this.#repositoryRequestSequence) {
@@ -240,6 +290,18 @@ export class RepositoryPageState {
           break;
         case "tags":
           break;
+        case "releases":
+          await this.#loadReleases(init);
+          break;
+        case "issues":
+          await Promise.all([
+            this.loadIssues(init),
+            this.loadIssueLabels(init),
+            this.issueNumber
+              ? this.loadIssue(this.issueNumber, init)
+              : Promise.resolve(),
+          ]);
+          break;
         case "settings":
           await this.#loadWebhooks(init);
           break;
@@ -257,7 +319,13 @@ export class RepositoryPageState {
 
   navigate(
     nextView: RepositoryView,
-    options: { path?: string; oid?: string; page?: number; rev?: string } = {},
+    options: {
+      path?: string;
+      oid?: string;
+      page?: number;
+      rev?: string;
+      issue?: number | null;
+    } = {},
   ): void {
     this.view =
       nextView === "settings" && !this.repository?.can_manage
@@ -266,6 +334,7 @@ export class RepositoryPageState {
     this.repositoryPath = options.path ?? "";
     this.commitOid = options.oid ?? "";
     this.historyPage = options.page ?? 1;
+    this.issueNumber = nextView === "issues" ? (options.issue ?? null) : null;
     this.revision = options.rev ?? this.revision;
     this.#writeLocation();
     void this.loadView();
@@ -440,6 +509,413 @@ export class RepositoryPageState {
     window.location.assign("/");
   }
 
+  selectIssue(number: number | null) {
+    this.selectedIssue = null;
+    this.issueComments = [];
+    this.navigate("issues", { issue: number });
+  }
+
+  async loadIssues(init: RequestInit = {}) {
+    this.issuesLoading = true;
+    try {
+      this.issues = await requestJson(
+        this.#api("/issues"),
+        z.array(issueSchema),
+        init,
+      );
+      this.issuesLoaded = true;
+    } finally {
+      this.issuesLoading = false;
+    }
+  }
+
+  async loadIssue(number: number, init: RequestInit = {}) {
+    const [issue, comments] = await Promise.all([
+      requestJson(this.#api(`/issues/${number}`), issueSchema, init),
+      requestJson(
+        this.#api(`/issues/${number}/comments`),
+        z.array(issueCommentSchema),
+        init,
+      ),
+    ]);
+    if (this.issueNumber === number) {
+      this.selectedIssue = issue;
+      this.issueComments = comments;
+    }
+    return issue;
+  }
+
+  async loadIssueLabels(init: RequestInit = {}) {
+    this.issueLabels = await requestJson(
+      this.#api("/issue-labels"),
+      z.array(issueLabelSchema),
+      init,
+    );
+  }
+
+  async loadAssignableUsers(init: RequestInit = {}) {
+    this.assignableUsers = await requestJson(
+      this.#api("/assignable-users"),
+      z.array(issueUserSchema),
+      init,
+    );
+  }
+
+  async previewMarkdown(markdown: string) {
+    const { rendered_html } = await requestJson(
+      `${this.#api("/markdown-preview")}`,
+      renderedMarkdownSchema,
+      { method: "POST", body: jsonBody({ markdown }) },
+    );
+    return rendered_html;
+  }
+
+  async uploadIssueAttachment(file: File): Promise<IssueAttachment> {
+    return requestJson(
+      `${this.#api("/issue-attachments")}?${new URLSearchParams({ name: file.name })}`,
+      issueAttachmentSchema,
+      {
+        method: "PUT",
+        headers: { "content-type": file.type || "application/octet-stream" },
+        body: file,
+      },
+    );
+  }
+
+  async createIssue(values: {
+    title: string;
+    body: string;
+    label_ids: string[];
+    assignee?: string;
+    attachment_ids?: string[];
+  }) {
+    this.issuePending = true;
+    this.error = null;
+    try {
+      const issue = await requestJson(this.#api("/issues"), issueSchema, {
+        method: "POST",
+        body: jsonBody(values),
+      });
+      this.notice = `Issue #${issue.number} opened.`;
+      await this.loadIssues();
+      this.selectIssue(issue.number);
+      return issue;
+    } catch (caught) {
+      this.error = errorMessage(caught);
+      throw caught;
+    } finally {
+      this.issuePending = false;
+    }
+  }
+
+  async updateIssue(
+    number: number,
+    values: {
+      title?: string;
+      body?: string;
+      state?: "open" | "closed";
+      assignee?: string;
+      label_ids?: string[];
+      attachment_ids?: string[];
+    },
+  ) {
+    this.issuePending = true;
+    this.error = null;
+    try {
+      const issue = await requestJson(
+        this.#api(`/issues/${number}`),
+        issueSchema,
+        { method: "PATCH", body: jsonBody(values) },
+      );
+      this.selectedIssue = issue;
+      this.issues = this.issues.map((item) =>
+        item.number === issue.number ? issue : item,
+      );
+      this.notice = `Issue #${number} updated.`;
+      return issue;
+    } catch (caught) {
+      this.error = errorMessage(caught);
+      throw caught;
+    } finally {
+      this.issuePending = false;
+    }
+  }
+
+  async deleteIssue(number: number) {
+    this.issuePending = true;
+    this.error = null;
+    try {
+      await requestEmpty(this.#api(`/issues/${number}`), { method: "DELETE" });
+      this.notice = `Issue #${number} deleted.`;
+      this.issueNumber = null;
+      this.selectedIssue = null;
+      this.issueComments = [];
+      await this.loadIssues();
+      this.#writeLocation();
+    } catch (caught) {
+      this.error = errorMessage(caught);
+      throw caught;
+    } finally {
+      this.issuePending = false;
+    }
+  }
+
+  async createIssueComment(number: number, body: string) {
+    this.commentPending = true;
+    this.error = null;
+    try {
+      const comment = await requestJson(
+        this.#api(`/issues/${number}/comments`),
+        issueCommentSchema,
+        { method: "POST", body: jsonBody({ body }) },
+      );
+      this.issueComments = [...this.issueComments, comment];
+      if (this.selectedIssue?.number === number) {
+        this.selectedIssue = {
+          ...this.selectedIssue,
+          comment_count: this.selectedIssue.comment_count + 1,
+        };
+      }
+      await this.loadIssues();
+      return comment;
+    } catch (caught) {
+      this.error = errorMessage(caught);
+      throw caught;
+    } finally {
+      this.commentPending = false;
+    }
+  }
+
+  async updateIssueComment(number: number, id: string, body: string) {
+    this.commentPending = true;
+    this.error = null;
+    try {
+      const comment = await requestJson(
+        this.#api(`/issues/${number}/comments/${id}`),
+        issueCommentSchema,
+        { method: "PATCH", body: jsonBody({ body }) },
+      );
+      this.issueComments = this.issueComments.map((item) =>
+        item.id === id ? comment : item,
+      );
+      return comment;
+    } catch (caught) {
+      this.error = errorMessage(caught);
+      throw caught;
+    } finally {
+      this.commentPending = false;
+    }
+  }
+
+  async deleteIssueComment(number: number, id: string) {
+    this.commentPending = true;
+    this.error = null;
+    try {
+      await requestEmpty(this.#api(`/issues/${number}/comments/${id}`), {
+        method: "DELETE",
+      });
+      this.issueComments = this.issueComments.filter((item) => item.id !== id);
+      if (this.selectedIssue?.number === number) {
+        this.selectedIssue = {
+          ...this.selectedIssue,
+          comment_count: Math.max(0, this.selectedIssue.comment_count - 1),
+        };
+      }
+      await this.loadIssues();
+    } catch (caught) {
+      this.error = errorMessage(caught);
+      throw caught;
+    } finally {
+      this.commentPending = false;
+    }
+  }
+
+  async createIssueLabel(values: {
+    name: string;
+    color: string;
+    description: string;
+  }) {
+    this.labelPending = true;
+    this.error = null;
+    try {
+      const label = await requestJson(
+        this.#api("/issue-labels"),
+        issueLabelSchema,
+        { method: "POST", body: jsonBody(values) },
+      );
+      this.issueLabels = [...this.issueLabels, label].sort((left, right) =>
+        left.name.localeCompare(right.name),
+      );
+      return label;
+    } catch (caught) {
+      this.error = errorMessage(caught);
+      throw caught;
+    } finally {
+      this.labelPending = false;
+    }
+  }
+
+  async deleteIssueLabel(id: string) {
+    this.labelPending = true;
+    this.error = null;
+    try {
+      await requestEmpty(this.#api(`/issue-labels/${id}`), {
+        method: "DELETE",
+      });
+      this.issueLabels = this.issueLabels.filter((label) => label.id !== id);
+      await this.loadIssues();
+      if (this.issueNumber) await this.loadIssue(this.issueNumber);
+    } catch (caught) {
+      this.error = errorMessage(caught);
+      throw caught;
+    } finally {
+      this.labelPending = false;
+    }
+  }
+
+  async createRelease(
+    values: {
+      target_revision: string;
+      title: string;
+      body: string;
+      prerelease: boolean;
+    },
+    files: File[],
+  ) {
+    this.releasePending = true;
+    this.error = null;
+    this.notice = null;
+    try {
+      let release = await requestJson(this.#api("/releases"), releaseSchema, {
+        method: "POST",
+        body: jsonBody(values),
+      });
+      this.releases = [release, ...this.releases];
+      this.releasesLoaded = true;
+      if (files.length) {
+        this.releaseAssetPending = true;
+        try {
+          for (const file of files) {
+            const asset = await requestJson(
+              `${this.#api(`/releases/${release.id}/assets`)}?${new URLSearchParams({ name: file.name })}`,
+              releaseAssetSchema,
+              {
+                method: "PUT",
+                headers: {
+                  "content-type": file.type || "application/octet-stream",
+                },
+                body: file,
+              },
+            );
+            release = { ...release, assets: [...release.assets, asset] };
+          }
+        } catch (caught) {
+          await this.#loadReleases({}).catch(() => undefined);
+          this.error = `Release “${release.title}” was published, but some assets could not be uploaded: ${errorMessage(caught)} Add the remaining files from the published release.`;
+          return release;
+        }
+      }
+      await this.#loadReleases({});
+      this.notice = `Release “${release.title}” published.`;
+      return release;
+    } catch (caught) {
+      this.error = errorMessage(caught);
+      throw caught;
+    } finally {
+      this.releasePending = false;
+      this.releaseAssetPending = false;
+    }
+  }
+
+  async updateRelease(
+    id: string,
+    values: {
+      target_revision: string;
+      title: string;
+      body: string;
+      prerelease: boolean;
+    },
+  ) {
+    this.releasePending = true;
+    this.error = null;
+    this.notice = null;
+    try {
+      const release = await requestJson(
+        this.#api(`/releases/${id}`),
+        releaseSchema,
+        { method: "PATCH", body: jsonBody(values) },
+      );
+      await this.#loadReleases({});
+      this.notice = "Release updated.";
+      return release;
+    } catch (caught) {
+      this.error = errorMessage(caught);
+      throw caught;
+    } finally {
+      this.releasePending = false;
+    }
+  }
+
+  async uploadReleaseAssets(releaseId: string, files: File[]) {
+    this.releaseAssetPending = true;
+    this.error = null;
+    try {
+      for (const file of files) {
+        await requestJson(
+          `${this.#api(`/releases/${releaseId}/assets`)}?${new URLSearchParams({ name: file.name })}`,
+          releaseAssetSchema,
+          {
+            method: "PUT",
+            headers: {
+              "content-type": file.type || "application/octet-stream",
+            },
+            body: file,
+          },
+        );
+      }
+      await this.#loadReleases({});
+      this.notice = `${files.length} release asset${files.length === 1 ? "" : "s"} uploaded.`;
+    } catch (caught) {
+      this.error = errorMessage(caught);
+      throw caught;
+    } finally {
+      this.releaseAssetPending = false;
+    }
+  }
+
+  async deleteRelease(id: string) {
+    this.releasePending = true;
+    this.error = null;
+    try {
+      await requestEmpty(this.#api(`/releases/${id}`), { method: "DELETE" });
+      await this.#loadReleases({});
+      this.notice = "Release deleted. Its Git target was not changed.";
+    } catch (caught) {
+      this.error = errorMessage(caught);
+      throw caught;
+    } finally {
+      this.releasePending = false;
+    }
+  }
+
+  async deleteReleaseAsset(releaseId: string, assetId: string) {
+    this.releaseAssetPending = true;
+    this.error = null;
+    try {
+      await requestEmpty(
+        this.#api(`/releases/${releaseId}/assets/${assetId}`),
+        { method: "DELETE" },
+      );
+      await this.#loadReleases({});
+      this.notice = "Release asset deleted.";
+    } catch (caught) {
+      this.error = errorMessage(caught);
+      throw caught;
+    } finally {
+      this.releaseAssetPending = false;
+    }
+  }
+
   async createWebhook(): Promise<void> {
     this.webhookCreating = true;
     this.error = null;
@@ -536,11 +1012,43 @@ export class RepositoryPageState {
         method: "POST",
       });
       this.notice = "Ping delivery queued.";
-      window.setTimeout(() => void this.#refreshWebhooks(), 1500);
+      window.setTimeout(() => void this.#refreshWebhookActivity(id), 1500);
     } catch (caught) {
       this.error = errorMessage(caught);
     } finally {
       this.webhookPingingId = null;
+    }
+  }
+
+  async toggleWebhookDeliveries(hookId: string): Promise<void> {
+    if (this.expandedWebhookId === hookId) {
+      this.expandedWebhookId = null;
+      return;
+    }
+    this.expandedWebhookId = hookId;
+    if (!this.webhookDeliveries[hookId]) {
+      await this.#loadWebhookDeliveries(hookId);
+    }
+  }
+
+  async redeliverWebhookDelivery(
+    hookId: string,
+    deliveryId: string,
+  ): Promise<void> {
+    this.redeliveringDeliveryId = deliveryId;
+    this.error = null;
+    this.notice = null;
+    try {
+      await requestEmpty(
+        `${this.#hooksApi()}/${hookId}/deliveries/${deliveryId}/attempts`,
+        { method: "POST" },
+      );
+      this.notice = "Redelivery queued.";
+      window.setTimeout(() => void this.#refreshWebhookActivity(hookId), 1500);
+    } catch (caught) {
+      this.error = errorMessage(caught);
+    } finally {
+      this.redeliveringDeliveryId = null;
     }
   }
 
@@ -551,6 +1059,11 @@ export class RepositoryPageState {
     try {
       await requestEmpty(`${this.#hooksApi()}/${id}`, { method: "DELETE" });
       this.webhooks = this.webhooks.filter((hook) => hook.id !== id);
+      if (this.expandedWebhookId === id) {
+        this.expandedWebhookId = null;
+      }
+      const { [id]: removed, ...deliveries } = this.webhookDeliveries;
+      this.webhookDeliveries = deliveries;
       this.notice = "Webhook deleted.";
     } catch (caught) {
       this.error = errorMessage(caught);
@@ -608,6 +1121,33 @@ export class RepositoryPageState {
     }
   }
 
+  async refreshReleases() {
+    try {
+      await this.#loadReleases({});
+    } catch (caught) {
+      this.error = errorMessage(caught);
+    }
+  }
+
+  async #loadReleases(init: RequestInit) {
+    if (this.releasesLoading || (this.releasesLoaded && init.signal)) return;
+    this.releasesLoading = true;
+    this.releasesLoadFailed = false;
+    try {
+      this.releases = await requestJson(
+        this.#api("/releases"),
+        z.array(releaseSchema),
+        init,
+      );
+      this.releasesLoaded = true;
+    } catch (caught) {
+      this.releasesLoadFailed = true;
+      throw caught;
+    } finally {
+      this.releasesLoading = false;
+    }
+  }
+
   async #loadWebhooks(init: RequestInit): Promise<void> {
     if (!this.repository?.can_manage) return;
     this.webhooksLoading = true;
@@ -628,6 +1168,34 @@ export class RepositoryPageState {
       await this.#loadWebhooks({});
     } catch (caught) {
       this.error = errorMessage(caught);
+    }
+  }
+
+  async #loadWebhookDeliveries(hookId: string): Promise<void> {
+    this.webhookDeliveriesLoadingId = hookId;
+    try {
+      const deliveries = await requestJson(
+        `${this.#hooksApi()}/${hookId}/deliveries`,
+        z.array(webhookDeliverySchema),
+        {},
+      );
+      this.webhookDeliveries = {
+        ...this.webhookDeliveries,
+        [hookId]: deliveries,
+      };
+    } finally {
+      this.webhookDeliveriesLoadingId = null;
+    }
+  }
+
+  async #refreshWebhookActivity(hookId: string): Promise<void> {
+    void this.#refreshWebhooks();
+    if (this.expandedWebhookId === hookId) {
+      try {
+        await this.#loadWebhookDeliveries(hookId);
+      } catch (caught) {
+        this.error = errorMessage(caught);
+      }
     }
   }
 
@@ -833,6 +1401,9 @@ export class RepositoryPageState {
     this.repositoryPath = parameters.get("path") || "";
     this.commitOid = parameters.get("oid") || "";
     this.historyPage = Math.max(1, Number(parameters.get("page")) || 1);
+    const issueNumber = Number(parameters.get("issue"));
+    this.issueNumber =
+      view === "issues" && issueNumber > 0 ? issueNumber : null;
   }
 
   #writeLocation(): void {
@@ -844,6 +1415,9 @@ export class RepositoryPageState {
     if (this.repositoryPath) parameters.set("path", this.repositoryPath);
     if (this.commitOid) parameters.set("oid", this.commitOid);
     if (this.historyPage > 1) parameters.set("page", String(this.historyPage));
+    if (this.view === "issues" && this.issueNumber) {
+      parameters.set("issue", String(this.issueNumber));
+    }
     const search = parameters.toString();
     window.history.pushState(
       {},

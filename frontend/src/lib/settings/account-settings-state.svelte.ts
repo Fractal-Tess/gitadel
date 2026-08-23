@@ -38,7 +38,8 @@ import {
 import type { AppState } from "$lib/state/app-state.svelte.js";
 import { createCredential, creationOptions } from "$lib/webauthn.js";
 
-export type AccountSettingsView = "security" | "applications" | "organizations";
+export type AccountSettingsView =
+  "security" | "applications" | "organizations" | "administration";
 
 export class AccountSettingsState {
   view = $state<AccountSettingsView>("security");

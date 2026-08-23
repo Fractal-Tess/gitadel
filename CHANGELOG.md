@@ -4,6 +4,11 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+### Added
+
+- Added webhook delivery history. Every webhook delivery (push, ping, and redelivery) is now recorded with its event, payload, response status, response body, duration, and timestamp, viewable per hook in repository settings with a redeliver action for retrying a past delivery.
+- Added repository webhook delivery APIs: list deliveries (`GET /api/v1/repos/{namespace}/{name}/hooks/{id}/deliveries`), fetch one delivery, and redeliver it (`POST .../deliveries/{delivery_id}/attempts`). History is capped at the 50 most recent deliveries per webhook.
+
 ### Changed
 
 - Made username changes save on Enter without requiring the current password or a separate update button.

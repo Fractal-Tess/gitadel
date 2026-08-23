@@ -312,6 +312,7 @@ pub(super) async fn create_owned_repository(
         visibility: Set(visibility),
         object_format: Set(object_format.to_owned()),
         default_branch: Set("main".to_owned()),
+        issue_counter: Set(0),
         storage_key: Set(storage_key),
         created_by: Set(actor_user_id),
         archived_at: Set(None),

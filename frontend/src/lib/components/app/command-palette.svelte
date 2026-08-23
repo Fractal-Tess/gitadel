@@ -94,11 +94,7 @@
    * which outrank descriptions, so typing `web` finds `acme/web` before it
    * finds `web-team/billing` or anything that merely mentions the web.
    */
-  function score(
-    repository: Repository,
-    path: string,
-    needle: string,
-  ): number {
+  function score(repository: Repository, path: string, needle: string): number {
     const name = repository.name.toLowerCase();
     if (name.startsWith(needle)) return 100;
     if (path.startsWith(needle)) return 90;
@@ -208,7 +204,7 @@
         label: "Administration",
         icon: ShieldCheck,
         keywords: "instance users audit log",
-        run: () => void goto(resolve("/admin")),
+        run: () => void goto(resolve("/settings?view=administration")),
       });
     }
     actions.push({
@@ -268,8 +264,7 @@
       repository.name,
       repository.default_branch,
     );
-    return () =>
-      cancelRepositoryPreload(repository.namespace, repository.name);
+    return () => cancelRepositoryPreload(repository.namespace, repository.name);
   });
 
   function updatedLabel(value: string): string {

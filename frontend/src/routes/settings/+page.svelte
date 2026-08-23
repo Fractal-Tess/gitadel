@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { page } from "$app/state";
-  import { AppWindow, Building2, KeyRound } from "lucide-svelte";
+  import { AppWindow, Building2, KeyRound, ShieldCheck } from "lucide-svelte";
 
+  import InstanceSettings from "$lib/components/settings/instance-settings.svelte";
   import OauthApplicationSettings from "$lib/components/settings/oauth-application-settings.svelte";
   import OrganizationSettings from "$lib/components/settings/organization-settings.svelte";
   import SecuritySettings from "$lib/components/settings/security-settings.svelte";
@@ -15,8 +16,16 @@
   const state = new AccountSettingsState(app);
 
   onMount(() => {
-    if (page.url.searchParams.get("view") === "applications") {
+    const requestedView = page.url.searchParams.get("view");
+    if (requestedView === "applications") {
       state.view = "applications";
+    } else if (requestedView === "organizations") {
+      state.view = "organizations";
+    } else if (
+      requestedView === "administration" &&
+      app.authStatus?.user?.is_admin
+    ) {
+      state.view = "administration";
     }
     void state.initialize();
   });
@@ -46,6 +55,17 @@
           active: state.view === "organizations",
           select: () => (state.view = "organizations"),
         },
+        ...(app.authStatus?.user?.is_admin
+          ? [
+              {
+                id: "administration",
+                label: "Administration",
+                icon: ShieldCheck,
+                active: state.view === "administration",
+                select: () => (state.view = "administration"),
+              },
+            ]
+          : []),
       ],
     }),
   );
@@ -71,7 +91,9 @@
     <SecuritySettings {state} />
   {:else if state.view === "applications"}
     <OauthApplicationSettings {state} />
-  {:else}
+  {:else if state.view === "organizations"}
     <OrganizationSettings {state} />
+  {:else}
+    <InstanceSettings />
   {/if}
 </div>

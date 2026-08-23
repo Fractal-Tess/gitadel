@@ -21,11 +21,10 @@
   let faviconVersion = $derived(
     encodeURIComponent(app.instance?.updated_at ?? "default"),
   );
-  // Sign-in and registration are the only routes without the app shell: there
-  // is nothing to navigate to until the visitor is through them.
-  let bare = $derived(
-    page.url.pathname === "/login" || page.url.pathname === "/register",
-  );
+  // Sign-in, registration and OAuth consent render without the app shell:
+  // each is a single decision the visitor must finish before navigating.
+  const bareRoutes = new Set(["/login", "/register", "/oauth/consent"]);
+  let bare = $derived(bareRoutes.has(page.url.pathname));
 
   $effect(() => {
     const url = page.url;
@@ -81,8 +80,14 @@
       }
       if (url.pathname === "/login" && status.authenticated) {
         const returnTo = url.searchParams.get("returnTo");
-        if (returnTo?.startsWith("/admin")) {
-          await goto(resolve("/admin"), { replaceState: true });
+        if (returnTo?.startsWith("/login/oauth/authorize?")) {
+          // Server-side route: a client-side goto would hand the OAuth
+          // authorize path to the SPA router, which has no such page.
+          window.location.assign(returnTo);
+        } else if (returnTo?.startsWith("/admin")) {
+          await goto(resolve("/settings?view=administration"), {
+            replaceState: true,
+          });
         } else if (returnTo?.startsWith("/settings")) {
           await goto(resolve("/settings"), { replaceState: true });
         } else {

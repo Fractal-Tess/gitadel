@@ -1,8 +1,12 @@
 <script lang="ts">
   import {
     Activity,
+    ChevronDown,
+    ChevronUp,
+    History,
     Pencil,
     Radio,
+    RotateCw,
     Send,
     Trash2,
     Webhook,
@@ -19,13 +23,31 @@
   let editingId = $state<string | null>(null);
   let editUrl = $state("");
   let editSecret = $state("");
+  let openDeliveryId = $state<string | null>(null);
 
   function formatDelivery(value: string | null) {
-    if (!value) return "No deliveries yet";
+    if (!value) return "Not delivered";
     return new Intl.DateTimeFormat(undefined, {
       dateStyle: "medium",
       timeStyle: "short",
     }).format(new Date(value));
+  }
+
+  function formatDuration(durationMs: number) {
+    if (durationMs < 1000) return `${durationMs} ms`;
+    return `${(durationMs / 1000).toFixed(1)} s`;
+  }
+
+  function formatPayload(payload: unknown) {
+    try {
+      return JSON.stringify(payload, null, 2);
+    } catch {
+      return String(payload);
+    }
+  }
+
+  function toggleDelivery(deliveryId: string) {
+    openDeliveryId = openDeliveryId === deliveryId ? null : deliveryId;
   }
 
   function startEditing(id: string, url: string) {
@@ -122,6 +144,8 @@
                 </p>
               {/if}
             </div>
+
+            <!-- deliveries section -->
 
             <div class="flex flex-wrap items-center justify-end gap-2">
               <label
@@ -229,6 +253,139 @@
                 </div>
               </form>
             {/if}
+
+            <div class="border-t pt-3">
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                class="gap-2"
+                aria-expanded={repository.expandedWebhookId === hook.id}
+                onclick={() => void repository.toggleWebhookDeliveries(hook.id)}
+              >
+                <History class="size-3.5" />
+                Recent deliveries
+                {#if repository.expandedWebhookId === hook.id}
+                  <ChevronUp class="size-3.5" />
+                {:else}
+                  <ChevronDown class="size-3.5" />
+                {/if}
+              </Button>
+              {#if repository.expandedWebhookId === hook.id}
+                {#if repository.webhookDeliveriesLoadingId === hook.id && !repository.webhookDeliveries[hook.id]}
+                  <p class="mt-2 text-xs text-foreground/70">
+                    Loading deliveries…
+                  </p>
+                {:else if !repository.webhookDeliveries[hook.id]?.length}
+                  <p class="mt-2 text-xs leading-5 text-foreground/70">
+                    No deliveries recorded yet. Use Ping or push to this
+                    repository to trigger one.
+                  </p>
+                {:else}
+                  <ul
+                    class="mt-2 divide-y rounded-md border text-sm"
+                    aria-label={`Recent deliveries for ${hook.config.url}`}
+                  >
+                    {#each repository.webhookDeliveries[hook.id] as delivery (delivery.id)}
+                      <li>
+                        <div
+                          class="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2"
+                        >
+                          <span
+                            class={[
+                              "size-2 shrink-0 rounded-full",
+                              delivery.status === "ok"
+                                ? "bg-emerald-500"
+                                : "bg-destructive",
+                            ]}
+                            aria-hidden="true"
+                          ></span>
+                          <span
+                            class={[
+                              "font-mono text-xs",
+                              delivery.status === "ok"
+                                ? "text-emerald-500"
+                                : "text-destructive",
+                            ]}
+                          >
+                            {delivery.status_code
+                              ? `HTTP ${delivery.status_code}`
+                              : "Failed"}
+                          </span>
+                          <span class="font-medium text-xs"
+                            >{delivery.event}</span
+                          >
+                          <span class="text-xs text-foreground/70">
+                            {formatDelivery(delivery.delivered_at)}
+                          </span>
+                          <span class="text-xs text-foreground/70">
+                            {formatDuration(delivery.duration_ms)}
+                          </span>
+                          <div class="ml-auto flex items-center gap-1">
+                            <Button
+                              type="button"
+                              size="icon-sm"
+                              variant="ghost"
+                              class="max-sm:size-8"
+                              aria-expanded={openDeliveryId === delivery.id}
+                              aria-label={openDeliveryId === delivery.id
+                                ? `Hide delivery details for ${delivery.event}`
+                                : `Show delivery details for ${delivery.event}`}
+                              onclick={() => toggleDelivery(delivery.id)}
+                            >
+                              {#if openDeliveryId === delivery.id}
+                                <ChevronUp class="size-3.5" />
+                              {:else}
+                                <ChevronDown class="size-3.5" />
+                              {/if}
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              class="gap-1.5 max-sm:h-8"
+                              disabled={repository.redeliveringDeliveryId !==
+                                null || repository.webhookActionPending}
+                              aria-label={`Redeliver ${delivery.event} delivery`}
+                              onclick={() =>
+                                void repository.redeliverWebhookDelivery(
+                                  hook.id,
+                                  delivery.id,
+                                )}
+                            >
+                              <RotateCw class="size-3" />
+                              {repository.redeliveringDeliveryId === delivery.id
+                                ? "Redelivering…"
+                                : "Redeliver"}
+                            </Button>
+                          </div>
+                        </div>
+                        {#if openDeliveryId === delivery.id}
+                          <div class="grid gap-3 border-t bg-card/50 px-3 py-3">
+                            <div class="min-w-0">
+                              <h4 class="text-xs font-semibold">
+                                Request payload
+                              </h4>
+                              <pre
+                                class="mt-1 max-h-64 overflow-auto rounded bg-muted/40 p-2 font-mono text-xs leading-5 whitespace-pre-wrap break-all">{formatPayload(
+                                  delivery.payload,
+                                )}</pre>
+                            </div>
+                            {#if delivery.response_body}
+                              <div class="min-w-0">
+                                <h4 class="text-xs font-semibold">Response</h4>
+                                <pre
+                                  class="mt-1 max-h-40 overflow-auto rounded bg-muted/40 p-2 font-mono text-xs leading-5 whitespace-pre-wrap break-all">{delivery.response_body}</pre>
+                              </div>
+                            {/if}
+                          </div>
+                        {/if}
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
+              {/if}
+            </div>
           </li>
         {:else}
           <li class="grid justify-items-center gap-2 px-5 py-12 text-center">

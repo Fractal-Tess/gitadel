@@ -7,7 +7,6 @@
     PanelLeftOpen,
     ScrollText,
     Settings2,
-    ShieldCheck,
     Star,
   } from "lucide-svelte";
 
@@ -64,14 +63,6 @@
         icon: Settings2,
         active: page.url.pathname === "/settings",
         preload: () => preloadAccountSettings(viewer),
-      });
-    }
-    if (app.authStatus?.user?.is_admin) {
-      links.push({
-        label: "Administration",
-        href: resolve("/admin"),
-        icon: ShieldCheck,
-        active: page.url.pathname.startsWith("/admin"),
       });
     }
     links.push({
