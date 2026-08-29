@@ -1,8 +1,17 @@
 /target/
 /.direnv/
 /gitadel.db
+/gitadel.db.lock
 /gitadel.db-*
 /data/
+
+# Left in the repository root by a bare `cargo run`, which uses the built-in
+# defaults rather than a config file.
+/gitadel.toml
+/gitadel-ssh-ed25519
+/gitadel-ssh-ed25519.pub
+/repositories/
+/lfs/
 
 /frontend/node_modules/
 /frontend/.svelte-kit/

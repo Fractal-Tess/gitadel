@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import {
+  auditEventSchema,
   oauthApplicationSchema,
   organizationSchema,
   passkeySchema,
@@ -9,6 +10,7 @@ import {
   requestJson,
   sshKeySchema,
   tokenSchema,
+  type Organization,
 } from "$lib/api.js";
 
 const cacheLifetime = 5 * 60_000;
@@ -57,15 +59,29 @@ const exploreCache = new Map<
   CacheEntry<Awaited<ReturnType<typeof fetchExplore>>>
 >();
 
-function fetchExplore(page: number, perPage: number) {
+function fetchExplore(
+  page: number,
+  perPage: number,
+  namespace?: string | null,
+) {
+  const query = new URLSearchParams({
+    page: String(page),
+    per_page: String(perPage),
+  });
+  if (namespace) query.set("namespace", namespace);
   return requestJson(
-    `/api/v1/repositories/overview?${new URLSearchParams({ page: String(page), per_page: String(perPage) })}`,
+    `/api/v1/repositories/overview?${query}`,
     repositoryOverviewSchema,
   );
 }
 
-function exploreKey(page: number, perPage: number, username?: string | null) {
-  return `${viewerKey(username)}:${page}:${perPage}`;
+function exploreKey(
+  page: number,
+  perPage: number,
+  username?: string | null,
+  namespace?: string | null,
+) {
+  return `${viewerKey(username)}:${namespace ?? "*"}:${page}:${perPage}`;
 }
 
 const exploreRefreshes = new Map<string, ReturnType<typeof fetchExplore>>();
@@ -74,12 +90,13 @@ export function refreshExplore(
   page: number,
   perPage: number,
   username?: string | null,
+  namespace?: string | null,
 ) {
-  const key = exploreKey(page, perPage, username);
+  const key = exploreKey(page, perPage, username, namespace);
   const active = exploreRefreshes.get(key);
   if (active) return active;
 
-  const refresh = fetchExplore(page, perPage).then((value) => {
+  const refresh = fetchExplore(page, perPage, namespace).then((value) => {
     exploreCache.set(key, {
       expiresAt: Date.now() + cacheLifetime,
       promise: Promise.resolve(value),
@@ -99,15 +116,19 @@ export function peekExplore(
   page: number,
   perPage: number,
   username?: string | null,
+  namespace?: string | null,
 ) {
-  return peek(exploreCache, exploreKey(page, perPage, username));
+  return peek(exploreCache, exploreKey(page, perPage, username, namespace));
 }
 
-export function preloadExplore(username?: string | null) {
-  const key = exploreKey(1, 20, username);
-  void cached(exploreCache, key, () => fetchExplore(1, 20)).promise.catch(
-    () => undefined,
-  );
+export function preloadExplore(
+  username?: string | null,
+  namespace?: string | null,
+) {
+  const key = exploreKey(1, 20, username, namespace);
+  void cached(exploreCache, key, () =>
+    fetchExplore(1, 20, namespace),
+  ).promise.catch(() => undefined);
 }
 
 export function invalidateExplore(username?: string | null) {
@@ -156,6 +177,11 @@ function fetchOrganizations() {
 export function loadOrganizations(username?: string | null) {
   const key = viewerKey(username);
   return cached(organizationCache, key, fetchOrganizations).promise;
+}
+
+export function refreshOrganizations(username?: string | null) {
+  organizationCache.delete(viewerKey(username));
+  return loadOrganizations(username);
 }
 
 const accountSettingsCache = new Map<
@@ -217,4 +243,48 @@ export function updateAccountSettings(
 export function clearAccountSettings(username: string) {
   accountSettingsCache.delete(username);
   organizationCache.delete(username);
+}
+
+export function updateOrganizations(
+  username: string,
+  organizations: Organization[],
+) {
+  const value = [...organizations].sort((left, right) =>
+    left.slug.localeCompare(right.slug),
+  );
+  organizationCache.set(username, {
+    expiresAt: Date.now() + cacheLifetime,
+    promise: Promise.resolve(value),
+    value,
+  });
+  const account = accountSettingsCache.get(username)?.value;
+  if (account) {
+    accountSettingsCache.set(username, {
+      expiresAt: Date.now() + cacheLifetime,
+      promise: Promise.resolve({ ...account, organizations: value }),
+      value: { ...account, organizations: value },
+    });
+  }
+}
+
+const adminActivityCache = new Map<
+  string,
+  CacheEntry<Awaited<ReturnType<typeof fetchAdminActivity>>>
+>();
+
+function fetchAdminActivity() {
+  return requestJson("/api/v1/audit?limit=100", z.array(auditEventSchema));
+}
+
+export function loadAdminActivity() {
+  return cached(adminActivityCache, "activity", fetchAdminActivity).promise;
+}
+
+export function refreshAdminActivity() {
+  adminActivityCache.delete("activity");
+  return loadAdminActivity();
+}
+
+export function preloadAdminActivity() {
+  void loadAdminActivity().catch(() => undefined);
 }

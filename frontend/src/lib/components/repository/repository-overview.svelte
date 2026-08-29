@@ -1,13 +1,19 @@
 <script lang="ts">
   import { Copy, GitBranch } from "lucide-svelte";
+  import { MediaQuery } from "svelte/reactivity";
 
   import RepositoryContent from "$lib/components/repository/repository-content.svelte";
   import RepositoryTree from "$lib/components/repository/repository-tree.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
+  import * as Resizable from "$lib/components/ui/resizable/index.js";
   import * as Tabs from "$lib/components/ui/tabs/index.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
 
   let { state }: { state: RepositoryPageState } = $props();
+
+  // 1280px is Tailwind's `xl`, the width where the tree stops stacking above
+  // the content and becomes a resizable side column.
+  const wideLayout = new MediaQuery("min-width: 1280px");
 
   function initialRepositoryCommands(): string {
     const repository = state.repository;
@@ -82,10 +88,33 @@ git push -u origin main`;
     </section>
   </div>
 {:else}
-  <div
-    class="grid bg-card/20 xl:h-full xl:min-h-0 xl:grid-cols-[18rem_minmax(0,1fr)]"
-  >
-    <RepositoryTree {state} />
-    <RepositoryContent {state} />
-  </div>
+  <!-- The tree is only a side column on wide viewports, and a horizontal pane
+       group cannot stack, so the resizable layout is gated on the same 1280px
+       breakpoint Tailwind's `xl` uses. -->
+  {#if wideLayout.current}
+    <Resizable.PaneGroup
+      direction="horizontal"
+      autoSaveId="gitadel:repository-overview"
+      class="h-full min-h-0 bg-card/20"
+    >
+      <Resizable.Pane defaultSize={22} minSize={12} maxSize={50}>
+        <RepositoryTree {state} />
+      </Resizable.Pane>
+      <!-- The 1px divider keeps the seam the fixed layout had. The grip makes
+           the column draggable at a glance, and the wider ::after strip is the
+           grab area, tinted on hover and while dragging. -->
+      <Resizable.Handle
+        withHandle
+        class="after:w-3 hover:after:bg-primary/30 data-[active]:after:bg-primary/50 [&>div]:h-8 [&>div]:w-1.5 [&>div]:bg-muted-foreground/60 [&>div]:transition-colors hover:[&>div]:bg-primary data-[active]:[&>div]:bg-primary"
+      />
+      <Resizable.Pane defaultSize={78} minSize={30}>
+        <RepositoryContent {state} />
+      </Resizable.Pane>
+    </Resizable.PaneGroup>
+  {:else}
+    <div class="grid bg-card/20">
+      <RepositoryTree {state} />
+      <RepositoryContent {state} />
+    </div>
+  {/if}
 {/if}

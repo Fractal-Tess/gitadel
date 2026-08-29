@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::Path,
     process::Stdio,
     time::{Duration, Instant},
@@ -516,10 +516,13 @@ pub(super) async fn dispatch_push(
         .filter(repository_webhook::Column::Active.eq(true))
         .all(state.identity().database())
         .await?;
-    if hooks.is_empty() {
+    let integrations_enabled = super::integrations::has_enabled(state, repository.id).await?;
+    let actions_available = state.actions().is_some();
+    if hooks.is_empty() && !integrations_enabled && !actions_available {
         return Ok(());
     }
-    let after = snapshot_refs(&state.repository_path(repository)).await?;
+    let path = state.repository_path(repository);
+    let after = snapshot_refs(&path).await?;
     let actor = user::Entity::find_by_id(actor_user_id)
         .one(state.identity().database())
         .await?
@@ -531,9 +534,37 @@ pub(super) async fn dispatch_push(
     };
 
     for (reference, old_oid, new_oid) in changed_refs(&before, &after, &zero) {
-        let payload = push_payload(
-            state, repository, &actor, reference, old_oid, new_oid, &zero,
-        );
+        let commits = commit_entries(&path, old_oid, new_oid, &zero).await;
+        let changed_paths = pushed_paths(&commits);
+        let pushed = PushedRef {
+            reference,
+            before: old_oid,
+            after: new_oid,
+            zero: &zero,
+        };
+        let payload = push_payload(state, repository, &actor, &pushed, commits);
+        if let Some(actions) = state.actions() {
+            if let Err(error) = crate::actions::workflow::ingest_push(
+                actions,
+                repository,
+                actor_user_id,
+                reference,
+                old_oid,
+                new_oid,
+                &zero,
+                changed_paths,
+            )
+            .await
+            {
+                tracing::error!(
+                    %error,
+                    repository_id = %repository.id,
+                    reference,
+                    commit = new_oid,
+                    "could not enqueue Actions workflows"
+                );
+            }
+        }
         for hook in &hooks {
             queue_delivery(
                 state.clone(),
@@ -542,8 +573,29 @@ pub(super) async fn dispatch_push(
                 payload.clone(),
             );
         }
+        if integrations_enabled {
+            super::integrations::dispatch_push(
+                state,
+                repository,
+                reference,
+                new_oid == zero,
+                payload,
+            );
+        }
     }
     Ok(())
+}
+
+fn pushed_paths(commits: &[Value]) -> Vec<String> {
+    let mut paths = BTreeSet::new();
+    for commit in commits {
+        for field in ["added", "modified", "removed"] {
+            if let Some(values) = commit.get(field).and_then(Value::as_array) {
+                paths.extend(values.iter().filter_map(Value::as_str).map(str::to_owned));
+            }
+        }
+    }
+    paths.into_iter().collect()
 }
 
 fn queue_ping(
@@ -755,15 +807,33 @@ fn changed_refs<'a>(
         .collect()
 }
 
+/// Maximum commits enumerated per pushed ref.
+///
+/// Gitea caps its own push payloads similarly; a branch created from a large
+/// import would otherwise walk the entire history.
+const PUSH_COMMIT_LIMIT: usize = 50;
+
+/// The four values describing one pushed ref, which always travel together.
+struct PushedRef<'a> {
+    reference: &'a str,
+    before: &'a str,
+    after: &'a str,
+    zero: &'a str,
+}
+
 fn push_payload(
     state: &RepositoryState,
     repository: &repository::Model,
     actor: &user::Model,
-    reference: &str,
-    before: &str,
-    after: &str,
-    zero: &str,
+    pushed: &PushedRef<'_>,
+    commits: Vec<Value>,
 ) -> Value {
+    let PushedRef {
+        reference,
+        before,
+        after,
+        zero,
+    } = *pushed;
     json!({
         "ref": reference,
         "before": before,
@@ -773,12 +843,116 @@ fn push_payload(
         "forced": false,
         "base_ref": null,
         "compare": null,
-        "commits": [],
-        "head_commit": null,
+        "head_commit": commits.last().cloned(),
+        "commits": commits,
         "repository": repository_payload(state, repository),
         "pusher": { "name": actor.username },
         "sender": user_payload(actor),
     })
+}
+
+/// Enumerate the commits a push introduced, with their changed paths.
+///
+/// Consumers filter on these paths — Dokploy's watch paths are exactly this —
+/// so an empty list silently disables that filtering. Failures degrade to an
+/// empty list rather than blocking the push.
+async fn commit_entries(path: &Path, before: &str, after: &str, zero: &str) -> Vec<Value> {
+    if after == zero {
+        return Vec::new();
+    }
+    // A new ref has no baseline, so walk back from its tip instead of a range.
+    let range = if before == zero {
+        after.to_owned()
+    } else {
+        format!("{before}..{after}")
+    };
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args([
+            "log",
+            &format!("--max-count={PUSH_COMMIT_LIMIT}"),
+            // STX starts each record so name-status lines stay newline-split.
+            "--format=%x02%H%x1f%s%x1f%an%x1f%ae%x1f%cI",
+            "--name-status",
+            "--no-color",
+            &range,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await;
+    let output = match output {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            tracing::warn!(
+                stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+                "listing pushed commits failed"
+            );
+            return Vec::new();
+        }
+        Err(error) => {
+            tracing::warn!(%error, "listing pushed commits failed");
+            return Vec::new();
+        }
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut commits = text
+        .split('\u{2}')
+        .skip(1)
+        .filter_map(parse_commit_record)
+        .collect::<Vec<_>>();
+    // git log is newest first; push payloads list commits oldest first.
+    commits.reverse();
+    commits
+}
+
+fn parse_commit_record(record: &str) -> Option<Value> {
+    let (header, body) = record.split_once('\n').unwrap_or((record, ""));
+    let mut fields = header.split('\u{1f}');
+    let id = fields.next()?;
+    let message = fields.next().unwrap_or_default();
+    let author_name = fields.next().unwrap_or_default();
+    let author_email = fields.next().unwrap_or_default();
+    let timestamp = fields.next().unwrap_or_default();
+
+    let mut added = Vec::new();
+    let mut modified = Vec::new();
+    let mut removed = Vec::new();
+    for line in body.lines().filter(|line| !line.is_empty()) {
+        let mut columns = line.split('\t');
+        let Some(status) = columns.next() else {
+            continue;
+        };
+        let Some(target) = columns.next() else {
+            continue;
+        };
+        // Renames and copies report the source first, then the destination.
+        match status.as_bytes().first() {
+            Some(b'A') => added.push(target.to_owned()),
+            Some(b'D') => removed.push(target.to_owned()),
+            Some(b'R' | b'C') => {
+                removed.push(target.to_owned());
+                if let Some(destination) = columns.next() {
+                    added.push(destination.to_owned());
+                }
+            }
+            Some(_) => modified.push(target.to_owned()),
+            None => {}
+        }
+    }
+
+    Some(json!({
+        "id": id,
+        "message": message,
+        "timestamp": timestamp,
+        "author": { "name": author_name, "email": author_email },
+        "committer": { "name": author_name, "email": author_email },
+        "added": added,
+        "modified": modified,
+        "removed": removed,
+    }))
 }
 
 fn repository_payload(state: &RepositoryState, repository: &repository::Model) -> Value {

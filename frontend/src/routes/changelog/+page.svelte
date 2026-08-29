@@ -69,7 +69,7 @@
     </p>
   {:else}
     <div
-      class="prose prose-invert max-w-none prose-code:before:content-none prose-code:after:content-none"
+      class="prose max-w-none prose-code:before:content-none prose-code:after:content-none dark:prose-invert"
       {@attach trustedHtml(html)}
     ></div>
   {/if}

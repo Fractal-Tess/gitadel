@@ -1,16 +1,33 @@
+use std::{convert::Infallible, path::PathBuf, time::Duration};
+
 use axum::{
     Json,
     body::{Body, Bytes},
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
-    response::Response,
+    response::{
+        Response,
+        sse::{Event, Sse},
+    },
 };
 use axum_extra::extract::cookie::CookieJar;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use futures_util::stream;
 use sea_orm::{ActiveModelTrait, ConnectionTrait, EntityTrait, Set, TransactionTrait};
 use serde::{Deserialize, Serialize};
+use tokio_util::io::ReaderStream;
+use url::Url;
+use uuid::Uuid;
 
-use crate::entity::{audit_event, instance, instance_asset};
+use crate::{
+    archive::{self, MaintenanceAction},
+    backup_provider::{
+        self, BackupProvider, BackupProviderConfig, BackupProviderKind, FilesystemSettings,
+        RUNTIME_S3_PROVIDER_ID,
+    },
+    config::S3Settings,
+    entity::{audit_event, instance, instance_asset},
+};
 
 pub const MAX_FAVICON_BYTES: usize = 512 * 1024;
 const MIN_FAVICON_EDGE: u32 = 16;
@@ -43,7 +60,6 @@ impl TryFrom<&str> for FaviconTheme {
 pub struct InstanceSettingsResponse {
     site_name: String,
     site_description: Option<String>,
-    default_repository_visibility: String,
     updated_at: chrono::DateTime<Utc>,
 }
 
@@ -52,7 +68,6 @@ impl From<instance::Model> for InstanceSettingsResponse {
         Self {
             site_name: settings.site_name,
             site_description: settings.site_description,
-            default_repository_visibility: settings.default_repository_visibility,
             updated_at: settings.updated_at,
         }
     }
@@ -62,7 +77,6 @@ impl From<instance::Model> for InstanceSettingsResponse {
 pub struct UpdateInstanceSettingsRequest {
     site_name: String,
     site_description: Option<String>,
-    default_repository_visibility: String,
 }
 
 pub async fn public_instance_settings(
@@ -113,14 +127,6 @@ pub async fn update_instance_settings(
             "Site description cannot exceed 280 characters.",
         ));
     }
-    if !matches!(
-        request.default_repository_visibility.as_str(),
-        "public" | "private"
-    ) {
-        return Err(ApiError::bad_request(
-            "Default repository visibility must be public or private.",
-        ));
-    }
 
     let settings = instance::Entity::find_by_id(1)
         .one(state.database())
@@ -130,7 +136,6 @@ pub async fn update_instance_settings(
     let mut active: instance::ActiveModel = settings.into();
     active.site_name = Set(site_name.to_owned());
     active.site_description = Set(site_description);
-    active.default_repository_visibility = Set(request.default_repository_visibility);
     active.updated_at = Set(now);
     let settings = active.update(state.database()).await?;
 
@@ -267,6 +272,702 @@ fn favicon_asset(theme: FaviconTheme) -> (&'static str, &'static [u8]) {
         FaviconTheme::Light => ("favicon-light", DEFAULT_LIGHT_FAVICON),
         FaviconTheme::Dark => ("favicon-dark", DEFAULT_DARK_FAVICON),
     }
+}
+
+#[derive(Serialize)]
+pub struct BackupProviderCatalogItem {
+    slug: BackupProviderKind,
+    name: &'static str,
+    description: &'static str,
+}
+
+#[derive(Serialize)]
+pub struct BackupProvidersResponse {
+    providers: Vec<BackupProviderCatalogItem>,
+    connections: Vec<BackupProviderResponse>,
+}
+
+#[derive(Serialize)]
+pub struct BackupProviderResponse {
+    id: Uuid,
+    name: String,
+    provider: BackupProviderKind,
+    managed_by_config: bool,
+    path: Option<String>,
+    endpoint: Option<String>,
+    bucket: Option<String>,
+    access_key_hint: Option<String>,
+    region: Option<String>,
+    prefix: Option<String>,
+    schedule: Option<String>,
+    next_backup_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateBackupProviderRequest {
+    id: Option<Uuid>,
+    name: String,
+    provider: BackupProviderKind,
+    path: Option<String>,
+    endpoint: Option<String>,
+    bucket: Option<String>,
+    access_key: Option<String>,
+    secret_key: Option<String>,
+    region: Option<String>,
+    prefix: Option<String>,
+    test_token: Option<Uuid>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateBackupScheduleRequest {
+    schedule: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct BackupProviderTestResponse {
+    test_token: Uuid,
+    message: &'static str,
+}
+
+#[derive(Deserialize)]
+pub struct CreateBackupRequest {
+    name: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct BackupScheduledResponse {
+    key: String,
+    operation_id: Uuid,
+    message: &'static str,
+}
+
+#[derive(Serialize)]
+pub struct RestorePreflightResponse {
+    token: Uuid,
+    key: String,
+    #[serde(flatten)]
+    inspection: archive::BackupInspection,
+    required_free_space: u64,
+    available_free_space: u64,
+}
+
+#[derive(Deserialize)]
+pub struct RestorePreflightRequest {
+    key: String,
+}
+
+#[derive(Deserialize)]
+pub struct BackupObjectRequest {
+    key: String,
+}
+
+#[derive(Deserialize)]
+pub struct RestoreBackupRequest {
+    token: Uuid,
+    password: String,
+    create_safety_backup: bool,
+}
+
+pub async fn list_backup_providers(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Json<BackupProvidersResponse>, ApiError> {
+    require_admin(&state, &headers, &jar, SCOPE_READ).await?;
+    let fallback = state.runtime_settings()?.backup.s3.as_ref();
+    let providers = backup_provider::list(state.database(), fallback)
+        .await
+        .map_err(ApiError::internal)?;
+    let schedules = archive::list_backup_schedules(state.database())
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(BackupProvidersResponse {
+        providers: vec![
+            BackupProviderCatalogItem {
+                slug: BackupProviderKind::Filesystem,
+                name: "Filesystem",
+                description: "Write backup archives to a directory on the Gitadel host.",
+            },
+            BackupProviderCatalogItem {
+                slug: BackupProviderKind::S3,
+                name: "S3-compatible storage",
+                description: "Store backups in AWS S3, RustFS, MinIO, or another compatible service.",
+            },
+        ],
+        connections: providers
+            .into_iter()
+            .map(|provider| {
+                let schedule = schedules.get(&provider.id).cloned();
+                backup_provider_response(provider, schedule)
+            })
+            .collect(),
+    }))
+}
+
+pub async fn test_backup_provider(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(request): Json<UpdateBackupProviderRequest>,
+) -> Result<Json<BackupProviderTestResponse>, ApiError> {
+    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
+    let config = requested_backup_provider_config(&state, &request).await?;
+    archive::test_backup_provider(&config, state.runtime_settings()?)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let provider = config.kind().as_str();
+    let test_token = state
+        .cache_tested_backup_provider(actor.user.id, config)
+        .await;
+    state
+        .audit(
+            Some(actor.user.id),
+            "backup.provider.test",
+            Some(provider.to_owned()),
+        )
+        .await?;
+    Ok(Json(BackupProviderTestResponse {
+        test_token,
+        message: "Backup provider is available and writable.",
+    }))
+}
+
+pub async fn create_backup_provider(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(request): Json<UpdateBackupProviderRequest>,
+) -> Result<(StatusCode, Json<BackupProviderResponse>), ApiError> {
+    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
+    if request.id.is_some() {
+        return Err(ApiError::bad_request(
+            "A new backup provider cannot include an existing provider ID.",
+        ));
+    }
+    let config = requested_backup_provider_config(&state, &request).await?;
+    consume_provider_test(&state, actor.user.id, request.test_token, &config).await?;
+    let now = Utc::now();
+    let provider = BackupProvider {
+        id: Uuid::new_v4(),
+        name: request.name.trim().to_owned(),
+        config,
+        created_at: now,
+        updated_at: now,
+    };
+    backup_provider::save(state.database(), &provider)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    state
+        .audit(
+            Some(actor.user.id),
+            "backup.provider.create",
+            Some(provider.id.to_string()),
+        )
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(backup_provider_response(provider, None)),
+    ))
+}
+
+pub async fn update_backup_provider(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(provider_id): Path<Uuid>,
+    Json(request): Json<UpdateBackupProviderRequest>,
+) -> Result<Json<BackupProviderResponse>, ApiError> {
+    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
+    if request.id != Some(provider_id) {
+        return Err(ApiError::bad_request(
+            "The backup provider ID does not match the requested resource.",
+        ));
+    }
+    let mut existing = required_backup_provider(&state, provider_id).await?;
+    let config = requested_backup_provider_config(&state, &request).await?;
+    consume_provider_test(&state, actor.user.id, request.test_token, &config).await?;
+    if existing.id == RUNTIME_S3_PROVIDER_ID {
+        existing.id = Uuid::new_v4();
+        existing.created_at = Utc::now();
+    }
+    existing.name = request.name.trim().to_owned();
+    existing.config = config;
+    existing.updated_at = Utc::now();
+    backup_provider::save(state.database(), &existing)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    state
+        .audit(
+            Some(actor.user.id),
+            "backup.provider.update",
+            Some(existing.id.to_string()),
+        )
+        .await?;
+    let schedule = archive::load_backup_schedule(state.database(), existing.id)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(backup_provider_response(existing, schedule)))
+}
+
+pub async fn delete_backup_provider(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(provider_id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
+    if provider_id == RUNTIME_S3_PROVIDER_ID {
+        return Err(ApiError::bad_request(
+            "A provider from gitadel.toml cannot be removed here.",
+        ));
+    }
+    if !backup_provider::delete(state.database(), provider_id)
+        .await
+        .map_err(ApiError::internal)?
+    {
+        return Err(ApiError::not_found());
+    }
+    state
+        .audit(
+            Some(actor.user.id),
+            "backup.provider.delete",
+            Some(provider_id.to_string()),
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn update_backup_schedule(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(provider_id): Path<Uuid>,
+    Json(request): Json<UpdateBackupScheduleRequest>,
+) -> Result<Json<BackupProviderResponse>, ApiError> {
+    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
+    let mut provider = required_backup_provider(&state, provider_id).await?;
+    if provider.id == RUNTIME_S3_PROVIDER_ID {
+        provider.id = Uuid::new_v4();
+        provider.created_at = Utc::now();
+        provider.updated_at = provider.created_at;
+        backup_provider::save(state.database(), &provider)
+            .await
+            .map_err(ApiError::internal)?;
+    }
+    archive::validate_backup_schedule(request.schedule.as_deref())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let schedule =
+        archive::save_backup_schedule(state.database(), provider.id, request.schedule.as_deref())
+            .await
+            .map_err(ApiError::internal)?;
+    state
+        .audit(
+            Some(actor.user.id),
+            "backup.schedule.update",
+            Some(
+                schedule
+                    .as_ref()
+                    .map_or_else(|| "disabled".to_owned(), |value| value.schedule.clone()),
+            ),
+        )
+        .await?;
+    Ok(Json(backup_provider_response(provider, schedule)))
+}
+
+pub async fn list_backups(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(provider_id): Path<Uuid>,
+) -> Result<Json<Vec<archive::BackupObject>>, ApiError> {
+    require_admin(&state, &headers, &jar, SCOPE_READ).await?;
+    let provider = required_backup_provider(&state, provider_id).await?;
+    let backups = archive::list_backups(&provider.config, state.runtime_settings()?)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(backups))
+}
+
+pub async fn download_backup(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(provider_id): Path<Uuid>,
+    Query(request): Query<BackupObjectRequest>,
+) -> Result<Response, ApiError> {
+    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
+    let provider = required_backup_provider(&state, provider_id).await?;
+    let key = request.key;
+    let (body, size) = match &provider.config {
+        BackupProviderConfig::Filesystem(filesystem) => {
+            let (file, size) =
+                archive::open_filesystem_backup(state.runtime_settings()?, filesystem, &key)
+                    .await
+                    .map_err(ApiError::internal)?;
+            (Body::from_stream(ReaderStream::new(file)), Some(size))
+        }
+        BackupProviderConfig::S3(s3) => {
+            let download = archive::stream_s3_backup(s3, &key)
+                .await
+                .map_err(ApiError::internal)?;
+            (Body::from_stream(download.stream), download.size)
+        }
+    };
+    state
+        .audit(Some(actor.user.id), "backup.download", Some(key.clone()))
+        .await?;
+
+    let filename = download_filename(&key);
+    let mut response = Response::new(body);
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/zstd"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
+            .map_err(ApiError::internal)?,
+    );
+    if let Some(size) = size {
+        response.headers_mut().insert(
+            header::CONTENT_LENGTH,
+            HeaderValue::from_str(&size.to_string()).map_err(ApiError::internal)?,
+        );
+    }
+    Ok(response)
+}
+
+pub async fn delete_backup(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(provider_id): Path<Uuid>,
+    Query(request): Query<BackupObjectRequest>,
+) -> Result<StatusCode, ApiError> {
+    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
+    let provider = required_backup_provider(&state, provider_id).await?;
+    archive::delete_backup(&provider.config, state.runtime_settings()?, &request.key)
+        .await
+        .map_err(ApiError::internal)?;
+    state
+        .audit(Some(actor.user.id), "backup.delete", Some(request.key))
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn backup_progress(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(_operation_id): Path<Uuid>,
+) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
+    let events = stream::once(async {
+        Ok(Event::default()
+            .comment("Maintenance is starting.")
+            .retry(Duration::from_millis(500)))
+    });
+    Ok(Sse::new(events))
+}
+
+pub async fn create_backup(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(provider_id): Path<Uuid>,
+    Json(request): Json<CreateBackupRequest>,
+) -> Result<(StatusCode, Json<BackupScheduledResponse>), ApiError> {
+    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
+    let provider = required_backup_provider(&state, provider_id).await?;
+    let name = archive::validate_backup_name(request.name.as_deref())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let key =
+        archive::new_backup_key(&provider.config, name.as_deref()).map_err(ApiError::internal)?;
+    let operation_id = Uuid::new_v4();
+    state
+        .audit(Some(actor.user.id), "backup.create", Some(key.clone()))
+        .await?;
+    state
+        .schedule_maintenance(MaintenanceAction::Create {
+            operation_id,
+            key: key.clone(),
+            provider,
+            name,
+        })
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(BackupScheduledResponse {
+            operation_id,
+            key,
+            message: "Gitadel is restarting to create the backup.",
+        }),
+    ))
+}
+
+pub async fn preflight_restore(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(provider_id): Path<Uuid>,
+    Json(request): Json<RestorePreflightRequest>,
+) -> Result<Json<RestorePreflightResponse>, ApiError> {
+    let key = request.key;
+    require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
+    let mut provider = required_backup_provider(&state, provider_id).await?;
+    if provider.id == RUNTIME_S3_PROVIDER_ID {
+        provider.id = Uuid::new_v4();
+        provider.created_at = Utc::now();
+        provider.updated_at = provider.created_at;
+    }
+    let runtime = state.runtime_settings()?;
+    let (path, inspection) = archive::download_and_inspect_backup(runtime, &provider.config, &key)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let available_free_space =
+        archive::restore_available_space(runtime).map_err(ApiError::internal)?;
+    let required_free_space = inspection.uncompressed_size.saturating_mul(2);
+    if available_free_space < required_free_space {
+        let _ = std::fs::remove_file(path);
+        return Err(ApiError::bad_request(format!(
+            "Restore needs at least {required_free_space} bytes free; {available_free_space} bytes are available."
+        )));
+    }
+    let token = state
+        .cache_validated_backup(key.clone(), path, provider)
+        .await;
+    Ok(Json(RestorePreflightResponse {
+        token,
+        key,
+        inspection,
+        required_free_space,
+        available_free_space,
+    }))
+}
+
+pub async fn restore_backup(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(_provider_id): Path<Uuid>,
+    Json(request): Json<RestoreBackupRequest>,
+) -> Result<(StatusCode, Json<BackupScheduledResponse>), ApiError> {
+    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
+    if actor.via_api_token {
+        return Err(ApiError::forbidden(
+            "Restore requires an interactive administrator session.",
+        ));
+    }
+    if !super::verify_password(request.password, actor.user.password_hash.clone()).await? {
+        return Err(ApiError::forbidden("Password confirmation failed."));
+    }
+    let backup = state
+        .take_validated_backup(request.token)
+        .await
+        .ok_or_else(|| ApiError::bad_request("The validated backup expired. Validate it again."))?;
+    let operation_id = Uuid::new_v4();
+    let safety_key = if request.create_safety_backup {
+        Some(
+            archive::new_backup_key(&backup.provider.config, Some("pre-restore-safety"))
+                .map_err(ApiError::internal)?,
+        )
+    } else {
+        None
+    };
+    state
+        .audit(
+            Some(actor.user.id),
+            "backup.restore",
+            Some(backup.key.clone()),
+        )
+        .await?;
+    if let Err(error) = state
+        .schedule_maintenance(MaintenanceAction::Restore {
+            operation_id,
+            archive: backup.path.clone(),
+            key: backup.key.clone(),
+            provider: backup.provider,
+            safety_key,
+        })
+        .await
+    {
+        let _ = std::fs::remove_file(backup.path);
+        return Err(error);
+    }
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(BackupScheduledResponse {
+            key: backup.key,
+            operation_id,
+            message: "Gitadel is restarting to restore the selected backup.",
+        }),
+    ))
+}
+
+async fn required_backup_provider(
+    state: &IdentityState,
+    provider_id: Uuid,
+) -> Result<BackupProvider, ApiError> {
+    let fallback = state.runtime_settings()?.backup.s3.as_ref();
+    backup_provider::load(state.database(), fallback, provider_id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(ApiError::not_found)
+}
+
+async fn requested_backup_provider_config(
+    state: &IdentityState,
+    request: &UpdateBackupProviderRequest,
+) -> Result<BackupProviderConfig, ApiError> {
+    let existing = if let Some(id) = request.id {
+        Some(required_backup_provider(state, id).await?)
+    } else {
+        None
+    };
+    match request.provider {
+        BackupProviderKind::Filesystem => {
+            let path = required_provider_field(request.path.as_ref(), "Path")?;
+            Ok(BackupProviderConfig::Filesystem(FilesystemSettings {
+                path: PathBuf::from(path),
+            }))
+        }
+        BackupProviderKind::S3 => {
+            let existing_s3 = existing.as_ref().and_then(|provider| {
+                if let BackupProviderConfig::S3(settings) = &provider.config {
+                    Some(settings)
+                } else {
+                    None
+                }
+            });
+            let access_key = request
+                .access_key
+                .as_ref()
+                .filter(|value| !value.is_empty())
+                .cloned()
+                .or_else(|| existing_s3.map(|settings| settings.access_key.clone()))
+                .ok_or_else(|| ApiError::bad_request("Access key is required."))?;
+            let secret_key = request
+                .secret_key
+                .as_ref()
+                .filter(|value| !value.is_empty())
+                .cloned()
+                .or_else(|| existing_s3.map(|settings| settings.secret_key.clone()))
+                .ok_or_else(|| ApiError::bad_request("Secret key is required."))?;
+            let endpoint = required_provider_field(request.endpoint.as_ref(), "Endpoint")?;
+            let settings = S3Settings {
+                endpoint: Url::parse(endpoint)
+                    .map_err(|_| ApiError::bad_request("Endpoint must be a valid URL."))?,
+                bucket: required_provider_field(request.bucket.as_ref(), "Bucket")?.to_owned(),
+                access_key,
+                secret_key,
+                region: required_provider_field(request.region.as_ref(), "Region")?.to_owned(),
+                prefix: request.prefix.as_deref().unwrap_or("backups").to_owned(),
+            };
+            crate::config::validate_s3_settings(&settings)
+                .map_err(|error| ApiError::bad_request(error.to_string()))?;
+            Ok(BackupProviderConfig::S3(settings))
+        }
+    }
+}
+
+async fn consume_provider_test(
+    state: &IdentityState,
+    user_id: Uuid,
+    test_token: Option<Uuid>,
+    config: &BackupProviderConfig,
+) -> Result<(), ApiError> {
+    let test_token = test_token
+        .ok_or_else(|| ApiError::bad_request("Test this exact provider before saving."))?;
+    if !state
+        .consume_tested_backup_provider(test_token, user_id, config)
+        .await
+    {
+        return Err(ApiError::bad_request(
+            "The provider test expired or the configuration changed. Test it again before saving.",
+        ));
+    }
+    Ok(())
+}
+
+fn required_provider_field<'a>(
+    value: Option<&'a String>,
+    field: &str,
+) -> Result<&'a str, ApiError> {
+    value
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| ApiError::bad_request(format!("{field} is required.")))
+}
+
+fn backup_provider_response(
+    provider: BackupProvider,
+    schedule: Option<archive::BackupSchedule>,
+) -> BackupProviderResponse {
+    let (schedule, next_backup_at) = schedule
+        .map(|schedule| (Some(schedule.schedule), Some(schedule.next_backup_at)))
+        .unwrap_or((None, None));
+    let managed_by_config = provider.id == RUNTIME_S3_PROVIDER_ID;
+    match provider.config {
+        BackupProviderConfig::Filesystem(settings) => BackupProviderResponse {
+            id: provider.id,
+            name: provider.name,
+            provider: BackupProviderKind::Filesystem,
+            managed_by_config,
+            path: Some(settings.path.to_string_lossy().into_owned()),
+            endpoint: None,
+            bucket: None,
+            access_key_hint: None,
+            region: None,
+            prefix: None,
+            schedule,
+            next_backup_at,
+        },
+        BackupProviderConfig::S3(settings) => BackupProviderResponse {
+            id: provider.id,
+            name: provider.name,
+            provider: BackupProviderKind::S3,
+            managed_by_config,
+            path: None,
+            endpoint: Some(settings.endpoint.to_string()),
+            bucket: Some(settings.bucket),
+            access_key_hint: Some(access_key_hint(&settings.access_key)),
+            region: Some(settings.region),
+            prefix: Some(settings.prefix),
+            schedule,
+            next_backup_at,
+        },
+    }
+}
+
+fn download_filename(key: &str) -> String {
+    let filename = key.rsplit('/').next().unwrap_or("gitadel-backup.tar.zst");
+    let sanitized = filename
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "gitadel-backup.tar.zst".to_owned()
+    } else {
+        sanitized
+    }
+}
+
+fn access_key_hint(access_key: &str) -> String {
+    let suffix = access_key
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("ending in {suffix}")
 }
 
 fn validate_png(bytes: &[u8]) -> Result<(), ApiError> {

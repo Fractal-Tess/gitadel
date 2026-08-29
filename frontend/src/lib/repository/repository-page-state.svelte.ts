@@ -5,10 +5,14 @@ import { z } from "zod";
 
 import {
   ApiFailure,
+  actionArtifactsSchema,
+  actionLogsSchema,
+  actionRunDetailSchema,
+  actionRunSummarySchema,
+  actionStatusesSchema,
   blobSchema,
   commitSchema,
   diffSchema,
-  historySchema,
   issueAttachmentSchema,
   issueCommentSchema,
   issueLabelSchema,
@@ -27,6 +31,11 @@ import {
   treeSchema,
   webhookSchema,
   webhookDeliverySchema,
+  type ActionArtifact,
+  type ActionCommitStatus,
+  type ActionLogs,
+  type ActionRunDetail,
+  type ActionRuns,
   type AuthStatus,
   type Blob,
   type Commit,
@@ -48,8 +57,20 @@ import {
 import { copyText } from "$lib/clipboard.js";
 import { escapeHtml, languageLabel } from "$lib/repository/format.js";
 import {
+  clearRepositoryDataCache,
+  loadRepositoryActionRuns,
+  loadRepositoryAssignableUsers,
+  loadRepositoryHistory,
+  loadRepositoryIssueLabels,
+  loadRepositoryIssues,
+  loadRepositoryReleases,
+  loadRepositoryWebhooks,
+  preloadRepositoryData,
+} from "$lib/repository/repository-data-cache.js";
+import {
   clearRepositoryPreload,
   loadRepositoryBootstrap,
+  preloadRepository,
   takePreloadedRepositoryOverview,
 } from "$lib/repository/repository-preload.js";
 
@@ -57,10 +78,12 @@ export type RepositoryView =
   | "overview"
   | "history"
   | "commit"
+  | "actions"
   | "tags"
   | "releases"
   | "issues"
-  | "settings";
+  | "settings"
+  | "integrations";
 export type CopyTarget = "http" | "ssh";
 
 const MAX_HIGHLIGHT_CHARACTERS = 200_000;
@@ -76,10 +99,12 @@ function isRepositoryView(value: string | null): value is RepositoryView {
     "overview",
     "history",
     "commit",
+    "actions",
     "tags",
     "releases",
     "issues",
     "settings",
+    "integrations",
   ].includes(value ?? "");
 }
 
@@ -102,6 +127,11 @@ export class RepositoryPageState {
   commitCount = $state.raw<number | null>(null);
   readme = $state.raw<Blob | null>(null);
   authStatus = $state.raw<AuthStatus | null>(null);
+  actionArtifacts = $state.raw<ActionArtifact[]>([]);
+  actionRuns = $state.raw<ActionRuns | null>(null);
+  actionRun = $state.raw<ActionRunDetail | null>(null);
+  actionLogs = $state.raw<ActionLogs | null>(null);
+  actionCommitStatuses = $state.raw<Record<string, ActionCommitStatus>>({});
   webhooks = $state.raw<Webhook[]>([]);
   webhookDeliveries = $state<Record<string, WebhookDelivery[]>>({});
   expandedWebhookId = $state<string | null>(null);
@@ -116,11 +146,19 @@ export class RepositoryPageState {
   topics = $state.raw<string[]>([]);
   ownedNamespaces = $state.raw<string[]>([]);
   view = $state<RepositoryView>("overview");
+  // Which provider the integrations view configures; only meaningful while
+  // the view is active.
+  integrationProvider = $state<string | null>(null);
+  settingsTab = $state("general");
   revision = $state("");
   repositoryPath = $state("");
   commitOid = $state("");
   historyPage = $state(1);
   issueNumber = $state<number | null>(null);
+  actionRunId = $state<string | null>(null);
+  actionJobId = $state<number | null>(null);
+  actionCommit = $state("");
+  actionPage = $state(1);
   webhookUrl = $state("");
   webhookSecret = $state("");
   webhookActive = $state(true);
@@ -142,8 +180,12 @@ export class RepositoryPageState {
   webhookDeletingId = $state<string | null>(null);
   repositoryControlPending = $state(false);
   lifecyclePending = $state(false);
+  actionsLoading = $state(false);
+  actionArtifactsLoading = $state(false);
+  actionLogsLoading = $state(false);
+  actionArtifactsError = $state<string | null>(null);
+  actionsPending = $state(false);
   error = $state<string | null>(null);
-  notice = $state<string | null>(null);
   copied = $state<CopyTarget | null>(null);
   favoritePending = $state(false);
   wrapLines = $state(false);
@@ -162,11 +204,13 @@ export class RepositoryPageState {
   );
 
   #repositoryRequestSequence = 0;
+  #actionLogRequestSequence = 0;
   #highlightRequestSequence = 0;
   #supplementaryRefreshTimers: number[] = [];
   #viewRequestController: AbortController | null = null;
   #statsRevision = "";
   #sidebarRevision = "";
+  #actionsPollTimer: number | null = null;
 
   constructor(namespace: string, name: string) {
     this.namespace = namespace;
@@ -177,6 +221,10 @@ export class RepositoryPageState {
     this.#repositoryRequestSequence += 1;
     this.#viewRequestController?.abort();
     this.#viewRequestController = null;
+    if (this.#actionsPollTimer !== null) {
+      window.clearTimeout(this.#actionsPollTimer);
+      this.#actionsPollTimer = null;
+    }
     this.#supplementaryRefreshTimers.forEach((timer) =>
       window.clearTimeout(timer),
     );
@@ -217,8 +265,15 @@ export class RepositoryPageState {
           .map((organization) => organization.slug),
       ];
       this.#readLocation(repository);
-      void this.#loadReleases({}).catch(() => undefined);
       await this.loadView();
+      if (sequence !== this.#repositoryRequestSequence) return;
+      preloadRepository(this.namespace, this.name, this.revision);
+      void preloadRepositoryData(
+        this.namespace,
+        this.name,
+        this.revision,
+        repository.can_manage,
+      );
     } catch (caught) {
       if (sequence === this.#repositoryRequestSequence) {
         this.error = errorMessage(caught);
@@ -267,11 +322,19 @@ export class RepositoryPageState {
           await this.#loadOverview(init);
           break;
         case "history":
-          this.history = await requestJson(
-            `${this.#api("/history")}?${new URLSearchParams({ rev: this.revision, page: String(this.historyPage), per_page: "30" })}`,
-            historySchema,
-            init,
+          this.history = await loadRepositoryHistory(
+            this.namespace,
+            this.name,
+            this.revision,
+            this.historyPage,
           );
+          if (init.signal.aborted) return;
+          if (this.history) {
+            void this.loadActionStatuses(
+              this.history.commits.map((commit) => commit.oid),
+              init,
+            );
+          }
           break;
         case "commit":
           if (!this.commitOid) throw new Error("No commit was selected.");
@@ -287,6 +350,10 @@ export class RepositoryPageState {
               init,
             ),
           ]);
+          void this.loadActionStatuses([this.commitOid], init);
+          break;
+        case "actions":
+          await this.loadActions(init);
           break;
         case "tags":
           break;
@@ -304,6 +371,10 @@ export class RepositoryPageState {
           break;
         case "settings":
           await this.#loadWebhooks(init);
+          break;
+        case "integrations":
+          // The configure component loads its own provider detail.
+          if (!this.integrationProvider) this.view = "settings";
           break;
       }
     } catch (caught) {
@@ -325,17 +396,37 @@ export class RepositoryPageState {
       page?: number;
       rev?: string;
       issue?: number | null;
+      provider?: string;
+      settingsTab?: string;
+      run?: string | null;
+      job?: number | null;
+      commit?: string;
     } = {},
   ): void {
     this.view =
-      nextView === "settings" && !this.repository?.can_manage
+      (nextView === "settings" || nextView === "integrations") &&
+      !this.repository?.can_manage
         ? "overview"
         : nextView;
+    this.integrationProvider =
+      nextView === "integrations" ? (options.provider ?? null) : null;
+    // Configuring a provider is still the integrations page, so the rail keeps
+    // that sub-page marked as the current one.
+    this.settingsTab =
+      nextView === "settings"
+        ? (options.settingsTab ?? "general")
+        : nextView === "integrations"
+          ? "integrations"
+          : "general";
     this.repositoryPath = options.path ?? "";
     this.commitOid = options.oid ?? "";
     this.historyPage = options.page ?? 1;
     this.issueNumber = nextView === "issues" ? (options.issue ?? null) : null;
     this.revision = options.rev ?? this.revision;
+    this.actionRunId = nextView === "actions" ? (options.run ?? null) : null;
+    this.actionJobId = nextView === "actions" ? (options.job ?? null) : null;
+    this.actionCommit = nextView === "actions" ? (options.commit ?? "") : "";
+    this.actionPage = nextView === "actions" ? (options.page ?? 1) : 1;
     this.#writeLocation();
     void this.loadView();
   }
@@ -431,7 +522,6 @@ export class RepositoryPageState {
   }): Promise<void> {
     this.repositoryControlPending = true;
     this.error = null;
-    this.notice = null;
     try {
       const repository = await requestJson(
         this.#api("/control"),
@@ -445,6 +535,7 @@ export class RepositoryPageState {
         repository.namespace !== this.namespace ||
         repository.name !== this.name;
       clearRepositoryPreload(this.namespace, this.name);
+      clearRepositoryDataCache(this.namespace, this.name);
       this.repository = repository;
       if (moved) {
         window.location.assign(
@@ -452,7 +543,7 @@ export class RepositoryPageState {
         );
         return;
       }
-      this.notice = "Repository settings saved.";
+      toast.success("Repository settings saved.");
       if (values.default_branch) {
         this.revision = values.default_branch;
         await this.initialize();
@@ -518,11 +609,13 @@ export class RepositoryPageState {
   async loadIssues(init: RequestInit = {}) {
     this.issuesLoading = true;
     try {
-      this.issues = await requestJson(
-        this.#api("/issues"),
-        z.array(issueSchema),
-        init,
+      const issues = await loadRepositoryIssues(
+        this.namespace,
+        this.name,
+        !init.signal,
       );
+      if (init.signal?.aborted) return;
+      this.issues = issues;
       this.issuesLoaded = true;
     } finally {
       this.issuesLoading = false;
@@ -546,19 +639,16 @@ export class RepositoryPageState {
   }
 
   async loadIssueLabels(init: RequestInit = {}) {
-    this.issueLabels = await requestJson(
-      this.#api("/issue-labels"),
-      z.array(issueLabelSchema),
-      init,
-    );
+    const labels = await loadRepositoryIssueLabels(this.namespace, this.name);
+    if (!init.signal?.aborted) this.issueLabels = labels;
   }
 
   async loadAssignableUsers(init: RequestInit = {}) {
-    this.assignableUsers = await requestJson(
-      this.#api("/assignable-users"),
-      z.array(issueUserSchema),
-      init,
+    const users = await loadRepositoryAssignableUsers(
+      this.namespace,
+      this.name,
     );
+    if (!init.signal?.aborted) this.assignableUsers = users;
   }
 
   async previewMarkdown(markdown: string) {
@@ -596,7 +686,7 @@ export class RepositoryPageState {
         method: "POST",
         body: jsonBody(values),
       });
-      this.notice = `Issue #${issue.number} opened.`;
+      toast.success(`Issue #${issue.number} opened.`);
       await this.loadIssues();
       this.selectIssue(issue.number);
       return issue;
@@ -631,7 +721,7 @@ export class RepositoryPageState {
       this.issues = this.issues.map((item) =>
         item.number === issue.number ? issue : item,
       );
-      this.notice = `Issue #${number} updated.`;
+      toast.success(`Issue #${number} updated.`);
       return issue;
     } catch (caught) {
       this.error = errorMessage(caught);
@@ -646,7 +736,7 @@ export class RepositoryPageState {
     this.error = null;
     try {
       await requestEmpty(this.#api(`/issues/${number}`), { method: "DELETE" });
-      this.notice = `Issue #${number} deleted.`;
+      toast.success(`Issue #${number} deleted.`);
       this.issueNumber = null;
       this.selectedIssue = null;
       this.issueComments = [];
@@ -743,6 +833,7 @@ export class RepositoryPageState {
         issueLabelSchema,
         { method: "POST", body: jsonBody(values) },
       );
+      clearRepositoryDataCache(this.namespace, this.name, ["issue-labels"]);
       this.issueLabels = [...this.issueLabels, label].sort((left, right) =>
         left.name.localeCompare(right.name),
       );
@@ -762,6 +853,7 @@ export class RepositoryPageState {
       await requestEmpty(this.#api(`/issue-labels/${id}`), {
         method: "DELETE",
       });
+      clearRepositoryDataCache(this.namespace, this.name, ["issue-labels"]);
       this.issueLabels = this.issueLabels.filter((label) => label.id !== id);
       await this.loadIssues();
       if (this.issueNumber) await this.loadIssue(this.issueNumber);
@@ -784,7 +876,6 @@ export class RepositoryPageState {
   ) {
     this.releasePending = true;
     this.error = null;
-    this.notice = null;
     try {
       let release = await requestJson(this.#api("/releases"), releaseSchema, {
         method: "POST",
@@ -816,7 +907,7 @@ export class RepositoryPageState {
         }
       }
       await this.#loadReleases({});
-      this.notice = `Release “${release.title}” published.`;
+      toast.success(`Release “${release.title}” published.`);
       return release;
     } catch (caught) {
       this.error = errorMessage(caught);
@@ -838,7 +929,6 @@ export class RepositoryPageState {
   ) {
     this.releasePending = true;
     this.error = null;
-    this.notice = null;
     try {
       const release = await requestJson(
         this.#api(`/releases/${id}`),
@@ -846,7 +936,7 @@ export class RepositoryPageState {
         { method: "PATCH", body: jsonBody(values) },
       );
       await this.#loadReleases({});
-      this.notice = "Release updated.";
+      toast.success("Release updated.");
       return release;
     } catch (caught) {
       this.error = errorMessage(caught);
@@ -874,7 +964,9 @@ export class RepositoryPageState {
         );
       }
       await this.#loadReleases({});
-      this.notice = `${files.length} release asset${files.length === 1 ? "" : "s"} uploaded.`;
+      toast.success(
+        `${files.length} release asset${files.length === 1 ? "" : "s"} uploaded.`,
+      );
     } catch (caught) {
       this.error = errorMessage(caught);
       throw caught;
@@ -889,7 +981,7 @@ export class RepositoryPageState {
     try {
       await requestEmpty(this.#api(`/releases/${id}`), { method: "DELETE" });
       await this.#loadReleases({});
-      this.notice = "Release deleted. Its Git target was not changed.";
+      toast.success("Release deleted. Its Git target was not changed.");
     } catch (caught) {
       this.error = errorMessage(caught);
       throw caught;
@@ -907,7 +999,7 @@ export class RepositoryPageState {
         { method: "DELETE" },
       );
       await this.#loadReleases({});
-      this.notice = "Release asset deleted.";
+      toast.success("Release asset deleted.");
     } catch (caught) {
       this.error = errorMessage(caught);
       throw caught;
@@ -919,7 +1011,6 @@ export class RepositoryPageState {
   async createWebhook(): Promise<void> {
     this.webhookCreating = true;
     this.error = null;
-    this.notice = null;
     try {
       const hook = await requestJson(this.#hooksApi(), webhookSchema, {
         method: "POST",
@@ -939,7 +1030,7 @@ export class RepositoryPageState {
       this.webhookUrl = "";
       this.webhookSecret = "";
       this.webhookActive = true;
-      this.notice = "Webhook created. A ping delivery has been queued.";
+      toast.success("Webhook created. A ping delivery has been queued.");
       window.setTimeout(() => void this.#refreshWebhooks(), 1500);
     } catch (caught) {
       this.error = errorMessage(caught);
@@ -951,7 +1042,6 @@ export class RepositoryPageState {
   async updateWebhook(hook: Webhook, url: string, secret: string) {
     this.webhookUpdatingId = hook.id;
     this.error = null;
-    this.notice = null;
     try {
       const updated = await requestJson(
         `${this.#hooksApi()}/${hook.id}`,
@@ -970,7 +1060,7 @@ export class RepositoryPageState {
       this.webhooks = this.webhooks.map((item) =>
         item.id === updated.id ? updated : item,
       );
-      this.notice = "Webhook updated. Send a ping to verify the endpoint.";
+      toast.success("Webhook updated. Send a ping to verify the endpoint.");
     } catch (caught) {
       this.error = errorMessage(caught);
       throw caught;
@@ -982,7 +1072,6 @@ export class RepositoryPageState {
   async setWebhookActive(hook: Webhook, active: boolean): Promise<void> {
     this.webhookUpdatingId = hook.id;
     this.error = null;
-    this.notice = null;
     try {
       const updated = await requestJson(
         `${this.#hooksApi()}/${hook.id}`,
@@ -995,7 +1084,7 @@ export class RepositoryPageState {
       this.webhooks = this.webhooks.map((item) =>
         item.id === updated.id ? updated : item,
       );
-      this.notice = active ? "Webhook enabled." : "Webhook disabled.";
+      toast.success(active ? "Webhook enabled." : "Webhook disabled.");
     } catch (caught) {
       this.error = errorMessage(caught);
     } finally {
@@ -1006,12 +1095,11 @@ export class RepositoryPageState {
   async pingWebhook(id: string): Promise<void> {
     this.webhookPingingId = id;
     this.error = null;
-    this.notice = null;
     try {
       await requestEmpty(`${this.#hooksApi()}/${id}/pings`, {
         method: "POST",
       });
-      this.notice = "Ping delivery queued.";
+      toast.success("Ping delivery queued.");
       window.setTimeout(() => void this.#refreshWebhookActivity(id), 1500);
     } catch (caught) {
       this.error = errorMessage(caught);
@@ -1037,13 +1125,12 @@ export class RepositoryPageState {
   ): Promise<void> {
     this.redeliveringDeliveryId = deliveryId;
     this.error = null;
-    this.notice = null;
     try {
       await requestEmpty(
         `${this.#hooksApi()}/${hookId}/deliveries/${deliveryId}/attempts`,
         { method: "POST" },
       );
-      this.notice = "Redelivery queued.";
+      toast.success("Redelivery queued.");
       window.setTimeout(() => void this.#refreshWebhookActivity(hookId), 1500);
     } catch (caught) {
       this.error = errorMessage(caught);
@@ -1055,7 +1142,6 @@ export class RepositoryPageState {
   async deleteWebhook(id: string): Promise<void> {
     this.webhookDeletingId = id;
     this.error = null;
-    this.notice = null;
     try {
       await requestEmpty(`${this.#hooksApi()}/${id}`, { method: "DELETE" });
       this.webhooks = this.webhooks.filter((hook) => hook.id !== id);
@@ -1064,7 +1150,7 @@ export class RepositoryPageState {
       }
       const { [id]: removed, ...deliveries } = this.webhookDeliveries;
       this.webhookDeliveries = deliveries;
-      this.notice = "Webhook deleted.";
+      toast.success("Webhook deleted.");
     } catch (caught) {
       this.error = errorMessage(caught);
     } finally {
@@ -1101,10 +1187,10 @@ export class RepositoryPageState {
   ): Promise<void> {
     this.lifecyclePending = true;
     this.error = null;
-    this.notice = null;
     try {
       await requestEmpty(this.#api(path), { method });
       clearRepositoryPreload(this.namespace, this.name);
+      clearRepositoryDataCache(this.namespace, this.name);
       if (this.repository && path === "/archive") {
         this.repository = {
           ...this.repository,
@@ -1112,7 +1198,7 @@ export class RepositoryPageState {
             method === "POST" ? new SvelteDate().toISOString() : null,
         };
       }
-      this.notice = notice;
+      toast.success(notice);
     } catch (caught) {
       this.error = errorMessage(caught);
       throw caught;
@@ -1134,11 +1220,13 @@ export class RepositoryPageState {
     this.releasesLoading = true;
     this.releasesLoadFailed = false;
     try {
-      this.releases = await requestJson(
-        this.#api("/releases"),
-        z.array(releaseSchema),
-        init,
+      const releases = await loadRepositoryReleases(
+        this.namespace,
+        this.name,
+        !init.signal,
       );
+      if (init.signal?.aborted) return;
+      this.releases = releases;
       this.releasesLoaded = true;
     } catch (caught) {
       this.releasesLoadFailed = true;
@@ -1149,14 +1237,18 @@ export class RepositoryPageState {
   }
 
   async #loadWebhooks(init: RequestInit): Promise<void> {
-    if (!this.repository?.can_manage) return;
+    if (!this.repository?.can_manage || (this.webhooksLoaded && init.signal)) {
+      return;
+    }
     this.webhooksLoading = true;
     try {
-      this.webhooks = await requestJson(
-        this.#hooksApi(),
-        z.array(webhookSchema),
-        init,
+      const webhooks = await loadRepositoryWebhooks(
+        this.namespace,
+        this.name,
+        !init.signal,
       );
+      if (init.signal?.aborted) return;
+      this.webhooks = webhooks;
       this.webhooksLoaded = true;
     } finally {
       this.webhooksLoading = false;
@@ -1314,6 +1406,195 @@ export class RepositoryPageState {
     }
   }
 
+  async loadActions(init: RequestInit = {}, polling = false): Promise<void> {
+    if (!polling) this.actionsLoading = true;
+    try {
+      this.actionRuns = await loadRepositoryActionRuns(
+        this.namespace,
+        this.name,
+        this.actionPage,
+        this.actionCommit,
+        polling,
+      );
+      if (init.signal?.aborted) return;
+      if (this.actionRunId) {
+        this.actionRun = await requestJson(
+          this.#actionsApi(`/runs/${encodeURIComponent(this.actionRunId)}`),
+          actionRunDetailSchema,
+          init,
+        );
+        await this.loadActionArtifacts(init);
+        if (
+          this.actionJobId &&
+          this.actionRun.jobs.some((job) => job.id === this.actionJobId)
+        ) {
+          await this.loadActionLog(init);
+        }
+      } else {
+        this.actionRun = null;
+        this.actionLogs = null;
+        this.actionArtifacts = [];
+        this.actionArtifactsError = null;
+      }
+    } catch (caught) {
+      if (
+        !polling &&
+        !(caught instanceof DOMException && caught.name === "AbortError")
+      ) {
+        this.error = errorMessage(caught);
+      }
+    } finally {
+      if (!polling) this.actionsLoading = false;
+      this.#scheduleActionsPoll();
+    }
+  }
+
+  async loadActionArtifacts(init: RequestInit = {}): Promise<void> {
+    const runId = this.actionRunId;
+    if (!runId) return;
+    this.actionArtifactsLoading = true;
+    this.actionArtifactsError = null;
+    try {
+      const response = await requestJson(
+        this.#actionsApi(`/runs/${encodeURIComponent(runId)}/artifacts`),
+        actionArtifactsSchema,
+        init,
+      );
+      if (this.actionRunId === runId) {
+        this.actionArtifacts = response.artifacts;
+      }
+    } catch (caught) {
+      if (!(caught instanceof DOMException && caught.name === "AbortError")) {
+        this.actionArtifactsError = errorMessage(caught);
+      }
+    } finally {
+      if (this.actionRunId === runId) this.actionArtifactsLoading = false;
+    }
+  }
+
+  async loadActionStatuses(
+    oids: string[],
+    init: RequestInit = {},
+  ): Promise<void> {
+    if (oids.length === 0) return;
+    const parameters = new URLSearchParams({
+      oids: oids.slice(0, 50).join(","),
+    });
+    try {
+      const response = await requestJson(
+        `${this.#actionsApi("/statuses")}?${parameters}`,
+        actionStatusesSchema,
+        init,
+      );
+      this.actionCommitStatuses = Object.fromEntries(
+        response.statuses.map((status) => [status.oid, status]),
+      );
+    } catch {
+      // Commit checks are supplementary; repository history remains usable.
+    }
+  }
+
+  selectActionRun(runId: string): void {
+    this.actionArtifacts = [];
+    this.actionArtifactsError = null;
+    this.navigate("actions", {
+      run: runId,
+      commit: this.actionCommit,
+      page: this.actionPage,
+    });
+  }
+
+  selectActionJob(jobId: number): void {
+    this.actionJobId = jobId;
+    this.actionLogs = null;
+    this.#writeLocation();
+    void this.loadActionLog();
+  }
+
+  async loadActionLog(init: RequestInit = {}): Promise<void> {
+    if (!this.actionRunId || !this.actionJobId) return;
+    const runId = this.actionRunId;
+    const jobId = this.actionJobId;
+    const requestSequence = ++this.#actionLogRequestSequence;
+    this.actionLogsLoading = true;
+    try {
+      const parameters = new URLSearchParams();
+      if (this.actionLogs?.next_cursor) {
+        parameters.set("cursor", this.actionLogs.next_cursor);
+      }
+      const suffix = parameters.size ? `?${parameters}` : "";
+      const delta = await requestJson(
+        this.#actionsApi(
+          `/runs/${encodeURIComponent(runId)}/jobs/${jobId}/logs${suffix}`,
+        ),
+        actionLogsSchema,
+        init,
+      );
+      if (
+        requestSequence !== this.#actionLogRequestSequence ||
+        this.actionRunId !== runId ||
+        this.actionJobId !== jobId
+      ) {
+        return;
+      }
+      this.actionLogs = {
+        text: `${this.actionLogs?.text ?? ""}${this.actionLogs?.text && delta.text ? "\n" : ""}${delta.text}`,
+        next_cursor: delta.next_cursor,
+        complete: delta.complete,
+      };
+    } finally {
+      if (requestSequence === this.#actionLogRequestSequence) {
+        this.actionLogsLoading = false;
+      }
+    }
+  }
+
+  async cancelActionRun(): Promise<void> {
+    if (!this.actionRunId || this.actionsPending) return;
+    this.actionsPending = true;
+    try {
+      await requestJson(
+        this.#actionsApi(
+          `/runs/${encodeURIComponent(this.actionRunId)}/cancel`,
+        ),
+        actionRunSummarySchema,
+        { method: "POST" },
+      );
+      await this.loadActions({}, true);
+    } catch (caught) {
+      this.error = errorMessage(caught);
+    } finally {
+      this.actionsPending = false;
+    }
+  }
+
+  handleVisibilityChange(): void {
+    if (document.visibilityState === "visible" && this.view === "actions") {
+      void this.loadActions({}, true);
+    }
+  }
+
+  #scheduleActionsPoll(): void {
+    if (this.#actionsPollTimer !== null) {
+      window.clearTimeout(this.#actionsPollTimer);
+      this.#actionsPollTimer = null;
+    }
+    if (
+      this.view !== "actions" ||
+      document.visibilityState !== "visible" ||
+      !this.actionRuns?.runs.some((run) =>
+        ["queued", "running"].includes(run.status),
+      )
+    ) {
+      return;
+    }
+    const delay = this.actionRunId ? 2_000 : 5_000;
+    this.#actionsPollTimer = window.setTimeout(() => {
+      this.#actionsPollTimer = null;
+      void this.loadActions({}, true);
+    }, delay);
+  }
+
   async #loadOverview(init: RequestInit): Promise<void> {
     try {
       const preloaded = this.repositoryPath
@@ -1397,26 +1678,56 @@ export class RepositoryPageState {
     const view = isRepositoryView(requestedView) ? requestedView : "overview";
     this.view =
       view === "settings" && !repository.can_manage ? "overview" : view;
+    this.settingsTab =
+      this.view === "settings"
+        ? parameters.get("tab") || "general"
+        : this.view === "integrations"
+          ? "integrations"
+          : "general";
     this.revision = parameters.get("rev") || repository.default_branch;
     this.repositoryPath = parameters.get("path") || "";
     this.commitOid = parameters.get("oid") || "";
     this.historyPage = Math.max(1, Number(parameters.get("page")) || 1);
+    this.actionRunId = view === "actions" ? parameters.get("run") : null;
+    const actionJobId = Number(parameters.get("job"));
+    this.actionJobId =
+      view === "actions" && actionJobId > 0 ? actionJobId : null;
+    this.actionCommit =
+      view === "actions" ? parameters.get("commit") || "" : "";
+    this.actionPage =
+      view === "actions" ? Math.max(1, Number(parameters.get("page")) || 1) : 1;
     const issueNumber = Number(parameters.get("issue"));
     this.issueNumber =
       view === "issues" && issueNumber > 0 ? issueNumber : null;
+    this.integrationProvider =
+      view === "integrations" ? parameters.get("provider") : null;
   }
 
   #writeLocation(): void {
     const parameters = new URLSearchParams();
     if (this.view !== "overview") parameters.set("view", this.view);
+    if (this.view === "settings" && this.settingsTab !== "general") {
+      parameters.set("tab", this.settingsTab);
+    }
     if (this.revision && this.revision !== this.repository?.default_branch) {
       parameters.set("rev", this.revision);
     }
     if (this.repositoryPath) parameters.set("path", this.repositoryPath);
     if (this.commitOid) parameters.set("oid", this.commitOid);
-    if (this.historyPage > 1) parameters.set("page", String(this.historyPage));
+    if (this.view === "history" && this.historyPage > 1) {
+      parameters.set("page", String(this.historyPage));
+    }
     if (this.view === "issues" && this.issueNumber) {
       parameters.set("issue", String(this.issueNumber));
+    }
+    if (this.view === "integrations" && this.integrationProvider) {
+      parameters.set("provider", this.integrationProvider);
+    }
+    if (this.view === "actions") {
+      if (this.actionRunId) parameters.set("run", this.actionRunId);
+      if (this.actionJobId) parameters.set("job", String(this.actionJobId));
+      if (this.actionCommit) parameters.set("commit", this.actionCommit);
+      if (this.actionPage > 1) parameters.set("page", String(this.actionPage));
     }
     const search = parameters.toString();
     window.history.pushState(
@@ -1428,6 +1739,10 @@ export class RepositoryPageState {
 
   #api(path = ""): string {
     return `/api/v1/repositories/${encodeURIComponent(this.namespace)}/${encodeURIComponent(this.name)}${path}`;
+  }
+
+  #actionsApi(path = ""): string {
+    return this.#api(`/actions${path}`);
   }
 
   #hooksApi(): string {

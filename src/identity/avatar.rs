@@ -10,11 +10,11 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::Utc;
-use sea_orm::{ActiveModelTrait, EntityTrait, Set, TransactionTrait};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::entity::{user, user_avatar};
+use crate::entity::{organization, organization_avatar, user, user_avatar};
 
 use super::{ApiError, IdentityState, SCOPE_WRITE};
 
@@ -32,7 +32,27 @@ pub async fn public_avatar(
         .await?
         .ok_or_else(ApiError::not_found)?;
 
-    let mut response = Response::new(Body::from(avatar.content));
+    Ok(avatar_response(avatar.content))
+}
+
+pub async fn public_organization_avatar(
+    State(state): State<IdentityState>,
+    Path(slug): Path<String>,
+) -> Result<Response, ApiError> {
+    let organization = organization::Entity::find()
+        .filter(organization::Column::Slug.eq(slug))
+        .one(state.database())
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let avatar = organization_avatar::Entity::find_by_id(organization.id)
+        .one(state.database())
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    Ok(avatar_response(avatar.content))
+}
+
+fn avatar_response(content: Vec<u8>) -> Response {
+    let mut response = Response::new(Body::from(content));
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
@@ -44,7 +64,7 @@ pub async fn public_avatar(
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
     );
-    Ok(response)
+    response
 }
 
 #[derive(Deserialize)]
@@ -92,6 +112,84 @@ pub async fn update_avatar(
     account.update(&transaction).await?;
     state
         .audit_on(&transaction, Some(actor_id), "account.avatar.update", None)
+        .await?;
+    transaction.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn update_organization_avatar(
+    State(state): State<IdentityState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(request): Json<UpdateAvatarRequest>,
+) -> Result<StatusCode, ApiError> {
+    let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
+    let organization = super::resources::owned_organization(&state, &slug, actor.user.id).await?;
+    let body = STANDARD
+        .decode(request.image_base64)
+        .map_err(|_| invalid_png())?;
+    validate_avatar_png(&body)?;
+    let transaction = state.database().begin().await?;
+    match organization_avatar::Entity::find_by_id(organization.id)
+        .one(&transaction)
+        .await?
+    {
+        Some(avatar) => {
+            let mut active: organization_avatar::ActiveModel = avatar.into();
+            active.content = Set(body);
+            active.update(&transaction).await?;
+        }
+        None => {
+            organization_avatar::ActiveModel {
+                organization_id: Set(organization.id),
+                content: Set(body),
+            }
+            .insert(&transaction)
+            .await?;
+        }
+    }
+    let now = Utc::now();
+    let mut active: organization::ActiveModel = organization.into();
+    active.avatar_updated_at = Set(Some(now));
+    active.updated_at = Set(now);
+    active.update(&transaction).await?;
+    state
+        .audit_on(
+            &transaction,
+            Some(actor.user.id),
+            "organization.avatar.update",
+            Some(slug),
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn delete_organization_avatar(
+    State(state): State<IdentityState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<StatusCode, ApiError> {
+    let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
+    let organization = super::resources::owned_organization(&state, &slug, actor.user.id).await?;
+    let transaction = state.database().begin().await?;
+    organization_avatar::Entity::delete_by_id(organization.id)
+        .exec(&transaction)
+        .await?;
+    let now = Utc::now();
+    let mut active: organization::ActiveModel = organization.into();
+    active.avatar_updated_at = Set(None);
+    active.updated_at = Set(now);
+    active.update(&transaction).await?;
+    state
+        .audit_on(
+            &transaction,
+            Some(actor.user.id),
+            "organization.avatar.delete",
+            Some(slug),
+        )
         .await?;
     transaction.commit().await?;
     Ok(StatusCode::NO_CONTENT)

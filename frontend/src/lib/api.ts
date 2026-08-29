@@ -17,10 +17,15 @@ const errorSchema = z.object({
   }),
 });
 
+export const themePreferenceSchema = z.enum(["system", "light", "dark"]);
+export type ThemePreference = z.infer<typeof themePreferenceSchema>;
+
 const userSchema = z.object({
-  id: z.uuid(),
+  id: z.guid(),
   username: z.string(),
   is_admin: z.boolean(),
+  default_repository_visibility: z.enum(["public", "private"]),
+  theme_preference: themePreferenceSchema,
   avatar_updated_at: z.string().nullable(),
 });
 
@@ -35,9 +40,159 @@ export const authResponseSchema = z.object({ user: userSchema });
 export const instanceSettingsSchema = z.object({
   site_name: z.string(),
   site_description: z.string().nullable(),
-  default_repository_visibility: z.enum(["public", "private"]),
   updated_at: z.string(),
 });
+
+export const backupProviderKindSchema = z.enum(["filesystem", "s3"]);
+export type BackupProviderKind = z.infer<typeof backupProviderKindSchema>;
+
+export const backupProviderCatalogItemSchema = z.object({
+  slug: backupProviderKindSchema,
+  name: z.string(),
+  description: z.string(),
+});
+export type BackupProviderCatalogItem = z.infer<
+  typeof backupProviderCatalogItemSchema
+>;
+
+export const backupProviderSchema = z.object({
+  id: z.uuid(),
+  name: z.string(),
+  provider: backupProviderKindSchema,
+  managed_by_config: z.boolean(),
+  path: z.string().nullable(),
+  endpoint: z.string().nullable(),
+  bucket: z.string().nullable(),
+  access_key_hint: z.string().nullable(),
+  region: z.string().nullable(),
+  prefix: z.string().nullable(),
+  schedule: z.string().nullable(),
+  next_backup_at: z.string().nullable(),
+});
+export type BackupProvider = z.infer<typeof backupProviderSchema>;
+
+export const backupProvidersSchema = z.object({
+  providers: z.array(backupProviderCatalogItemSchema),
+  connections: z.array(backupProviderSchema),
+});
+
+export const backupProviderTestSchema = z.object({
+  test_token: z.uuid(),
+  message: z.string(),
+});
+
+export const backupSnapshotSchema = z.object({
+  key: z.string(),
+  name: z.string().nullable(),
+  gitadel_version: z.string().nullable(),
+  size: z.number(),
+  created_at: z.string(),
+});
+export type BackupSnapshot = z.infer<typeof backupSnapshotSchema>;
+
+export const backupScheduledSchema = z.object({
+  key: z.string(),
+  operation_id: z.uuid(),
+  message: z.string(),
+});
+
+export const backupProgressSchema = z.object({
+  operation_id: z.uuid(),
+  key: z.string(),
+  operation: z.enum(["create", "restore"]),
+  phase: z.enum([
+    "scheduled",
+    "checking_destination",
+    "snapshotting_database",
+    "copying_repositories",
+    "copying_lfs",
+    "writing_metadata",
+    "compressing",
+    "uploading",
+    "restoring",
+    "completed",
+    "failed",
+  ]),
+  message: z.string(),
+  processed_bytes: z.number().nullable(),
+  total_bytes: z.number().nullable(),
+});
+export type BackupProgress = z.infer<typeof backupProgressSchema>;
+
+export const restorePreflightSchema = z.object({
+  token: z.uuid(),
+  key: z.string(),
+  format_version: z.number(),
+  gitadel_version: z.string().nullable(),
+  backup_name: z.string().nullable(),
+  version_warning: z.string().nullable(),
+  created_at: z.string(),
+  file_count: z.number(),
+  uncompressed_size: z.number(),
+  includes_settings: z.boolean(),
+  includes_host_key: z.boolean(),
+  required_free_space: z.number(),
+  available_free_space: z.number(),
+});
+export type RestorePreflight = z.infer<typeof restorePreflightSchema>;
+
+export const integrationProviderSchema = z.object({
+  slug: z.string(),
+  name: z.string(),
+  description: z.string(),
+  icon: z.string(),
+  source_required: z.boolean(),
+});
+export type IntegrationProvider = z.infer<typeof integrationProviderSchema>;
+export const integrationSourceSummarySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  managed: z.boolean(),
+  ready: z.boolean().optional(),
+});
+export const namespaceIntegrationSchema = z.object({
+  id: z.uuid(),
+  provider: z.string(),
+  provider_name: z.string(),
+  name: z.string(),
+  enabled: z.boolean(),
+  url: z.string(),
+  internal_url: z.string(),
+  api_key_set: z.boolean(),
+  source: integrationSourceSummarySchema.optional(),
+});
+export type NamespaceIntegration = z.infer<typeof namespaceIntegrationSchema>;
+export const integrationCredentialSchema = z.object({
+  api_key: z.string(),
+});
+export const namespaceIntegrationsSchema = z.object({
+  namespace: z.string(),
+  providers: z.array(integrationProviderSchema),
+  integrations: z.array(namespaceIntegrationSchema),
+});
+
+export const integrationRemoteSourceSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  ready: z.boolean(),
+});
+
+export const integrationSourceBindingSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  managed: z.boolean(),
+  ready: z.boolean(),
+  authorization_url: z.url().optional(),
+});
+
+export const integrationSourceConnectionSchema = z.object({
+  required: z.boolean(),
+  binding: integrationSourceBindingSchema.nullable(),
+  sources: z.array(integrationRemoteSourceSchema),
+});
+export type IntegrationSourceConnection = z.infer<
+  typeof integrationSourceConnectionSchema
+>;
 
 export const changelogSchema = z.object({
   application_version: z.string(),
@@ -50,7 +205,7 @@ export const invitationSchema = z.object({
 });
 
 export const sshKeySchema = z.object({
-  id: z.uuid(),
+  id: z.guid(),
   name: z.string(),
   fingerprint: z.string(),
   public_key: z.string(),
@@ -59,7 +214,7 @@ export const sshKeySchema = z.object({
 });
 
 export const tokenSchema = z.object({
-  id: z.uuid(),
+  id: z.guid(),
   name: z.string(),
   scopes: z.array(z.enum(["read", "write", "ssh_keys"])),
   expires_at: z.string().nullable(),
@@ -73,7 +228,7 @@ export const createdTokenSchema = z.object({
 });
 
 export const oauthApplicationSchema = z.object({
-  id: z.uuid(),
+  id: z.guid(),
   name: z.string(),
   client_id: z.string(),
   redirect_uri: z.url(),
@@ -86,16 +241,17 @@ export const createdOauthApplicationSchema = z.object({
 });
 
 export const passkeySchema = z.object({
-  id: z.uuid(),
+  id: z.guid(),
   name: z.string(),
   created_at: z.string(),
   last_used_at: z.string().nullable(),
 });
 
 export const organizationSchema = z.object({
-  id: z.uuid(),
+  id: z.guid(),
   slug: z.string(),
   display_name: z.string(),
+  avatar_updated_at: z.string().nullable(),
   role: z.enum(["owner", "member"]),
 });
 
@@ -105,9 +261,15 @@ export const memberSchema = z.object({
   created_at: z.string(),
 });
 
+export const memberSuggestionSchema = z.object({
+  id: z.guid(),
+  username: z.string(),
+  avatar_updated_at: z.string().nullable(),
+});
+
 export const auditEventSchema = z.object({
   id: z.number(),
-  actor_user_id: z.uuid().nullable(),
+  actor_user_id: z.guid().nullable(),
   actor_username: z.string().nullable(),
   action: z.string(),
   target: z.string().nullable(),
@@ -125,12 +287,13 @@ export const webauthnRequestSchema = z.object({
 });
 
 export const repositorySchema = z.object({
-  id: z.uuid(),
+  id: z.guid(),
   namespace: z.string(),
   name: z.string(),
   description: z.string().nullable(),
   visibility: z.enum(["public", "private"]),
   object_format: z.enum(["sha1", "sha256"]),
+  mirrored: z.boolean(),
   default_branch: z.string(),
   archived_at: z.string().nullable(),
   created_at: z.string(),
@@ -140,12 +303,205 @@ export const repositorySchema = z.object({
   can_manage: z.boolean(),
 });
 
+export const remoteImportRepositorySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  full_name: z.string(),
+  description: z.string().nullable(),
+  web_url: z.string(),
+  clone_url: z.string(),
+  visibility: z.string(),
+  archived: z.boolean(),
+  fork: z.boolean(),
+  default_branch: z.string().nullable(),
+});
+export type RemoteImportRepository = z.infer<
+  typeof remoteImportRepositorySchema
+>;
+
+export const importDiscoverySchema = z.object({
+  provider: z.enum(["github", "gitlab", "gitea", "forgejo"]),
+  instance_url: z.string(),
+  account: z.string(),
+  repositories: z.array(remoteImportRepositorySchema),
+});
+export type ImportDiscovery = z.infer<typeof importDiscoverySchema>;
+
+export const repositoryImportItemSchema = z.object({
+  id: z.uuid(),
+  source_id: z.string(),
+  source_full_name: z.string(),
+  source_web_url: z.string(),
+  target_namespace: z.string(),
+  target_name: z.string(),
+  target_visibility: z.enum(["public", "private"]),
+  state: z.enum([
+    "queued",
+    "cloning",
+    "metadata",
+    "completed",
+    "failed",
+    "cancelled",
+    "credentials_required",
+  ]),
+  attempts: z.number(),
+  repository_id: z.uuid().nullable(),
+  last_error: z.string().nullable(),
+});
+export type RepositoryImportItem = z.infer<typeof repositoryImportItemSchema>;
+
+export const repositoryImportSchema = z.object({
+  id: z.uuid(),
+  provider: z.enum(["github", "gitlab", "gitea", "forgejo"]),
+  instance_url: z.string(),
+  target_namespace: z.string(),
+  state: z.enum([
+    "queued",
+    "running",
+    "completed",
+    "completed_with_errors",
+    "cancelled",
+    "credentials_required",
+  ]),
+  created_at: z.string(),
+  updated_at: z.string(),
+  items: z.array(repositoryImportItemSchema),
+});
+export type RepositoryImport = z.infer<typeof repositoryImportSchema>;
+
+export const identityUsageSchema = z.object({
+  repository: z.string(),
+  last_attempted_at: z.string().nullable(),
+  last_synced_at: z.string().nullable(),
+  last_error: z.string().nullable(),
+});
+
+export const mirrorIdentitySchema = z.object({
+  id: z.uuid(),
+  name: z.string(),
+  kind: z.enum(["basic", "token", "ssh"]),
+  username: z.string().nullable(),
+  provider: z.enum(["github", "gitlab", "gitea", "forgejo"]).nullable(),
+  instance_url: z.string().nullable(),
+  public_key: z.string().nullable(),
+  fingerprint: z.string().nullable(),
+  last_used_at: z.string().nullable(),
+  usage_history: z.array(identityUsageSchema),
+  created_at: z.string(),
+  updated_at: z.string(),
+});
+
+export const mirrorIdentitiesSchema = z.array(mirrorIdentitySchema);
+
+export const repositoryMirrorSchema = z.object({
+  remote_url: z.string(),
+  identity_id: z.uuid().nullable(),
+  credential_configured: z.boolean(),
+  schedule: z.string().nullable(),
+  last_attempted_at: z.string().nullable(),
+  last_synced_at: z.string().nullable(),
+  last_error: z.string().nullable(),
+  metadata_last_synced_at: z.string().nullable(),
+  metadata_error: z.string().nullable(),
+  next_sync_at: z.string().nullable(),
+  syncing: z.boolean(),
+});
+
+export const repositoryIntegrationConnectionSchema = z.object({
+  id: z.uuid(),
+  provider: z.string(),
+  provider_name: z.string(),
+  name: z.string(),
+  configured: z.boolean(),
+});
+
+export const repositoryIntegrationSchema = z.object({
+  id: z.uuid(),
+  connection_id: z.uuid(),
+  provider: z.string(),
+  provider_name: z.string(),
+  name: z.string(),
+  connection_name: z.string(),
+  configured: z.boolean(),
+  repository_setup: z.boolean(),
+  enabled: z.boolean(),
+  resource: z.unknown().optional(),
+  config: z.unknown().optional(),
+});
+
+export const repositoryIntegrationsSchema = z.object({
+  integrations: z.array(repositoryIntegrationSchema),
+  connections: z.array(repositoryIntegrationConnectionSchema),
+  providers: z.array(integrationProviderSchema),
+});
+
+export const integrationTestResultSchema = z.object({
+  account: z.string().nullable(),
+  warnings: z.array(z.string()),
+});
+export type IntegrationTestResult = z.infer<typeof integrationTestResultSchema>;
+
+export const dokployResourceKindSchema = z.enum(["application", "compose"]);
+
+export const remoteResourceSchema = z.object({
+  kind: dokployResourceKindSchema,
+  id: z.string(),
+  name: z.string(),
+  status: z.string().nullable(),
+  server_name: z.string().nullable(),
+});
+export type RemoteResource = z.infer<typeof remoteResourceSchema>;
+
+export const dokployEnvironmentSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string().nullable(),
+  resources: z.array(remoteResourceSchema),
+});
+export type DokployEnvironment = z.infer<typeof dokployEnvironmentSchema>;
+
+export const dokployProjectSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  environments: z.array(dokployEnvironmentSchema),
+});
+export type DokployProject = z.infer<typeof dokployProjectSchema>;
+
+export const dokployRemoteCatalogSchema = z.object({
+  external_url: z.url(),
+  projects: z.array(dokployProjectSchema),
+  servers: z.array(z.object({ id: z.string(), name: z.string() })),
+});
+export type DokployRemoteCatalog = z.infer<typeof dokployRemoteCatalogSchema>;
+
+export const dokployCreatedEnvironmentSchema = dokployEnvironmentSchema.extend({
+  project_id: z.string(),
+  project_name: z.string(),
+});
+
+export const dokployResourceLinkSchema = z.object({
+  kind: dokployResourceKindSchema,
+  id: z.string(),
+  name: z.string(),
+  branch: z.string(),
+  project_id: z.string(),
+  project_name: z.string(),
+  environment_id: z.string(),
+  environment_name: z.string(),
+  external_url: z.url(),
+});
+export type DokployResourceLink = z.infer<typeof dokployResourceLinkSchema>;
+
+export const integrationDeployResultSchema = z.object({
+  summary: z.string(),
+});
+
 export const topicsSchema = z.object({
   topics: z.array(z.string()),
 });
 
 export const webhookSchema = z.object({
-  id: z.uuid(),
+  id: z.guid(),
   type: z.literal("Repository"),
   name: z.literal("web"),
   active: z.boolean(),
@@ -168,7 +524,7 @@ export const webhookSchema = z.object({
 });
 
 export const webhookDeliverySchema = z.object({
-  id: z.uuid(),
+  id: z.guid(),
   event: z.string(),
   status_code: z.number().int().nullable(),
   status: z.enum(["ok", "failed"]),
@@ -179,20 +535,25 @@ export const webhookDeliverySchema = z.object({
 });
 
 export const issueUserSchema = z.object({
-  id: z.uuid(),
+  id: z.guid(),
   username: z.string(),
   avatar_updated_at: z.string().nullable(),
 });
 
+export const externalIssueAuthorSchema = z.object({
+  username: z.string(),
+  profile_url: z.url(),
+});
+
 export const issueLabelSchema = z.object({
-  id: z.uuid(),
+  id: z.guid(),
   name: z.string(),
   color: z.string(),
   description: z.string(),
 });
 
 export const issueSchema = z.object({
-  id: z.uuid(),
+  id: z.guid(),
   number: z.number().int().positive(),
   title: z.string(),
   body: z.string(),
@@ -205,22 +566,26 @@ export const issueSchema = z.object({
   created_at: z.string(),
   updated_at: z.string(),
   closed_at: z.string().nullable(),
+  external_url: z.url().nullable(),
+  external_author: externalIssueAuthorSchema.nullable(),
   can_edit: z.boolean(),
   can_manage: z.boolean(),
 });
 
 export const issueCommentSchema = z.object({
-  id: z.uuid(),
+  id: z.guid(),
   body: z.string(),
   rendered_body: z.string(),
   author: issueUserSchema,
   created_at: z.string(),
   updated_at: z.string(),
+  external_url: z.url().nullable(),
+  external_author: externalIssueAuthorSchema.nullable(),
   can_edit: z.boolean(),
 });
 
 export const issueAttachmentSchema = z.object({
-  id: z.uuid(),
+  id: z.guid(),
   name: z.string(),
   content_type: z.string(),
   size_bytes: z.number().int().nonnegative(),
@@ -233,17 +598,18 @@ export const renderedMarkdownSchema = z.object({
 });
 
 export const releaseAssetSchema = z.object({
-  id: z.uuid(),
+  id: z.guid(),
   name: z.string(),
   content_type: z.string(),
   size_bytes: z.number().int().nonnegative(),
   download_count: z.number().int().nonnegative(),
   created_at: z.string(),
   download_url: z.string(),
+  external_url: z.string().nullable(),
 });
 
 export const releaseSchema = z.object({
-  id: z.uuid(),
+  id: z.guid(),
   target_revision: z.string(),
   target_oid: z.string(),
   title: z.string(),
@@ -256,6 +622,10 @@ export const releaseSchema = z.object({
   created_at: z.string(),
   updated_at: z.string(),
   assets: z.array(releaseAssetSchema),
+  external_url: z.string().nullable(),
+  external_author: z
+    .object({ username: z.string(), profile_url: z.string().nullable() })
+    .nullable(),
 });
 
 export const repositoryActivitySchema = z.object({
@@ -292,6 +662,7 @@ export const repositoryOverviewSchema = z.object({
 export const refSchema = z.object({
   name: z.string(),
   oid: z.string(),
+  commit_oid: z.string(),
 });
 
 export const refsSchema = z.object({
@@ -335,6 +706,21 @@ export const signatureSchema = z.object({
   timestamp: z.number(),
   timezone_offset_minutes: z.number(),
 });
+export const commitVerificationSchema = z.object({
+  verified: z.boolean(),
+  reason: z.enum(["verified", "unknown_key", "invalid"]),
+  signer: z.string().nullable(),
+  fingerprint: z.string().nullable(),
+});
+
+export const commitRefSchema = z.object({
+  kind: z.enum(["tag", "release"]),
+  name: z.string(),
+  prerelease: z.boolean(),
+  latest: z.boolean(),
+  published_at: z.string().nullable(),
+  commits_since_previous: z.number().int().nonnegative().nullable(),
+});
 
 export const commitSchema = z.object({
   oid: z.string(),
@@ -345,6 +731,10 @@ export const commitSchema = z.object({
   committer: signatureSchema,
   title: z.string(),
   message: z.string(),
+  insertions: z.number(),
+  deletions: z.number(),
+  refs: z.array(commitRefSchema),
+  verification: commitVerificationSchema.nullable(),
 });
 
 export const historySchema = z.object({
@@ -367,6 +757,130 @@ export const languageStatSchema = z.object({
   blanks: z.number(),
 });
 
+export const actionStatusSchema = z.enum([
+  "queued",
+  "running",
+  "success",
+  "failure",
+  "cancelled",
+  "skipped",
+]);
+
+export const actionRunSummarySchema = z.object({
+  id: z.uuid(),
+  number: z.number(),
+  workflow_name: z.string(),
+  workflow_path: z.string(),
+  status: actionStatusSchema,
+  failure_kind: z.string().nullable(),
+  failure_summary: z.string().nullable(),
+  reference: z.string(),
+  before_sha: z.string(),
+  after_sha: z.string(),
+  created_at: z.string(),
+  started_at: z.string().nullable(),
+  completed_at: z.string().nullable(),
+});
+
+export const actionRunsSchema = z.object({
+  runs: z.array(actionRunSummarySchema),
+  page: z.number(),
+  per_page: z.number(),
+  has_more: z.boolean(),
+});
+
+export const actionJobSchema = z.object({
+  id: z.number(),
+  key: z.string(),
+  name: z.string(),
+  status: actionStatusSchema,
+  result: z.string().nullable(),
+  labels: z.array(z.string()),
+  runner_id: z.number().nullable(),
+  attempt: z.number(),
+  failure_kind: z.string().nullable(),
+  failure_summary: z.string().nullable(),
+  created_at: z.string(),
+  started_at: z.string().nullable(),
+  completed_at: z.string().nullable(),
+});
+
+export const actionRunDetailSchema = z.object({
+  run: actionRunSummarySchema,
+  jobs: z.array(actionJobSchema),
+  can_cancel: z.boolean(),
+  diagnostic: z.string().nullable(),
+});
+
+export const actionLogsSchema = z.object({
+  text: z.string(),
+  next_cursor: z.string().nullable(),
+  complete: z.boolean(),
+});
+
+export const actionArtifactSchema = z.object({
+  id: z.number().int().positive(),
+  name: z.string(),
+  size_bytes: z.number().int().nonnegative(),
+  sha256: z.string().nullable(),
+  creating_job_id: z.number().int().positive(),
+  created_at: z.string(),
+  expires_at: z.string(),
+  download_url: z.string(),
+});
+export const actionArtifactsSchema = z.object({
+  artifacts: z.array(actionArtifactSchema),
+});
+
+export const actionCommitStatusSchema = z.object({
+  oid: z.string(),
+  status: actionStatusSchema.exclude(["skipped"]),
+  total: z.number(),
+  success: z.number(),
+  failure: z.number(),
+  running: z.number(),
+  queued: z.number(),
+  cancelled: z.number(),
+});
+
+export const actionStatusesSchema = z.object({
+  statuses: z.array(actionCommitStatusSchema),
+});
+
+export const actionRunnerSchema = z.object({
+  id: z.number(),
+  name: z.string(),
+  labels: z.array(z.string()),
+  version: z.string(),
+  status: z.enum(["online", "offline"]),
+  last_seen_at: z.string().nullable(),
+  incompatibility: z.string().nullable(),
+});
+
+export const actionRunnersSchema = z.object({
+  runners: z.array(actionRunnerSchema),
+});
+
+export const actionRegistrationSchema = z.object({
+  token: z.string(),
+  expires_at: z.string(),
+  server_url: z.string(),
+  required_version: z.string(),
+  runner_name: z.string(),
+  labels: z.array(z.string()),
+});
+
+export type ActionStatus = z.infer<typeof actionStatusSchema>;
+export type ActionRunSummary = z.infer<typeof actionRunSummarySchema>;
+export type ActionRuns = z.infer<typeof actionRunsSchema>;
+export type ActionJob = z.infer<typeof actionJobSchema>;
+export type ActionRunDetail = z.infer<typeof actionRunDetailSchema>;
+export type ActionLogs = z.infer<typeof actionLogsSchema>;
+export type ActionArtifact = z.infer<typeof actionArtifactSchema>;
+export type ActionCommitStatus = z.infer<typeof actionCommitStatusSchema>;
+export type ActionRunner = z.infer<typeof actionRunnerSchema>;
+export type ActionRegistration = z.infer<typeof actionRegistrationSchema>;
+
 export type AuthStatus = z.infer<typeof authStatusSchema>;
 export type User = z.infer<typeof userSchema>;
 export type InstanceSettings = z.infer<typeof instanceSettingsSchema>;
@@ -377,8 +891,18 @@ export type PasskeySummary = z.infer<typeof passkeySchema>;
 export type OauthApplication = z.infer<typeof oauthApplicationSchema>;
 export type Organization = z.infer<typeof organizationSchema>;
 export type Member = z.infer<typeof memberSchema>;
+export type MemberSuggestion = z.infer<typeof memberSuggestionSchema>;
 export type AuditEvent = z.infer<typeof auditEventSchema>;
 export type Repository = z.infer<typeof repositorySchema>;
+export type MirrorIdentity = z.infer<typeof mirrorIdentitySchema>;
+export type RepositoryMirror = z.infer<typeof repositoryMirrorSchema>;
+export type RepositoryIntegrationConnection = z.infer<
+  typeof repositoryIntegrationConnectionSchema
+>;
+export type RepositoryIntegration = z.infer<typeof repositoryIntegrationSchema>;
+export type RepositoryIntegrations = z.infer<
+  typeof repositoryIntegrationsSchema
+>;
 export type Webhook = z.infer<typeof webhookSchema>;
 export type WebhookDelivery = z.infer<typeof webhookDeliverySchema>;
 export type Issue = z.infer<typeof issueSchema>;
@@ -397,6 +921,7 @@ export type Tree = z.infer<typeof treeSchema>;
 export type TreeEntry = z.infer<typeof treeEntrySchema>;
 export type Blob = z.infer<typeof blobSchema>;
 export type Commit = z.infer<typeof commitSchema>;
+export type CommitRef = z.infer<typeof commitRefSchema>;
 export type History = z.infer<typeof historySchema>;
 export type Diff = z.infer<typeof diffSchema>;
 export type LanguageStat = z.infer<typeof languageStatSchema>;
@@ -468,6 +993,15 @@ export async function requestEmpty(
 export function avatarUrl(userId: string, updatedAt: string | null) {
   return updatedAt
     ? `/api/v1/users/${userId}/avatar?v=${encodeURIComponent(updatedAt)}`
+    : null;
+}
+
+export function organizationAvatarUrl(
+  slug: string,
+  updatedAt: string | null,
+): string | null {
+  return updatedAt
+    ? `/api/v1/organizations/${encodeURIComponent(slug)}/avatar?v=${encodeURIComponent(updatedAt)}`
     : null;
 }
 

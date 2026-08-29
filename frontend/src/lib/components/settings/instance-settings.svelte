@@ -1,16 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import {
-    Database,
-    ImageIcon,
-    RotateCcw,
-    Server,
-    ShieldCheck,
-  } from "lucide-svelte";
+  import { ImageIcon, Palette, RotateCcw } from "lucide-svelte";
 
   import AdminAccessSettings from "$lib/components/settings/admin-access-settings.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
-  import * as Select from "$lib/components/ui/select/index.js";
   import {
     ApiFailure,
     instanceSettingsSchema,
@@ -20,14 +13,15 @@
   } from "$lib/api.js";
   import { AdminSettingsState } from "$lib/settings/admin-settings-state.svelte.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
+  let {
+    view,
+  }: { view: "general" | "access" | "activity" } = $props();
+
 
   const app = useAppState();
   const adminState = new AdminSettingsState();
   let siteName = $state(app.instance?.site_name ?? "Gitadel");
   let siteDescription = $state(app.instance?.site_description ?? "");
-  let defaultVisibility = $state<"public" | "private">(
-    app.instance?.default_repository_visibility ?? "private",
-  );
   type FaviconTheme = "light" | "dark";
 
   let working = $state(false);
@@ -113,7 +107,6 @@
             body: jsonBody({
               site_name: siteName,
               site_description: siteDescription || null,
-              default_repository_visibility: defaultVisibility,
             }),
           },
         );
@@ -136,10 +129,18 @@
       id="administration-heading"
       class="text-lg font-semibold tracking-tight"
     >
-      Administration
+      {view === "general"
+        ? "Appearance"
+        : view === "access"
+          ? "Access"
+          : "Activity"}
     </h2>
     <p class="mt-1.5 text-sm text-muted-foreground">
-      Manage global identity, repository defaults, access, and audit history.
+      {view === "general"
+        ? "Manage instance identity and repository defaults."
+        : view === "access"
+          ? "Control how additional users gain access."
+          : "Review repository, authentication, and administration events."}
     </p>
   </header>
 
@@ -159,17 +160,18 @@
       </p>
     {/if}
 
+    {#if view === "general"}
     <form
-      class="rounded-md border bg-card/25"
+      class="overflow-hidden rounded-xl border bg-card/40 shadow-sm"
       onsubmit={(event) => {
         event.preventDefault();
         void saveSettings();
       }}
     >
       <header class="flex items-center gap-3 border-b px-5 py-4">
-        <Server class="size-4 text-muted-foreground" />
+        <Palette class="size-4 text-muted-foreground" />
         <div>
-          <h2 class="text-sm font-semibold">General</h2>
+          <h2 class="text-sm font-semibold">Branding and defaults</h2>
           <p class="mt-0.5 text-xs text-muted-foreground">
             Browser identity and repository creation defaults.
           </p>
@@ -279,68 +281,14 @@
           </div>
         </fieldset>
 
-        <label class="grid max-w-sm gap-1.5 text-sm font-medium">
-          Default repository visibility
-          <Select.Root
-            type="single"
-            value={defaultVisibility}
-            onValueChange={(value) => {
-              if (value === "public" || value === "private") {
-                defaultVisibility = value;
-                void saveSettings();
-              }
-            }}
-          >
-            <Select.Trigger class="w-full">
-              {defaultVisibility === "private" ? "Private" : "Public"}
-            </Select.Trigger>
-            <Select.Content>
-              <Select.Item value="private">Private</Select.Item>
-              <Select.Item value="public">Public</Select.Item>
-            </Select.Content>
-          </Select.Root>
-        </label>
       </div>
     </form>
 
-    <section class="rounded-md border bg-card/25">
-      <header class="flex items-center gap-3 border-b px-5 py-4">
-        <ShieldCheck class="size-4 text-muted-foreground" />
-        <div>
-          <h2 class="text-sm font-semibold">Registration</h2>
-          <p class="mt-0.5 text-xs text-muted-foreground">
-            Closed after initial setup.
-          </p>
-        </div>
-      </header>
-      <div class="flex items-center justify-between gap-5 p-5 text-sm">
-        <div>
-          <p class="font-medium">Public registration disabled</p>
-          <p class="mt-1 text-xs text-muted-foreground">
-            The first account is the administrator. Additional accounts require
-            an invitation.
-          </p>
-        </div>
-        <span
-          class="rounded-full border px-2.5 py-1 text-xs text-muted-foreground"
-          >Locked</span
-        >
-      </div>
-    </section>
+    {/if}
 
-    <AdminAccessSettings state={adminState} />
+    {#if view === "access" || view === "activity"}
+      <AdminAccessSettings state={adminState} {view} />
+    {/if}
 
-    <section class="rounded-md border bg-card/25 p-5">
-      <div class="flex items-start gap-3">
-        <Database class="mt-0.5 size-4 text-muted-foreground" />
-        <div>
-          <h2 class="text-sm font-semibold">Persistence</h2>
-          <p class="mt-1 text-xs leading-5 text-muted-foreground">
-            Instance settings are stored in the application database and apply
-            to every deployment mode.
-          </p>
-        </div>
-      </div>
-    </section>
   </div>
 </section>

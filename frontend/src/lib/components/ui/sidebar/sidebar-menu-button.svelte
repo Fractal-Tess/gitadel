@@ -59,7 +59,9 @@
 		"data-slot": "sidebar-menu-button",
 		"data-sidebar": "menu-button",
 		"data-size": size,
-		"data-active": isActive,
+		// Tailwind's `data-active:` matches the attribute's presence, so an
+		// inactive button has to omit it rather than set it to "false".
+		"data-active": isActive ? "true" : undefined,
 		...restProps,
 	});
 </script>

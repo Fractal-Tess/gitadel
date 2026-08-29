@@ -1,0 +1,23 @@
+processes:
+  frontend:
+    description: Build frontend assets after relevant source changes
+    command: >-
+      mkdir -p frontend/build &&
+      exec watchexec --restart
+      --watch frontend/src
+      --watch frontend/static
+      --watch frontend/svelte.config.js
+      --watch frontend/vite.config.ts
+      --watch frontend/package.json
+      --exts svelte,ts,js,css,json,png,svg,html
+      -- bun run --cwd frontend build
+    readiness_probe:
+      exec:
+        command: test -f frontend/build/index.html
+
+  backend:
+    description: Rebuild and restart Gitadel after Rust source changes
+    command: watchexec --restart --exts rs -- cargo run
+    depends_on:
+      frontend:
+        condition: process_healthy

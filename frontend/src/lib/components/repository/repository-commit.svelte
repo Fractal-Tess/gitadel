@@ -1,11 +1,23 @@
 <script lang="ts">
-  import { ArrowLeft, GitBranch, GitCommitHorizontal } from "lucide-svelte";
+  import {
+    ArrowLeft,
+    GitBranch,
+    GitCommitHorizontal,
+    Rocket,
+    ShieldAlert,
+    ShieldCheck,
+    Tag,
+  } from "lucide-svelte";
 
+  import ActionStatusBadge from "$lib/components/actions/action-status-badge.svelte";
   import PierreDiff from "$lib/components/repository/pierre-diff.svelte";
   import { formatDate } from "$lib/repository/format.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
 
   let { state }: { state: RepositoryPageState } = $props();
+  const check = $derived(
+    state.commit ? state.actionCommitStatuses[state.commit.oid] : undefined,
+  );
 </script>
 
 {#if state.commit}
@@ -34,6 +46,56 @@
             ><GitBranch class="size-3.5" />{state.revision}</span
           >
         </div>
+        {#if state.commit.verification}
+          <span
+            class={state.commit.verification.verified
+              ? "mt-3 inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-700 dark:text-emerald-300"
+              : "mt-3 inline-flex items-center gap-1.5 rounded-full border bg-muted/40 px-2.5 py-1 text-xs font-medium text-muted-foreground"}
+            title={state.commit.verification.fingerprint ?? undefined}
+          >
+            {#if state.commit.verification.verified}
+              <ShieldCheck class="size-3.5" />
+              Verified by {state.commit.verification.signer}
+            {:else}
+              <ShieldAlert class="size-3.5" />
+              {state.commit.verification.reason === "invalid"
+                ? "Invalid SSH signature"
+                : "Unverified SSH signature"}
+            {/if}
+          </span>
+        {/if}
+        {#if state.commit.refs.length}
+          <div class="mt-3 flex flex-wrap items-center gap-2">
+            {#each state.commit.refs as reference (reference.kind + reference.name)}
+              {#if reference.kind === "release"}
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary hover:bg-primary/20"
+                  onclick={() => state.navigate("releases")}
+                >
+                  <Rocket class="size-3" />
+                  {reference.name}
+                  {#if reference.latest}
+                    <span class="text-[10px] tracking-wide uppercase"
+                      >Latest</span
+                    >
+                  {:else if reference.prerelease}
+                    <span class="text-[10px] tracking-wide uppercase">Pre</span>
+                  {/if}
+                </button>
+              {:else}
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-xs text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+                  onclick={() => state.changeRevision(reference.name)}
+                >
+                  <Tag class="size-3" />
+                  {reference.name}
+                </button>
+              {/if}
+            {/each}
+          </div>
+        {/if}
         {#if state.commit.message !== state.commit.title}
           <pre
             class="mt-5 whitespace-pre-wrap border-t pt-4 font-sans text-sm leading-6 text-foreground/80">{state
@@ -90,6 +152,22 @@
           </p>
         </div>
       </div>
+      {#if check && check.total > 0}
+        <div>
+          <p
+            class="text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+          >
+            Checks
+          </p>
+          <button
+            type="button"
+            class="mt-3"
+            onclick={() => state.navigate("actions", { commit: state.commit!.oid })}
+          >
+            <ActionStatusBadge status={check.status} />
+          </button>
+        </div>
+      {/if}
       <div>
         <p
           class="text-xs font-semibold uppercase tracking-wider text-muted-foreground"

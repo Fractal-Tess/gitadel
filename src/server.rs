@@ -1,23 +1,34 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, convert::Infallible};
 
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::State,
+    extract::{Path, State},
     http::{HeaderValue, StatusCode, Uri, header},
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::get,
 };
+use futures_util::stream;
 use rust_embed::RustEmbed;
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
-use tokio::net::TcpListener;
+use tokio::{
+    net::TcpListener,
+    sync::{mpsc, watch},
+    time::Duration,
+};
+use tokio_util::sync::CancellationToken;
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 use tracing::info;
 
 use crate::{
+    actions::{self, ActionsState},
     api,
+    archive::{self, MaintenanceAction, MaintenanceProgress, MaintenanceProgressReporter},
     config::Settings,
     identity::{self, IdentityState},
     repository::{self, RepositoryState},
@@ -33,60 +44,219 @@ struct HealthResponse {
     database: &'static str,
 }
 
-pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<()> {
+pub enum ServerExit {
+    Shutdown,
+    Maintenance(Box<MaintenanceAction>),
+}
+
+pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<ServerExit> {
     let http_bind = settings.server.bind;
     let listener = TcpListener::bind(http_bind)
         .await
         .with_context(|| format!("could not bind HTTP listener to {http_bind}"))?;
 
+    let (maintenance_sender, mut maintenance_receiver) = mpsc::channel(1);
     let identity_state =
-        IdentityState::new(database, settings.auth, settings.server.public_url.clone())
+        IdentityState::new_with_runtime(database, settings.clone(), maintenance_sender)
             .context("could not initialize authentication")?;
     let ssh_port = settings.ssh.bind.port();
     let repository_state = RepositoryState::new(
         identity_state.clone(),
-        settings.storage,
-        settings.server.public_url,
+        settings.storage.clone(),
+        settings.server.public_url.clone(),
         ssh_port,
     )
     .await
     .context("could not initialize repository storage")?;
+    repository::recover_imports(&repository_state)
+        .await
+        .context("could not recover interrupted repository imports")?;
+    let actions_state = ActionsState::new(repository_state.clone(), settings.actions.clone());
+    repository_state
+        .attach_actions(actions_state.clone())
+        .map_err(|_| anyhow::anyhow!("Actions state was already initialized"))?;
     let api_router = Router::new()
         .route("/", get(api::version))
         .route("/changelog", get(api::changelog))
         .merge(identity::router().with_state(identity_state.clone()))
-        .merge(repository::router().with_state(repository_state.clone()));
+        .merge(repository::router().with_state(repository_state.clone()))
+        .merge(actions_state.api_router());
     let app = Router::new()
         .merge(
             Router::new()
                 .route("/healthz", get(health))
                 .with_state(identity_state.clone()),
         )
-        .merge(identity::oauth_router().with_state(identity_state))
+        .merge(identity::oauth_router().with_state(identity_state.clone()))
         .nest("/api/v1", api_router)
+        .merge(actions_state.artifact_router())
+        .nest("/api/actions", actions_state.protocol_router())
         .merge(repository::git_http_router().with_state(repository_state.clone()))
         .fallback(get(frontend))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http());
 
     info!(address = %http_bind, "Gitadel HTTP server listening");
+    let shutdown = CancellationToken::new();
+    let http_shutdown = shutdown.clone();
     let mut http = tokio::spawn(async move {
         axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
+            .with_graceful_shutdown(async move {
+                tokio::select! {
+                    () = shutdown_signal() => {}
+                    () = http_shutdown.cancelled() => {}
+                }
+            })
             .await
             .context("HTTP server stopped unexpectedly")
     });
+    let mut mirror_scheduler =
+        tokio::spawn(repository::serve_mirror_scheduler(repository_state.clone()));
+    let mut backup_scheduler = tokio::spawn(archive::serve_backup_scheduler(identity_state));
+    let mut actions_scheduler =
+        tokio::spawn(actions::serve_actions_scheduler(actions_state.clone()));
     let mut ssh = tokio::spawn(repository::serve_ssh(settings.ssh, repository_state));
-    tokio::select! {
+    let exit = tokio::select! {
         result = &mut http => {
             ssh.abort();
-            result.context("HTTP server task failed")?
+            mirror_scheduler.abort();
+            backup_scheduler.abort();
+            actions_state.cancel();
+            actions_scheduler.abort();
+            result.context("HTTP server task failed")??;
+            ServerExit::Shutdown
         }
         result = &mut ssh => {
             http.abort();
-            result.context("SSH server task failed")?
+            mirror_scheduler.abort();
+            backup_scheduler.abort();
+            actions_state.cancel();
+            actions_scheduler.abort();
+            result.context("SSH server task failed")??;
+            ServerExit::Shutdown
         }
+        result = &mut mirror_scheduler => {
+            http.abort();
+            ssh.abort();
+            backup_scheduler.abort();
+            actions_state.cancel();
+            actions_scheduler.abort();
+            result.context("mirror scheduler task failed")??;
+            ServerExit::Shutdown
+        }
+        result = &mut backup_scheduler => {
+            http.abort();
+            ssh.abort();
+            mirror_scheduler.abort();
+            actions_state.cancel();
+            actions_scheduler.abort();
+            result.context("backup scheduler task failed")??;
+            ServerExit::Shutdown
+        }
+        result = &mut actions_scheduler => {
+            http.abort();
+            ssh.abort();
+            mirror_scheduler.abort();
+            backup_scheduler.abort();
+            result.context("Actions scheduler task failed")??;
+            ServerExit::Shutdown
+        }
+        Some(action) = maintenance_receiver.recv() => {
+            shutdown.cancel();
+            ssh.abort();
+            mirror_scheduler.abort();
+            backup_scheduler.abort();
+            actions_state.cancel();
+            actions_scheduler.abort();
+            if tokio::time::timeout(Duration::from_secs(5), &mut http).await.is_err() {
+                http.abort();
+            }
+            ServerExit::Maintenance(Box::new(action))
+        }
+    };
+    Ok(exit)
+}
+
+#[derive(Clone)]
+struct MaintenanceStatusState {
+    operation_id: uuid::Uuid,
+    receiver: watch::Receiver<MaintenanceProgress>,
+}
+
+pub async fn perform_maintenance(settings: &Settings, action: MaintenanceAction) -> Result<()> {
+    let reporter = MaintenanceProgressReporter::new(&action);
+    let operation_id = action.operation_id();
+    let shutdown = CancellationToken::new();
+    let http_shutdown = shutdown.clone();
+    let status_server = match TcpListener::bind(settings.server.bind).await {
+        Ok(listener) => {
+            let state = MaintenanceStatusState {
+                operation_id,
+                receiver: reporter.subscribe(),
+            };
+            let app = Router::new()
+                .route(
+                    "/api/v1/admin/backups/progress/{operation_id}",
+                    get(maintenance_progress),
+                )
+                .with_state(state);
+            Some(tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(http_shutdown.cancelled_owned())
+                    .await
+            }))
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not start maintenance progress server");
+            None
+        }
+    };
+
+    let result = archive::perform_maintenance(action, settings, &reporter).await;
+    match &result {
+        Ok(()) => reporter.complete(),
+        Err(error) => reporter.fail(error),
     }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    shutdown.cancel();
+    if let Some(mut status_server) = status_server
+        && tokio::time::timeout(Duration::from_secs(2), &mut status_server)
+            .await
+            .is_err()
+    {
+        status_server.abort();
+    }
+    result
+}
+
+async fn maintenance_progress(
+    Path(operation_id): Path<uuid::Uuid>,
+    State(state): State<MaintenanceStatusState>,
+) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
+    if operation_id != state.operation_id {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let events = stream::unfold(
+        (state.receiver, true),
+        |(mut receiver, initial)| async move {
+            if !initial && receiver.changed().await.is_err() {
+                return None;
+            }
+            let progress = receiver.borrow_and_update().clone();
+            let data = serde_json::to_string(&progress).ok()?;
+            Some((
+                Ok(Event::default()
+                    .data(data)
+                    .retry(Duration::from_millis(500))),
+                (receiver, false),
+            ))
+        },
+    );
+    Ok(Sse::new(events).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(1))
+            .text("maintenance"),
+    ))
 }
 
 async fn health(State(state): State<IdentityState>) -> Result<Json<HealthResponse>, StatusCode> {

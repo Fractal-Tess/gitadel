@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { GitBranch, LockKeyhole, Star } from "lucide-svelte";
+  import { GitBranch, Heart, LockKeyhole, RefreshCw } from "lucide-svelte";
 
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Select from "$lib/components/ui/select/index.js";
@@ -38,6 +38,13 @@
     </Select.Root>
   {/if}
 
+  {#if state.repository?.mirrored}
+    <span
+      class="inline-flex items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-sky-600 dark:text-sky-400"
+    >
+      <RefreshCw class="size-2.5" />Mirror
+    </span>
+  {/if}
   {#if state.repository?.visibility === "private"}
     <span
       class="inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs font-medium text-muted-foreground"
@@ -63,7 +70,7 @@
     disabled={state.favoritePending}
     onclick={() => void state.toggleFavorite()}
   >
-    <Star
+    <Heart
       class={state.repository?.favorited
         ? "size-3.5 fill-current text-amber-400"
         : "size-3.5"}

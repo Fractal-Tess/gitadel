@@ -1,20 +1,34 @@
 mod browser;
 mod git_http;
 mod gitea;
+mod github_mirror;
+mod import_metadata;
+mod imports;
+mod integrations;
 mod issues;
 mod lfs;
+mod mirrors;
 mod releases;
 mod resources;
 mod ssh;
 mod topics;
 mod webhooks;
 
-pub(crate) use browser::render_markdown;
+pub(crate) use browser::{read_git, render_markdown};
+pub(crate) use mirrors::serve_scheduler as serve_mirror_scheduler;
+
+pub(crate) fn outbound_http_client() -> Result<reqwest::Client, reqwest::Error> {
+    webhooks::webhook_client()
+}
+
+pub(crate) async fn recover_imports(state: &RepositoryState) -> Result<(), ApiError> {
+    imports::recover_interrupted(state).await
+}
 
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -32,6 +46,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
+    actions::ActionsState,
     config::StorageSettings,
     entity::{
         namespace, organization_member, repository, repository_alias, repository_collaborator, user,
@@ -43,6 +58,7 @@ use crate::{
 pub struct RepositoryState {
     identity: IdentityState,
     repository_root: Arc<PathBuf>,
+    actions_artifact_root: Arc<PathBuf>,
     analysis_slots: Arc<Semaphore>,
     overview_cache: Arc<RwLock<HashMap<String, browser::GitOverview>>>,
     stats_cache: Arc<RwLock<HashMap<String, Vec<browser::LanguageStatResponse>>>>,
@@ -53,11 +69,15 @@ pub struct RepositoryState {
     size_generations: Arc<RwLock<HashMap<Uuid, u64>>>,
     size_refreshing: Arc<Mutex<HashSet<Uuid>>>,
     size_measurement_slots: Arc<Semaphore>,
+    mirror_slots: Arc<Semaphore>,
+    mirror_syncing: Arc<Mutex<HashSet<Uuid>>>,
+    github_known_hosts: Arc<Mutex<Option<(String, Instant)>>>,
     lfs_root: Arc<PathBuf>,
     public_url: Arc<Url>,
     ssh_port: u16,
     lfs_tokens: Arc<RwLock<HashMap<String, LfsAuthorization>>>,
     webhook_client: reqwest::Client,
+    actions: Arc<OnceLock<ActionsState>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,6 +113,7 @@ const COMMIT_COUNT_CACHE_CAPACITY: usize = 4_096;
 const COMMIT_COUNT_CONCURRENCY: usize = 2;
 const REPOSITORY_SIZE_CACHE_LIFETIME: Duration = Duration::from_secs(5 * 60);
 const REPOSITORY_SIZE_MEASUREMENT_CONCURRENCY: usize = 2;
+const MIRROR_SYNC_CONCURRENCY: usize = 2;
 
 impl RepositoryState {
     pub async fn new(
@@ -102,10 +123,14 @@ impl RepositoryState {
         ssh_port: u16,
     ) -> Result<Self, anyhow::Error> {
         fs::create_dir_all(&settings.repository_root).await?;
+        mirrors::cleanup_temporary_files(&settings.repository_root).await?;
         fs::create_dir_all(&settings.lfs_root).await?;
+        mirrors::cleanup_lfs_staging(&settings.lfs_root).await?;
+        fs::create_dir_all(&settings.actions_artifact_root).await?;
         Ok(Self {
             identity,
             repository_root: Arc::new(settings.repository_root),
+            actions_artifact_root: Arc::new(settings.actions_artifact_root),
             analysis_slots: Arc::new(Semaphore::new(ANALYSIS_CONCURRENCY)),
             overview_cache: Arc::new(RwLock::new(HashMap::new())),
             stats_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -118,16 +143,31 @@ impl RepositoryState {
             size_measurement_slots: Arc::new(Semaphore::new(
                 REPOSITORY_SIZE_MEASUREMENT_CONCURRENCY,
             )),
+            mirror_slots: Arc::new(Semaphore::new(MIRROR_SYNC_CONCURRENCY)),
+            mirror_syncing: Arc::new(Mutex::new(HashSet::new())),
+            github_known_hosts: Arc::new(Mutex::new(None)),
             lfs_root: Arc::new(settings.lfs_root),
             public_url: Arc::new(public_url),
             ssh_port,
             lfs_tokens: Arc::new(RwLock::new(HashMap::new())),
             webhook_client: webhooks::webhook_client()?,
+            actions: Arc::new(OnceLock::new()),
         })
+    }
+
+    pub(crate) fn attach_actions(&self, state: ActionsState) -> Result<(), ActionsState> {
+        self.actions.set(state)
+    }
+
+    pub(crate) fn actions(&self) -> Option<&ActionsState> {
+        self.actions.get()
     }
 
     pub fn identity(&self) -> &IdentityState {
         &self.identity
+    }
+    pub(super) fn http_client(&self) -> &reqwest::Client {
+        &self.webhook_client
     }
 
     pub fn repository_path(&self, repository: &repository::Model) -> PathBuf {
@@ -135,8 +175,21 @@ impl RepositoryState {
             .join(format!("{}.git", repository.storage_key))
     }
 
+    pub(crate) fn actions_artifact_root(&self) -> &Path {
+        self.actions_artifact_root.as_ref()
+    }
+
     pub(super) fn lfs_repository_path(&self, repository: &repository::Model) -> PathBuf {
-        self.lfs_root.join(repository.storage_key.to_string())
+        self.lfs_root_path(repository.storage_key)
+    }
+
+    pub(super) fn lfs_root_path(&self, storage_key: Uuid) -> PathBuf {
+        self.lfs_root.join(storage_key.to_string())
+    }
+
+    pub(super) fn lfs_import_staging_path(&self) -> PathBuf {
+        self.lfs_root
+            .join(format!(".gitadel-import-{}", Uuid::new_v4().simple()))
     }
 
     pub(super) fn lfs_object_path(&self, repository: &repository::Model, oid: &str) -> PathBuf {
@@ -157,11 +210,11 @@ impl RepositoryState {
         endpoint.to_string().trim_end_matches('/').to_owned()
     }
 
-    pub(super) fn webhook_client(&self) -> &reqwest::Client {
+    pub(crate) fn webhook_client(&self) -> &reqwest::Client {
         &self.webhook_client
     }
 
-    pub(super) fn http_clone_url(&self, repository: &repository::Model) -> String {
+    pub(crate) fn http_clone_url(&self, repository: &repository::Model) -> String {
         let mut endpoint = self.public_url.as_ref().clone();
         endpoint.set_path(&format!(
             "/{}/{}.git",
@@ -170,6 +223,10 @@ impl RepositoryState {
         endpoint.set_query(None);
         endpoint.set_fragment(None);
         endpoint.to_string()
+    }
+
+    pub(crate) fn public_url(&self) -> &Url {
+        &self.public_url
     }
 
     pub(super) fn ssh_clone_url(&self, repository: &repository::Model) -> String {
@@ -395,6 +452,9 @@ impl RepositoryState {
         if permission == Permission::Write && repository.archived_at.is_some() {
             return Err(ApiError::forbidden("Archived repositories are read-only."));
         }
+        if permission == Permission::Write && repository.mirrored {
+            return Err(ApiError::forbidden("Mirrored repositories are read-only."));
+        }
         if self.can_access(repository, user_id, permission).await? {
             Ok(())
         } else {
@@ -512,6 +572,26 @@ pub fn router() -> Router<RepositoryState> {
         )
         .route("/repositories/overview", get(browser::overview))
         .route(
+            "/repository-imports/discover",
+            axum::routing::post(imports::discover),
+        )
+        .route(
+            "/repository-imports",
+            axum::routing::post(imports::create_import),
+        )
+        .route(
+            "/repository-imports/direct",
+            axum::routing::post(imports::create_direct_import),
+        )
+        .route(
+            "/repository-imports/{id}",
+            get(imports::get_import).delete(imports::cancel_import),
+        )
+        .route(
+            "/repository-imports/{id}/retry",
+            axum::routing::post(imports::retry_import),
+        )
+        .route(
             "/repositories/{namespace}/{name}",
             get(resources::get_repository),
         )
@@ -546,6 +626,16 @@ pub fn router() -> Router<RepositoryState> {
         )
         .route("/topics", get(topics::suggest_topics))
         .route("/repositories/{namespace}/{name}/refs", get(browser::refs))
+        .route(
+            "/repositories/{namespace}/{name}/mirror",
+            get(mirrors::get_mirror)
+                .patch(mirrors::update_mirror)
+                .delete(mirrors::convert_mirror),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/mirror/sync",
+            axum::routing::post(mirrors::sync_mirror),
+        )
         .route(
             "/repositories/{namespace}/{name}/releases",
             get(releases::list_releases).post(releases::create_release),
@@ -640,6 +730,36 @@ pub fn router() -> Router<RepositoryState> {
             delete(resources::remove_collaborator),
         )
         .route(
+            "/repos/{namespace}/{name}/integrations",
+            get(integrations::list_integrations).post(integrations::create_integration),
+        )
+        .route(
+            "/repos/{namespace}/{name}/integrations/{id}",
+            axum::routing::put(integrations::update_integration)
+                .get(integrations::get_integration)
+                .delete(integrations::delete_integration),
+        )
+        .route(
+            "/repos/{namespace}/{name}/integrations/{id}/resources",
+            get(integrations::list_remote_resources).post(integrations::create_remote_resource),
+        )
+        .route(
+            "/repos/{namespace}/{name}/integrations/{id}/resources/link",
+            axum::routing::post(integrations::link_remote_resource),
+        )
+        .route(
+            "/repos/{namespace}/{name}/integrations/{id}/projects",
+            axum::routing::post(integrations::create_remote_project),
+        )
+        .route(
+            "/repos/{namespace}/{name}/integrations/{id}/environments",
+            axum::routing::post(integrations::create_remote_environment),
+        )
+        .route(
+            "/repos/{namespace}/{name}/integrations/{id}/deploy",
+            axum::routing::post(integrations::deploy_integration),
+        )
+        .route(
             "/repos/{namespace}/{name}/hooks",
             get(webhooks::list_webhooks).post(webhooks::create_webhook),
         )
@@ -682,6 +802,14 @@ pub async fn serve_ssh(
 ) -> Result<(), anyhow::Error> {
     ssh::serve(settings, state).await
 }
+const RESERVED_REPOSITORY_NAMES: &[&str] = &[
+    "integrations",
+    "members",
+    "mirror-credentials",
+    "runners",
+    "settings",
+];
+
 pub fn validate_repository_name(value: &str) -> Result<String, ApiError> {
     let name = value.trim();
 
@@ -689,13 +817,44 @@ pub fn validate_repository_name(value: &str) -> Result<String, ApiError> {
     let valid_chars = name
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
-    let reserved = matches!(name, "." | "..")
-        || name.contains("..")
-        || name.to_ascii_lowercase().ends_with(".git");
+    let lower_name = name.to_ascii_lowercase();
+    let reserved =
+        matches!(name, "." | "..") || name.contains("..") || lower_name.ends_with(".git");
+    if RESERVED_REPOSITORY_NAMES.contains(&lower_name.as_str()) {
+        return Err(ApiError::bad_request(format!(
+            "The repository name '{name}' is reserved for namespace management.",
+        )));
+    }
     if !valid_length || !valid_chars || reserved {
         return Err(ApiError::bad_request(
             "Repository names may contain letters, numbers, periods, underscores, and hyphens.",
         ));
     }
     Ok(name.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_repository_name;
+
+    #[test]
+    fn repository_names_reject_namespace_management_routes() {
+        for name in [
+            "members",
+            "Runners",
+            "integrations",
+            "mirror-credentials",
+            "settings",
+        ] {
+            assert!(validate_repository_name(name).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn repository_names_allow_non_route_names() {
+        assert_eq!(
+            validate_repository_name("member-service").unwrap(),
+            "member-service",
+        );
+    }
 }

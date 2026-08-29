@@ -1,5 +1,6 @@
 use std::{
-    collections::BTreeMap,
+    cmp::Ordering,
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     process::Stdio,
 };
@@ -14,11 +15,13 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use comrak::{Options, markdown_to_html};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 use serde::{Deserialize, Serialize};
 use sley::{
     GitError, GitObjectType, ObjectId, ReachableCommitOptions, ReferenceTarget,
     Repository as GitRepository, StreamControl, TagQueryOptions,
 };
+use ssh_key::{HashAlg, PublicKey, SshSig};
 use tokei::{Config as TokeiConfig, LanguageType};
 use tokio::{process::Command, task::JoinSet};
 
@@ -27,7 +30,7 @@ use super::{
     resources::{self, accessible_repositories},
 };
 use crate::{
-    entity::repository,
+    entity::{repository, repository_release, ssh_key as ssh_key_entity, user},
     identity::{ApiError, SCOPE_READ},
 };
 
@@ -60,6 +63,7 @@ pub struct OverviewQuery {
     page: usize,
     #[serde(default = "default_overview_per_page")]
     per_page: usize,
+    namespace: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -72,6 +76,9 @@ pub struct ActivityQuery {
 pub struct RefResponse {
     name: String,
     oid: String,
+    /// The commit the ref resolves to. For an annotated tag this differs from
+    /// `oid`, which is the tag object, so decorating commits needs this one.
+    commit_oid: String,
 }
 
 #[derive(Serialize)]
@@ -121,6 +128,19 @@ pub struct HistoryResponse {
     has_next: bool,
 }
 
+/// A tag or release pointing at a commit, for decorating history rows.
+#[derive(Serialize, Clone)]
+pub struct CommitRefResponse {
+    kind: &'static str,
+    name: String,
+    prerelease: bool,
+    latest: bool,
+    published_at: Option<DateTime<Utc>>,
+    /// Commits between the previous release and this one, for releases whose
+    /// predecessor is known.
+    commits_since_previous: Option<usize>,
+}
+
 #[derive(Serialize)]
 pub struct CommitResponse {
     oid: String,
@@ -131,6 +151,20 @@ pub struct CommitResponse {
     committer: SignatureResponse,
     title: String,
     message: String,
+    insertions: usize,
+    deletions: usize,
+    refs: Vec<CommitRefResponse>,
+    verification: Option<CommitVerificationResponse>,
+    #[serde(skip)]
+    signing_fingerprint: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct CommitVerificationResponse {
+    verified: bool,
+    reason: &'static str,
+    signer: Option<String>,
+    fingerprint: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -275,6 +309,12 @@ pub async fn overview(
     let mut page_repositories = accessible
         .repositories
         .into_iter()
+        .filter(|repository| {
+            query
+                .namespace
+                .as_deref()
+                .is_none_or(|namespace| repository.namespace == namespace)
+        })
         .skip(offset)
         .take(per_page + 1)
         .collect::<Vec<_>>();
@@ -356,28 +396,15 @@ pub async fn refs(
                 };
                 Some(RefResponse {
                     name: reference.name.strip_prefix("refs/heads/")?.to_owned(),
+                    commit_oid: oid.to_hex(),
                     oid: oid.to_hex(),
                 })
             })
             .collect::<Vec<_>>();
-        branches.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        branches.sort_unstable_by(|left, right| compare_ref_names(&left.name, &right.name));
 
-        let mut tags = git
-            .query_tags(TagQueryOptions::new())
-            .map_err(|error| GitError::Command(error.to_string()))?
-            .entries
-            .into_iter()
-            .filter_map(|entry| {
-                let ReferenceTarget::Direct(oid) = entry.reference.target else {
-                    return None;
-                };
-                Some(RefResponse {
-                    name: entry.name,
-                    oid: oid.to_hex(),
-                })
-            })
-            .collect::<Vec<_>>();
-        tags.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        let mut tags = tag_refs(git)?;
+        tags.sort_unstable_by(|left, right| compare_ref_names(&left.name, &right.name));
         Ok(RefsResponse {
             branches,
             tags,
@@ -615,7 +642,7 @@ pub async fn history(
     let page = query.page.max(1);
     let per_page = query.per_page.clamp(1, 100);
     let path = state.repository_path(&repository);
-    let response = read_git(path, move |git| {
+    let mut response = read_git(path.clone(), move |git| {
         let tip = git.peel_to_commit_oid(git.rev_parse(&revision)?)?;
         let start = (page - 1).saturating_mul(per_page);
         let end = start.saturating_add(per_page + 1);
@@ -638,9 +665,21 @@ pub async fn history(
         )?;
         let has_next = selected.len() > per_page;
         selected.truncate(per_page);
+        let stats = commit_line_stats(&path, tip, end, &selected);
+        let tags = tag_decorations(git)?;
         let commits = selected
             .into_iter()
-            .map(|oid| commit_response(git, oid))
+            .map(|oid| {
+                let (insertions, deletions) = stats.get(&oid.to_hex()).copied().unwrap_or_default();
+                commit_response(git, oid).map(|mut response| {
+                    response.insertions = insertions;
+                    response.deletions = deletions;
+                    if let Some(found) = tags.get(&response.oid) {
+                        response.refs = found.clone();
+                    }
+                    response
+                })
+            })
             .collect::<sley::Result<Vec<_>>>()?;
         Ok(HistoryResponse {
             commits,
@@ -650,6 +689,8 @@ pub async fn history(
         })
     })
     .await?;
+    attach_release_refs(&state, &repository, &mut response.commits).await?;
+    attach_commit_verifications(&state, &mut response.commits).await?;
     Ok(Json(response))
 }
 
@@ -661,11 +702,19 @@ pub async fn commit(
 ) -> Result<Json<CommitResponse>, ApiError> {
     let repository = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
     let path = state.repository_path(&repository);
-    let response = read_git(path, move |git| {
+    let mut response = read_git(path, move |git| {
         let oid = git.peel_to_commit_oid(git.rev_parse(&revision)?)?;
-        commit_response(git, oid)
+        let tags = tag_decorations(git)?;
+        commit_response(git, oid).map(|mut response| {
+            if let Some(found) = tags.get(&response.oid) {
+                response.refs = found.clone();
+            }
+            response
+        })
     })
     .await?;
+    attach_release_refs(&state, &repository, std::slice::from_mut(&mut response)).await?;
+    attach_commit_verifications(&state, std::slice::from_mut(&mut response)).await?;
     Ok(Json(response))
 }
 
@@ -831,7 +880,7 @@ async fn readable_repository(
     Ok(repository)
 }
 
-pub(super) async fn read_git<T, F>(path: PathBuf, operation: F) -> Result<T, ApiError>
+pub(crate) async fn read_git<T, F>(path: PathBuf, operation: F) -> Result<T, ApiError>
 where
     T: Send + 'static,
     F: FnOnce(&GitRepository) -> sley::Result<T> + Send + 'static,
@@ -868,6 +917,104 @@ fn normalize_browse_path(path: &str) -> Result<String, ApiError> {
     Ok(normalized.to_owned())
 }
 
+fn commit_line_stats(
+    path: &Path,
+    tip: ObjectId,
+    limit: usize,
+    wanted: &[ObjectId],
+) -> BTreeMap<String, (usize, usize)> {
+    let mut stats = BTreeMap::new();
+    let output = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(path)
+        .args([
+            "log",
+            "--numstat",
+            "--first-parent",
+            "--find-renames",
+            "--format=%H",
+            "-n",
+            &limit.to_string(),
+            &tip.to_hex(),
+        ])
+        .stdin(Stdio::null())
+        .output();
+    if let Ok(output) = output
+        && output.status.success()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut current_oid: Option<String> = None;
+        let mut insertions = 0usize;
+        let mut deletions = 0usize;
+        for line in text.lines() {
+            if is_commit_marker(line) {
+                if let Some(oid) = current_oid.replace(line.to_owned()) {
+                    stats.insert(oid, (insertions, deletions));
+                }
+                insertions = 0;
+                deletions = 0;
+            } else if let Some((added, removed)) = parse_numstat_line(line) {
+                insertions += added;
+                deletions += removed;
+            }
+        }
+        if let Some(oid) = current_oid {
+            stats.insert(oid, (insertions, deletions));
+        }
+    }
+    for oid in wanted {
+        let hex = oid.to_hex();
+        if stats.contains_key(&hex) {
+            continue;
+        }
+        if let Some((insertions, deletions)) = diff_tree_stats(path, *oid) {
+            stats.insert(hex, (insertions, deletions));
+        }
+    }
+    stats
+}
+
+fn is_commit_marker(line: &str) -> bool {
+    line.len() == 40 && line.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn parse_numstat_line(line: &str) -> Option<(usize, usize)> {
+    let mut fields = line.split('\t');
+    let insertions = fields.next()?.parse().ok()?;
+    let deletions = fields.next()?.parse().ok()?;
+    Some((insertions, deletions))
+}
+
+fn diff_tree_stats(path: &Path, oid: ObjectId) -> Option<(usize, usize)> {
+    let output = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(path)
+        .args([
+            "diff-tree",
+            "--numstat",
+            "--first-parent",
+            "--find-renames",
+            "--root",
+            "-r",
+            &oid.to_hex(),
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut insertions = 0usize;
+    let mut deletions = 0usize;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some((added, removed)) = parse_numstat_line(line) {
+            insertions += added;
+            deletions += removed;
+        }
+    }
+    Some((insertions, deletions))
+}
+
 fn commit_response(repository: &GitRepository, oid: ObjectId) -> sley::Result<CommitResponse> {
     let commit = repository.read_commit(&oid)?;
     let author = signature_response(commit.author_signature(), &commit.author);
@@ -875,6 +1022,28 @@ fn commit_response(repository: &GitRepository, oid: ObjectId) -> sley::Result<Co
     let message = String::from_utf8_lossy(&commit.message).trim().to_owned();
     let title = message.lines().next().unwrap_or_default().to_owned();
     let oid_hex = oid.to_hex();
+    let (verification, signing_fingerprint) =
+        match verify_ssh_commit_signature(&repository.read_object(&oid)?.body) {
+            SshCommitSignature::Unsigned => (None, None),
+            SshCommitSignature::Invalid => (
+                Some(CommitVerificationResponse {
+                    verified: false,
+                    reason: "invalid",
+                    signer: None,
+                    fingerprint: None,
+                }),
+                None,
+            ),
+            SshCommitSignature::Valid(fingerprint) => (
+                Some(CommitVerificationResponse {
+                    verified: false,
+                    reason: "unknown_key",
+                    signer: None,
+                    fingerprint: Some(fingerprint.clone()),
+                }),
+                Some(fingerprint),
+            ),
+        };
     Ok(CommitResponse {
         short_oid: oid_hex[..12.min(oid_hex.len())].to_owned(),
         oid: oid_hex,
@@ -888,6 +1057,284 @@ fn commit_response(repository: &GitRepository, oid: ObjectId) -> sley::Result<Co
         committer,
         title,
         message,
+        insertions: 0,
+        deletions: 0,
+        refs: Vec::new(),
+        verification,
+        signing_fingerprint,
+    })
+}
+
+enum SshCommitSignature {
+    Unsigned,
+    Invalid,
+    Valid(String),
+}
+
+fn verify_ssh_commit_signature(body: &[u8]) -> SshCommitSignature {
+    let Some((payload, pem)) = ssh_signed_payload(body) else {
+        return SshCommitSignature::Unsigned;
+    };
+    if !pem.starts_with(b"-----BEGIN SSH SIGNATURE-----") {
+        return SshCommitSignature::Unsigned;
+    }
+    let Ok(signature) = SshSig::from_pem(&pem) else {
+        return SshCommitSignature::Invalid;
+    };
+    let public_key = PublicKey::new(signature.public_key().clone(), "");
+    if public_key.verify("git", &payload, &signature).is_err() {
+        return SshCommitSignature::Invalid;
+    }
+    SshCommitSignature::Valid(public_key.fingerprint(HashAlg::Sha256).to_string())
+}
+
+fn ssh_signed_payload(body: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    let header_end = body.windows(2).position(|bytes| bytes == b"\n\n")?;
+    let mut cursor = 0usize;
+    while cursor <= header_end {
+        let line_end = body[cursor..=header_end]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|offset| cursor + offset)?;
+        let line = &body[cursor..line_end];
+        let value = line
+            .strip_prefix(b"gpgsig ")
+            .or_else(|| line.strip_prefix(b"gpgsig-sha256 "));
+        let Some(first_line) = value else {
+            cursor = line_end + 1;
+            continue;
+        };
+
+        let mut pem = Vec::with_capacity(512);
+        pem.extend_from_slice(first_line);
+        pem.push(b'\n');
+        let mut field_end = line_end + 1;
+        while field_end <= header_end && body[field_end] == b' ' {
+            let continuation_end = body[field_end..=header_end]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map(|offset| field_end + offset)?;
+            pem.extend_from_slice(&body[field_end + 1..continuation_end]);
+            pem.push(b'\n');
+            field_end = continuation_end + 1;
+        }
+
+        let mut payload = Vec::with_capacity(body.len() - (field_end - cursor));
+        payload.extend_from_slice(&body[..cursor]);
+        payload.extend_from_slice(&body[field_end..]);
+        return Some((payload, pem));
+    }
+    None
+}
+
+/// Every tag, with annotated tags peeled to the commit they release.
+fn tag_refs(repository: &GitRepository) -> sley::Result<Vec<RefResponse>> {
+    Ok(repository
+        .query_tags(TagQueryOptions::new())
+        .map_err(|error| GitError::Command(error.to_string()))?
+        .entries
+        .into_iter()
+        .filter_map(|entry| {
+            let ReferenceTarget::Direct(oid) = entry.reference.target else {
+                return None;
+            };
+            // An annotated tag points at a tag object, so the commit it
+            // releases only comes out of peeling it.
+            let commit_oid = repository.peel_to_commit_oid(oid).ok()?;
+            Some(RefResponse {
+                name: entry.name,
+                oid: oid.to_hex(),
+                commit_oid: commit_oid.to_hex(),
+            })
+        })
+        .collect())
+}
+
+/// Tag decorations keyed by the commit hex they point at.
+fn tag_decorations(
+    repository: &GitRepository,
+) -> sley::Result<BTreeMap<String, Vec<CommitRefResponse>>> {
+    let mut decorations: BTreeMap<String, Vec<CommitRefResponse>> = BTreeMap::new();
+    for tag in tag_refs(repository)? {
+        decorations
+            .entry(tag.commit_oid)
+            .or_default()
+            .push(CommitRefResponse {
+                kind: "tag",
+                name: tag.name,
+                prerelease: false,
+                latest: false,
+                published_at: None,
+                commits_since_previous: None,
+            });
+    }
+    for tags in decorations.values_mut() {
+        tags.sort_unstable_by(|left, right| compare_ref_names(&left.name, &right.name));
+    }
+    Ok(decorations)
+}
+
+/// Associate valid SSH signatures with the account that registered the key.
+async fn attach_commit_verifications(
+    state: &RepositoryState,
+    commits: &mut [CommitResponse],
+) -> Result<(), ApiError> {
+    let fingerprints = commits
+        .iter()
+        .filter_map(|commit| commit.signing_fingerprint.clone())
+        .collect::<HashSet<_>>();
+    if fingerprints.is_empty() {
+        return Ok(());
+    }
+
+    let keys = ssh_key_entity::Entity::find()
+        .filter(ssh_key_entity::Column::Fingerprint.is_in(fingerprints))
+        .all(state.identity().database())
+        .await?;
+    let user_ids = keys.iter().map(|key| key.user_id).collect::<HashSet<_>>();
+    let usernames = user::Entity::find()
+        .filter(user::Column::Id.is_in(user_ids))
+        .all(state.identity().database())
+        .await?
+        .into_iter()
+        .map(|owner| (owner.id, owner.username))
+        .collect::<HashMap<_, _>>();
+    let signers = keys
+        .into_iter()
+        .filter_map(|key| {
+            usernames
+                .get(&key.user_id)
+                .cloned()
+                .map(|username| (key.fingerprint, username))
+        })
+        .collect::<HashMap<_, _>>();
+
+    for commit in commits {
+        let Some(fingerprint) = &commit.signing_fingerprint else {
+            continue;
+        };
+        let Some(signer) = signers.get(fingerprint) else {
+            continue;
+        };
+        let Some(verification) = &mut commit.verification else {
+            continue;
+        };
+        verification.verified = true;
+        verification.reason = "verified";
+        verification.signer = Some(signer.clone());
+    }
+    Ok(())
+}
+
+/// Overlay releases published for these commits and calculate predecessor counts.
+async fn attach_release_refs(
+    state: &RepositoryState,
+    repository: &repository::Model,
+    commits: &mut [CommitResponse],
+) -> Result<(), ApiError> {
+    if commits.is_empty() {
+        return Ok(());
+    }
+    let releases = repository_release::Entity::find()
+        .filter(repository_release::Column::RepositoryId.eq(repository.id))
+        .order_by_desc(repository_release::Column::PublishedAt)
+        .all(state.identity().database())
+        .await?;
+    let latest_id = releases
+        .iter()
+        .find(|release| !release.prerelease)
+        .map(|release| release.id);
+    let path = state.repository_path(repository);
+    let mut decorated = false;
+    for (index, release) in releases.iter().enumerate() {
+        let Some(commit) = commits
+            .iter_mut()
+            .find(|commit| commit.oid == release.target_oid)
+        else {
+            continue;
+        };
+        // Only releases on this page cost a count, and the predecessor is the
+        // next one published before it.
+        let commits_since_previous = match releases.get(index + 1) {
+            Some(previous) => {
+                commits_between(&path, &previous.target_oid, &release.target_oid).await
+            }
+            None => None,
+        };
+        commit.refs.push(CommitRefResponse {
+            kind: "release",
+            name: release.title.clone(),
+            prerelease: release.prerelease,
+            latest: Some(release.id) == latest_id,
+            published_at: Some(release.published_at),
+            commits_since_previous,
+        });
+        decorated = true;
+    }
+    if decorated {
+        for commit in commits {
+            // Releases lead, tags follow, each already in name order.
+            commit
+                .refs
+                .sort_by_key(|reference| u8::from(reference.kind == "tag"));
+        }
+    }
+    Ok(())
+}
+
+/// Commits reachable from `to` but not `from`, or `None` when git cannot say.
+async fn commits_between(path: &Path, from: &str, to: &str) -> Option<usize> {
+    let output = Command::new("git")
+        .arg("--git-dir")
+        .arg(path)
+        .args(["rev-list", "--count", &format!("{from}..{to}")])
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+/// Order ref names so embedded numbers compare numerically: `v0.9.0` sorts
+/// before `v0.10.0`, which a plain string compare gets backwards.
+fn compare_ref_names(left: &str, right: &str) -> Ordering {
+    let mut left_parts = ref_name_parts(left);
+    let mut right_parts = ref_name_parts(right);
+    loop {
+        match (left_parts.next(), right_parts.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(left), Some(right)) => {
+                let ordering = match (left.parse::<u64>(), right.parse::<u64>()) {
+                    (Ok(left), Ok(right)) => left.cmp(&right),
+                    _ => left.cmp(right),
+                };
+                if ordering != Ordering::Equal {
+                    return ordering;
+                }
+            }
+        }
+    }
+}
+
+/// Split a ref name into alternating digit and non-digit runs.
+fn ref_name_parts(name: &str) -> impl Iterator<Item = &str> {
+    let mut rest = name;
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let numeric = rest.starts_with(|character: char| character.is_ascii_digit());
+        let end = rest
+            .find(|character: char| character.is_ascii_digit() != numeric)
+            .unwrap_or(rest.len());
+        let (part, tail) = rest.split_at(end);
+        rest = tail;
+        Some(part)
     })
 }
 
@@ -1043,4 +1490,56 @@ const fn default_page() -> usize {
 
 const fn default_per_page() -> usize {
     30
+}
+
+#[cfg(test)]
+mod tests {
+    use ssh_key::{HashAlg, LineEnding, PrivateKey, private::Ed25519Keypair};
+
+    use super::{SshCommitSignature, verify_ssh_commit_signature};
+
+    fn signed_commit() -> Vec<u8> {
+        let payload = b"tree 0000000000000000000000000000000000000000\nauthor Alice <alice@example.com> 1 +0000\ncommitter Alice <alice@example.com> 1 +0000\n\nSigned commit\n";
+        let private_key = PrivateKey::from(Ed25519Keypair::from_seed(&[7; 32]));
+        let signature = private_key
+            .sign("git", HashAlg::Sha512, payload)
+            .expect("sign commit")
+            .to_pem(LineEnding::LF)
+            .expect("encode signature");
+        let header_end = payload
+            .windows(2)
+            .position(|bytes| bytes == b"\n\n")
+            .expect("commit headers");
+        let mut body = Vec::with_capacity(payload.len() + signature.len() + 32);
+        body.extend_from_slice(&payload[..=header_end]);
+        for (index, line) in signature.lines().enumerate() {
+            if index == 0 {
+                body.extend_from_slice(b"gpgsig ");
+            } else {
+                body.push(b' ');
+            }
+            body.extend_from_slice(line.as_bytes());
+            body.push(b'\n');
+        }
+        body.extend_from_slice(&payload[header_end + 1..]);
+        body
+    }
+
+    #[test]
+    fn verifies_git_ssh_signature() {
+        assert!(matches!(
+            verify_ssh_commit_signature(&signed_commit()),
+            SshCommitSignature::Valid(_)
+        ));
+    }
+
+    #[test]
+    fn rejects_signature_after_commit_changes() {
+        let mut body = signed_commit();
+        body.extend_from_slice(b"tampered");
+        assert!(matches!(
+            verify_ssh_commit_signature(&body),
+            SshCommitSignature::Invalid
+        ));
+    }
 }

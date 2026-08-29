@@ -1,0 +1,6 @@
+.svelte-kit/
+build/
+node_modules/
+.env
+.env.*
+__omp_shell(".env.example")

@@ -7,6 +7,48 @@ import * as linguistLanguages from "linguist-languages";
 import type { Language as LinguistLanguage } from "linguist-languages";
 import { defineConfig, type Plugin } from "vite";
 
+const MIN_LANGUAGE_COLOR_CONTRAST = 3;
+const DARK_SURFACE_LUMINANCE = 0.18 ** 3;
+const LANGUAGE_COLOR_OVERRIDES: Readonly<Record<string, string>> = {
+  JSON: "#f1e05a",
+  "JSON with Comments": "#f1e05a",
+};
+
+function relativeLuminance(channels: readonly number[]): number {
+  const [red = 0, green = 0, blue = 0] = channels.map((channel) => {
+    const value = channel / 255;
+    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  });
+  return red * 0.2126 + green * 0.7152 + blue * 0.0722;
+}
+
+function darkThemeLanguageColor(color: string): string {
+  const channels = [1, 3, 5].map((offset) =>
+    Number.parseInt(color.slice(offset, offset + 2), 16),
+  );
+  const minimumLuminance =
+    MIN_LANGUAGE_COLOR_CONTRAST * (DARK_SURFACE_LUMINANCE + 0.05) - 0.05;
+  if (relativeLuminance(channels) >= minimumLuminance) return color;
+
+  let lowerMix = 0;
+  let upperMix = 1;
+  for (let iteration = 0; iteration < 12; iteration += 1) {
+    const mix = (lowerMix + upperMix) / 2;
+    const mixed = channels.map((channel) => channel + (255 - channel) * mix);
+    if (relativeLuminance(mixed) >= minimumLuminance) upperMix = mix;
+    else lowerMix = mix;
+  }
+
+  const adjusted = channels
+    .map((channel) =>
+      Math.ceil(channel + (255 - channel) * upperMix)
+        .toString(16)
+        .padStart(2, "0"),
+    )
+    .join("");
+  return `light-dark(${color}, #${adjusted})`;
+}
+
 const linguistLanguageData = linguistLanguages as Record<
   string,
   LinguistLanguage
@@ -15,13 +57,15 @@ const linguistLanguageColors = Object.values(linguistLanguageData).reduce<
   Record<string, string>
 >((colors, language) => {
   const color =
+    LANGUAGE_COLOR_OVERRIDES[language.name] ??
     language.color ??
     (language.group ? linguistLanguageData[language.group]?.color : undefined);
   if (!color) return colors;
 
-  colors[language.name.toLowerCase()] = color;
+  const adaptiveColor = darkThemeLanguageColor(color);
+  colors[language.name.toLowerCase()] = adaptiveColor;
   for (const alias of language.aliases ?? [])
-    colors[alias.toLowerCase()] = color;
+    colors[alias.toLowerCase()] = adaptiveColor;
   return colors;
 }, {});
 

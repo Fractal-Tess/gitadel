@@ -1,0 +1,163 @@
+# Gitadel Actions
+
+Gitadel Actions is a repository-scoped CI control plane. Gitadel discovers workflows after successful pushes, schedules durable runs and jobs, authorizes a runner, stores logs, and reports commit status. The separately deployed Forgejo Runner executes repository code. Gitadel itself never executes workflow steps.
+
+This is a pinned Forgejo Runner integration, not a claim of generic GitHub Actions compatibility.
+
+## Trust and isolation
+
+Workflow discovery is active for every repository. A pushed workflow can read that repository with the job's short-lived credential, publish releases and release assets to that same repository, and exfiltrate those values through transformed logs or the network. Registering a runner therefore enables code execution for every repository in its personal or organization namespace.
+
+Run Forgejo Runner on a dedicated disposable host or VM. Configure a container backend, non-privileged containers, no host or Docker socket mounts, explicit CPU/memory/process limits, a read-only host filesystem where practical, and restricted egress. The runner protocol does not let Gitadel attest any of those controls. Do not register a runner configured for host execution.
+
+A namespace runner can serve every repository owned by that user or organization. Each runner executes one job at a time; register more runners when the namespace needs concurrency. Gitadel issues each job a short-lived token limited to repository reads, optional LFS reads, and release/release-asset publication for that same repository. It cannot push or write LFS, and terminal completion or cancellation revokes it.
+
+## Required runner
+
+The compatibility pin is exactly Forgejo Runner **v13.0.0** and `actions-proto` **v0.7.0**. Other runner versions are rejected.
+
+Official Linux amd64 binary:
+
+```text
+https://code.forgejo.org/forgejo/runner/releases/download/v13.0.0/forgejo-runner-13.0.0-linux-amd64
+sha256 cfcfe65e9ed5c9a4b344acfdbc3c32210b274c005a5888f46967c4d988177707
+```
+
+The official OCI package is `code.forgejo.org/forgejo/runner:13.0.0`. Pin the resolved image digest in deployment configuration rather than tracking `13`, `13.0`, or another mutable tag.
+
+## Register a runner
+
+1. Open **Settings → Actions**.
+2. Choose your personal namespace or an organization you own.
+3. Enter a runner name and comma-separated label names. Labels are exact, case-sensitive names such as `docker`.
+4. Select **Create registration token**. The token is displayed once and expires after 10 minutes.
+5. Put the execution mapping for those label names in the runner configuration. The server approves names; the runner owns their container mapping.
+6. Run the registration command shown by Gitadel, then start `forgejo-runner daemon` with the same configuration.
+
+Minimal isolated mapping:
+
+```yaml
+runner:
+  capacity: 1
+  labels:
+    docker:
+      backend: docker
+      backend-options:
+        image: docker.io/library/node@sha256:<immutable-image-digest>
+
+cache:
+  enabled: false
+
+container:
+  privileged: false
+  valid_volumes: []
+  docker_host: "-"
+```
+
+The generated command has this form:
+
+```sh
+forgejo-runner register --no-interactive \
+  --instance https://git.example.com \
+  --token gta_reg_REDACTED \
+  --name repository-runner \
+  --labels docker
+forgejo-runner --config /etc/forgejo-runner/config.yml daemon
+```
+
+Protect the registration and runner-token files as credentials. Removing a runner in Gitadel revokes its access to the namespace. Online/offline state comes from authenticated runner requests; the browser does not infer it.
+
+## Workflows
+
+Gitadel reads workflows from the pushed commit, never from the working tree or default branch. It uses the first existing directory in this order:
+
+1. `.forgejo/workflows`
+2. `.gitea/workflows`
+3. `.github/workflows`
+
+Lower-precedence directories are ignored when a higher-precedence directory exists. YAML files may use `.yml` or `.yaml`.
+
+Supported scope:
+
+- `push`, including `branches`, `branches-ignore`, `tags`, `tags-ignore`, `paths`, and `paths-ignore`
+- static job DAGs with `needs`
+- one or more static `runs-on` labels
+- shell steps and runner-evaluated step/job conditions
+- step outputs and downstream `needs` results/outputs
+- same-commit local actions
+- JavaScript and Docker actions pinned to a full 40-character commit from the configured action origin
+- job containers and services pinned by `@sha256:<64 hex characters>`
+- Forgejo v4 artifact upload and download actions
+
+Example:
+
+```yaml
+name: Verify
+on:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: docker
+    outputs:
+      result: ${{ steps.result.outputs.value }}
+    steps:
+      - run: cargo test --locked
+      - id: result
+        run: echo "value=passed" >> "$GITHUB_OUTPUT"
+
+  report:
+    needs: test
+    runs-on: docker
+    steps:
+      - run: test "${{ needs.test.outputs.result }}" = passed
+```
+
+Artifact actions use the configured default origin. Pin the Forgejo actions to immutable commits:
+
+```yaml
+- uses: forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e
+  with:
+    name: production-build
+    path: build
+
+- uses: forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e
+  with:
+    name: production-build
+    path: downloaded
+```
+
+Malformed or unsupported workflows create a visible failed run with no jobs. They are never silently reduced to a supported subset.
+
+Not supported: pull-request triggers, manual dispatch, schedules, reruns, matrix expansion, reusable workflows or job-level `uses`, concurrency groups, environments/approvals, deployments, cache, OIDC, or user-managed Actions secrets/variables.
+
+## Configuration
+
+Actions settings live under `[actions]` in `gitadel.toml` and support the equivalent `GITADEL_ACTIONS__...` environment keys.
+
+```toml
+[actions]
+allowed_action_origins = ["https://code.forgejo.org"]
+default_actions_origin = "https://code.forgejo.org"
+runner_loss_seconds = 300
+fetch_timeout_seconds = 20
+max_log_request_bytes = 1048576
+max_log_row_bytes = 65536
+max_log_response_bytes = 262144
+max_job_log_bytes = 16777216
+retention_days = 90
+max_artifact_bytes = 2147483648
+max_artifact_upload_request_bytes = 16777216
+max_artifact_block_list_bytes = 1048576
+max_artifact_blocks = 50000
+max_artifact_name_bytes = 255
+artifact_grant_lifetime_seconds = 3600
+lfs_read = true
+```
+
+`allowed_action_origins` is empty by default, so remote actions are disabled until an operator opts in. `default_actions_origin` must also appear in that list before remote actions are accepted. Local actions and pinned container actions remain subject to workflow validation.
+
+A runner that stops reporting past `runner_loss_seconds` fails its current job with `runner_lost`; Gitadel does not retry it automatically. The default is five minutes. Job logs accept at most 1 MiB per request and 64 KiB per row, return at most 256 KiB per page, and retain at most 16 MiB per job with a visible truncation marker. Workflow artifacts default to a 2 GiB archive limit, 16 MiB upload requests, 50,000 blocks, 255-byte names, and one-hour signed grants; the workflow's requested retention is capped by `retention_days`.
+
+Workflow limits are 64 files in the selected directory, 1 MiB per file, 128 jobs per workflow, 256 dependency edges, and 256 steps per job.

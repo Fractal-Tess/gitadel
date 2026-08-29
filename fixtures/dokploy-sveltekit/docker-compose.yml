@@ -1,0 +1,13 @@
+services:
+  fixture:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DEPLOYMENT_KIND: compose
+      FIXTURE_VALUE: ${FIXTURE_VALUE:-compose-default}
+      FIXTURE_REVISION: ${FIXTURE_REVISION:-initial}
+      HOST: 0.0.0.0
+      PORT: 3000
+    expose:
+      - "3000"

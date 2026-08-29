@@ -30,12 +30,7 @@
       const returnTo = page.url.searchParams.get("returnTo");
       if (returnTo?.startsWith("/login/oauth/authorize?")) {
         window.location.assign(returnTo);
-      } else if (returnTo?.startsWith("/admin")) {
-        await goto(resolve("/settings?view=administration"));
-      } else if (
-        returnTo === "/settings" ||
-        returnTo?.startsWith("/settings?")
-      ) {
+      } else if (returnTo?.startsWith("/settings")) {
         await goto(returnTo);
       } else {
         await goto(resolve("/"));

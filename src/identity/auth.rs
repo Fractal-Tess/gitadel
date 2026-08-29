@@ -148,6 +148,95 @@ pub async fn update_username(
 }
 
 #[derive(Deserialize)]
+pub struct UpdateRepositoryPreferencesRequest {
+    default_repository_visibility: String,
+}
+
+pub async fn update_repository_preferences(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(request): Json<UpdateRepositoryPreferencesRequest>,
+) -> Result<Json<AuthResponse>, ApiError> {
+    let actor = state
+        .authenticate(&headers, &jar, super::SCOPE_WRITE)
+        .await?;
+    require_browser_session(actor.via_api_token)?;
+    if !matches!(
+        request.default_repository_visibility.as_str(),
+        "public" | "private"
+    ) {
+        return Err(ApiError::bad_request(
+            "Default repository visibility must be public or private.",
+        ));
+    }
+
+    let actor_id = actor.user.id;
+    let transaction = state.database().begin().await?;
+    let mut account: user::ActiveModel = actor.user.into();
+    account.default_repository_visibility = Set(request.default_repository_visibility);
+    account.updated_at = Set(Utc::now());
+    let account = account.update(&transaction).await?;
+    state
+        .audit_on(
+            &transaction,
+            Some(actor_id),
+            "account.repository_preferences.update",
+            None,
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(Json(AuthResponse {
+        user: account.into(),
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateThemePreferenceRequest {
+    theme_preference: String,
+}
+
+pub async fn update_theme_preference(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(request): Json<UpdateThemePreferenceRequest>,
+) -> Result<Json<AuthResponse>, ApiError> {
+    let actor = state
+        .authenticate(&headers, &jar, super::SCOPE_WRITE)
+        .await?;
+    require_browser_session(actor.via_api_token)?;
+    if !matches!(
+        request.theme_preference.as_str(),
+        "system" | "light" | "dark"
+    ) {
+        return Err(ApiError::bad_request(
+            "Theme preference must be system, light, or dark.",
+        ));
+    }
+
+    let actor_id = actor.user.id;
+    let theme_preference = request.theme_preference;
+    let transaction = state.database().begin().await?;
+    let mut account: user::ActiveModel = actor.user.into();
+    account.theme_preference = Set(theme_preference.clone());
+    account.updated_at = Set(Utc::now());
+    let account = account.update(&transaction).await?;
+    state
+        .audit_on(
+            &transaction,
+            Some(actor_id),
+            "account.theme_preference.update",
+            Some(theme_preference),
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(Json(AuthResponse {
+        user: account.into(),
+    }))
+}
+
+#[derive(Deserialize)]
 pub struct UpdatePasswordRequest {
     current_password: String,
     new_password: String,
@@ -303,6 +392,8 @@ pub async fn register(
         username: Set(username.clone()),
         password_hash: Set(password_hash),
         is_admin: Set(false),
+        default_repository_visibility: Set("private".to_owned()),
+        theme_preference: Set("system".to_owned()),
         disabled_at: Set(None),
         avatar_updated_at: Set(None),
         created_at: Set(now),

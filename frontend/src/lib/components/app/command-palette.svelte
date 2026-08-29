@@ -4,13 +4,15 @@
   import { Command as CommandPrimitive } from "bits-ui";
   import {
     Archive,
+    Building2,
     Compass,
+    Heart,
     LockKeyhole,
     Plus,
+    RefreshCw,
     ScrollText,
     Settings2,
     ShieldCheck,
-    Star,
   } from "lucide-svelte";
 
   import * as Command from "$lib/components/ui/command/index.js";
@@ -184,28 +186,41 @@
       {
         id: "favorites",
         label: "Favorites",
-        icon: Star,
+        icon: Heart,
         keywords: "starred saved",
         run: () => void goto(`${resolve("/")}?tab=favorites`),
       },
     ];
     if (app.authStatus?.authenticated) {
-      actions.push({
-        id: "settings",
-        label: "Account settings",
-        icon: Settings2,
-        keywords: "profile security passkeys tokens ssh keys avatar",
-        run: () => void goto(resolve("/settings")),
-      });
-    }
-    if (app.authStatus?.user?.is_admin) {
-      actions.push({
-        id: "admin",
-        label: "Administration",
-        icon: ShieldCheck,
-        keywords: "instance users audit log",
-        run: () => void goto(resolve("/settings?view=administration")),
-      });
+      actions.push(
+        {
+          id: "account-settings",
+          label: "Account settings",
+          icon: Settings2,
+          keywords: "profile security passkeys tokens ssh keys avatar",
+          run: () =>
+            void goto(resolve("/-/account/[view]", { view: "profile" })),
+        },
+        {
+          id: "organizations",
+          label: "Organizations",
+          icon: Building2,
+          keywords: "organizations runners integrations mirror identities tokens",
+          run: () => void goto(resolve("/-/organizations")),
+        },
+      );
+      if (app.authStatus.user?.is_admin) {
+        actions.push({
+          id: "administration",
+          label: "Administration",
+          icon: ShieldCheck,
+          keywords: "instance users access audit backups appearance",
+          run: () =>
+            void goto(
+              resolve("/-/administration/[view]", { view: "appearance" }),
+            ),
+        });
+      }
     }
     actions.push({
       id: "changelog",
@@ -222,9 +237,10 @@
     return [
       {
         id: "create",
-        label: "New repository",
+        label: "Create or import repositories and organizations",
         icon: Plus,
-        keywords: "create add initialise initialize",
+        keywords:
+          "create add import repository mirror organization initialise initialize github gitlab gitea forgejo",
         run: () => (shell.createOpen = true),
       } satisfies PaletteAction,
     ].filter(matches);
@@ -353,8 +369,15 @@
         class="font-medium">{repository.name}</span
       >
     </span>
+    {#if repository.mirrored}
+      <span
+        class="inline-flex shrink-0 items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-sky-600 dark:text-sky-400"
+      >
+        <RefreshCw class="size-2.5" />Mirror
+      </span>
+    {/if}
     {#if repository.favorited}
-      <Star class="size-3 shrink-0 fill-amber-400 text-amber-400" />
+      <Heart class="size-3 shrink-0 fill-amber-400 text-amber-400" />
     {/if}
     {#if repository.visibility === "private"}
       <LockKeyhole class="size-3 shrink-0 text-muted-foreground" />

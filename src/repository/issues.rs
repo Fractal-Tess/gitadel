@@ -46,6 +46,13 @@ pub struct IssueLabelResponse {
     name: String,
     color: String,
     description: String,
+    external_url: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ExternalIssueAuthorResponse {
+    username: String,
+    profile_url: String,
 }
 
 #[derive(Serialize)]
@@ -63,6 +70,8 @@ pub struct IssueResponse {
     created_at: chrono::DateTime<Utc>,
     updated_at: chrono::DateTime<Utc>,
     closed_at: Option<chrono::DateTime<Utc>>,
+    external_url: Option<String>,
+    external_author: Option<ExternalIssueAuthorResponse>,
     can_edit: bool,
     can_manage: bool,
 }
@@ -90,6 +99,8 @@ pub struct IssueCommentResponse {
     author: IssueUserResponse,
     created_at: chrono::DateTime<Utc>,
     updated_at: chrono::DateTime<Utc>,
+    external_url: Option<String>,
+    external_author: Option<ExternalIssueAuthorResponse>,
     can_edit: bool,
 }
 
@@ -260,6 +271,12 @@ pub async fn create_issue(
         created_at: Set(now),
         updated_at: Set(now),
         closed_at: Set(None),
+        external_source: Set(None),
+        external_id: Set(None),
+        external_url: Set(None),
+        external_author: Set(None),
+        external_author_url: Set(None),
+        external_updated_at: Set(None),
     }
     .insert(&transaction)
     .await?;
@@ -309,6 +326,11 @@ pub async fn update_issue(
         .can_access(&repository, Some(actor.user.id), Permission::Write)
         .await?;
     let stored = find_issue(&state, repository.id, number).await?;
+    if stored.external_source.is_some() {
+        return Err(ApiError::forbidden(
+            "Issues imported from an upstream forge are read-only.",
+        ));
+    }
     if stored.author_user_id != actor.user.id && !can_write {
         return Err(ApiError::not_found());
     }
@@ -386,6 +408,11 @@ pub async fn delete_issue(
         )
         .await?;
     let issue = find_issue(&state, repository.id, number).await?;
+    if issue.external_source.is_some() {
+        return Err(ApiError::forbidden(
+            "Issues imported from an upstream forge are read-only.",
+        ));
+    }
     let attachments = issue_attachment::Entity::find()
         .filter(issue_attachment::Column::IssueId.eq(issue.id))
         .all(state.identity().database())
@@ -448,6 +475,11 @@ pub async fn create_comment(
         )
         .await?;
     let issue = find_issue(&state, repository.id, number).await?;
+    if issue.external_source.is_some() {
+        return Err(ApiError::forbidden(
+            "Comments on imported upstream issues are read-only.",
+        ));
+    }
     let body = validate_comment_body(request.body)?;
     let now = Utc::now();
     let transaction = state.identity().database().begin().await?;
@@ -458,6 +490,12 @@ pub async fn create_comment(
         body: Set(body),
         created_at: Set(now),
         updated_at: Set(now),
+        external_source: Set(None),
+        external_id: Set(None),
+        external_url: Set(None),
+        external_author: Set(None),
+        external_author_url: Set(None),
+        external_updated_at: Set(None),
     }
     .insert(&transaction)
     .await?;
@@ -500,6 +538,11 @@ pub async fn update_comment(
         .await?;
     let issue = find_issue(&state, repository.id, number).await?;
     let stored = find_comment(&state, issue.id, id).await?;
+    if stored.external_source.is_some() {
+        return Err(ApiError::forbidden(
+            "Comments imported from an upstream forge are read-only.",
+        ));
+    }
     if stored.author_user_id != actor.user.id && !can_write {
         return Err(ApiError::not_found());
     }
@@ -531,6 +574,11 @@ pub async fn delete_comment(
         .await?;
     let issue = find_issue(&state, repository.id, number).await?;
     let comment = find_comment(&state, issue.id, id).await?;
+    if comment.external_source.is_some() {
+        return Err(ApiError::forbidden(
+            "Comments imported from an upstream forge are read-only.",
+        ));
+    }
     if comment.author_user_id != actor.user.id && !can_write {
         return Err(ApiError::not_found());
     }
@@ -578,6 +626,11 @@ pub async fn create_label(
         name: Set(validate_label_name(&request.name)?),
         color: Set(validate_label_color(&request.color)?),
         description: Set(validate_label_description(request.description)?),
+        external_source: Set(None),
+        external_instance_url: Set(None),
+        external_id: Set(None),
+        external_url: Set(None),
+        external_updated_at: Set(None),
         created_at: Set(Utc::now()),
     }
     .insert(state.identity().database())
@@ -1046,6 +1099,15 @@ async fn issue_response(
         .filter(issue_comment::Column::IssueId.eq(issue.id))
         .count(state.identity().database())
         .await?;
+    let external_author = issue
+        .external_author
+        .as_ref()
+        .zip(issue.external_author_url.as_ref())
+        .map(|(username, profile_url)| ExternalIssueAuthorResponse {
+            username: username.clone(),
+            profile_url: profile_url.clone(),
+        });
+    let imported = issue.external_source.is_some();
     Ok(IssueResponse {
         id: issue.id,
         number: issue.number,
@@ -1060,8 +1122,10 @@ async fn issue_response(
         created_at: issue.created_at,
         updated_at: issue.updated_at,
         closed_at: issue.closed_at,
-        can_edit: viewer_id == Some(issue.author_user_id) || can_write,
-        can_manage: can_write,
+        external_url: issue.external_url,
+        external_author,
+        can_edit: !imported && (viewer_id == Some(issue.author_user_id) || can_write),
+        can_manage: !imported && can_write,
     })
 }
 
@@ -1084,6 +1148,15 @@ async fn comment_response(
     viewer_id: Option<Uuid>,
     can_write: bool,
 ) -> Result<IssueCommentResponse, ApiError> {
+    let external_author = comment
+        .external_author
+        .as_ref()
+        .zip(comment.external_author_url.as_ref())
+        .map(|(username, profile_url)| ExternalIssueAuthorResponse {
+            username: username.clone(),
+            profile_url: profile_url.clone(),
+        });
+    let imported = comment.external_source.is_some();
     Ok(IssueCommentResponse {
         id: comment.id,
         rendered_body: render_markdown(&comment.body),
@@ -1091,7 +1164,9 @@ async fn comment_response(
         author: issue_user(state, comment.author_user_id).await?,
         created_at: comment.created_at,
         updated_at: comment.updated_at,
-        can_edit: viewer_id == Some(comment.author_user_id) || can_write,
+        external_url: comment.external_url,
+        external_author,
+        can_edit: !imported && (viewer_id == Some(comment.author_user_id) || can_write),
     })
 }
 
@@ -1174,7 +1249,62 @@ fn label_response(label: issue_label::Model) -> IssueLabelResponse {
         name: label.name,
         color: label.color,
         description: label.description,
+        external_url: label.external_url,
     }
+}
+
+// Consumed by the repository import metadata worker.
+pub(super) struct ImportedLabel {
+    pub(super) external_source: String,
+    pub(super) external_instance_url: String,
+    pub(super) external_id: String,
+    pub(super) external_url: Option<String>,
+    pub(super) name: String,
+    pub(super) color: String,
+    pub(super) description: String,
+    pub(super) external_updated_at: Option<chrono::DateTime<Utc>>,
+}
+
+// Consumed by the repository import metadata worker.
+pub(super) async fn upsert_imported_label(
+    state: &super::RepositoryState,
+    repository_id: Uuid,
+    label: ImportedLabel,
+) -> Result<(), crate::identity::ApiError> {
+    let database = state.identity().database();
+    if let Some(current) = issue_label::Entity::find()
+        .filter(issue_label::Column::RepositoryId.eq(repository_id))
+        .filter(issue_label::Column::ExternalSource.eq(&label.external_source))
+        .filter(issue_label::Column::ExternalInstanceUrl.eq(&label.external_instance_url))
+        .filter(issue_label::Column::ExternalId.eq(&label.external_id))
+        .one(database)
+        .await?
+    {
+        let mut active: issue_label::ActiveModel = current.into();
+        active.name = Set(label.name);
+        active.color = Set(label.color);
+        active.description = Set(label.description);
+        active.external_url = Set(label.external_url);
+        active.external_updated_at = Set(label.external_updated_at);
+        active.update(database).await?;
+    } else {
+        issue_label::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            repository_id: Set(repository_id),
+            name: Set(label.name),
+            color: Set(label.color),
+            description: Set(label.description),
+            external_source: Set(Some(label.external_source)),
+            external_instance_url: Set(Some(label.external_instance_url)),
+            external_id: Set(Some(label.external_id)),
+            external_url: Set(label.external_url),
+            external_updated_at: Set(label.external_updated_at),
+            created_at: Set(Utc::now()),
+        }
+        .insert(database)
+        .await?;
+    }
+    Ok(())
 }
 
 fn validate_issue_title(value: &str) -> Result<String, ApiError> {

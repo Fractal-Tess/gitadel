@@ -1,4 +1,15 @@
+import { buttonVariants } from "$lib/components/ui/button/index.js";
+import { copyText } from "$lib/clipboard.js";
+import { cn } from "$lib/utils.js";
+
 const MAX_MARKDOWN_HIGHLIGHT_CHARACTERS = 50_000;
+const DATE_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+const DAY_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+});
 
 const LANGUAGES: Record<string, string> = {
   astro: "xml",
@@ -107,10 +118,11 @@ const LANGUAGE_LABELS: Record<string, string> = {
 };
 
 export function formatDate(timestamp: number): string {
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(new Date(timestamp * 1000));
+  return DATE_TIME_FORMATTER.format(new Date(timestamp * 1000));
+}
+
+export function formatDay(date: string): string {
+  return DAY_FORMATTER.format(new Date(date));
 }
 
 export function formatSize(size: number | null): string {
@@ -253,6 +265,95 @@ function rewriteMarkdownReferences(node: HTMLElement, source: MarkdownSource) {
   }
 }
 
+function codeCopyIcon(copied: boolean) {
+  const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  icon.setAttribute("viewBox", "0 0 24 24");
+  icon.setAttribute("fill", "none");
+  icon.setAttribute("stroke", "currentColor");
+  icon.setAttribute("stroke-width", "2");
+  icon.setAttribute("stroke-linecap", "round");
+  icon.setAttribute("stroke-linejoin", "round");
+  icon.setAttribute("aria-hidden", "true");
+  icon.setAttribute("class", copied ? "size-3 text-emerald-500" : "size-3.5");
+
+  if (copied) {
+    const path = document.createElementNS(icon.namespaceURI, "path");
+    path.setAttribute("d", "m9 11 3 3L22 4");
+    const secondPath = document.createElementNS(icon.namespaceURI, "path");
+    secondPath.setAttribute(
+      "d",
+      "M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11",
+    );
+    icon.append(path, secondPath);
+  } else {
+    const rect = document.createElementNS(icon.namespaceURI, "rect");
+    rect.setAttribute("width", "14");
+    rect.setAttribute("height", "14");
+    rect.setAttribute("x", "8");
+    rect.setAttribute("y", "8");
+    rect.setAttribute("rx", "2");
+    const path = document.createElementNS(icon.namespaceURI, "path");
+    path.setAttribute(
+      "d",
+      "M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2",
+    );
+    icon.append(rect, path);
+  }
+
+  return icon;
+}
+
+function addCodeCopyButton(
+  code: HTMLElement,
+  source: string,
+): () => void {
+  const pre = code.closest("pre");
+  if (!pre) return () => undefined;
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = cn(
+    buttonVariants({ variant: "outline", size: "icon-sm" }),
+    "not-prose absolute top-2.5 right-2.5 text-foreground",
+  );
+  button.append(codeCopyIcon(false));
+  button.setAttribute("aria-label", "Copy code");
+
+  let resetTimer: number | undefined;
+  const handleCopy = async () => {
+    window.clearTimeout(resetTimer);
+    try {
+      await copyText(source);
+      button.replaceChildren(codeCopyIcon(true));
+      button.setAttribute("aria-label", "Code copied");
+    } catch {
+      button.replaceChildren(codeCopyIcon(false));
+      button.setAttribute("aria-label", "Could not copy code");
+    }
+    resetTimer = window.setTimeout(() => {
+      button.replaceChildren(codeCopyIcon(false));
+      button.setAttribute("aria-label", "Copy code");
+    }, 1_500);
+  };
+
+  const previousPadding = pre.style.padding;
+  const previousCodeBorderRadius = code.style.borderRadius;
+  pre.style.padding = "1px";
+  code.style.borderRadius = "inherit";
+  pre.classList.add("relative");
+  pre.append(button);
+  button.addEventListener("click", handleCopy);
+
+  return () => {
+    window.clearTimeout(resetTimer);
+    button.removeEventListener("click", handleCopy);
+    button.remove();
+    pre.style.padding = previousPadding;
+    code.style.borderRadius = previousCodeBorderRadius;
+    pre.classList.remove("relative");
+  };
+}
+
 export function trustedHtml(
   html: string,
   markdownSource?: MarkdownSource,
@@ -271,6 +372,9 @@ export function trustedHtml(
       source: code.textContent ?? "",
     }));
     for (const { code } of blocks) code.classList.add("hljs");
+    const removeCopyButtons = blocks.map(({ code, source }) =>
+      addCodeCopyButton(code, source),
+    );
 
     const highlightable = blocks.filter(
       ({ language, source }) =>
@@ -290,6 +394,7 @@ export function trustedHtml(
     }
     return () => {
       cancelled = true;
+      for (const removeCopyButton of removeCopyButtons) removeCopyButton();
     };
   };
 }

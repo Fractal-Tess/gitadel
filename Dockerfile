@@ -19,7 +19,7 @@ RUN cargo build --release --locked \
 
 FROM debian:trixie-slim AS runtime
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates git \
+    && apt-get install --yes --no-install-recommends ca-certificates git git-lfs \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 --shell /usr/sbin/nologin gitadel \
     && install --directory --owner gitadel --group gitadel /data

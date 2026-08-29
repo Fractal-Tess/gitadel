@@ -385,6 +385,17 @@ async fn authorized_repository(
         .strip_suffix(".git")
         .ok_or_else(ApiError::not_found)?;
     let repository = state.find(namespace, name).await?;
+    if permission == LfsPermission::Read
+        && state
+            .actions()
+            .is_some_and(|actions| actions.settings().lfs_read)
+        && let Some(token) = token_from_headers(headers)
+        && crate::actions::tokens::authorize_job(state.identity().database(), &token, repository.id)
+            .await?
+            .is_some()
+    {
+        return Ok((repository, None));
+    }
 
     if let Some(token) = bearer_token(headers)
         && let Some(user_id) = state

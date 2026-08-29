@@ -1,0 +1,52 @@
+name: Publish release
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: docker
+    steps:
+      - name: Publish release and asset
+        env:
+          RELEASE_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+        run: |
+          printf '%s\n' "Build ${GITHUB_SHA}" > release.txt
+          node --input-type=module <<'NODE'
+          import { readFile } from "node:fs/promises";
+
+          const headers = {
+            authorization: `Bearer ${process.env.RELEASE_TOKEN}`,
+            "content-type": "application/json",
+          };
+          const repository = process.env.GITHUB_REPOSITORY
+            .split("/")
+            .map(encodeURIComponent)
+            .join("/");
+          const base = `${process.env.GITHUB_API_URL}/repositories/${repository}/releases`;
+          const created = await fetch(base, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              target_revision: process.env.GITHUB_SHA,
+              title: process.env.GITHUB_REF_NAME,
+              body: `Published by workflow run ${process.env.GITHUB_RUN_NUMBER}.`,
+              prerelease: false,
+            }),
+          });
+          if (!created.ok) {
+            throw new Error(`release creation failed: ${created.status} ${await created.text()}`);
+          }
+          const release = await created.json();
+          const asset = await fetch(`${base}/${release.id}/assets?name=release.txt`, {
+            method: "PUT",
+            headers: {
+              authorization: `Bearer ${process.env.RELEASE_TOKEN}`,
+              "content-type": "text/plain",
+            },
+            body: await readFile("release.txt"),
+          });
+          if (!asset.ok) {
+            throw new Error(`asset upload failed: ${asset.status} ${await asset.text()}`);
+          }
+          NODE

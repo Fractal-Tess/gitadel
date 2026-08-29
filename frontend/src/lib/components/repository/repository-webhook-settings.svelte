@@ -12,6 +12,7 @@
     Webhook,
   } from "lucide-svelte";
 
+  import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Card from "$lib/components/ui/card/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
@@ -24,6 +25,12 @@
   let editUrl = $state("");
   let editSecret = $state("");
   let openDeliveryId = $state<string | null>(null);
+  // Long-lived hooks accumulate up to 50 recorded deliveries, so the history
+  // opens on the newest few and reveals the rest on request.
+  const DELIVERY_PREVIEW_COUNT = 5;
+  let expandedDeliveryListId = $state<string | null>(null);
+  let deleteDialogOpen = $state(false);
+  let pendingDelete = $state<{ id: string; url: string } | null>(null);
 
   function formatDelivery(value: string | null) {
     if (!value) return "Not delivered";
@@ -50,6 +57,12 @@
     openDeliveryId = openDeliveryId === deliveryId ? null : deliveryId;
   }
 
+  async function toggleDeliveryHistory(hookId: string) {
+    // Reopening a hook starts from the short list again.
+    expandedDeliveryListId = null;
+    await repository.toggleWebhookDeliveries(hookId);
+  }
+
   function startEditing(id: string, url: string) {
     editingId = id;
     editUrl = url;
@@ -66,10 +79,17 @@
     }
   }
 
-  function deleteWebhook(id: string, url: string) {
-    if (globalThis.confirm(`Delete the webhook for ${url}?`)) {
-      void repository.deleteWebhook(id);
-    }
+  function requestDeleteWebhook(id: string, url: string) {
+    pendingDelete = { id, url };
+    deleteDialogOpen = true;
+  }
+
+  function confirmDeleteWebhook() {
+    const target = pendingDelete;
+    if (!target) return;
+    deleteDialogOpen = false;
+    pendingDelete = null;
+    void repository.deleteWebhook(target.id);
   }
 </script>
 
@@ -190,7 +210,7 @@
                 class="text-foreground/70 hover:text-destructive max-sm:size-11"
                 disabled={repository.webhookActionPending}
                 aria-label={`Delete webhook for ${hook.config.url}`}
-                onclick={() => deleteWebhook(hook.id, hook.config.url)}
+                onclick={() => requestDeleteWebhook(hook.id, hook.config.url)}
               >
                 <Trash2 class="size-3.5" />
               </Button>
@@ -261,7 +281,7 @@
                 variant="ghost"
                 class="gap-2"
                 aria-expanded={repository.expandedWebhookId === hook.id}
-                onclick={() => void repository.toggleWebhookDeliveries(hook.id)}
+                onclick={() => void toggleDeliveryHistory(hook.id)}
               >
                 <History class="size-3.5" />
                 Recent deliveries
@@ -282,11 +302,16 @@
                     repository to trigger one.
                   </p>
                 {:else}
+                  {@const deliveries =
+                    repository.webhookDeliveries[hook.id] ?? []}
+                  {@const collapsed =
+                    expandedDeliveryListId !== hook.id &&
+                    deliveries.length > DELIVERY_PREVIEW_COUNT}
                   <ul
                     class="mt-2 divide-y rounded-md border text-sm"
                     aria-label={`Recent deliveries for ${hook.config.url}`}
                   >
-                    {#each repository.webhookDeliveries[hook.id] as delivery (delivery.id)}
+                    {#each collapsed ? deliveries.slice(0, DELIVERY_PREVIEW_COUNT) : deliveries as delivery (delivery.id)}
                       <li>
                         <div
                           class="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2"
@@ -383,6 +408,25 @@
                       </li>
                     {/each}
                   </ul>
+                  {#if deliveries.length > DELIVERY_PREVIEW_COUNT}
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      class="mt-2 gap-2"
+                      aria-expanded={!collapsed}
+                      onclick={() =>
+                        (expandedDeliveryListId = collapsed ? hook.id : null)}
+                    >
+                      {#if collapsed}
+                        <ChevronDown class="size-3.5" />
+                        Show {deliveries.length - DELIVERY_PREVIEW_COUNT} more
+                      {:else}
+                        <ChevronUp class="size-3.5" />
+                        Show fewer
+                      {/if}
+                    </Button>
+                  {/if}
                 {/if}
               {/if}
             </div>
@@ -459,3 +503,18 @@
     </form>
   </Card.Content>
 </Card.Root>
+
+<AlertDialog.Root bind:open={deleteDialogOpen}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>Delete webhook?</AlertDialog.Title>
+      <AlertDialog.Description>
+        This will delete the webhook for {pendingDelete?.url ?? "this endpoint"} and stop deliveries. This cannot be undone.
+      </AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Action variant="destructive" onclick={confirmDeleteWebhook}>Delete webhook</AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>

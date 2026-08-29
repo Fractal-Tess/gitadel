@@ -157,7 +157,7 @@
     <div class="p-4 {className}">
       {#if previewHtml}
         <div
-          class="prose prose-invert max-w-none text-sm prose-code:before:content-none prose-code:after:content-none"
+          class="prose max-w-none text-sm prose-code:before:content-none prose-code:after:content-none dark:prose-invert"
           {@attach trustedHtml(previewHtml)}
         ></div>
       {:else}

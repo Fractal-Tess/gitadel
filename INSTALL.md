@@ -124,7 +124,7 @@ Common command-line options also have aliases including `GITADEL_CONFIG`, `GITAD
 
 ## Backups
 
-Backups are offline so the storage lock can guarantee one consistent snapshot. Stop the service before creating one:
+CLI backups are offline so the storage lock can guarantee one consistent snapshot. Stop the service before creating one:
 
 ```bash
 mkdir -p backups
@@ -134,4 +134,38 @@ docker compose run --rm -v "$PWD/backups:/backups" \
 docker compose start gitadel
 ```
 
-Each archive includes a SHA-256 manifest. Restore rejects changed, missing, or extra files and only writes into empty configured storage paths. Run `gitadel backup restore --help` for the restore command.
+The archive contains the SQLite database (users, instance settings, credentials, and all other relational state), repositories and their attachments, LFS and release assets, the SSH host key, and the effective Gitadel configuration. Every file is covered by a SHA-256 manifest. Restore rejects changed, missing, or extra files and only writes database and storage data into empty configured paths:
+
+```bash
+gitadel backup restore /backups/gitadel-backup.tar.zst
+```
+
+For an S3-compatible store, configure its API origin and bucket. The endpoint must be the S3 API origin, not a web-console URL:
+
+```toml
+[backup.s3]
+endpoint = "https://s3.example.com"
+bucket = "gitadel"
+region = "us-east-1"
+prefix = "backups"
+```
+
+Supply credentials through the environment when the configuration file is not secret:
+
+```ini
+GITADEL__BACKUP__S3__ACCESS_KEY=access-key
+GITADEL__BACKUP__S3__SECRET_KEY=secret-key
+```
+
+While Gitadel is running, administrators manage backup providers under **Settings → Backups**. The catalog supports filesystem directories on the Gitadel host and S3-compatible storage. A destination must pass a write test before it can be saved, and each provider has its own automatic schedule. An existing `[backup.s3]` entry appears as a managed provider; editing or scheduling it stores a database-backed copy. The page lists snapshots for the selected provider, creates a current-instance backup, downloads an archive, deletes a snapshot after confirmation, and downloads and integrity-checks a selected snapshot before restore. Automatic backups can run hourly, every six hours, daily, weekly, or on a custom five-, six-, or seven-field UTC cron expression. The form translates custom cron into plain language and shows the next run. Gitadel briefly stops its normal HTTP, SSH, and mirror services for the actual backup or replacement. A restricted maintenance endpoint keeps the page updated with the snapshot, compression, and upload phase, including byte progress during S3 transfer, until the full server starts again automatically.
+
+Online restore requires the administrator's current password and an explicit destructive-action acknowledgment. By default it first creates and verifies a safety backup of the current instance; if that backup fails, restore does not begin. The restored instance retains the running installation's bind addresses, storage paths, and selected backup provider so it can restart on the same host.
+
+Then stop Gitadel and create a backup. The command prints the unique object key:
+
+```bash
+gitadel backup create-s3
+gitadel backup restore-s3 backups/gitadel-20260827T120000Z-example.tar.zst
+```
+
+`backup create-s3 --key custom/path.tar.zst` uses an explicit key and refuses to replace an existing object. S3 uploads use multipart transfer for large archives and are verified against the stored object size. Backup archives contain credentials and password hashes; restrict bucket access and use HTTPS outside a trusted private network.

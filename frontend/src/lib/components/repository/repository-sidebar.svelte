@@ -112,11 +112,20 @@
        header; only the metadata below it scrolls. -->
   <div class="min-h-0 flex-1 divide-y xl:overflow-y-auto xl:overscroll-contain">
     <section class="p-4">
-      <h2
-        class="text-xs font-semibold uppercase tracking-wider text-muted-foreground"
-      >
-        Clone
-      </h2>
+      <div class="flex items-center justify-between gap-2">
+        <h2
+          class="text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+        >
+          Clone
+        </h2>
+        {#if repository.repository?.mirrored}
+          <span
+            class="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-sky-600 dark:text-sky-400"
+          >
+            Mirror
+          </span>
+        {/if}
+      </div>
       <div class="mt-3 space-y-2">
         {#each cloneKinds as kind (kind.id)}
           <div>

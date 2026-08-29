@@ -1,0 +1,639 @@
+use sea_orm_migration::prelude::*;
+
+#[derive(DeriveMigrationName)]
+pub struct Migration;
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(NamespaceMirrorSshKey::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(NamespaceMirrorSshKey::Namespace)
+                            .string_len(255)
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(NamespaceMirrorSshKey::PrivateKey)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(NamespaceMirrorSshKey::PublicKey)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(NamespaceMirrorSshKey::Fingerprint)
+                            .string_len(255)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(NamespaceMirrorSshKey::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(NamespaceMirrorSshKey::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk-namespace-mirror-ssh-key-namespace")
+                            .from(
+                                NamespaceMirrorSshKey::Table,
+                                NamespaceMirrorSshKey::Namespace,
+                            )
+                            .to(Namespace::Table, Namespace::Slug)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table(NamespaceMirrorIdentity::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(NamespaceMirrorIdentity::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(NamespaceMirrorIdentity::Namespace)
+                            .string_len(255)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(NamespaceMirrorIdentity::Name)
+                            .string_len(80)
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(NamespaceMirrorIdentity::Kind)
+                            .string_len(16)
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(NamespaceMirrorIdentity::Username).string_len(255))
+                    .col(
+                        ColumnDef::new(NamespaceMirrorIdentity::Secret)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(NamespaceMirrorIdentity::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(NamespaceMirrorIdentity::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk-namespace-mirror-identity-namespace")
+                            .from(
+                                NamespaceMirrorIdentity::Table,
+                                NamespaceMirrorIdentity::Namespace,
+                            )
+                            .to(Namespace::Table, Namespace::Slug)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx-namespace-mirror-identity-owner")
+                    .table(NamespaceMirrorIdentity::Table)
+                    .col(NamespaceMirrorIdentity::Namespace)
+                    .col(NamespaceMirrorIdentity::CreatedAt)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryMirror::Table)
+                    .add_column(ColumnDef::new(RepositoryMirror::IdentityId).uuid())
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryMirror::Table)
+                    .add_column(ColumnDef::new(RepositoryMirror::GithubOwner).string_len(255))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryMirror::Table)
+                    .add_column(ColumnDef::new(RepositoryMirror::GithubRepository).string_len(255))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryMirror::Table)
+                    .add_column(
+                        ColumnDef::new(RepositoryMirror::MetadataLastSyncedAt)
+                            .timestamp_with_time_zone(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryMirror::Table)
+                    .add_column(ColumnDef::new(RepositoryMirror::MetadataError).text())
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .get_connection()
+            .execute_unprepared(
+                "INSERT INTO namespace_mirror_identities \
+                 (id, namespace, name, kind, username, secret, created_at, updated_at) \
+                 SELECT m.repository_id, r.namespace, 'Migrated ' || r.name, \
+                        CASE WHEN m.username IS NULL THEN 'token' ELSE 'basic' END, \
+                        m.username, m.secret, m.created_at, m.updated_at \
+                 FROM repository_mirrors m \
+                 JOIN repositories r ON r.id = m.repository_id \
+                 WHERE m.secret IS NOT NULL",
+            )
+            .await?;
+        manager
+            .get_connection()
+            .execute_unprepared(
+                "UPDATE repository_mirrors SET identity_id = repository_id WHERE secret IS NOT NULL",
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryMirror::Table)
+                    .drop_column(RepositoryMirror::Username)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryMirror::Table)
+                    .drop_column(RepositoryMirror::Secret)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Repository::Table)
+                    .add_column(ColumnDef::new(Repository::WebsiteUrl).string_len(2048))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryTopic::Table)
+                    .add_column(ColumnDef::new(RepositoryTopic::ExternalSource).string_len(32))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryIssue::Table)
+                    .add_column(ColumnDef::new(RepositoryIssue::ExternalSource).string_len(32))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryIssue::Table)
+                    .add_column(ColumnDef::new(RepositoryIssue::ExternalId).string_len(255))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryIssue::Table)
+                    .add_column(ColumnDef::new(RepositoryIssue::ExternalUrl).string_len(2048))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryIssue::Table)
+                    .add_column(ColumnDef::new(RepositoryIssue::ExternalAuthor).string_len(255))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryIssue::Table)
+                    .add_column(ColumnDef::new(RepositoryIssue::ExternalAuthorUrl).string_len(2048))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryIssue::Table)
+                    .add_column(
+                        ColumnDef::new(RepositoryIssue::ExternalUpdatedAt)
+                            .timestamp_with_time_zone(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx-repository-issue-external")
+                    .table(RepositoryIssue::Table)
+                    .col(RepositoryIssue::RepositoryId)
+                    .col(RepositoryIssue::ExternalSource)
+                    .col(RepositoryIssue::ExternalId)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(IssueComment::Table)
+                    .add_column(ColumnDef::new(IssueComment::ExternalSource).string_len(32))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(IssueComment::Table)
+                    .add_column(ColumnDef::new(IssueComment::ExternalId).string_len(255))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(IssueComment::Table)
+                    .add_column(ColumnDef::new(IssueComment::ExternalUrl).string_len(2048))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(IssueComment::Table)
+                    .add_column(ColumnDef::new(IssueComment::ExternalAuthor).string_len(255))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(IssueComment::Table)
+                    .add_column(ColumnDef::new(IssueComment::ExternalAuthorUrl).string_len(2048))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(IssueComment::Table)
+                    .add_column(
+                        ColumnDef::new(IssueComment::ExternalUpdatedAt).timestamp_with_time_zone(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx-issue-comment-external")
+                    .table(IssueComment::Table)
+                    .col(IssueComment::IssueId)
+                    .col(IssueComment::ExternalSource)
+                    .col(IssueComment::ExternalId)
+                    .unique()
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_index(
+                Index::drop()
+                    .name("idx-issue-comment-external")
+                    .table(IssueComment::Table)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(IssueComment::Table)
+                    .drop_column(IssueComment::ExternalUpdatedAt)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(IssueComment::Table)
+                    .drop_column(IssueComment::ExternalAuthorUrl)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(IssueComment::Table)
+                    .drop_column(IssueComment::ExternalAuthor)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(IssueComment::Table)
+                    .drop_column(IssueComment::ExternalUrl)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(IssueComment::Table)
+                    .drop_column(IssueComment::ExternalId)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(IssueComment::Table)
+                    .drop_column(IssueComment::ExternalSource)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_index(
+                Index::drop()
+                    .name("idx-repository-issue-external")
+                    .table(RepositoryIssue::Table)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryIssue::Table)
+                    .drop_column(RepositoryIssue::ExternalUpdatedAt)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryIssue::Table)
+                    .drop_column(RepositoryIssue::ExternalAuthorUrl)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryIssue::Table)
+                    .drop_column(RepositoryIssue::ExternalAuthor)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryIssue::Table)
+                    .drop_column(RepositoryIssue::ExternalUrl)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryIssue::Table)
+                    .drop_column(RepositoryIssue::ExternalId)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryIssue::Table)
+                    .drop_column(RepositoryIssue::ExternalSource)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryTopic::Table)
+                    .drop_column(RepositoryTopic::ExternalSource)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Repository::Table)
+                    .drop_column(Repository::WebsiteUrl)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryMirror::Table)
+                    .add_column(ColumnDef::new(RepositoryMirror::Username).string_len(255))
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryMirror::Table)
+                    .add_column(ColumnDef::new(RepositoryMirror::Secret).text())
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .get_connection()
+            .execute_unprepared(
+                "UPDATE repository_mirrors \
+                 SET username = (SELECT username FROM namespace_mirror_identities i WHERE i.id = identity_id), \
+                     secret = (SELECT secret FROM namespace_mirror_identities i WHERE i.id = identity_id)",
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryMirror::Table)
+                    .drop_column(RepositoryMirror::MetadataError)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryMirror::Table)
+                    .drop_column(RepositoryMirror::MetadataLastSyncedAt)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryMirror::Table)
+                    .drop_column(RepositoryMirror::GithubRepository)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryMirror::Table)
+                    .drop_column(RepositoryMirror::GithubOwner)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(RepositoryMirror::Table)
+                    .drop_column(RepositoryMirror::IdentityId)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(NamespaceMirrorIdentity::Table)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_table(Table::drop().table(NamespaceMirrorSshKey::Table).to_owned())
+            .await
+    }
+}
+
+#[derive(DeriveIden)]
+enum Namespace {
+    #[sea_orm(iden = "namespaces")]
+    Table,
+    Slug,
+}
+
+#[derive(DeriveIden)]
+enum NamespaceMirrorSshKey {
+    #[sea_orm(iden = "namespace_mirror_ssh_keys")]
+    Table,
+    Namespace,
+    PrivateKey,
+    PublicKey,
+    Fingerprint,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
+enum NamespaceMirrorIdentity {
+    #[sea_orm(iden = "namespace_mirror_identities")]
+    Table,
+    Id,
+    Namespace,
+    Name,
+    Kind,
+    Username,
+    Secret,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
+enum RepositoryMirror {
+    #[sea_orm(iden = "repository_mirrors")]
+    Table,
+    IdentityId,
+    GithubOwner,
+    GithubRepository,
+    MetadataLastSyncedAt,
+    MetadataError,
+    Username,
+    Secret,
+}
+
+#[derive(DeriveIden)]
+enum Repository {
+    #[sea_orm(iden = "repositories")]
+    Table,
+    WebsiteUrl,
+}
+
+#[derive(DeriveIden)]
+enum RepositoryTopic {
+    #[sea_orm(iden = "repository_topics")]
+    Table,
+    ExternalSource,
+}
+
+#[derive(DeriveIden)]
+enum RepositoryIssue {
+    #[sea_orm(iden = "repository_issues")]
+    Table,
+    RepositoryId,
+    ExternalSource,
+    ExternalId,
+    ExternalUrl,
+    ExternalAuthor,
+    ExternalAuthorUrl,
+    ExternalUpdatedAt,
+}
+
+#[derive(DeriveIden)]
+enum IssueComment {
+    #[sea_orm(iden = "issue_comments")]
+    Table,
+    IssueId,
+    ExternalSource,
+    ExternalId,
+    ExternalUrl,
+    ExternalAuthor,
+    ExternalAuthorUrl,
+    ExternalUpdatedAt,
+}

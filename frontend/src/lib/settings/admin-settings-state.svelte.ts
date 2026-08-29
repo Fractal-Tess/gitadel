@@ -1,13 +1,14 @@
-import { z } from "zod";
-
 import {
   ApiFailure,
-  auditEventSchema,
   invitationSchema,
   jsonBody,
   requestJson,
   type AuditEvent,
 } from "$lib/api.js";
+import {
+  loadAdminActivity,
+  refreshAdminActivity,
+} from "$lib/navigation-cache.js";
 
 export class AdminSettingsState {
   auditEvents = $state.raw<AuditEvent[]>([]);
@@ -18,10 +19,7 @@ export class AdminSettingsState {
 
   async initialize(): Promise<void> {
     await this.run(async () => {
-      this.auditEvents = await requestJson(
-        "/api/v1/audit?limit=100",
-        z.array(auditEventSchema),
-      );
+      this.auditEvents = await loadAdminActivity();
     });
   }
 
@@ -36,10 +34,7 @@ export class AdminSettingsState {
         },
       );
       this.invitation = response.token;
-      this.auditEvents = await requestJson(
-        "/api/v1/audit?limit=100",
-        z.array(auditEventSchema),
-      );
+      this.auditEvents = await refreshAdminActivity();
     });
   }
 

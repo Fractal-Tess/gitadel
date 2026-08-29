@@ -1,20 +1,36 @@
 <script lang="ts">
   import { page } from "$app/state";
   import { resolve } from "$app/paths";
+  import { cubicOut } from "svelte/easing";
+  import { prefersReducedMotion } from "svelte/motion";
+  import { crossfade } from "svelte/transition";
   import {
+    Building2,
+    CircleDot,
     Compass,
+    FileCode2,
+    Heart,
+    History,
+    Package,
     PanelLeftClose,
     PanelLeftOpen,
     ScrollText,
     Settings2,
-    Star,
+    ShieldCheck,
+    Tag,
+    UserRound,
+    Workflow,
   } from "lucide-svelte";
+  import { organizationAvatarUrl } from "$lib/api.js";
 
-  import * as Sheet from "$lib/components/ui/sheet/index.js";
+  import * as Avatar from "$lib/components/ui/avatar/index.js";
+  import * as Sidebar from "$lib/components/ui/sidebar/index.js";
   import {
+    preloadAdminActivity,
     preloadAccountSettings,
     preloadExplore,
   } from "$lib/navigation-cache.js";
+  import { repositorySettingsSections } from "$lib/repository/settings-sections.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
   import {
     useShellState,
@@ -22,47 +38,202 @@
   } from "$lib/state/shell-state.svelte.js";
 
   const app = useAppState();
+  const sidebar = Sidebar.useSidebar();
   const shell = useShellState();
   const viewer = $derived(app.authStatus?.user?.username);
+  // Only the desktop rail shrinks to icons; the mobile sheet is always full
+  // width, so it never needs the label as a tooltip.
+  const collapsed = $derived(
+    sidebar.state === "collapsed" && !sidebar.isMobile,
+  );
+
+  // Where the rail sits is the one thing it has to say clearly, so an idle row
+  // is dimmed, hovering restores full contrast, and the current page also keeps
+  // a white marker: two signals rather than one faint tint.
+  const row =
+    "relative isolate gap-3 px-3 text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground data-active:bg-transparent! data-active:font-normal data-active:text-foreground data-active:shadow-none! group-data-[collapsible=icon]:size-10! group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:gap-0 group-data-[collapsible=icon]:p-0! group-data-[collapsible=icon]:[&>span:not(.rail-highlight)]:hidden";
+  const menuRow = `h-10 ${row}`;
+  const subRow = `h-9 w-full justify-start text-left ${row}`;
+  const [sendHighlight, receiveHighlight] = crossfade({
+    duration: () => (prefersReducedMotion.current ? 0 : 220),
+    easing: cubicOut,
+    fallback: () => ({ duration: 0 }),
+  });
+
+  type RailSubLink = {
+    label: string;
+    href: string;
+    icon: ShellIcon;
+    active: boolean;
+  };
 
   type RailLink = {
     label: string;
     href: string;
     icon: ShellIcon;
     active: boolean;
+    avatarUrl?: string | null;
     preload?: () => void;
+    items?: RailSubLink[];
   };
 
-  const browseLinks = $derived.by<RailLink[]>(() => {
+  const exploreLinks = $derived.by<RailLink[]>(() => {
     const onExplore = page.url.pathname === "/";
-    const tab = page.url.searchParams.get("tab");
     return [
       {
-        label: "All repositories",
+        label: "Explore",
         href: resolve("/"),
         icon: Compass,
-        active: onExplore && tab !== "favorites",
-        preload: () => preloadExplore(viewer),
-      },
-      {
-        label: "Favorites",
-        href: `${resolve("/")}?tab=favorites`,
-        icon: Star,
-        active: onExplore && tab === "favorites",
+        active: onExplore && !page.url.searchParams.has("tab"),
         preload: () => preloadExplore(viewer),
       },
     ];
   });
 
+  const repositoryLinks = $derived.by<RailLink[]>(() => {
+    const namespace = page.params.namespace;
+    const repositoryName = page.params.name;
+    if (!namespace || !repositoryName) return [];
+    const base = resolve("/[namespace]/[name]", {
+      namespace,
+      name: repositoryName,
+    });
+    const view = page.url.searchParams.get("view") ?? "overview";
+    const current =
+      shell.activeRepository?.namespace === namespace &&
+      shell.activeRepository.name === repositoryName
+        ? shell.activeRepository
+        : null;
+    return [
+      {
+        label: "Code",
+        href: base,
+        icon: FileCode2,
+        active: view === "overview",
+      },
+      {
+        label: "History",
+        href: `${base}?view=history`,
+        icon: History,
+        active: view === "history" || view === "commit",
+      },
+      {
+        label: "Actions",
+        href: `${base}?view=actions`,
+        icon: Workflow,
+        active: view === "actions",
+      },
+      {
+        label: "Issues",
+        href: `${base}?view=issues`,
+        icon: CircleDot,
+        active: view === "issues",
+      },
+      {
+        label: "Releases",
+        href: `${base}?view=releases`,
+        icon: Package,
+        active: view === "releases",
+      },
+      {
+        label: "Tags",
+        href: `${base}?view=tags`,
+        icon: Tag,
+        active: view === "tags",
+      },
+      ...(current?.canManage
+        ? [
+            {
+              label: "Settings",
+              href: `${base}?view=settings`,
+              icon: Settings2,
+              active: view === "settings" || view === "integrations",
+              items: repositorySettingsSections
+                .filter(
+                  (section) => section.id !== "mirror" || current.mirrored,
+                )
+                .map((section) => ({
+                  label: section.label,
+                  href: `${base}?view=settings${
+                    section.id === "general" ? "" : `&tab=${section.id}`
+                  }`,
+                  icon: section.icon,
+                  active:
+                    view === "settings" &&
+                    (page.url.searchParams.get("tab") ?? "general") ===
+                      section.id,
+                })),
+            },
+          ]
+        : []),
+    ];
+  });
+
+  const personalLinks = $derived.by<RailLink[]>(() => {
+    if (!viewer) return [];
+    return [
+      {
+        label: viewer,
+        href: resolve("/[namespace]", { namespace: viewer }),
+        icon: UserRound,
+        active: page.params.namespace === viewer,
+        preload: () => preloadExplore(viewer, viewer),
+      },
+      {
+        label: "Favorites",
+        href: `${resolve("/")}?tab=favorites`,
+        icon: Heart,
+        active:
+          page.url.pathname === "/" &&
+          page.url.searchParams.get("tab") === "favorites",
+        preload: () => preloadExplore(viewer),
+      },
+    ];
+  });
+
+  const organizationLinks = $derived.by<RailLink[]>(() =>
+    app.organizations.map((organization) => ({
+      label: organization.display_name || organization.slug,
+      href: resolve("/[namespace]", { namespace: organization.slug }),
+      icon: Building2,
+      avatarUrl: organizationAvatarUrl(
+        organization.slug,
+        organization.avatar_updated_at,
+      ),
+      active:
+        page.params.namespace === organization.slug ||
+        page.params.slug === organization.slug,
+      preload: () => preloadExplore(viewer, organization.slug),
+    })),
+  );
+
   const manageLinks = $derived.by<RailLink[]>(() => {
-    const links: RailLink[] = [];
-    if (app.authStatus?.authenticated) {
-      links.push({
+    if (!app.authStatus?.authenticated) {
+      return [
+        {
+          label: "Changelog",
+          href: resolve("/changelog"),
+          icon: ScrollText,
+          active: page.url.pathname === "/changelog",
+        },
+      ];
+    }
+    const links: RailLink[] = [
+      {
         label: "Account settings",
-        href: resolve("/settings"),
+        href: resolve("/-/account/[view]", { view: "profile" }),
         icon: Settings2,
-        active: page.url.pathname === "/settings",
+        active: page.url.pathname.startsWith("/-/account"),
         preload: () => preloadAccountSettings(viewer),
+      },
+    ];
+    if (app.authStatus.user?.is_admin) {
+      links.push({
+        label: "Administration",
+        href: resolve("/-/administration/[view]", { view: "appearance" }),
+        icon: ShieldCheck,
+        active: page.url.pathname.startsWith("/-/administration"),
+        preload: preloadAdminActivity,
       });
     }
     links.push({
@@ -73,132 +244,139 @@
     });
     return links;
   });
+
+  function dismissMobile(): void {
+    sidebar.setOpenMobile(false);
+  }
 </script>
 
-{#snippet body(collapsed: boolean, desktop = false)}
-  {@const row = collapsed
-    ? "flex h-9 items-center justify-center rounded-md"
-    : "flex h-9 items-center gap-3 rounded-md px-3"}
-  {@const idle = "text-muted-foreground hover:bg-accent hover:text-foreground"}
-  {@const on = "bg-accent font-medium text-foreground"}
-  {@const heading =
-    "px-3 pb-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/70"}
-
-  <div class="flex min-h-0 flex-1 flex-col overflow-y-auto py-4">
-    <nav class="space-y-1 px-2" aria-label="Browse">
-      {#if !collapsed}<p class={heading}>Browse</p>{/if}
-      {#each browseLinks as link (link.label)}
-        <a
-          class="{row} {link.active ? on : idle} text-sm"
-          href={link.href}
-          aria-current={link.active ? "page" : undefined}
-          aria-label={collapsed ? link.label : undefined}
-          title={collapsed ? link.label : undefined}
-          onpointerenter={link.preload}
-          onfocus={link.preload}
-          onclick={() => (shell.railMobileOpen = false)}
-        >
-          <link.icon class="size-4 shrink-0" />
-          {#if !collapsed}<span class="truncate">{link.label}</span>{/if}
-        </a>
-      {/each}
-    </nav>
-
-    {#if shell.navGroup}
-      <nav
-        class="mt-5 space-y-1 border-t px-2 pt-5"
-        aria-label={shell.navGroup.label}
-      >
-        {#if !collapsed}<p class={heading}>{shell.navGroup.label}</p>{/if}
-        {#each shell.navGroup.items as item (item.id)}
-          <button
-            class="{row} {item.active ? on : idle} w-full text-left text-sm"
-            aria-current={item.active ? "page" : undefined}
-            aria-label={collapsed ? item.label : undefined}
-            title={collapsed ? item.label : undefined}
-            onclick={() => {
-              item.select();
-              shell.railMobileOpen = false;
-            }}
-          >
-            <item.icon class="size-4 shrink-0" />
-            {#if !collapsed}<span class="truncate">{item.label}</span>{/if}
-          </button>
-        {/each}
-      </nav>
-    {/if}
-
-    <div class="mt-auto border-t px-2 pt-4">
-      {#if desktop}
-        <button
-          type="button"
-          class="{row} {idle} mb-1 w-full text-left text-sm"
-          aria-label={collapsed ? "Expand navigation" : "Collapse navigation"}
-          aria-expanded={!collapsed}
-          aria-controls="app-navigation"
-          title={collapsed ? "Expand navigation" : undefined}
-          onclick={() => shell.toggleRail()}
-        >
-          {#if collapsed}
-            <PanelLeftOpen class="size-4 shrink-0" />
-          {:else}
-            <PanelLeftClose class="size-4 shrink-0" />
-            <span class="truncate">Collapse sidebar</span>
-          {/if}
-        </button>
-      {/if}
-
-      <nav class="space-y-1" aria-label="Manage">
-        {#each manageLinks as link (link.label)}
-          <a
-            class="{row} {link.active ? on : idle} text-sm"
-            href={link.href}
-            aria-current={link.active ? "page" : undefined}
-            aria-label={collapsed ? link.label : undefined}
-            title={collapsed ? link.label : undefined}
-            onpointerenter={link.preload}
-            onfocus={link.preload}
-            onclick={() => (shell.railMobileOpen = false)}
-          >
-            <link.icon class="size-4 shrink-0" />
-            {#if !collapsed}<span class="truncate">{link.label}</span>{/if}
-          </a>
-        {/each}
-      </nav>
-    </div>
-  </div>
+{#snippet activeHighlight(key: string)}
+  <span
+    class="rail-highlight pointer-events-none absolute inset-0 -z-10 rounded-md bg-sidebar-accent shadow-[inset_3px_0_0_0_white]"
+    aria-hidden="true"
+    in:receiveHighlight={{ key }}
+    out:sendHighlight={{ key }}
+  ></span>
 {/snippet}
 
-<aside
-  id="app-navigation"
-  class="relative hidden shrink-0 border-r transition-[width] duration-150 md:flex md:flex-col {shell.railOpen
-    ? 'w-60'
-    : 'w-14'}"
->
-  {@render body(!shell.railOpen, true)}
+{#snippet linkMenu(links: RailLink[], label: string, highlightKey: string)}
+  <Sidebar.Menu aria-label={label}>
+    {#each links as link (link.label)}
+      <Sidebar.MenuItem>
+        <Sidebar.MenuButton isActive={link.active} class={menuRow}>
+          {#snippet child({ props })}
+            <a
+              {...props}
+              href={link.href}
+              aria-current={link.active ? "page" : undefined}
+              title={collapsed ? link.label : undefined}
+              onpointerenter={link.preload}
+              onfocus={link.preload}
+              onclick={dismissMobile}
+            >
+              {#if link.active}
+                {@render activeHighlight(highlightKey)}
+              {/if}
+              {#if link.avatarUrl}
+                <Avatar.Root class="size-4 shrink-0">
+                  <Avatar.Image src={link.avatarUrl} alt="" />
+                  <Avatar.Fallback>
+                    <Building2 class="size-3" />
+                  </Avatar.Fallback>
+                </Avatar.Root>
+              {:else}
+                <link.icon />
+              {/if}
+              <span>{link.label}</span>
+            </a>
+          {/snippet}
+        </Sidebar.MenuButton>
+        {#if link.active && link.items?.length}
+          <Sidebar.MenuSub>
+            {#each link.items as item (item.label)}
+              <Sidebar.MenuSubItem>
+                <Sidebar.MenuSubButton isActive={item.active} class={subRow}>
+                  {#snippet child({ props })}
+                    <a
+                      {...props}
+                      href={item.href}
+                      aria-current={item.active ? "page" : undefined}
+                      onclick={dismissMobile}
+                    >
+                      <item.icon />
+                      <span>{item.label}</span>
+                    </a>
+                  {/snippet}
+                </Sidebar.MenuSubButton>
+              </Sidebar.MenuSubItem>
+            {/each}
+          </Sidebar.MenuSub>
+        {/if}
+      </Sidebar.MenuItem>
+    {/each}
+  </Sidebar.Menu>
+{/snippet}
 
-  <button
-    type="button"
-    class="absolute inset-y-0 -right-2 z-20 hidden w-4 {shell.railOpen
-      ? 'cursor-w-resize'
-      : 'cursor-e-resize'} after:absolute after:inset-y-0 after:left-1/2 after:w-[2px] after:-translate-x-1/2 after:bg-transparent after:transition-colors hover:after:bg-border md:block"
-    aria-label={shell.railOpen ? "Collapse navigation" : "Expand navigation"}
-    aria-expanded={shell.railOpen}
-    aria-controls="app-navigation"
-    tabindex={-1}
-    title={shell.railOpen ? "Collapse navigation" : "Expand navigation"}
-    onclick={() => shell.toggleRail()}
-  ></button>
-</aside>
+<!-- The shell keeps its own full-width header, so the rail starts below it
+     instead of taking the whole viewport height the way shadcn's default
+     dashboard layout does. -->
+<Sidebar.Root collapsible="icon" class="md:top-16 md:h-[calc(100svh-4rem)]">
+  <Sidebar.Content class="py-2">
+    <Sidebar.Group>
+      <Sidebar.GroupContent>
+        {@render linkMenu(exploreLinks, "Explore", "places")}
+      </Sidebar.GroupContent>
+    </Sidebar.Group>
 
-<Sheet.Root bind:open={shell.railMobileOpen}>
-  <Sheet.Content side="left" class="w-64 p-0">
-    <Sheet.Header class="sr-only">
-      <Sheet.Title>Navigation</Sheet.Title>
-      <Sheet.Description>Browse repositories and settings.</Sheet.Description>
-    </Sheet.Header>
-    <div class="flex h-full flex-col">
-      {@render body(false)}
-    </div>
-  </Sheet.Content>
-</Sheet.Root>
+    {#if personalLinks.length}
+      <Sidebar.Group class="mt-3 border-t pt-3">
+        <Sidebar.GroupLabel>Personal</Sidebar.GroupLabel>
+        <Sidebar.GroupContent>
+          {@render linkMenu(personalLinks, "Personal", "places")}
+        </Sidebar.GroupContent>
+      </Sidebar.Group>
+    {/if}
+
+    {#if organizationLinks.length}
+      <Sidebar.Group class="mt-3 border-t pt-3">
+        <Sidebar.GroupLabel>Organizations</Sidebar.GroupLabel>
+        <Sidebar.GroupContent>
+          {@render linkMenu(organizationLinks, "Organizations", "places")}
+        </Sidebar.GroupContent>
+      </Sidebar.Group>
+    {/if}
+
+    {#if repositoryLinks.length}
+      <Sidebar.Group class="mt-3 border-t pt-3">
+        <Sidebar.GroupLabel>Repository</Sidebar.GroupLabel>
+        <Sidebar.GroupContent>
+          {@render linkMenu(repositoryLinks, "Repository", "repository")}
+        </Sidebar.GroupContent>
+      </Sidebar.Group>
+    {/if}
+  </Sidebar.Content>
+
+  <Sidebar.Footer class="mt-auto border-t">
+    <Sidebar.Menu>
+      <Sidebar.MenuItem class="hidden md:block">
+        <Sidebar.MenuButton
+          class={menuRow}
+          aria-label={collapsed ? "Expand navigation" : "Collapse navigation"}
+          aria-expanded={!collapsed}
+          title={collapsed ? "Expand navigation" : undefined}
+          onclick={() => sidebar.toggle()}
+        >
+          {#if collapsed}
+            <PanelLeftOpen />
+          {:else}
+            <PanelLeftClose />
+            <span>Collapse sidebar</span>
+          {/if}
+        </Sidebar.MenuButton>
+      </Sidebar.MenuItem>
+    </Sidebar.Menu>
+    {@render linkMenu(manageLinks, "Manage", "manage")}
+  </Sidebar.Footer>
+
+  <Sidebar.Rail />
+</Sidebar.Root>

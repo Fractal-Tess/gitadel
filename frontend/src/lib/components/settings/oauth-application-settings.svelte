@@ -2,16 +2,29 @@
   import { Check, Clipboard, KeyRound, Trash2 } from "lucide-svelte";
   import { toast } from "svelte-sonner";
 
+  import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
-  import * as Card from "$lib/components/ui/card/index.js";
+  import * as Dialog from "$lib/components/ui/dialog/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
   import type { AccountSettingsState } from "$lib/settings/account-settings-state.svelte.js";
 
-  let { state: account }: { state: AccountSettingsState } = $props();
+  let {
+    state: account,
+    showHeader = true,
+  }: {
+    state: AccountSettingsState;
+    showHeader?: boolean;
+  } = $props();
+  let createDialogOpen = $state(false);
   let revokeDialogOpen = $state(false);
   let pendingApplication = $state<{ id: string; name: string } | null>(null);
+
+  const timestampFormatter = new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
 
   async function copyCredential(value: string, label: string) {
     try {
@@ -36,6 +49,11 @@
     }
   }
 
+  async function createApplication() {
+    await account.createOauthApplication();
+    if (!account.error) createDialogOpen = false;
+  }
+
   function requestRevoke(id: string, name: string) {
     pendingApplication = { id, name };
     revokeDialogOpen = true;
@@ -51,195 +69,218 @@
   }
 </script>
 
-<div class="grid gap-5 lg:grid-cols-[minmax(0,1.2fr)_minmax(20rem,0.8fr)]">
-  <Card.Root class="ring-foreground/20">
-    <Card.Header class="border-b">
+<section
+  class="space-y-6"
+  aria-labelledby={showHeader ? "oauth-applications-heading" : undefined}
+  aria-label={showHeader ? undefined : "OAuth applications"}
+>
+  {#if showHeader}
+    <header>
+      <h2
+        id="oauth-applications-heading"
+        class="text-lg font-semibold tracking-tight"
+      >
+        OAuth applications
+      </h2>
+      <p class="mt-1.5 max-w-2xl text-sm leading-6 text-muted-foreground">
+        Register clients that need access to your Gitadel account.
+      </p>
+    </header>
+  {/if}
+
+  {#if account.createdOauthClientId && account.createdOauthClientSecret}
+    <section
+      class="grid gap-3 rounded-lg border border-amber-400/35 bg-amber-400/5 p-4"
+      aria-labelledby="new-oauth-credentials"
+    >
       <div class="flex items-start gap-3">
-        <KeyRound class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+        <Check class="mt-0.5 size-4 shrink-0 text-amber-300" />
         <div>
-          <Card.Title>OAuth applications</Card.Title>
-          <Card.Description>
-            Register clients that need access to your Gitadel account.
-          </Card.Description>
+          <h3 id="new-oauth-credentials" class="text-sm font-semibold">
+            Save these credentials now
+          </h3>
+          <p class="mt-1 text-xs leading-5 text-muted-foreground">
+            The client secret is shown once. Copy both values before leaving
+            this page.
+          </p>
         </div>
       </div>
-    </Card.Header>
-    <Card.Content class="grid gap-5">
-      {#if account.createdOauthClientId && account.createdOauthClientSecret}
-        <section
-          class="grid gap-3 rounded-lg border border-amber-400/35 bg-amber-400/5 p-4"
-          aria-labelledby="new-oauth-credentials"
-        >
-          <div class="flex items-start gap-3">
-            <Check class="mt-0.5 size-4 shrink-0 text-amber-300" />
-            <div>
-              <h3 id="new-oauth-credentials" class="text-sm font-semibold">
-                Save these credentials now
-              </h3>
-              <p class="mt-1 text-xs leading-5 text-muted-foreground">
-                The client secret is shown once. Copy both values into your
-                client before leaving this page.
-              </p>
-            </div>
-          </div>
 
-          <div class="grid gap-3 sm:grid-cols-2">
-            <Field.Field>
-              <Field.Label for="oauth-client-id">Client ID</Field.Label>
-              <div class="flex gap-2">
-                <Input
-                  id="oauth-client-id"
-                  class="font-mono text-xs"
-                  value={account.createdOauthClientId}
-                  readonly
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  aria-label="Copy client ID"
-                  onclick={() =>
-                    void copyCredential(
-                      account.createdOauthClientId!,
-                      "Client ID",
-                    )}
-                >
-                  <Clipboard class="size-4" />
-                </Button>
-              </div>
-            </Field.Field>
-            <Field.Field>
-              <Field.Label for="oauth-client-secret">Client secret</Field.Label>
-              <div class="flex gap-2">
-                <Input
-                  id="oauth-client-secret"
-                  class="font-mono text-xs"
-                  value={account.createdOauthClientSecret}
-                  readonly
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  aria-label="Copy client secret"
-                  onclick={() =>
-                    void copyCredential(
-                      account.createdOauthClientSecret!,
-                      "Client secret",
-                    )}
-                >
-                  <Clipboard class="size-4" />
-                </Button>
-              </div>
-            </Field.Field>
-          </div>
-        </section>
-      {/if}
-
-      <ul class="divide-y rounded-lg border">
-        {#each account.oauthApplications as application (application.id)}
-          <li class="flex items-start justify-between gap-4 p-4">
-            <div class="min-w-0">
-              <p class="font-medium">{application.name}</p>
-              <dl class="mt-2 grid gap-1 text-xs text-muted-foreground">
-                <div class="flex min-w-0 gap-2">
-                  <dt class="shrink-0 font-medium text-foreground/80">
-                    Client ID
-                  </dt>
-                  <dd class="truncate font-mono">{application.client_id}</dd>
-                </div>
-                <div class="flex min-w-0 gap-2">
-                  <dt class="shrink-0 font-medium text-foreground/80">
-                    Redirect
-                  </dt>
-                  <dd class="truncate">{application.redirect_uri}</dd>
-                </div>
-              </dl>
-            </div>
+      <div class="grid gap-3 sm:grid-cols-2">
+        <Field.Field>
+          <Field.Label for="oauth-client-id">Client ID</Field.Label>
+          <div class="flex gap-2">
+            <Input
+              id="oauth-client-id"
+              class="font-mono text-xs"
+              value={account.createdOauthClientId}
+              readonly
+            />
             <Button
               type="button"
-              size="sm"
               variant="outline"
-              class="shrink-0 gap-2"
-              onclick={() => requestRevoke(application.id, application.name)}
+              aria-label="Copy client ID"
+              onclick={() =>
+                void copyCredential(account.createdOauthClientId!, "Client ID")}
             >
-              <Trash2 class="size-3.5" />Revoke
+              <Clipboard class="size-4" />
             </Button>
-          </li>
-        {:else}
-          <li class="p-5 text-sm text-muted-foreground">
-            No OAuth applications yet. Create one with the redirect URI provided
-            by the client you want to connect.
-          </li>
-        {/each}
-      </ul>
-    </Card.Content>
-  </Card.Root>
-
-  <div class="grid content-start gap-5">
-    <section class="rounded-lg border bg-muted/25 p-5">
-      <h2 class="text-sm font-semibold">Connect a client</h2>
-      <ol class="mt-3 grid gap-2 text-sm leading-6 text-muted-foreground">
-        <li>
-          <strong class="text-foreground">1.</strong> Copy the redirect URI from the
-          client you want to connect.
-        </li>
-        <li>
-          <strong class="text-foreground">2.</strong> Create an application below
-          using that exact URI.
-        </li>
-        <li>
-          <strong class="text-foreground">3.</strong> Copy the generated client ID
-          and secret back into the client.
-        </li>
-      </ol>
-      <p class="mt-3 text-xs leading-5 text-muted-foreground">
-        Use this Gitadel installation as the server URL. The client will request
-        access when you authorize it.
-      </p>
-    </section>
-
-    <form
-      class="grid gap-4 rounded-lg border bg-card/25 p-5"
-      onsubmit={(event) => {
-        event.preventDefault();
-        void account.createOauthApplication();
-      }}
-    >
-      <div>
-        <h2 class="text-sm font-semibold">Create application</h2>
-        <p class="mt-1 text-xs leading-5 text-muted-foreground">
-          The redirect URI must match the client's value exactly, including the
-          scheme and path.
-        </p>
+          </div>
+        </Field.Field>
+        <Field.Field>
+          <Field.Label for="oauth-client-secret">Client secret</Field.Label>
+          <div class="flex gap-2">
+            <Input
+              id="oauth-client-secret"
+              class="font-mono text-xs"
+              value={account.createdOauthClientSecret}
+              readonly
+            />
+            <Button
+              type="button"
+              variant="outline"
+              aria-label="Copy client secret"
+              onclick={() =>
+                void copyCredential(
+                  account.createdOauthClientSecret!,
+                  "Client secret",
+                )}
+            >
+              <Clipboard class="size-4" />
+            </Button>
+          </div>
+        </Field.Field>
       </div>
-      <Field.Field>
-        <Field.Label for="oauth-application-name">Name</Field.Label>
-        <Input
-          id="oauth-application-name"
-          bind:value={account.oauthApplicationName}
-          placeholder="My integration"
-          maxlength={128}
-          required
-        />
-      </Field.Field>
-      <Field.Field>
-        <Field.Label for="oauth-redirect-uri">Redirect URI</Field.Label>
-        <Input
-          id="oauth-redirect-uri"
-          type="url"
-          bind:value={account.oauthRedirectUri}
-          placeholder="https://app.example.com/oauth/callback"
-          autocomplete="url"
-          required
-        />
-        <Field.Description>
-          This value is provided by the client you are connecting.
-        </Field.Description>
-      </Field.Field>
-      <Button type="submit" disabled={account.working}>
-        Create OAuth application
-      </Button>
-    </form>
+    </section>
+  {/if}
+
+  <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+    <IntegrationAddCard
+      title="New application"
+      description="Register a client with its exact OAuth redirect URI."
+      onclick={() => (createDialogOpen = true)}
+    />
+
+    {#each account.oauthApplications as application (application.id)}
+      <article
+        class="flex min-h-64 flex-col rounded-xl border bg-card/40 p-5 shadow-sm transition-colors hover:bg-card/60"
+      >
+        <header class="flex items-start gap-4">
+          <span
+            class="grid size-12 shrink-0 place-items-center rounded-xl border bg-muted"
+            aria-hidden="true"
+          >
+            <KeyRound class="size-6 text-primary" />
+          </span>
+          <span class="min-w-0 flex-1">
+            <span class="block truncate font-semibold">{application.name}</span>
+            <span class="mt-0.5 block text-xs text-muted-foreground">
+              OAuth application
+            </span>
+          </span>
+        </header>
+
+        <dl class="mt-5 grid gap-3 text-xs">
+          <div class="min-w-0">
+            <dt class="text-muted-foreground">Client ID</dt>
+            <dd class="mt-0.5 truncate font-mono" title={application.client_id}>
+              {application.client_id}
+            </dd>
+          </div>
+          <div class="min-w-0">
+            <dt class="text-muted-foreground">Redirect URI</dt>
+            <dd class="mt-0.5 truncate" title={application.redirect_uri}>
+              {application.redirect_uri}
+            </dd>
+          </div>
+          <div>
+            <dt class="text-muted-foreground">Created</dt>
+            <dd class="mt-0.5">
+              <time datetime={application.created_at}>
+                {timestampFormatter.format(new Date(application.created_at))}
+              </time>
+            </dd>
+          </div>
+        </dl>
+
+        <div class="mt-auto flex flex-wrap justify-end gap-2 pt-5">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            class="gap-2"
+            onclick={() => copyCredential(application.client_id, "Client ID")}
+          >
+            <Clipboard class="size-3.5" />Copy client ID
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            class="gap-2"
+            onclick={() => requestRevoke(application.id, application.name)}
+          >
+            <Trash2 class="size-3.5" />Revoke
+          </Button>
+        </div>
+      </article>
+    {/each}
   </div>
+
+  <Dialog.Root bind:open={createDialogOpen}>
+    <Dialog.Content class="ring-foreground/20 sm:max-w-lg">
+      <Dialog.Header>
+        <Dialog.Title>Create OAuth application</Dialog.Title>
+        <Dialog.Description>
+          Enter the redirect URI supplied by the client. It must match exactly,
+          including its scheme and path.
+        </Dialog.Description>
+      </Dialog.Header>
+      <form
+        class="grid gap-4"
+        onsubmit={(event) => {
+          event.preventDefault();
+          void createApplication();
+        }}
+      >
+        <Field.Field>
+          <Field.Label for="oauth-application-name">Name</Field.Label>
+          <Input
+            id="oauth-application-name"
+            bind:value={account.oauthApplicationName}
+            placeholder="My integration"
+            maxlength={128}
+            autofocus
+            required
+          />
+        </Field.Field>
+        <Field.Field>
+          <Field.Label for="oauth-redirect-uri">Redirect URI</Field.Label>
+          <Input
+            id="oauth-redirect-uri"
+            type="url"
+            bind:value={account.oauthRedirectUri}
+            placeholder="https://app.example.com/oauth/callback"
+            autocomplete="url"
+            required
+          />
+          <Field.Description>
+            This value is provided by the client you are connecting.
+          </Field.Description>
+        </Field.Field>
+        <Dialog.Footer>
+          <Dialog.Close>
+            {#snippet child({ props })}
+              <Button {...props} type="button" variant="outline">Cancel</Button>
+            {/snippet}
+          </Dialog.Close>
+          <Button type="submit" disabled={account.working}>
+            {account.working ? "Creating…" : "Create application"}
+          </Button>
+        </Dialog.Footer>
+      </form>
+    </Dialog.Content>
+  </Dialog.Root>
 
   <AlertDialog.Root bind:open={revokeDialogOpen}>
     <AlertDialog.Content>
@@ -263,4 +304,4 @@
       </AlertDialog.Footer>
     </AlertDialog.Content>
   </AlertDialog.Root>
-</div>
+</section>

@@ -11,7 +11,125 @@ pub mod instance {
         pub created_at: DateTimeUtc,
         pub site_name: String,
         pub site_description: Option<String>,
-        pub default_repository_visibility: String,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod backup_provider {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "backup_providers")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub name: String,
+        pub provider: String,
+        pub configuration: String,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod backup_provider_schedule {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "backup_provider_schedules")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub provider_id: Uuid,
+        pub schedule: String,
+        pub next_backup_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod namespace_integration {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "namespace_integrations")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        /// Namespace slug that owns this connection instance.
+        pub namespace: String,
+        /// Provider implementation used by this connection.
+        pub provider: String,
+        /// User-defined label that distinguishes instances of one provider.
+        pub name: String,
+        pub enabled: bool,
+        pub url: String,
+        pub api_key: String,
+        /// URL Dokploy containers use to reach Gitadel.
+        pub dokploy_internal_url: Option<String>,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod dokploy_source_binding {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "dokploy_source_bindings")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub integration_id: Uuid,
+        pub gitea_id: String,
+        pub git_provider_id: String,
+        pub oauth_application_id: Option<Uuid>,
+        pub managed: bool,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod repository_integration {
+    use super::*;
+
+    /// An independently configured integration attached to a repository.
+    /// Multiple rows may use the same namespace connection.
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "repository_integrations")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub repository_id: Uuid,
+        pub integration_id: Uuid,
+        pub name: String,
+        pub enabled: bool,
+        /// Which remote resource this repository deploys as, if linked.
+        /// Opaque JSON: only the provider's dispatcher reads it.
+        pub resource: Option<String>,
+        /// Provider-specific deployment configuration.
+        pub config: Option<String>,
         pub updated_at: DateTimeUtc,
     }
 
@@ -52,6 +170,8 @@ pub mod user {
         pub username: String,
         pub password_hash: String,
         pub is_admin: bool,
+        pub default_repository_visibility: String,
+        pub theme_preference: String,
         pub disabled_at: Option<DateTimeUtc>,
         pub avatar_updated_at: Option<DateTimeUtc>,
         pub created_at: DateTimeUtc,
@@ -271,8 +391,26 @@ pub mod organization {
         #[sea_orm(unique)]
         pub slug: String,
         pub display_name: String,
+        pub avatar_updated_at: Option<DateTimeUtc>,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod organization_avatar {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "organization_avatars")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub organization_id: Uuid,
+        pub content: Vec<u8>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -355,6 +493,34 @@ pub mod namespace {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod namespace_mirror_identity {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "namespace_mirror_identities")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub namespace: String,
+        pub name: String,
+        pub kind: String,
+        pub username: Option<String>,
+        pub secret: String,
+        pub provider: Option<String>,
+        pub instance_url: Option<String>,
+        pub public_key: Option<String>,
+        pub fingerprint: Option<String>,
+        pub last_used_at: Option<DateTimeUtc>,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod repository {
     use super::*;
 
@@ -366,8 +532,10 @@ pub mod repository {
         pub namespace: String,
         pub name: String,
         pub description: Option<String>,
+        pub website_url: Option<String>,
         pub visibility: String,
         pub object_format: String,
+        pub mirrored: bool,
         pub default_branch: String,
         pub issue_counter: i64,
         #[sea_orm(unique)]
@@ -375,6 +543,89 @@ pub mod repository {
         pub created_by: Uuid,
         pub archived_at: Option<DateTimeUtc>,
         pub deleted_at: Option<DateTimeUtc>,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod repository_mirror {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "repository_mirrors")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub repository_id: Uuid,
+        pub remote_url: String,
+        pub identity_id: Option<Uuid>,
+        pub github_owner: Option<String>,
+        pub github_repository: Option<String>,
+        pub schedule: Option<String>,
+        pub last_attempted_at: Option<DateTimeUtc>,
+        pub last_synced_at: Option<DateTimeUtc>,
+        pub last_error: Option<String>,
+        pub metadata_last_synced_at: Option<DateTimeUtc>,
+        pub metadata_error: Option<String>,
+        pub next_sync_at: Option<DateTimeUtc>,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod repository_import {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "repository_imports")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub created_by: Uuid,
+        pub target_namespace: String,
+        pub provider: String,
+        pub instance_url: String,
+        pub state: String,
+        pub identity_id: Option<Uuid>,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod repository_import_item {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "repository_import_items")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub import_id: Uuid,
+        pub source_id: String,
+        pub source_full_name: String,
+        pub source_web_url: String,
+        pub source_clone_url: String,
+        pub target_namespace: String,
+        pub target_name: String,
+        pub target_visibility: String,
+        pub state: String,
+        pub attempts: i32,
+        pub repository_id: Option<Uuid>,
+        pub last_error: Option<String>,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
     }
@@ -503,6 +754,7 @@ pub mod repository_topic {
         #[sea_orm(primary_key, auto_increment = false)]
         pub topic_id: Uuid,
         pub created_at: DateTimeUtc,
+        pub external_source: Option<String>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -529,6 +781,12 @@ pub mod repository_issue {
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
         pub closed_at: Option<DateTimeUtc>,
+        pub external_source: Option<String>,
+        pub external_id: Option<String>,
+        pub external_url: Option<String>,
+        pub external_author: Option<String>,
+        pub external_author_url: Option<String>,
+        pub external_updated_at: Option<DateTimeUtc>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -573,6 +831,12 @@ pub mod issue_comment {
         pub body: String,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
+        pub external_source: Option<String>,
+        pub external_id: Option<String>,
+        pub external_url: Option<String>,
+        pub external_author: Option<String>,
+        pub external_author_url: Option<String>,
+        pub external_updated_at: Option<DateTimeUtc>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -593,6 +857,11 @@ pub mod issue_label {
         pub name: String,
         pub color: String,
         pub description: String,
+        pub external_source: Option<String>,
+        pub external_instance_url: Option<String>,
+        pub external_id: Option<String>,
+        pub external_url: Option<String>,
+        pub external_updated_at: Option<DateTimeUtc>,
         pub created_at: DateTimeUtc,
     }
 
@@ -638,6 +907,13 @@ pub mod repository_release {
         pub published_at: DateTimeUtc,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
+        pub external_source: Option<String>,
+        pub external_instance_url: Option<String>,
+        pub external_id: Option<String>,
+        pub external_url: Option<String>,
+        pub external_author: Option<String>,
+        pub external_author_url: Option<String>,
+        pub external_updated_at: Option<DateTimeUtc>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -660,6 +936,11 @@ pub mod release_asset {
         pub size_bytes: i64,
         pub download_count: i64,
         pub created_at: DateTimeUtc,
+        pub external_source: Option<String>,
+        pub external_instance_url: Option<String>,
+        pub external_id: Option<String>,
+        pub external_url: Option<String>,
+        pub external_updated_at: Option<DateTimeUtc>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -698,6 +979,249 @@ pub mod lfs_lock {
         pub repository_id: Uuid,
         pub user_id: Uuid,
         pub path: String,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod action_run {
+    use super::*;
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "action_runs")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub repository_id: Uuid,
+        pub number: i64,
+        pub workflow_path: String,
+        pub workflow_name: String,
+        pub event: String,
+        pub ref_name: String,
+        pub before_sha: String,
+        pub after_sha: String,
+        pub actor_id: Option<Uuid>,
+        pub status: String,
+        pub failure_kind: Option<String>,
+        pub failure_summary: Option<String>,
+        pub diagnostic: Option<String>,
+        pub event_json: String,
+        pub cancel_requested_at: Option<DateTimeUtc>,
+        pub cancelled_by: Option<Uuid>,
+        pub created_at: DateTimeUtc,
+        pub started_at: Option<DateTimeUtc>,
+        pub completed_at: Option<DateTimeUtc>,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod action_runner {
+    use super::*;
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "action_runners")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        pub uuid: String,
+        pub namespace: String,
+        pub name: String,
+        pub token_hash: String,
+        pub approved_labels: String,
+        pub version: String,
+        pub ephemeral: bool,
+        pub disabled_at: Option<DateTimeUtc>,
+        pub deleted_at: Option<DateTimeUtc>,
+        pub last_seen_at: Option<DateTimeUtc>,
+        pub created_by: Option<Uuid>,
+        pub created_at: DateTimeUtc,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod action_job {
+    use super::*;
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "action_jobs")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        pub run_id: Uuid,
+        pub job_key: String,
+        pub name: String,
+        pub required_labels: String,
+        pub workflow_payload: Vec<u8>,
+        pub status: String,
+        pub result: Option<String>,
+        pub runner_id: Option<i64>,
+        pub request_key: Option<String>,
+        pub lease_generation: i64,
+        pub lease_deadline: Option<DateTimeUtc>,
+        pub last_report_at: Option<DateTimeUtc>,
+        pub attempt: i64,
+        pub step_state: String,
+        pub outputs: String,
+        pub expected_log_index: i64,
+        pub log_bytes: i64,
+        pub log_truncated: bool,
+        pub failure_kind: Option<String>,
+        pub failure_summary: Option<String>,
+        pub created_at: DateTimeUtc,
+        pub started_at: Option<DateTimeUtc>,
+        pub completed_at: Option<DateTimeUtc>,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod action_job_need {
+    use super::*;
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "action_job_needs")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub job_id: i64,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub needed_job_id: i64,
+        pub needed_job_key: String,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod action_job_log {
+    use super::*;
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "action_job_logs")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub job_id: i64,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub row_index: i64,
+        pub timestamp: DateTimeUtc,
+        pub content: String,
+        pub byte_count: i64,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod action_runner_registration_token {
+    use super::*;
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "action_runner_registration_tokens")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub token_hash: String,
+        pub namespace: String,
+        pub runner_name: String,
+        pub approved_labels: String,
+        pub expires_at: DateTimeUtc,
+        pub used_at: Option<DateTimeUtc>,
+        pub created_by: Option<Uuid>,
+        pub created_at: DateTimeUtc,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod action_runner_fetch {
+    use super::*;
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "action_runner_fetches")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub runner_id: i64,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub request_key: String,
+        pub job_id: i64,
+        pub lease_generation: i64,
+        pub token_generation: String,
+        pub created_at: DateTimeUtc,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod action_job_token {
+    use super::*;
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "action_job_tokens")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub job_id: i64,
+        pub repository_id: Uuid,
+        pub lease_generation: i64,
+        pub token_hash: String,
+        pub expires_at: DateTimeUtc,
+        pub revoked_at: Option<DateTimeUtc>,
+        pub created_at: DateTimeUtc,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod action_artifact {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "action_artifacts")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        pub repository_id: Uuid,
+        pub run_id: Uuid,
+        pub creating_job_id: i64,
+        pub name: String,
+        pub storage_key: String,
+        pub status: String,
+        pub size_bytes: i64,
+        pub sha256: Option<String>,
+        pub expires_at: DateTimeUtc,
+        pub finalized_at: Option<DateTimeUtc>,
+        pub deleted_at: Option<DateTimeUtc>,
+        pub deleted_by_job_id: Option<i64>,
+        pub metadata_json: String,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod action_artifact_grant {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "action_artifact_grants")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub artifact_id: i64,
+        pub issued_to_job_id: i64,
+        pub scope: String,
+        pub token_hash: String,
+        pub expires_at: DateTimeUtc,
+        pub revoked_at: Option<DateTimeUtc>,
+        pub last_used_at: Option<DateTimeUtc>,
+        pub use_count: i64,
         pub created_at: DateTimeUtc,
     }
 

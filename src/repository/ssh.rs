@@ -350,6 +350,7 @@ async fn repository_for_git_service(
                 description: None,
                 visibility: None,
                 object_format: None,
+                mirror: None,
             };
             match create_owned_repository(state, actor_user_id, options).await {
                 Ok(repository) => Ok(repository),

@@ -1,10 +1,22 @@
 <script lang="ts">
-  import { Activity, Clipboard, RefreshCw, UserPlus } from "lucide-svelte";
+  import {
+    Activity,
+    Clipboard,
+    RefreshCw,
+    ShieldCheck,
+    UserPlus,
+  } from "lucide-svelte";
 
   import { Button } from "$lib/components/ui/button/index.js";
   import type { AdminSettingsState } from "$lib/settings/admin-settings-state.svelte.js";
 
-  let { state }: { state: AdminSettingsState } = $props();
+  let {
+    state,
+    view,
+  }: {
+    state: AdminSettingsState;
+    view: "access" | "activity";
+  } = $props();
   const inputClass =
     "w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-2 focus:ring-ring/20";
 
@@ -56,7 +68,32 @@
 {/if}
 
 <div class="grid gap-6 lg:grid-cols-2">
-  <section class="rounded-md border bg-card/25">
+  {#if view === "access"}
+    <section class="overflow-hidden rounded-xl border bg-card/40 shadow-sm">
+      <header class="flex items-center gap-3 border-b px-5 py-4">
+        <ShieldCheck class="size-4 text-muted-foreground" />
+        <div>
+          <h2 class="text-sm font-semibold">Registration</h2>
+          <p class="mt-0.5 text-xs text-muted-foreground">
+            Closed after initial setup.
+          </p>
+        </div>
+      </header>
+      <div class="flex items-center justify-between gap-5 p-5 text-sm">
+        <div>
+          <p class="font-medium">Public registration disabled</p>
+          <p class="mt-1 text-xs text-muted-foreground">
+            The first account is the administrator. Additional accounts require
+            an invitation.
+          </p>
+        </div>
+        <span
+          class="rounded-full border px-2.5 py-1 text-xs text-muted-foreground"
+          >Locked</span
+        >
+      </div>
+    </section>
+  <section class="overflow-hidden rounded-xl border bg-card/40 shadow-sm">
     <header class="flex items-center gap-3 border-b px-5 py-4">
       <UserPlus class="size-4 text-muted-foreground" />
       <div>
@@ -108,8 +145,10 @@
       </form>
     </div>
   </section>
+  {/if}
 
-  <section class="rounded-md border bg-card/25 lg:col-span-2">
+  {#if view === "activity"}
+  <section class="overflow-hidden rounded-xl border bg-card/40 shadow-sm lg:col-span-2">
     <header class="flex items-center justify-between gap-3 border-b px-5 py-4">
       <div class="flex items-center gap-3">
         <Activity class="size-4 text-muted-foreground" />
@@ -155,4 +194,5 @@
       {/each}
     </ul>
   </section>
+  {/if}
 </div>

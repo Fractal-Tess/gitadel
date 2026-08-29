@@ -20,6 +20,7 @@
     type IssueUser,
   } from "$lib/api.js";
   import * as Avatar from "$lib/components/ui/avatar/index.js";
+  import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Badge } from "$lib/components/ui/badge/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
@@ -31,6 +32,11 @@
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
 
   let { state: repository }: { state: RepositoryPageState } = $props();
+  const dateFormatter = new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
 
   let filterState = $state<"open" | "closed">("open");
   let search = $state("");
@@ -40,6 +46,12 @@
   let labelsOpen = $state(false);
   let editingComment = $state<{ issueNumber: number; id: string } | null>(null);
   let commentDrafts = $state<Record<number, string>>({});
+  let deleteCommentDialogOpen = $state(false);
+  let pendingDeleteComment = $state<{ issueNumber: number; id: string } | null>(
+    null,
+  );
+  let deleteIssueDialogOpen = $state(false);
+  let pendingDeleteIssue = $state<number | null>(null);
 
   const filteredIssues = $derived.by(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -100,11 +112,7 @@
   }
 
   function issueDate(value: string) {
-    return new Intl.DateTimeFormat(undefined, {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-    }).format(new Date(value));
+    return dateFormatter.format(new Date(value));
   }
 
   function beginCommentEdit(issueNumber: number, comment: IssueComment) {
@@ -118,18 +126,38 @@
   }
 </script>
 
-{#snippet userAvatar(account: IssueUser, size = "size-8")}
+{#snippet userAvatar(
+  account: IssueUser,
+  externalAuthor: Issue["external_author"],
+  size = "size-8",
+)}
   <Avatar.Root class={size}>
-    {#if avatarUrl(account.id, account.avatar_updated_at)}
+    {#if !externalAuthor && avatarUrl(account.id, account.avatar_updated_at)}
       <Avatar.Image
         src={avatarUrl(account.id, account.avatar_updated_at) ?? undefined}
         alt=""
       />
     {/if}
     <Avatar.Fallback class="text-[10px] font-medium uppercase">
-      {account.username.slice(0, 2)}
+      {(externalAuthor?.username ?? account.username).slice(0, 2)}
     </Avatar.Fallback>
   </Avatar.Root>
+{/snippet}
+
+{#snippet authorName(
+  account: IssueUser,
+  externalAuthor: Issue["external_author"],
+)}
+  {#if externalAuthor}
+    <a
+      class="font-medium text-foreground hover:underline"
+      href={externalAuthor.profile_url}
+      target="_blank"
+      rel="noreferrer">{externalAuthor.username}</a
+    >
+  {:else}
+    <strong class="font-medium text-foreground">{account.username}</strong>
+  {/if}
 {/snippet}
 
 <div class="mx-auto max-w-6xl">
@@ -178,12 +206,15 @@
                   class="size-3.5"
                 />Open{:else}<CheckCircle2 class="size-3.5" />Closed{/if}
             </Badge>
-            <span
-              ><strong class="font-medium text-foreground"
-                >{issue.author.username}</strong
-              >
-              opened this issue on {issueDate(issue.created_at)}</span
-            >
+            <span>
+              {@render authorName(issue.author, issue.external_author)}
+              opened this issue on {issueDate(issue.created_at)}
+            </span>
+            {#if issue.external_url}
+              <a href={issue.external_url} target="_blank" rel="noreferrer">
+                <Badge variant="outline">Imported from GitHub</Badge>
+              </a>
+            {/if}
             <span class="whitespace-nowrap"
               >· {issue.comment_count} comment{issue.comment_count === 1
                 ? ""
@@ -210,16 +241,15 @@
           <header
             class="flex items-center gap-3 border-b bg-muted/20 px-4 py-3 text-sm"
           >
-            {@render userAvatar(issue.author)}
-            <span
-              ><strong>{issue.author.username}</strong> commented on {issueDate(
-                issue.created_at,
-              )}</span
-            >
+            {@render userAvatar(issue.author, issue.external_author)}
+            <span>
+              {@render authorName(issue.author, issue.external_author)}
+              opened this issue on {issueDate(issue.created_at)}
+            </span>
           </header>
           {#if issue.rendered_body}
             <div
-              class="prose prose-invert max-w-none p-5 text-sm prose-code:before:content-none prose-code:after:content-none"
+              class="prose max-w-none p-5 text-sm prose-code:before:content-none prose-code:after:content-none dark:prose-invert"
               {@attach trustedHtml(issue.rendered_body)}
             ></div>
           {:else}
@@ -234,12 +264,11 @@
             <header
               class="flex items-center gap-3 border-b bg-muted/20 px-4 py-3 text-sm"
             >
-              {@render userAvatar(comment.author)}
-              <span class="min-w-0 flex-1 truncate"
-                ><strong>{comment.author.username}</strong> commented on {issueDate(
-                  comment.created_at,
-                )}</span
-              >
+              {@render userAvatar(comment.author, comment.external_author)}
+              <span class="min-w-0 flex-1 truncate">
+                {@render authorName(comment.author, comment.external_author)}
+                commented on {issueDate(comment.created_at)}
+              </span>
               {#if comment.can_edit}
                 <Button
                   variant="ghost"
@@ -255,11 +284,11 @@
                   class="text-muted-foreground hover:text-destructive"
                   aria-label="Delete comment"
                   onclick={() => {
-                    if (globalThis.confirm("Delete this comment?"))
-                      void repository.deleteIssueComment(
-                        issue.number,
-                        comment.id,
-                      );
+                    pendingDeleteComment = {
+                      issueNumber: issue.number,
+                      id: comment.id,
+                    };
+                    deleteCommentDialogOpen = true;
                   }}
                 >
                   <Trash2 class="size-3" />
@@ -267,13 +296,26 @@
               {/if}
             </header>
             <div
-              class="prose prose-invert max-w-none p-5 text-sm prose-code:before:content-none prose-code:after:content-none"
+              class="prose max-w-none p-5 text-sm prose-code:before:content-none prose-code:after:content-none dark:prose-invert"
               {@attach trustedHtml(comment.rendered_body)}
             ></div>
           </article>
         {/each}
 
-        {#if repository.authStatus?.authenticated}
+        {#if issue.external_url}
+          <div
+            class="rounded-md border p-5 text-center text-sm text-muted-foreground"
+          >
+            This issue is synchronized from GitHub.
+            <a
+              class="font-medium text-foreground underline-offset-4 hover:underline"
+              href={issue.external_url}
+              target="_blank"
+              rel="noreferrer">Open it on GitHub</a
+            >
+            to comment or change its state.
+          </div>
+        {:else if repository.authStatus?.authenticated}
           <form
             class="overflow-hidden rounded-md border"
             onsubmit={submitComment}
@@ -357,7 +399,7 @@
           </h2>
           {#if issue.assignee}
             <div class="mt-3 flex items-center gap-2">
-              {@render userAvatar(issue.assignee, "size-6")}
+              {@render userAvatar(issue.assignee, null, "size-6")}
               <span class="font-medium">{issue.assignee.username}</span>
             </div>
           {:else}
@@ -378,16 +420,14 @@
             {/each}
           </div>
         </section>
-        {#if repository.repository?.can_manage}
+        {#if issue.can_manage}
           <Button
             variant="ghost"
             size="sm"
             class="w-full justify-start gap-2 text-destructive"
             onclick={() => {
-              if (
-                globalThis.confirm(`Permanently delete issue #${issue.number}?`)
-              )
-                void repository.deleteIssue(issue.number);
+              pendingDeleteIssue = issue.number;
+              deleteIssueDialogOpen = true;
             }}
           >
             <Trash2 class="size-3.5" />Delete issue
@@ -508,13 +548,22 @@
                   >
                     {issue.title}
                   </button>
+                  {#if issue.external_url}
+                    <a
+                      href={issue.external_url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <Badge variant="outline">Imported from GitHub</Badge>
+                    </a>
+                  {/if}
                   {#each issue.labels as label (label.id)}
                     <LabelChip {label} />
                   {/each}
                 </div>
                 <p class="mt-1 text-xs text-muted-foreground">
                   #{issue.number} opened on {issueDate(issue.created_at)} by {issue
-                    .author.username}
+                    .external_author?.username ?? issue.author.username}
                   {#if issue.assignee}
                     · assigned to {issue.assignee.username}{/if}
                 </p>
@@ -553,3 +602,50 @@
 {#if repository.repository?.can_manage}
   <IssueLabelDialog bind:open={labelsOpen} state={repository} mode="manage" />
 {/if}
+
+<AlertDialog.Root bind:open={deleteCommentDialogOpen}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>Delete this comment?</AlertDialog.Title>
+      <AlertDialog.Description>This cannot be undone.</AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Action
+        variant="destructive"
+        onclick={() => {
+          const target = pendingDeleteComment;
+          if (!target) return;
+          deleteCommentDialogOpen = false;
+          pendingDeleteComment = null;
+          void repository.deleteIssueComment(target.issueNumber, target.id);
+        }}>Delete comment</AlertDialog.Action
+      >
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>
+
+<AlertDialog.Root bind:open={deleteIssueDialogOpen}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title
+        >Permanently delete issue #{pendingDeleteIssue ??
+          ""}?</AlertDialog.Title
+      >
+      <AlertDialog.Description>This cannot be undone.</AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Action
+        variant="destructive"
+        onclick={() => {
+          const id = pendingDeleteIssue;
+          if (id == null) return;
+          deleteIssueDialogOpen = false;
+          pendingDeleteIssue = null;
+          void repository.deleteIssue(id);
+        }}>Delete issue</AlertDialog.Action
+      >
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>

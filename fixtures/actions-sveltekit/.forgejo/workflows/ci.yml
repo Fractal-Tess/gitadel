@@ -1,0 +1,55 @@
+name: SvelteKit CI
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "package.json"
+      - "package-lock.json"
+      - "svelte.config.js"
+      - "tsconfig.json"
+      - "vite.config.ts"
+      - ".forgejo/workflows/ci.yml"
+
+jobs:
+  validate:
+    runs-on: docker
+    outputs:
+      commit: ${{ steps.metadata.outputs.commit }}
+    steps:
+      - name: Clone pushed commit
+        env:
+          CHECKOUT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git -c http.extraheader="Authorization: Bearer ${CHECKOUT_TOKEN}" clone --no-checkout "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" source
+          cd source
+          git checkout --detach "${GITHUB_SHA}"
+      - name: Install locked dependencies
+        run: npm --prefix source ci
+      - name: Check Svelte project
+        run: npm --prefix source run check
+      - name: Build SvelteKit project
+        run: npm --prefix source run build
+      - name: Publish checked commit
+        id: metadata
+        run: echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+      - name: Upload production build
+        uses: forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e
+        with:
+          name: sveltekit-build
+          path: source/build
+          retention-days: 1
+
+  report:
+    needs: validate
+    runs-on: docker
+    steps:
+      - name: Verify dependency output
+        run: test "${{ needs.validate.outputs.commit }}" = "${GITHUB_SHA}"
+      - name: Download production build
+        uses: forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e
+        with:
+          name: sveltekit-build
+          path: downloaded
+      - name: Verify downloaded build
+        run: test -f downloaded/index.js

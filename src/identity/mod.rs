@@ -1,11 +1,19 @@
 mod admin;
 mod auth;
 mod avatar;
+mod integrations;
+mod mirror_identities;
 mod oauth;
 mod resources;
 
+pub(crate) use integrations::{authorize_namespace, validate_name as validate_integration_name};
+pub(crate) use mirror_identities::{
+    load_secret as load_mirror_identity_secret,
+    mark_identity_used as mark_repository_identity_used,
+};
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -29,7 +37,7 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::Duration as TimeDuration;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 use url::Url;
 use uuid::Uuid;
 use webauthn_rs::{
@@ -38,7 +46,9 @@ use webauthn_rs::{
 };
 
 use crate::{
-    config::AuthSettings,
+    archive::MaintenanceAction,
+    backup_provider::{BackupProvider, BackupProviderConfig},
+    config::{AuthSettings, Settings},
     entity::{api_token, audit_event, namespace, oauth_access_token, session, ssh_key, user},
 };
 
@@ -47,6 +57,8 @@ pub const SCOPE_READ: i32 = 1;
 pub const SCOPE_WRITE: i32 = 1 << 1;
 pub const SCOPE_SSH_KEYS: i32 = 1 << 2;
 pub const SCOPE_REPOSITORY_READ: i32 = 1 << 3;
+const VALIDATED_BACKUP_LIFETIME: Duration = Duration::from_secs(30 * 60);
+const TESTED_BACKUP_PROVIDER_LIFETIME: Duration = Duration::from_secs(10 * 60);
 const CHALLENGE_LIFETIME: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone)]
@@ -58,6 +70,24 @@ pub struct IdentityState {
     registration_challenges: Arc<Mutex<HashMap<String, RegistrationChallenge>>>,
     authentication_challenges: Arc<Mutex<HashMap<String, AuthenticationChallenge>>>,
     authorization_requests: Arc<Mutex<HashMap<String, oauth::AuthorizationRequest>>>,
+    runtime_settings: Option<Arc<Settings>>,
+    maintenance_sender: Option<mpsc::Sender<MaintenanceAction>>,
+    maintenance_pending: Arc<Mutex<bool>>,
+    validated_backups: Arc<Mutex<HashMap<Uuid, ValidatedBackup>>>,
+    tested_backup_providers: Arc<Mutex<HashMap<Uuid, TestedBackupProvider>>>,
+}
+
+pub(crate) struct ValidatedBackup {
+    pub key: String,
+    pub path: PathBuf,
+    pub provider: BackupProvider,
+    validated_at: Instant,
+}
+
+struct TestedBackupProvider {
+    user_id: Uuid,
+    config: BackupProviderConfig,
+    tested_at: Instant,
 }
 
 pub struct RegistrationChallenge {
@@ -178,10 +208,37 @@ impl From<sea_orm::DbErr> for ApiError {
 }
 
 impl IdentityState {
+    #[cfg(test)]
     pub fn new(
         database: DatabaseConnection,
         settings: AuthSettings,
         public_url: Url,
+    ) -> Result<Self, anyhow::Error> {
+        Self::build(database, settings, public_url, None, None)
+    }
+
+    pub fn new_with_runtime(
+        database: DatabaseConnection,
+        settings: Settings,
+        maintenance_sender: mpsc::Sender<MaintenanceAction>,
+    ) -> Result<Self, anyhow::Error> {
+        let auth = settings.auth.clone();
+        let public_url = settings.server.public_url.clone();
+        Self::build(
+            database,
+            auth,
+            public_url,
+            Some(Arc::new(settings)),
+            Some(maintenance_sender),
+        )
+    }
+
+    fn build(
+        database: DatabaseConnection,
+        settings: AuthSettings,
+        public_url: Url,
+        runtime_settings: Option<Arc<Settings>>,
+        maintenance_sender: Option<mpsc::Sender<MaintenanceAction>>,
     ) -> Result<Self, anyhow::Error> {
         if public_url.path() != "/"
             || public_url.query().is_some()
@@ -208,11 +265,113 @@ impl IdentityState {
             registration_challenges: Arc::new(Mutex::new(HashMap::new())),
             authentication_challenges: Arc::new(Mutex::new(HashMap::new())),
             authorization_requests: Arc::new(Mutex::new(HashMap::new())),
+            runtime_settings,
+            maintenance_sender,
+            maintenance_pending: Arc::new(Mutex::new(false)),
+            validated_backups: Arc::new(Mutex::new(HashMap::new())),
+            tested_backup_providers: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
     pub fn database(&self) -> &DatabaseConnection {
         &self.database
+    }
+
+    pub fn runtime_settings(&self) -> Result<&Settings, ApiError> {
+        self.runtime_settings
+            .as_deref()
+            .ok_or_else(|| ApiError::internal("runtime settings are unavailable"))
+    }
+
+    pub async fn cache_validated_backup(
+        &self,
+        key: String,
+        path: PathBuf,
+        provider: BackupProvider,
+    ) -> Uuid {
+        let mut backups = self.validated_backups.lock().await;
+        backups.retain(|_, backup| {
+            if backup.validated_at.elapsed() <= VALIDATED_BACKUP_LIFETIME {
+                true
+            } else {
+                let _ = std::fs::remove_file(&backup.path);
+                false
+            }
+        });
+        let token = Uuid::new_v4();
+        backups.insert(
+            token,
+            ValidatedBackup {
+                key,
+                path,
+                provider,
+                validated_at: Instant::now(),
+            },
+        );
+        token
+    }
+
+    pub async fn take_validated_backup(&self, token: Uuid) -> Option<ValidatedBackup> {
+        let backup = self.validated_backups.lock().await.remove(&token)?;
+        if backup.validated_at.elapsed() > VALIDATED_BACKUP_LIFETIME {
+            let _ = std::fs::remove_file(backup.path);
+            return None;
+        }
+        Some(backup)
+    }
+
+    pub async fn cache_tested_backup_provider(
+        &self,
+        user_id: Uuid,
+        config: BackupProviderConfig,
+    ) -> Uuid {
+        let mut tested = self.tested_backup_providers.lock().await;
+        tested.retain(|_, proof| proof.tested_at.elapsed() <= TESTED_BACKUP_PROVIDER_LIFETIME);
+        let token = Uuid::new_v4();
+        tested.insert(
+            token,
+            TestedBackupProvider {
+                user_id,
+                config,
+                tested_at: Instant::now(),
+            },
+        );
+        token
+    }
+
+    pub async fn consume_tested_backup_provider(
+        &self,
+        token: Uuid,
+        user_id: Uuid,
+        config: &BackupProviderConfig,
+    ) -> bool {
+        let Some(proof) = self.tested_backup_providers.lock().await.remove(&token) else {
+            return false;
+        };
+        proof.tested_at.elapsed() <= TESTED_BACKUP_PROVIDER_LIFETIME
+            && proof.user_id == user_id
+            && proof.config == *config
+    }
+
+    pub async fn schedule_maintenance(&self, action: MaintenanceAction) -> Result<(), ApiError> {
+        let sender = self
+            .maintenance_sender
+            .clone()
+            .ok_or_else(|| ApiError::internal("maintenance operations are unavailable"))?;
+        let mut pending = self.maintenance_pending.lock().await;
+        if *pending {
+            return Err(ApiError::conflict(
+                "Another backup or restore operation is already starting.",
+            ));
+        }
+        *pending = true;
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(750)).await;
+            if sender.send(action).await.is_err() {
+                tracing::error!("could not schedule maintenance operation");
+            }
+        });
+        Ok(())
     }
 
     pub fn webauthn(&self) -> &Webauthn {
@@ -525,6 +684,8 @@ pub async fn bootstrap_admin(
         username: Set(username.clone()),
         password_hash: Set(password_hash),
         is_admin: Set(true),
+        default_repository_visibility: Set("private".to_owned()),
+        theme_preference: Set("system".to_owned()),
         disabled_at: Set(None),
         avatar_updated_at: Set(None),
         created_at: Set(now),
@@ -563,6 +724,42 @@ pub fn router() -> Router<IdentityState> {
             "/instance/favicon/{theme}",
             get(admin::public_instance_favicon),
         )
+        .route(
+            "/admin/backup/providers",
+            get(admin::list_backup_providers).post(admin::create_backup_provider),
+        )
+        .route(
+            "/admin/backup/providers/test",
+            post(admin::test_backup_provider),
+        )
+        .route(
+            "/admin/backup/providers/{provider_id}",
+            put(admin::update_backup_provider).delete(admin::delete_backup_provider),
+        )
+        .route(
+            "/admin/backup/providers/{provider_id}/schedule",
+            put(admin::update_backup_schedule),
+        )
+        .route(
+            "/admin/backup/providers/{provider_id}/backups",
+            get(admin::list_backups).post(admin::create_backup),
+        )
+        .route(
+            "/admin/backup/providers/{provider_id}/backups/object",
+            get(admin::download_backup).delete(admin::delete_backup),
+        )
+        .route(
+            "/admin/backups/progress/{operation_id}",
+            get(admin::backup_progress),
+        )
+        .route(
+            "/admin/backup/providers/{provider_id}/backups/preflight",
+            post(admin::preflight_restore),
+        )
+        .route(
+            "/admin/backup/providers/{provider_id}/backups/restore",
+            post(admin::restore_backup),
+        )
         .route("/setup", post(auth::setup))
         .route("/register", post(auth::register))
         .route("/auth/login", post(auth::login))
@@ -575,6 +772,11 @@ pub fn router() -> Router<IdentityState> {
                 .layer(DefaultBodyLimit::max(avatar::MAX_AVATAR_REQUEST_BYTES)),
         )
         .route("/me/username", put(auth::update_username))
+        .route(
+            "/me/repository-preferences",
+            put(auth::update_repository_preferences),
+        )
+        .route("/me/theme-preference", put(auth::update_theme_preference))
         .route("/me/password", put(auth::update_password))
         .route(
             "/auth/passkeys/login/start",
@@ -617,9 +819,21 @@ pub fn router() -> Router<IdentityState> {
             "/organizations",
             get(resources::list_organizations).post(resources::create_organization),
         )
+        .route("/organizations/{slug}", put(resources::update_organization))
+        .route(
+            "/organizations/{slug}/avatar",
+            get(avatar::public_organization_avatar)
+                .put(avatar::update_organization_avatar)
+                .delete(avatar::delete_organization_avatar)
+                .layer(DefaultBodyLimit::max(avatar::MAX_AVATAR_REQUEST_BYTES)),
+        )
         .route(
             "/organizations/{slug}/members",
             get(resources::list_members).post(resources::add_member),
+        )
+        .route(
+            "/organizations/{slug}/member-suggestions",
+            get(resources::list_member_suggestions),
         )
         .route(
             "/organizations/{slug}/members/{username}",
@@ -636,6 +850,33 @@ pub fn router() -> Router<IdentityState> {
                 .delete(admin::delete_instance_favicon)
                 .layer(DefaultBodyLimit::max(admin::MAX_FAVICON_BYTES)),
         )
+        .route(
+            "/namespaces/{slug}/integrations",
+            get(integrations::list_integrations).post(integrations::create_integration),
+        )
+        .route(
+            "/namespaces/{slug}/integrations/test",
+            post(integrations::test_new_integration),
+        )
+        .route(
+            "/namespaces/{slug}/integrations/{id}",
+            put(integrations::update_integration).delete(integrations::delete_integration),
+        )
+        .route(
+            "/namespaces/{slug}/integrations/{id}/credential",
+            get(integrations::get_integration_credential),
+        )
+        .route(
+            "/namespaces/{slug}/integrations/{id}/test",
+            post(integrations::test_integration),
+        )
+        .route(
+            "/namespaces/{slug}/integrations/{id}/source",
+            get(integrations::get_integration_source)
+                .post(integrations::configure_integration_source)
+                .delete(integrations::disconnect_integration_source),
+        )
+        .merge(mirror_identities::router())
 }
 
 pub fn oauth_router() -> Router<IdentityState> {
@@ -730,6 +971,8 @@ pub struct UserResponse {
     pub id: Uuid,
     pub username: String,
     pub is_admin: bool,
+    pub default_repository_visibility: String,
+    pub theme_preference: String,
     pub avatar_updated_at: Option<chrono::DateTime<Utc>>,
 }
 
@@ -739,6 +982,8 @@ impl From<user::Model> for UserResponse {
             id: user.id,
             username: user.username,
             is_admin: user.is_admin,
+            default_repository_visibility: user.default_repository_visibility,
+            theme_preference: user.theme_preference,
             avatar_updated_at: user.avatar_updated_at,
         }
     }

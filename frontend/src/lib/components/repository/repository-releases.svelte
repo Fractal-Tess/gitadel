@@ -12,6 +12,7 @@
     Upload,
   } from "lucide-svelte";
 
+  import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Badge } from "$lib/components/ui/badge/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
@@ -25,6 +26,8 @@
   let composerOpen = $state(false);
   let composerRelease = $state<Release | null>(null);
   let assetFiles = $state<Record<string, File[]>>({});
+  let deleteDialogOpen = $state(false);
+  let pendingDelete = $state<Release | null>(null);
 
   function beginCreate() {
     composerRelease = null;
@@ -36,15 +39,18 @@
     composerOpen = true;
   }
 
-  async function removeRelease(release: Release) {
-    if (
-      !globalThis.confirm(
-        `Delete the release “${release.title}”? Its target commit and Git refs will not be changed.`,
-      )
-    )
-      return;
+  function requestRemoveRelease(release: Release) {
+    pendingDelete = release;
+    deleteDialogOpen = true;
+  }
+
+  async function confirmRemoveRelease() {
+    const release = pendingDelete;
+    if (!release) return;
     try {
       await repository.deleteRelease(release.id);
+      deleteDialogOpen = false;
+      pendingDelete = null;
     } catch {
       // The page-level error explains the failure.
     }
@@ -145,9 +151,12 @@
                   {/if}
                 </div>
                 <p class="mt-1 text-xs text-muted-foreground">
-                  Published by <span class="font-medium text-foreground"
-                    >{release.author}</span
-                  >
+                  {release.external_author
+                    ? "Originally published by"
+                    : "Published by"}
+                  <span class="font-medium text-foreground">
+                    {release.external_author?.username ?? release.author}
+                  </span>
                 </p>
               </div>
               {#if repository.repository?.can_manage}
@@ -165,7 +174,7 @@
                     size="icon-sm"
                     class="text-muted-foreground hover:text-destructive"
                     aria-label={`Delete ${release.title}`}
-                    onclick={() => void removeRelease(release)}
+                    onclick={() => requestRemoveRelease(release)}
                   >
                     <Trash2 class="size-3.5" />
                   </Button>
@@ -175,7 +184,7 @@
 
             {#if release.rendered_body}
               <div
-                class="prose prose-invert mt-5 max-w-none text-sm prose-code:before:content-none prose-code:after:content-none"
+                class="prose mt-5 max-w-none text-sm prose-code:before:content-none prose-code:after:content-none dark:prose-invert"
                 {@attach trustedHtml(release.rendered_body)}
               ></div>
             {:else}
@@ -294,3 +303,25 @@
   state={repository}
   release={composerRelease}
 />
+
+<AlertDialog.Root bind:open={deleteDialogOpen}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title
+        >Delete release "{pendingDelete?.title ?? ""}"?</AlertDialog.Title
+      >
+      <AlertDialog.Description>
+        Its target commit and Git refs will not be changed. This cannot be
+        undone.
+      </AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Action
+        variant="destructive"
+        onclick={() => void confirmRemoveRelease()}
+        >Delete release</AlertDialog.Action
+      >
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>

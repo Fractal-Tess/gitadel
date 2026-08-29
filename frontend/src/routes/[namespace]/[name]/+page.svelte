@@ -1,17 +1,10 @@
 <script lang="ts">
   import { page } from "$app/state";
   import { resolve } from "$app/paths";
-  import {
-    ArrowLeft,
-    CircleDot,
-    FileCode2,
-    History,
-    Package,
-    Settings,
-    Tag,
-  } from "lucide-svelte";
+  import { ArrowLeft } from "lucide-svelte";
 
   import RepositoryCommit from "$lib/components/repository/repository-commit.svelte";
+  import RepositoryActions from "$lib/components/repository/repository-actions.svelte";
   import RepositoryHistory from "$lib/components/repository/repository-history.svelte";
   import RepositoryIssues from "$lib/components/repository/repository-issues.svelte";
   import RepositoryOverview from "$lib/components/repository/repository-overview.svelte";
@@ -19,6 +12,7 @@
   import RepositorySettings from "$lib/components/repository/repository-settings.svelte";
   import RepositorySidebar from "$lib/components/repository/repository-sidebar.svelte";
   import RepositoryTags from "$lib/components/repository/repository-tags.svelte";
+  import RepositoryIntegrationConfigure from "$lib/components/repository/repository-integration-configure.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
   import { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
   import { recordRepositoryVisit } from "$lib/state/recent-repositories.js";
@@ -31,11 +25,29 @@
       page.params.name ?? "",
     ),
   );
+  const inSettings = $derived(
+    state.view === "settings" || state.view === "integrations",
+  );
 
   $effect(() => {
     const current = state;
     void current.initialize();
     return () => current.destroy();
+  });
+
+  $effect(() => {
+    const repository = state.repository;
+    shell.setActiveRepository(
+      repository
+        ? {
+            namespace: repository.namespace,
+            name: repository.name,
+            canManage: repository.can_manage,
+            mirrored: repository.mirrored,
+          }
+        : null,
+    );
+    return () => shell.setActiveRepository(null);
   });
 
   // The palette leads with recently opened repositories, so every arrival here
@@ -45,66 +57,10 @@
       recordRepositoryVisit(state.repository.namespace, state.repository.name);
     }
   });
-
-  // The rail is the only place repository sections live, so republish them
-  // whenever the active view or the viewer's permissions change.
-  $effect(() => {
-    if (!state.repository) return;
-    return shell.publishNavGroup({
-      label: "Repository",
-      items: [
-        {
-          id: "overview",
-          label: "Code",
-          icon: FileCode2,
-          active: state.view === "overview",
-          select: () => state.navigate("overview"),
-        },
-        {
-          id: "history",
-          label: "History",
-          icon: History,
-          active: state.view === "history" || state.view === "commit",
-          select: () => state.navigate("history"),
-        },
-        {
-          id: "issues",
-          label: "Issues",
-          icon: CircleDot,
-          active: state.view === "issues",
-          select: () => state.navigate("issues"),
-        },
-        {
-          id: "releases",
-          label: "Releases",
-          icon: Package,
-          active: state.view === "releases",
-          select: () => state.navigate("releases"),
-        },
-        {
-          id: "tags",
-          label: "Tags",
-          icon: Tag,
-          active: state.view === "tags",
-          select: () => state.navigate("tags"),
-        },
-        ...(state.repository.can_manage
-          ? [
-              {
-                id: "settings",
-                label: "Settings",
-                icon: Settings,
-                active: state.view === "settings",
-                select: () => state.navigate("settings"),
-              },
-            ]
-          : []),
-      ],
-    });
-  });
 </script>
 
 <svelte:window onpopstate={() => state.restoreLocation()} />
+<svelte:document onvisibilitychange={() => state.handleVisibilityChange()} />
 
 <svelte:head>
   <title>
@@ -149,44 +105,51 @@
         {state.error}
       </div>
     {/if}
-    {#if state.notice}
+
+    {#if inSettings}
+      <!-- Settings is a form, not a browsing surface: it drops the metadata
+           column and reads in the same narrow measure as account settings. -->
       <div
-        class="shrink-0 border-b bg-muted/60 px-5 py-3 text-sm"
-        role="status"
-        aria-live="polite"
+        class="min-w-0 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:overscroll-contain"
       >
-        {state.notice}
+        <div class="mx-auto max-w-5xl px-5 py-8 lg:px-8">
+          {#if state.view === "integrations" && state.integrationProvider}
+            <RepositoryIntegrationConfigure {state} />
+          {:else}
+            <RepositorySettings {state} />
+          {/if}
+        </div>
+      </div>
+    {:else}
+      <!-- The metadata column is a property of the repository, not of one view,
+           so it lives here and stays put while the view changes. -->
+      <div class="grid xl:min-h-0 xl:flex-1 xl:grid-cols-[minmax(0,1fr)_18rem]">
+        <!-- Only the overview draws its own edge-to-edge columns and scrollers;
+             the other views are ordinary documents that need the page padding
+             back and scroll as a single block. -->
+        <div
+          class={state.view === "overview"
+            ? "min-w-0 xl:min-h-0"
+            : "min-w-0 px-5 py-6 xl:min-h-0 xl:overflow-y-auto xl:overscroll-contain"}
+        >
+          {#if state.view === "overview"}
+            <RepositoryOverview {state} />
+          {:else if state.view === "history"}
+            <RepositoryHistory {state} />
+          {:else if state.view === "commit"}
+            <RepositoryCommit {state} />
+          {:else if state.view === "actions"}
+            <RepositoryActions {state} />
+          {:else if state.view === "tags"}
+            <RepositoryTags {state} />
+          {:else if state.view === "releases"}
+            <RepositoryReleases {state} />
+          {:else if state.view === "issues"}
+            <RepositoryIssues {state} />
+          {/if}
+        </div>
+        <RepositorySidebar {state} />
       </div>
     {/if}
-
-    <!-- The metadata column is a property of the repository, not of one tab,
-         so it lives here and stays put while the view changes. -->
-    <div class="grid xl:min-h-0 xl:flex-1 xl:grid-cols-[minmax(0,1fr)_18rem]">
-      <!-- Only the overview draws its own edge-to-edge columns and scrollers;
-           the other views are ordinary documents that need the page padding
-           back and scroll as a single block. -->
-      <div
-        class={state.view === "overview"
-          ? "min-w-0 xl:min-h-0"
-          : "min-w-0 px-5 py-6 xl:min-h-0 xl:overflow-y-auto xl:overscroll-contain"}
-      >
-        {#if state.view === "overview"}
-          <RepositoryOverview {state} />
-        {:else if state.view === "history"}
-          <RepositoryHistory {state} />
-        {:else if state.view === "commit"}
-          <RepositoryCommit {state} />
-        {:else if state.view === "tags"}
-          <RepositoryTags {state} />
-        {:else if state.view === "releases"}
-          <RepositoryReleases {state} />
-        {:else if state.view === "issues"}
-          <RepositoryIssues {state} />
-        {:else if state.view === "settings"}
-          <RepositorySettings {state} />
-        {/if}
-      </div>
-      <RepositorySidebar {state} />
-    </div>
   </div>
 {/if}

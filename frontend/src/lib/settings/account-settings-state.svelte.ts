@@ -10,6 +10,7 @@ import { z } from "zod";
 
 import {
   ApiFailure,
+  actionRegistrationSchema,
   authResponseSchema,
   createdOauthApplicationSchema,
   createdTokenSchema,
@@ -21,6 +22,8 @@ import {
   requestJson,
   sshKeySchema,
   webauthnCreationSchema,
+  type ActionRegistration,
+  type ActionRunner,
   type ApiToken,
   type Member,
   type OauthApplication,
@@ -35,20 +38,29 @@ import {
   updateAccountSettings,
   type AccountSettingsData,
 } from "$lib/navigation-cache.js";
+import {
+  takeNamespaceMembers,
+  takeNamespaceRunners,
+} from "$lib/namespace-preload.js";
 import type { AppState } from "$lib/state/app-state.svelte.js";
 import { createCredential, creationOptions } from "$lib/webauthn.js";
 
 export type AccountSettingsView =
-  "security" | "applications" | "organizations" | "administration";
+  "account" | "authentication" | "ssh-keys" | "api-tokens" | "applications";
 
 export class AccountSettingsState {
-  view = $state<AccountSettingsView>("security");
   passkeys = $state.raw<PasskeySummary[]>([]);
   sshKeys = $state.raw<SshKey[]>([]);
   tokens = $state.raw<ApiToken[]>([]);
   oauthApplications = $state.raw<OauthApplication[]>([]);
   organizations = $state.raw<Organization[]>([]);
   selectedOrganization = $state.raw<Organization | null>(null);
+  actionRunners = $state.raw<Record<string, ActionRunner[]>>({});
+  actionRegistration = $state.raw<ActionRegistration | null>(null);
+  actionsLoading = $state(false);
+  actionsLoadError = $state<string | null>(null);
+  actionsWorking = $state<Record<string, boolean>>({});
+  actionErrors = $state<Record<string, string | null>>({});
   members = $state.raw<Member[]>([]);
   passkeyName = $state("This device");
   sshKeyName = $state("");
@@ -68,6 +80,7 @@ export class AccountSettingsState {
   memberUsername = $state("");
   memberRole = $state<"owner" | "member">("member");
   username = $state("");
+  defaultRepositoryVisibility = $state<"public" | "private">("private");
   currentPassword = $state("");
   newPassword = $state("");
   confirmPassword = $state("");
@@ -76,22 +89,30 @@ export class AccountSettingsState {
   error = $state<string | null>(null);
 
   #cacheUsername: string;
-
+  #fullSettingsLoaded = false;
   constructor(private readonly app: AppState) {
     this.#cacheUsername = app.authStatus?.user?.username ?? "";
     this.username = this.#cacheUsername;
+    this.defaultRepositoryVisibility =
+      app.authStatus?.user?.default_repository_visibility ?? "private";
     const cached = this.#cacheUsername
       ? peekAccountSettings(this.#cacheUsername)
       : null;
     if (cached) {
       this.#applySettings(cached);
+      this.#fullSettingsLoaded = true;
       this.loading = false;
     }
   }
 
-  async initialize(): Promise<void> {
+  async initialize(_view: AccountSettingsView): Promise<void> {
     const username = this.app.authStatus?.user?.username ?? "";
     if (!username) {
+      this.loading = false;
+      return;
+    }
+
+    if (this.#fullSettingsLoaded) {
       this.loading = false;
       return;
     }
@@ -100,6 +121,7 @@ export class AccountSettingsState {
     this.username = username;
     await this.run(async () => {
       this.#applySettings(await loadAccountSettings(username));
+      this.#fullSettingsLoaded = true;
     });
     this.loading = false;
   }
@@ -133,6 +155,32 @@ export class AccountSettingsState {
         description:
           "Update remotes that use your previous repository namespace.",
       });
+    });
+  }
+
+  async updateRepositoryVisibility(visibility: "public" | "private") {
+    const previous = this.defaultRepositoryVisibility;
+    if (visibility === previous) return;
+    this.defaultRepositoryVisibility = visibility;
+
+    await this.run(async () => {
+      try {
+        const response = await requestJson(
+          "/api/v1/me/repository-preferences",
+          authResponseSchema,
+          {
+            method: "PUT",
+            body: jsonBody({ default_repository_visibility: visibility }),
+          },
+        );
+        this.defaultRepositoryVisibility =
+          response.user.default_repository_visibility;
+        await this.app.refreshAuth();
+        toast.success("Repository default updated");
+      } catch (error) {
+        this.defaultRepositoryVisibility = previous;
+        throw error;
+      }
     });
   }
 
@@ -315,6 +363,7 @@ export class AccountSettingsState {
         },
       );
       this.organizations = [...this.organizations, organization];
+      this.app.addOrganization(organization);
       this.organizationSlug = "";
       this.organizationDisplayName = "";
       await this.selectOrganization(organization);
@@ -324,10 +373,7 @@ export class AccountSettingsState {
 
   async selectOrganization(organization: Organization): Promise<void> {
     this.selectedOrganization = organization;
-    this.members = await requestJson(
-      `/api/v1/organizations/${organization.slug}/members`,
-      z.array(memberSchema),
-    );
+    this.members = await takeNamespaceMembers(organization.slug);
   }
 
   async addMember(): Promise<void> {
@@ -362,6 +408,98 @@ export class AccountSettingsState {
       );
       toast.success("Organization member removed");
     });
+  }
+
+  async loadActionRunners(namespaces: string[]): Promise<void> {
+    this.actionsLoading = true;
+    this.actionsLoadError = null;
+    const errors: Record<string, string | null> = {};
+    const loaded: Record<string, ActionRunner[]> = {};
+    let failures = 0;
+
+    await Promise.all(
+      namespaces.map(async (namespace) => {
+        try {
+          loaded[namespace] = await takeNamespaceRunners(namespace);
+          errors[namespace] = null;
+        } catch (caught) {
+          failures += 1;
+          loaded[namespace] = this.actionRunners[namespace] ?? [];
+          errors[namespace] =
+            caught instanceof ApiFailure || caught instanceof Error
+              ? caught.message
+              : `Could not load runners for ${namespace}.`;
+        }
+      }),
+    );
+
+    this.actionRunners = loaded;
+    this.actionErrors = errors;
+    if (failures === namespaces.length && namespaces.length > 0) {
+      this.actionsLoadError = "Could not load runners.";
+    }
+    this.actionsLoading = false;
+  }
+
+  async issueActionRunner(
+    namespace: string,
+    name: string,
+    labels: string[],
+  ): Promise<void> {
+    if (this.actionsWorking[namespace]) return;
+    this.actionsWorking[namespace] = true;
+    this.actionErrors[namespace] = null;
+    try {
+      this.actionRegistration = await requestJson(
+        `/api/v1/namespaces/${encodeURIComponent(namespace)}/actions/runner-registration-tokens`,
+        actionRegistrationSchema,
+        {
+          method: "POST",
+          body: jsonBody({ name, labels }),
+        },
+      );
+    } catch (caught) {
+      const message =
+        caught instanceof ApiFailure || caught instanceof Error
+          ? caught.message
+          : "Could not create the runner registration token.";
+      this.actionErrors[namespace] = message;
+      toast.error(message);
+    } finally {
+      this.actionsWorking[namespace] = false;
+    }
+  }
+
+  async removeActionRunner(namespace: string, runnerId: number): Promise<void> {
+    if (this.actionsWorking[namespace]) return;
+    this.actionsWorking[namespace] = true;
+    this.actionErrors[namespace] = null;
+    try {
+      await requestEmpty(
+        `/api/v1/namespaces/${encodeURIComponent(namespace)}/actions/runners/${runnerId}`,
+        { method: "DELETE" },
+      );
+      this.actionRunners = {
+        ...this.actionRunners,
+        [namespace]: (this.actionRunners[namespace] ?? []).filter(
+          (runner) => runner.id !== runnerId,
+        ),
+      };
+      toast.success("Runner removed");
+    } catch (caught) {
+      const message =
+        caught instanceof ApiFailure || caught instanceof Error
+          ? caught.message
+          : "Could not remove the runner.";
+      this.actionErrors[namespace] = message;
+      toast.error(message);
+    } finally {
+      this.actionsWorking[namespace] = false;
+    }
+  }
+
+  closeActionRegistration(): void {
+    this.actionRegistration = null;
   }
 
   #applySettings(settings: AccountSettingsData): void {

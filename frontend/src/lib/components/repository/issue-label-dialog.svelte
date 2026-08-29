@@ -1,6 +1,7 @@
 <script lang="ts">
   import { LoaderCircle, Plus, Tag, Trash2 } from "lucide-svelte";
 
+  import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
@@ -25,6 +26,8 @@
   let color = $state("#3b82f6");
   let description = $state("");
   let failure = $state("");
+  let deleteDialogOpen = $state(false);
+  let pendingDeleteLabel = $state<{ id: string; name: string } | null>(null);
 
   const presets = [
     "#3b82f6",
@@ -68,10 +71,17 @@
     }
   }
 
-  function removeLabel(id: string, labelName: string) {
-    if (!globalThis.confirm(`Delete label “${labelName}” from every issue?`))
-      return;
-    void repository.deleteIssueLabel(id).catch(() => undefined);
+  function requestRemoveLabel(id: string, labelName: string) {
+    pendingDeleteLabel = { id, name: labelName };
+    deleteDialogOpen = true;
+  }
+
+  function confirmRemoveLabel() {
+    const target = pendingDeleteLabel;
+    if (!target) return;
+    deleteDialogOpen = false;
+    pendingDeleteLabel = null;
+    void repository.deleteIssueLabel(target.id).catch(() => undefined);
   }
 </script>
 
@@ -120,7 +130,7 @@
                 class="text-muted-foreground hover:text-destructive"
                 aria-label={`Delete ${label.name}`}
                 disabled={repository.labelPending}
-                onclick={() => removeLabel(label.id, label.name)}
+                onclick={() => requestRemoveLabel(label.id, label.name)}
               >
                 <Trash2 class="size-3" />
               </Button>
@@ -202,3 +212,16 @@
     </Dialog.Footer>
   </Dialog.Content>
 </Dialog.Root>
+
+<AlertDialog.Root bind:open={deleteDialogOpen}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>Delete label "{pendingDeleteLabel?.name ?? ""}"?</AlertDialog.Title>
+      <AlertDialog.Description>This will remove it from every issue. This cannot be undone.</AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Action variant="destructive" onclick={confirmRemoveLabel}>Delete label</AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>

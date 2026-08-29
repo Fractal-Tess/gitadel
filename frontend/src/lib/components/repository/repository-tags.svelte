@@ -20,7 +20,7 @@
           onclick={() => state.changeRevision(item.name)}>{item.name}</button
         >
         <code class="text-xs text-muted-foreground"
-          >{item.oid.slice(0, 12)}</code
+          >{item.commit_oid.slice(0, 12)}</code
         >
       </li>
     {:else}

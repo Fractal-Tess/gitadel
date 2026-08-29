@@ -43,7 +43,7 @@
       );
       await app.refreshAuth();
       if (creatingAdministrator) {
-        await goto(resolve("/settings?view=administration"));
+        await goto(resolve("/-/administration/[view]", { view: "appearance" }));
       } else {
         await goto(resolve("/"));
       }

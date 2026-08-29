@@ -1,8 +1,8 @@
-use std::{net::SocketAddr, path::PathBuf};
+use std::{fmt, net::SocketAddr, path::PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 /// Command-line options for the Gitadel server.
@@ -83,11 +83,23 @@ pub enum BackupCommand {
         #[arg(value_name = "OUTPUT")]
         output: PathBuf,
     },
+    /// Create a compressed backup and upload it to configured S3 storage.
+    CreateS3 {
+        /// Object key. Defaults to a unique key under the configured prefix.
+        #[arg(long, value_name = "KEY")]
+        key: Option<String>,
+    },
     /// Restore a backup into empty configured storage paths.
     Restore {
         /// Source `.tar.zst` archive.
         #[arg(value_name = "INPUT")]
         input: PathBuf,
+    },
+    /// Download an S3 backup and restore it into empty configured storage paths.
+    RestoreS3 {
+        /// Object key printed by `backup create-s3`.
+        #[arg(value_name = "KEY")]
+        key: String,
     },
 }
 
@@ -130,42 +142,131 @@ pub enum RepositoryCommand {
     },
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Settings {
     pub server: ServerSettings,
     pub database: DatabaseSettings,
     pub auth: AuthSettings,
     pub storage: StorageSettings,
     pub ssh: SshSettings,
+    #[serde(default)]
+    pub backup: BackupSettings,
+    #[serde(default)]
+    pub actions: ActionsSettings,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServerSettings {
     pub bind: SocketAddr,
     pub public_url: Url,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DatabaseSettings {
     pub url: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StorageSettings {
     pub repository_root: PathBuf,
     pub lfs_root: PathBuf,
+    pub actions_artifact_root: PathBuf,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SshSettings {
     pub bind: SocketAddr,
     pub host_key: PathBuf,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AuthSettings {
     pub session_lifetime_hours: i64,
     pub invitation_lifetime_hours: i64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct BackupSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub s3: Option<S3Settings>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ActionsSettings {
+    pub allowed_action_origins: Vec<String>,
+    pub default_actions_origin: String,
+    pub runner_loss_seconds: i64,
+    pub fetch_timeout_seconds: u64,
+    pub max_log_request_bytes: usize,
+    pub max_log_row_bytes: usize,
+    pub max_log_response_bytes: usize,
+    pub max_job_log_bytes: i64,
+    pub retention_days: i64,
+    pub max_artifact_bytes: i64,
+    pub max_artifact_upload_request_bytes: usize,
+    pub max_artifact_block_list_bytes: usize,
+    pub max_artifact_blocks: usize,
+    pub max_artifact_name_bytes: usize,
+    pub artifact_grant_lifetime_seconds: i64,
+    pub lfs_read: bool,
+}
+
+impl Default for ActionsSettings {
+    fn default() -> Self {
+        Self {
+            allowed_action_origins: Vec::new(),
+            default_actions_origin: "https://code.forgejo.org".to_owned(),
+            runner_loss_seconds: 300,
+            fetch_timeout_seconds: 20,
+            max_log_request_bytes: 1_048_576,
+            max_log_row_bytes: 65_536,
+            max_log_response_bytes: 256 * 1_024,
+            max_job_log_bytes: 16 * 1_048_576,
+            retention_days: 90,
+            max_artifact_bytes: 2 * 1024 * 1024 * 1024,
+            max_artifact_upload_request_bytes: 16 * 1024 * 1024,
+            max_artifact_block_list_bytes: 1 * 1024 * 1024,
+            max_artifact_blocks: 50_000,
+            max_artifact_name_bytes: 255,
+            artifact_grant_lifetime_seconds: 3_600,
+            lfs_read: true,
+        }
+    }
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct S3Settings {
+    pub endpoint: Url,
+    pub bucket: String,
+    pub access_key: String,
+    pub secret_key: String,
+    #[serde(default = "default_s3_region")]
+    pub region: String,
+    #[serde(default = "default_s3_prefix")]
+    pub prefix: String,
+}
+
+impl fmt::Debug for S3Settings {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("S3Settings")
+            .field("endpoint", &self.endpoint)
+            .field("bucket", &self.bucket)
+            .field("access_key", &self.access_key)
+            .field("secret_key", &"<redacted>")
+            .field("region", &self.region)
+            .field("prefix", &self.prefix)
+            .finish()
+    }
+}
+
+fn default_s3_region() -> String {
+    "us-east-1".to_owned()
+}
+
+fn default_s3_prefix() -> String {
+    "backups".to_owned()
 }
 
 impl Default for Settings {
@@ -182,6 +283,7 @@ impl Default for Settings {
             storage: StorageSettings {
                 repository_root: PathBuf::from("repositories"),
                 lfs_root: PathBuf::from("lfs"),
+                actions_artifact_root: PathBuf::from("actions-artifacts"),
             },
             ssh: SshSettings {
                 bind: SocketAddr::from(([127, 0, 0, 1], 2222)),
@@ -191,6 +293,8 @@ impl Default for Settings {
                 session_lifetime_hours: 24 * 30,
                 invitation_lifetime_hours: 72,
             },
+            backup: BackupSettings::default(),
+            actions: ActionsSettings::default(),
         }
     }
 }
@@ -213,6 +317,14 @@ impl Settings {
             .set_default(
                 "storage.lfs_root",
                 defaults.storage.lfs_root.to_string_lossy().into_owned(),
+            )?
+            .set_default(
+                "storage.actions_artifact_root",
+                defaults
+                    .storage
+                    .actions_artifact_root
+                    .to_string_lossy()
+                    .into_owned(),
             )?
             .set_default("ssh.bind", defaults.ssh.bind.to_string())?
             .set_default(
@@ -258,13 +370,123 @@ impl Settings {
             settings.ssh.host_key.clone_from(ssh_host_key);
         }
 
+        if let Some(s3) = &settings.backup.s3 {
+            validate_s3_settings(s3)?;
+        }
+        validate_actions_settings(&settings.actions)?;
+
         Ok(settings)
     }
+}
+fn validate_actions_settings(settings: &ActionsSettings) -> Result<()> {
+    ensure!(
+        (30..=3_600).contains(&settings.runner_loss_seconds),
+        "Actions runner loss timeout must be between 30 and 3600 seconds"
+    );
+    ensure!(
+        settings.fetch_timeout_seconds <= 60,
+        "Actions fetch timeout must not exceed 60 seconds"
+    );
+    ensure!(
+        settings.max_log_request_bytes > 0
+            && settings.max_log_row_bytes > 0
+            && settings.max_log_response_bytes > 0
+            && settings.max_job_log_bytes > 0,
+        "Actions log byte limits must be positive"
+    );
+    ensure!(
+        settings.max_log_row_bytes <= settings.max_log_request_bytes
+            && settings.max_log_row_bytes <= settings.max_log_response_bytes
+            && settings.max_log_response_bytes <= settings.max_job_log_bytes as usize,
+        "Actions log row/response limits must fit within their enclosing limits"
+    );
+    ensure!(
+        (1..=3_650).contains(&settings.retention_days),
+        "Actions artifact retention must be between 1 and 3650 days"
+    );
+    ensure!(
+        (1..=2 * 1024 * 1024 * 1024).contains(&settings.max_artifact_bytes),
+        "Actions artifact size limit must be between 1 byte and 2 GiB"
+    );
+    ensure!(
+        (1..=64 * 1024 * 1024).contains(&settings.max_artifact_upload_request_bytes)
+            && settings.max_artifact_upload_request_bytes <= settings.max_artifact_bytes as usize,
+        "Actions artifact upload request limit is invalid"
+    );
+    ensure!(
+        (1..=16 * 1024 * 1024).contains(&settings.max_artifact_block_list_bytes)
+            && settings.max_artifact_block_list_bytes <= settings.max_artifact_upload_request_bytes,
+        "Actions artifact block-list limit is invalid"
+    );
+    ensure!(
+        (1..=100_000).contains(&settings.max_artifact_blocks),
+        "Actions artifact block count must be between 1 and 100000"
+    );
+    ensure!(
+        (1..=255).contains(&settings.max_artifact_name_bytes),
+        "Actions artifact name limit must be between 1 and 255 bytes"
+    );
+    ensure!(
+        (60..=86_400).contains(&settings.artifact_grant_lifetime_seconds),
+        "Actions artifact grant lifetime must be between 60 and 86400 seconds"
+    );
+    validate_http_origin(&settings.default_actions_origin, "default Actions origin")?;
+    for origin in &settings.allowed_action_origins {
+        validate_http_origin(origin, "allowed Actions origin")?;
+    }
+    Ok(())
+}
+
+fn validate_http_origin(value: &str, name: &str) -> Result<()> {
+    let url = Url::parse(value).with_context(|| format!("{name} is not a valid URL"))?;
+    ensure!(
+        matches!(url.scheme(), "http" | "https")
+            && url.path() == "/"
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && url.username().is_empty()
+            && url.password().is_none(),
+        "{name} must be an HTTP(S) origin without a path, query, credentials, or fragment"
+    );
+    Ok(())
+}
+
+pub fn validate_s3_settings(settings: &S3Settings) -> Result<()> {
+    ensure!(
+        matches!(settings.endpoint.scheme(), "http" | "https")
+            && settings.endpoint.path() == "/"
+            && settings.endpoint.query().is_none()
+            && settings.endpoint.fragment().is_none()
+            && settings.endpoint.username().is_empty()
+            && settings.endpoint.password().is_none(),
+        "backup S3 endpoint must be an HTTP(S) origin without a path, query, credentials, or fragment"
+    );
+    ensure!(
+        !settings.bucket.trim().is_empty() && !settings.bucket.contains('/'),
+        "backup S3 bucket must be a non-empty bucket name"
+    );
+    ensure!(
+        !settings.access_key.is_empty() && !settings.secret_key.is_empty(),
+        "backup S3 access key and secret key must not be empty"
+    );
+    ensure!(
+        !settings.region.trim().is_empty(),
+        "backup S3 region must not be empty"
+    );
+    ensure!(
+        settings.prefix == settings.prefix.trim_matches('/'),
+        "backup S3 prefix must not start or end with '/'"
+    );
+    Ok(())
 }
 
 impl Cli {
     pub const fn command(&self) -> Option<&GitadelCommand> {
         self.command.as_ref()
+    }
+
+    pub fn config_path(&self) -> &PathBuf {
+        &self.config
     }
 
     pub fn bootstrap_admin(&self) -> Option<&str> {

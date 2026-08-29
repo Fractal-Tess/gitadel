@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { mode } from "mode-watcher";
 
   const MAX_RICH_DIFF_BYTES = 256 * 1024;
   const MAX_RICH_DIFF_FILES = 80;
@@ -8,6 +9,10 @@
 
   let { patch, cacheKey }: { patch: string; cacheKey: string } = $props();
   let container = $state<HTMLDivElement>();
+  let instances: Array<{
+    cleanUp(): void;
+    setThemeType(theme: "light" | "dark"): void;
+  }> = [];
   let rendering = $state(true);
   const renderRichDiff = $derived(canRenderRichDiff(patch));
   const plainPatch = $derived(
@@ -15,6 +20,12 @@
       ? patch.slice(0, MAX_PLAIN_DIFF_BYTES)
       : patch,
   );
+
+  $effect(() => {
+    const theme = mode.current;
+    if (!theme) return;
+    instances.forEach((instance) => instance.setThemeType(theme));
+  });
 
   function canRenderRichDiff(value: string) {
     if (value.length > MAX_RICH_DIFF_BYTES) return false;
@@ -45,7 +56,6 @@
     }
 
     let cancelled = false;
-    const instances: Array<{ cleanUp(): void }> = [];
     void (async () => {
       const [{ FileDiff, processPatch }] = await Promise.all([
         import("@pierre/diffs"),
@@ -64,7 +74,7 @@
           diffStyle: "split",
           overflow: "scroll",
           lineDiffType: "word",
-          themeType: "system",
+          themeType: mode.current ?? "system",
         });
         instance.render({ fileContainer: host, fileDiff: file });
         instances.push(instance);

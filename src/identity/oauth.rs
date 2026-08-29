@@ -19,7 +19,9 @@ use super::{
     ApiError, IdentityState, SCOPE_READ, SCOPE_REPOSITORY_READ, SCOPE_WRITE, hash_secret,
     random_secret, validate_name,
 };
-use crate::entity::{oauth_access_token, oauth_application, oauth_authorization_code};
+use crate::entity::{
+    dokploy_source_binding, oauth_access_token, oauth_application, oauth_authorization_code,
+};
 
 const AUTHORIZATION_CODE_LIFETIME: chrono::Duration = chrono::Duration::minutes(10);
 const MAX_OAUTH_PARAMETER_LENGTH: usize = 2_048;
@@ -146,14 +148,27 @@ pub async fn delete_application(
         ));
     }
     let transaction = state.database().begin().await?;
-    let deleted = oauth_application::Entity::delete_many()
-        .filter(oauth_application::Column::Id.eq(id))
+    if oauth_application::Entity::find_by_id(id)
         .filter(oauth_application::Column::UserId.eq(actor.user.id))
-        .exec(&transaction)
-        .await?;
-    if deleted.rows_affected == 0 {
+        .one(&transaction)
+        .await?
+        .is_none()
+    {
         return Err(ApiError::not_found());
     }
+    if dokploy_source_binding::Entity::find()
+        .filter(dokploy_source_binding::Column::OauthApplicationId.eq(id))
+        .one(&transaction)
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::conflict(
+            "This OAuth application is managed by a Dokploy integration. Disconnect that source first.",
+        ));
+    }
+    oauth_application::Entity::delete_by_id(id)
+        .exec(&transaction)
+        .await?;
     state
         .audit_on(
             &transaction,
@@ -385,9 +400,14 @@ pub async fn access_token(
             "The token request is missing the code or redirect_uri parameter.",
         );
     };
-    if [&request.client_id, &request.client_secret, &code, &redirect_uri]
-        .iter()
-        .any(|value| value.is_empty() || value.len() > MAX_OAUTH_PARAMETER_LENGTH)
+    if [
+        &request.client_id,
+        &request.client_secret,
+        &code,
+        &redirect_uri,
+    ]
+    .iter()
+    .any(|value| value.is_empty() || value.len() > MAX_OAUTH_PARAMETER_LENGTH)
     {
         return oauth_error(
             StatusCode::BAD_REQUEST,

@@ -2,7 +2,7 @@
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
   import { resolve } from "$app/paths";
-  import { LogOut, ScrollText, Settings2, ShieldCheck } from "lucide-svelte";
+  import { LogOut, Settings2 } from "lucide-svelte";
 
   import * as Avatar from "$lib/components/ui/avatar/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -71,18 +71,11 @@
         <span class="mt-0.5 block font-medium">{username}</span>
       </DropdownMenu.Label>
       <DropdownMenu.Separator />
-      <DropdownMenu.Item onclick={() => void goto(resolve("/settings"))}>
+      <DropdownMenu.Item
+        onclick={() =>
+          void goto(resolve("/-/account/[view]", { view: "profile" }))}
+      >
         <Settings2 />Account settings
-      </DropdownMenu.Item>
-      {#if app.authStatus.user?.is_admin}
-        <DropdownMenu.Item
-          onclick={() => void goto(resolve("/settings?view=administration"))}
-        >
-          <ShieldCheck />Administration
-        </DropdownMenu.Item>
-      {/if}
-      <DropdownMenu.Item onclick={() => void goto(resolve("/changelog"))}>
-        <ScrollText />Changelog
       </DropdownMenu.Item>
       <DropdownMenu.Separator />
       <DropdownMenu.Item disabled={working} onclick={() => void logout()}>

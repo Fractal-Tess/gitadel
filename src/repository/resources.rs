@@ -13,19 +13,19 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use chrono::{Duration, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
-    sea_query::Expr,
+    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, Set,
+    TransactionTrait, sea_query::Expr,
 };
 use serde::{Deserialize, Serialize};
 use sley::{ObjectFormat, Repository as SleyRepository};
 use tokio::{fs, process::Command};
 use uuid::Uuid;
 
-use super::{Permission, RepositoryState, validate_repository_name};
+use super::{Permission, RepositoryState, mirrors, validate_repository_name};
 use crate::{
     entity::{
-        instance, namespace, organization_member, repository, repository_alias,
-        repository_collaborator, repository_favorite, user,
+        namespace, organization_member, repository, repository_alias, repository_collaborator,
+        repository_favorite, user,
     },
     identity::{ApiError, SCOPE_READ, SCOPE_WRITE, validate_slug},
 };
@@ -36,8 +36,10 @@ pub struct RepositoryResponse {
     namespace: String,
     name: String,
     description: Option<String>,
+    website_url: Option<String>,
     visibility: String,
     object_format: String,
+    mirrored: bool,
     default_branch: String,
     archived_at: Option<chrono::DateTime<Utc>>,
     created_at: chrono::DateTime<Utc>,
@@ -66,8 +68,10 @@ impl RepositoryResponse {
             namespace: repository.namespace,
             name: repository.name,
             description: repository.description,
+            website_url: repository.website_url,
             visibility: repository.visibility,
             object_format: repository.object_format,
+            mirrored: repository.mirrored,
             default_branch: repository.default_branch,
             archived_at: repository.archived_at,
             created_at: repository.created_at,
@@ -202,6 +206,7 @@ pub struct CreateRepositoryRequest {
     description: Option<String>,
     visibility: Option<String>,
     object_format: Option<String>,
+    mirror: Option<mirrors::CreateMirrorRequest>,
 }
 
 pub(super) struct CreateRepositoryOptions {
@@ -210,6 +215,7 @@ pub(super) struct CreateRepositoryOptions {
     pub(super) description: Option<String>,
     pub(super) visibility: Option<String>,
     pub(super) object_format: Option<String>,
+    pub(super) mirror: Option<mirrors::CreateMirrorRequest>,
 }
 
 pub async fn create_repository(
@@ -231,6 +237,7 @@ pub async fn create_repository(
             description: request.description,
             visibility: request.visibility,
             object_format: request.object_format,
+            mirror: request.mirror,
         },
     )
     .await?;
@@ -260,10 +267,10 @@ pub(super) async fn create_owned_repository(
     let visibility = if let Some(visibility) = options.visibility {
         visibility
     } else {
-        instance::Entity::find_by_id(1)
+        user::Entity::find_by_id(actor_user_id)
             .one(state.identity().database())
             .await?
-            .ok_or_else(|| ApiError::internal("instance settings row is missing"))?
+            .ok_or_else(|| ApiError::internal("repository owner account is missing"))?
             .default_repository_visibility
     };
     if visibility != "public" && visibility != "private" {
@@ -271,13 +278,18 @@ pub(super) async fn create_owned_repository(
             "Repository visibility must be public or private.",
         ));
     }
-    let (object_format, sley_format) = match options.object_format.as_deref().unwrap_or("sha1") {
-        "sha1" => ("sha1", ObjectFormat::Sha1),
-        "sha256" => ("sha256", ObjectFormat::Sha256),
-        _ => {
-            return Err(ApiError::bad_request(
-                "Repository object format must be sha1 or sha256.",
-            ));
+    let mirrored = options.mirror.is_some();
+    let (object_format, sley_format) = if mirrored {
+        ("sha1", ObjectFormat::Sha1)
+    } else {
+        match options.object_format.as_deref().unwrap_or("sha1") {
+            "sha1" => ("sha1", ObjectFormat::Sha1),
+            "sha256" => ("sha256", ObjectFormat::Sha256),
+            _ => {
+                return Err(ApiError::bad_request(
+                    "Repository object format must be sha1 or sha256.",
+                ));
+            }
         }
     };
 
@@ -299,41 +311,103 @@ pub(super) async fn create_owned_repository(
         }
         _ => return Err(ApiError::not_found()),
     }
+    let mirror = match options.mirror {
+        Some(request) => {
+            Some(mirrors::PreparedMirror::prepare(state, &namespace_slug, request).await?)
+        }
+        None => None,
+    };
 
     ensure_location_available(state, &namespace_slug, &name).await?;
 
     let storage_key = Uuid::new_v4();
     let now = Utc::now();
-    let repository = repository::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        namespace: Set(namespace_slug.clone()),
-        name: Set(name.clone()),
-        description: Set(description),
-        visibility: Set(visibility),
-        object_format: Set(object_format.to_owned()),
-        default_branch: Set("main".to_owned()),
-        issue_counter: Set(0),
-        storage_key: Set(storage_key),
-        created_by: Set(actor_user_id),
-        archived_at: Set(None),
-        deleted_at: Set(None),
-        created_at: Set(now),
-        updated_at: Set(now),
+    let repository = repository::Model {
+        id: Uuid::new_v4(),
+        namespace: namespace_slug.clone(),
+        name: name.clone(),
+        description,
+        website_url: None,
+        visibility,
+        object_format: object_format.to_owned(),
+        mirrored,
+        default_branch: "main".to_owned(),
+        issue_counter: 0,
+        storage_key,
+        created_by: actor_user_id,
+        archived_at: None,
+        deleted_at: None,
+        created_at: now,
+        updated_at: now,
     };
-    let transaction = state.identity().database().begin().await?;
-    let repository = repository.insert(&transaction).await?;
     let repository_path = state.repository_path(&repository);
+    let mirror_initialization = if let Some(mirror) = mirror.as_ref() {
+        match mirrors::initialize(state, &repository_path, mirror).await {
+            Ok(initialized) => Some(initialized),
+            Err(error) => {
+                cleanup_repository(&repository_path).await;
+                return Err(error);
+            }
+        }
+    } else {
+        if let Err(error) = initialize_repository(&repository_path, sley_format).await {
+            cleanup_repository(&repository_path).await;
+            return Err(error);
+        }
+        None
+    };
 
-    if let Err(error) = initialize_repository(&repository_path, sley_format).await {
-        cleanup_repository(&repository_path).await;
-        return Err(error);
-    }
+    let transaction = match state.identity().database().begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            cleanup_repository(&repository_path).await;
+            return Err(error.into());
+        }
+    };
+    let repository = match repository.into_active_model().insert(&transaction).await {
+        Ok(repository) => repository,
+        Err(error) => {
+            cleanup_repository(&repository_path).await;
+            return Err(error.into());
+        }
+    };
+    let repository = if let Some(mirror) = mirror {
+        let Some(initialized) = mirror_initialization else {
+            cleanup_repository(&repository_path).await;
+            return Err(ApiError::internal(
+                "mirror initialization result is missing",
+            ));
+        };
+        let mut active = repository.into_active_model();
+        active.object_format = Set(initialized.object_format);
+        active.default_branch = Set(initialized.default_branch);
+        let repository = match active.update(&transaction).await {
+            Ok(repository) => repository,
+            Err(error) => {
+                cleanup_repository(&repository_path).await;
+                return Err(error.into());
+            }
+        };
+        if let Err(error) =
+            mirrors::insert(&transaction, repository.id, &repository.namespace, mirror).await
+        {
+            cleanup_repository(&repository_path).await;
+            return Err(error);
+        }
+        repository
+    } else {
+        repository
+    };
     if let Err(error) = state
         .identity()
         .audit_on(
             &transaction,
             Some(actor_user_id),
-            "repository.create",
+            if mirrored {
+                "repository.mirror.create"
+            } else {
+                "repository.create"
+            },
             Some(format!("{namespace_slug}/{name}")),
         )
         .await
@@ -345,7 +419,144 @@ pub(super) async fn create_owned_repository(
         cleanup_repository(&repository_path).await;
         return Err(error.into());
     }
+    if mirrored {
+        match mirrors::import_initial_metadata(state, &repository).await {
+            Ok(repository) => return Ok(repository),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    repository_id = %repository.id,
+                    "initial GitHub mirror metadata import failed"
+                );
+            }
+        }
+    }
 
+    Ok(repository)
+}
+
+pub(super) struct ImportRepositoryOptions {
+    pub(super) namespace: String,
+    pub(super) name: String,
+    pub(super) description: Option<String>,
+    pub(super) source_url: String,
+    pub(super) source_instance_url: Option<String>,
+    pub(super) visibility: String,
+    pub(super) remote_url: String,
+    pub(super) authentication: mirrors::ImportAuthentication,
+}
+
+pub(super) async fn create_imported_repository(
+    state: &RepositoryState,
+    actor_user_id: Uuid,
+    options: ImportRepositoryOptions,
+) -> Result<repository::Model, ApiError> {
+    let namespace = validate_slug(&options.namespace, "Namespace")?;
+    let name = validate_repository_name(&options.name)?;
+    let description = options
+        .description
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if description.as_ref().is_some_and(|value| value.len() > 512) {
+        return Err(ApiError::bad_request(
+            "Repository descriptions must be at most 512 characters.",
+        ));
+    }
+    if options.visibility != "public" && options.visibility != "private" {
+        return Err(ApiError::bad_request(
+            "Repository visibility must be public or private.",
+        ));
+    }
+
+    let owner = namespace::Entity::find_by_id(&namespace)
+        .one(state.identity().database())
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    match owner.kind.as_str() {
+        "user" if owner.user_id == Some(actor_user_id) => {}
+        "organization" => {
+            let organization_id = owner.organization_id.ok_or_else(ApiError::not_found)?;
+            organization_member::Entity::find_by_id((organization_id, actor_user_id))
+                .one(state.identity().database())
+                .await?
+                .filter(|membership| membership.role == "owner")
+                .ok_or_else(ApiError::not_found)?;
+        }
+        _ => return Err(ApiError::not_found()),
+    }
+    ensure_location_available(state, &namespace, &name).await?;
+
+    let now = Utc::now();
+    let mut repository = repository::Model {
+        id: Uuid::new_v4(),
+        namespace: namespace.clone(),
+        name: name.clone(),
+        description,
+        website_url: Some(options.source_url),
+        visibility: options.visibility,
+        object_format: "sha1".to_owned(),
+        mirrored: false,
+        default_branch: "main".to_owned(),
+        issue_counter: 0,
+        storage_key: Uuid::new_v4(),
+        created_by: actor_user_id,
+        archived_at: None,
+        deleted_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let path = state.repository_path(&repository);
+    let lfs_path = state.lfs_repository_path(&repository);
+    let initialized = match mirrors::initialize_import(
+        state,
+        &path,
+        repository.storage_key,
+        options.source_instance_url.as_deref(),
+        &options.remote_url,
+        &options.authentication,
+    )
+    .await
+    {
+        Ok(initialized) => initialized,
+        Err(error) => {
+            cleanup_repository_storage(&path, &lfs_path).await;
+            return Err(error);
+        }
+    };
+    repository.object_format = initialized.object_format;
+    repository.default_branch = initialized.default_branch;
+
+    let transaction = match state.identity().database().begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            cleanup_repository_storage(&path, &lfs_path).await;
+            return Err(error.into());
+        }
+    };
+    let repository = match repository.into_active_model().insert(&transaction).await {
+        Ok(repository) => repository,
+        Err(error) => {
+            cleanup_repository_storage(&path, &lfs_path).await;
+            return Err(error.into());
+        }
+    };
+    if let Err(error) = state
+        .identity()
+        .audit_on(
+            &transaction,
+            Some(actor_user_id),
+            "repository.import.create",
+            Some(format!("{namespace}/{name}")),
+        )
+        .await
+    {
+        cleanup_repository_storage(&path, &lfs_path).await;
+        return Err(error);
+    }
+    if let Err(error) = transaction.commit().await {
+        cleanup_repository_storage(&path, &lfs_path).await;
+        return Err(error.into());
+    }
     Ok(repository)
 }
 
@@ -638,7 +849,11 @@ pub async fn purge_repository(
         .exec(&transaction)
         .await?;
     transaction.commit().await?;
-    cleanup_repository(&state.repository_path(&repository)).await;
+    cleanup_repository_storage(
+        &state.repository_path(&repository),
+        &state.lfs_repository_path(&repository),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -715,7 +930,7 @@ async fn managed_repository(
     Ok((actor, repository))
 }
 
-async fn ensure_owned_namespace(
+pub(super) async fn ensure_owned_namespace(
     state: &RepositoryState,
     actor_user_id: Uuid,
     slug: &str,
@@ -1061,5 +1276,14 @@ async fn cleanup_repository(path: &Path) {
         && error.kind() != std::io::ErrorKind::NotFound
     {
         tracing::error!(%error, path = %path.display(), "could not clean up repository directory");
+    }
+}
+
+async fn cleanup_repository_storage(repository_path: &Path, lfs_path: &Path) {
+    cleanup_repository(repository_path).await;
+    if let Err(error) = fs::remove_dir_all(lfs_path).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::error!(%error, path = %lfs_path.display(), "could not clean up Git LFS directory");
     }
 }

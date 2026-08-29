@@ -119,6 +119,7 @@ pub async fn replace_topics(
             repository_id: Set(repository.id),
             topic_id: Set(topic_id),
             created_at: Set(now),
+            external_source: Set(None),
         }
         .insert(&transaction)
         .await?;

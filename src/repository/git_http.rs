@@ -176,6 +176,14 @@ async fn authorized_repository(
         return Ok(repository);
     }
     let token = token_from_headers(headers).ok_or_else(authentication_required)?;
+    if state.actions().is_some()
+        && crate::actions::tokens::authorize_job(state.identity().database(), &token, repository.id)
+            .await
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())?
+            .is_some()
+    {
+        return Ok(repository);
+    }
     let actor = state
         .identity()
         .authenticate_token(&token, SCOPE_REPOSITORY_READ)

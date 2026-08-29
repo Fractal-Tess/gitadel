@@ -11,7 +11,7 @@
 
 <!-- The metadata rail draws the divider on this column's right, so it only owns
      its own stacking border on narrow screens. -->
-<section class="flex min-w-0 flex-col border-b xl:min-h-0 xl:border-b-0">
+<section class="flex min-w-0 flex-col border-b xl:h-full xl:min-h-0 xl:border-b-0">
   {#if state.blob}
     <header
       class="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-3 border-b px-5 py-2 text-sm font-semibold"
@@ -79,7 +79,7 @@
         </div>
       {:else if state.blob.rendered_html}
         <div
-          class="prose prose-invert max-w-none p-6 prose-img:my-0 prose-img:inline-block prose-code:before:content-none prose-code:after:content-none lg:p-8"
+          class="prose max-w-none p-6 prose-img:my-0 prose-img:inline-block prose-code:before:content-none prose-code:after:content-none dark:prose-invert lg:p-8"
           {@attach trustedHtml(state.blob.rendered_html, {
             namespace: state.namespace,
             name: state.name,
@@ -105,7 +105,7 @@
     </header>
     <div class="min-h-0 flex-1 xl:overflow-y-auto xl:overscroll-contain">
       <div
-        class="prose prose-invert max-w-none p-6 prose-img:my-0 prose-img:inline-block prose-code:before:content-none prose-code:after:content-none lg:p-8"
+        class="prose max-w-none p-6 prose-img:my-0 prose-img:inline-block prose-code:before:content-none prose-code:after:content-none dark:prose-invert lg:p-8"
         {@attach trustedHtml(state.readme.rendered_html, {
           namespace: state.namespace,
           name: state.name,

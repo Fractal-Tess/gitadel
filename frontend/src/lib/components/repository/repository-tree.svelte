@@ -10,8 +10,10 @@
   let { state }: { state: RepositoryPageState } = $props();
 </script>
 
+<!-- The right-hand divider is drawn by the pane resizer on wide layouts, so
+     this column only owns the border it stacks with on narrow screens. -->
 <aside
-  class="flex min-w-0 flex-col border-b xl:h-full xl:min-h-0 xl:border-b-0 xl:border-r"
+  class="flex min-w-0 flex-col border-b xl:h-full xl:min-h-0 xl:border-b-0"
 >
   {#if state.repositoryTree}
     <Select.Root

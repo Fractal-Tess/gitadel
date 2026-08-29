@@ -4,37 +4,44 @@ Focused bug fixes and features that fit Gitadel's small-forge scope are welcome.
 
 ## Development environment
 
-The Nix flake pins Bun, the Rust toolchain from `rust-toolchain.toml`, and all native dependencies. Enter it automatically with direnv or manually with Nix:
+The Nix flake pins Bun, Rust, and the native dependencies. Enter the shell and
+install the locked frontend dependencies:
 
 ```bash
 direnv allow
 # or: nix develop
-frontend-install
+just install
 ```
 
-Run the frontend and backend in separate shells:
+Start the complete development loop in one terminal:
 
 ```bash
-frontend       # SvelteKit on http://localhost:5173
-backend        # Gitadel HTTP on :3000 and SSH on :2222
+just dev
 ```
 
-The flake also provides `frontend-build`, `release-build`, and `frontend-hash` commands.
+Process Compose runs the frontend and backend watchers, waits for the first
+frontend build before starting Gitadel, combines their logs, and stops both
+process groups on exit. Use `just frontend` or `just backend` to run one watcher.
+Run `just --list` for the remaining build and maintenance commands.
 
-### Single-port frontend watch
+### Single-port development
 
-To exercise flows that need the API and frontend on one origin (OAuth callbacks,
-cookies, passkeys), run:
+Only the backend binds a port and serves the frontend. OAuth callbacks, cookies,
+and passkeys therefore use one origin. In debug builds rust-embed reads
+`frontend/build/` from disk on every request, so frontend rebuilds are live and
+only Rust changes restart the server. The frontend watcher runs a fresh,
+finite production build after each relevant source change. See
+[AGENTS.md](AGENTS.md) for the underlying commands.
 
-```bash
-./scripts/dev.sh
-```
+`bun run --cwd frontend dev` serves a second origin that proxies only `/api`
+and `/healthz`, so backend routes are unreachable through it.
 
-It starts `vite build --watch` and serves Gitadel on http://localhost:8080. In
-debug builds rust-embed reads assets from `frontend/build/` on every request,
-so frontend changes are live without restarting; Rust changes require a
-restart. Defaults can be overridden with the `GITADEL_*` environment variables
-used by the CLI.
+Bare defaults are `127.0.0.1:3000` with SSH on `2222`, a `gitadel.db` in the
+repository root, and `repositories/`, `lfs/`, and an SSH host key beside it -
+all gitignored. Those ports collide with any Gitadel already running on the
+machine, so give a dev instance its own ports and paths through a gitignored
+`gitadel.toml` in the root, which is read automatically, or through the CLI
+flags and their `GITADEL_*` environment variables. See [AGENTS.md](AGENTS.md).
 
 ## Validation
 
@@ -54,15 +61,13 @@ Nix only includes Git-tracked files in flake source inputs. Stage new source fil
 Build the embedded SvelteKit frontend and release binary with:
 
 ```bash
-release-build
+just release-build
 ```
 
 The Nix package installs frontend dependencies in a fixed-output derivation. Refresh its hash whenever `frontend/bun.lock` changes:
 
 ```bash
-frontend-hash
-# or
-./scripts/update-frontend-hash.sh
+just frontend-hash
 ```
 
 ## Repository layout

@@ -20,6 +20,7 @@
       buildDeps = pkgs: [
         pkgs.cmake
         pkgs.git
+        pkgs.git-lfs
         pkgs.perl
         pkgs.pkg-config
       ];
@@ -94,7 +95,7 @@
           '';
           postInstall = ''
             wrapProgram $out/bin/gitadel \
-              --prefix PATH : ${lib.makeBinPath [ pkgs.git ]}
+              --prefix PATH : ${lib.makeBinPath [ pkgs.git pkgs.git-lfs ]}
           '';
           passthru = { inherit frontend nodeModules; };
           meta = {
@@ -128,10 +129,6 @@
             overlays = [ rust-overlay.overlays.default ];
           };
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
-          devCommand = name: text: pkgs.writeShellApplication {
-            inherit name text;
-            runtimeInputs = [ pkgs.bun pkgs.git pkgs.nix rustToolchain ];
-          };
         in
         {
           default = pkgs.mkShell {
@@ -139,27 +136,12 @@
               pkgs.bun
               pkgs.curl
               pkgs.jq
+              pkgs.just
               pkgs.openssh
+              pkgs.process-compose
               pkgs.rust-analyzer
+              pkgs.watchexec
               rustToolchain
-              (devCommand "backend" ''
-                cargo run -- "$@"
-              '')
-              (devCommand "frontend" ''
-                bun run --cwd frontend dev "$@"
-              '')
-              (devCommand "frontend-install" ''
-                bun install --cwd frontend --frozen-lockfile "$@"
-              '')
-              (devCommand "frontend-build" ''
-                bun run --cwd frontend build "$@"
-              '')
-              (devCommand "release-build" ''
-                exec ./scripts/build-release.sh "$@"
-              '')
-              (devCommand "frontend-hash" ''
-                exec ./scripts/update-frontend-hash.sh "$@"
-              '')
             ];
           };
         });
