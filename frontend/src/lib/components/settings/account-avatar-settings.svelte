@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Camera } from "lucide-svelte";
+  import Camera from "@lucide/svelte/icons/camera";
   import { toast } from "svelte-sonner";
 
   import { blobToBase64 } from "$lib/avatar-crop.js";
@@ -7,7 +7,12 @@
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import * as Avatar from "$lib/components/ui/avatar/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
-  import { ApiFailure, avatarUrl, jsonBody, requestEmpty } from "$lib/api.js";
+  import {
+    ApiFailure,
+    jsonBody,
+    requestEmpty,
+  } from "$lib/api/transport.js";
+  import { avatarUrl } from "$lib/api/account.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
   const app = useAppState();

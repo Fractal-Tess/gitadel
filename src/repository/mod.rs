@@ -7,16 +7,17 @@ mod imports;
 mod integrations;
 mod issues;
 mod lfs;
+mod mirror_scheduler;
 mod mirrors;
 mod releases;
 mod resources;
 mod ssh;
 mod topics;
 mod webhooks;
-
 pub(crate) use browser::{read_git, render_markdown};
-pub(crate) use mirrors::serve_scheduler as serve_mirror_scheduler;
 
+pub(crate) use git_http::GitHttpState;
+pub(crate) use mirror_scheduler::serve_mirror_scheduler;
 pub(crate) fn outbound_http_client() -> Result<reqwest::Client, reqwest::Error> {
     webhooks::webhook_client()
 }
@@ -27,8 +28,9 @@ pub(crate) async fn recover_imports(state: &RepositoryState) -> Result<(), ApiEr
 
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -42,11 +44,11 @@ use tokio::{
     fs,
     sync::{Mutex, RwLock, Semaphore},
 };
+use tokio_util::task::TaskTracker;
 use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    actions::ActionsState,
     config::StorageSettings,
     entity::{
         namespace, organization_member, repository, repository_alias, repository_collaborator, user,
@@ -77,7 +79,7 @@ pub struct RepositoryState {
     ssh_port: u16,
     lfs_tokens: Arc<RwLock<HashMap<String, LfsAuthorization>>>,
     webhook_client: reqwest::Client,
-    actions: Arc<OnceLock<ActionsState>>,
+    tasks: TaskTracker,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,16 +153,23 @@ impl RepositoryState {
             ssh_port,
             lfs_tokens: Arc::new(RwLock::new(HashMap::new())),
             webhook_client: webhooks::webhook_client()?,
-            actions: Arc::new(OnceLock::new()),
+            tasks: TaskTracker::new(),
         })
     }
 
-    pub(crate) fn attach_actions(&self, state: ActionsState) -> Result<(), ActionsState> {
-        self.actions.set(state)
+    pub(crate) fn spawn_task<F>(&self, task: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.tasks.spawn(task);
     }
 
-    pub(crate) fn actions(&self) -> Option<&ActionsState> {
-        self.actions.get()
+    pub(crate) fn close_tasks(&self) {
+        self.tasks.close();
+    }
+
+    pub(crate) async fn wait_for_tasks(&self) {
+        self.tasks.wait().await;
     }
 
     pub fn identity(&self) -> &IdentityState {
@@ -336,8 +345,9 @@ impl RepositoryState {
         }
         drop(refreshing);
 
+        let task_state = self.clone();
         let state = self.clone();
-        tokio::spawn(async move {
+        task_state.spawn_task(async move {
             if let Err(error) = state.measure_repository_size(&repository).await {
                 tracing::warn!(
                     %error,
@@ -792,15 +802,16 @@ pub fn router() -> Router<RepositoryState> {
         )
 }
 
-pub fn git_http_router() -> Router<RepositoryState> {
+pub fn git_http_router() -> Router<git_http::GitHttpState> {
     git_http::router().merge(lfs::router())
 }
 
 pub async fn serve_ssh(
     settings: crate::config::SshSettings,
     state: RepositoryState,
+    actions: crate::actions::ActionsState,
 ) -> Result<(), anyhow::Error> {
-    ssh::serve(settings, state).await
+    ssh::serve(settings, state, actions).await
 }
 const RESERVED_REPOSITORY_NAMES: &[&str] = &[
     "integrations",

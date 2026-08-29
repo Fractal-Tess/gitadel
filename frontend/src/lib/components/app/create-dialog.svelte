@@ -1,16 +1,15 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { resolve } from "$app/paths";
-  import {
-    ArrowLeft,
-    ArrowDownToLine,
-    Building2,
-    GitBranch,
-    LoaderCircle,
-    RefreshCw,
-  } from "lucide-svelte";
+  import ArrowLeft from "@lucide/svelte/icons/arrow-left";
+  import ArrowDownToLine from "@lucide/svelte/icons/arrow-down-to-line";
+  import Building2 from "@lucide/svelte/icons/building-2";
+  import GitBranch from "@lucide/svelte/icons/git-branch";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
 
-  import { avatarUrl, organizationAvatarUrl } from "$lib/api.js";
+  import { avatarUrl } from "$lib/api/account.js";
+  import { organizationAvatarUrl } from "$lib/api/organizations.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Avatar from "$lib/components/ui/avatar/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
@@ -22,12 +21,11 @@
   import {
     ApiFailure,
     jsonBody,
-    mirrorIdentitiesSchema,
-    organizationSchema,
-    repositorySchema,
     requestJson,
-    type MirrorIdentity,
-  } from "$lib/api.js";
+  } from "$lib/api/transport.js";
+  import { mirrorIdentitiesSchema, type MirrorIdentity } from "$lib/api/mirrors.js";
+  import { organizationSchema } from "$lib/api/organizations.js";
+  import { repositorySchema } from "$lib/api/repositories.js";
   import { invalidateExplore } from "$lib/navigation-cache.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
   import { useShellState } from "$lib/state/shell-state.svelte.js";
@@ -242,7 +240,7 @@
       mirrorRemoteUrl = "";
       mirrorIdentityId = "";
       mirrorSchedule = "";
-      invalidateExplore(viewer);
+      invalidateExplore(app.authorizationScope);
       await goto(
         resolve("/[namespace]/[name]", {
           namespace: repository.namespace,

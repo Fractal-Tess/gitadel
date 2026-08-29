@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { RepositoryActivity } from "$lib/api.js";
+  import type { RepositoryActivity } from "$lib/api/repositories.js";
   import ChartTooltip from "./chart-tooltip.svelte";
 
   let { activity }: { activity: RepositoryActivity } = $props();

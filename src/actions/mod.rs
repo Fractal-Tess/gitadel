@@ -72,6 +72,8 @@ pub(crate) async fn serve_actions_scheduler(state: ActionsState) -> anyhow::Resu
     }
 }
 
+// pbjson-build emits formatting borrows that are valid but trip current Clippy.
+#[allow(clippy::useless_borrows_in_formatting)]
 pub(crate) mod proto {
     pub(crate) mod ping {
         include!(concat!(env!("OUT_DIR"), "/ping.v1.rs"));

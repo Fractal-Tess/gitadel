@@ -31,7 +31,7 @@ use crate::{
     archive::{self, MaintenanceAction, MaintenanceProgress, MaintenanceProgressReporter},
     config::Settings,
     identity::{self, IdentityState},
-    repository::{self, RepositoryState},
+    repository::{self, GitHttpState, RepositoryState},
 };
 
 #[derive(RustEmbed)]
@@ -72,9 +72,7 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
         .await
         .context("could not recover interrupted repository imports")?;
     let actions_state = ActionsState::new(repository_state.clone(), settings.actions.clone());
-    repository_state
-        .attach_actions(actions_state.clone())
-        .map_err(|_| anyhow::anyhow!("Actions state was already initialized"))?;
+    let git_http_state = GitHttpState::new(repository_state.clone(), actions_state.clone());
     let api_router = Router::new()
         .route("/", get(api::version))
         .route("/changelog", get(api::changelog))
@@ -91,7 +89,7 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
         .nest("/api/v1", api_router)
         .merge(actions_state.artifact_router())
         .nest("/api/actions", actions_state.protocol_router())
-        .merge(repository::git_http_router().with_state(repository_state.clone()))
+        .merge(repository::git_http_router().with_state(git_http_state))
         .fallback(get(frontend))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http());
@@ -115,16 +113,34 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
     let mut backup_scheduler = tokio::spawn(archive::serve_backup_scheduler(identity_state));
     let mut actions_scheduler =
         tokio::spawn(actions::serve_actions_scheduler(actions_state.clone()));
-    let mut ssh = tokio::spawn(repository::serve_ssh(settings.ssh, repository_state));
-    let exit = tokio::select! {
+    let mut ssh = tokio::spawn(repository::serve_ssh(
+        settings.ssh,
+        repository_state.clone(),
+        actions_state.clone(),
+    ));
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum CompletedService {
+        Http,
+        Ssh,
+        MirrorScheduler,
+        BackupScheduler,
+        ActionsScheduler,
+    }
+
+    let (outcome, completed) = tokio::select! {
         result = &mut http => {
             ssh.abort();
             mirror_scheduler.abort();
             backup_scheduler.abort();
             actions_state.cancel();
             actions_scheduler.abort();
-            result.context("HTTP server task failed")??;
-            ServerExit::Shutdown
+            (
+                result
+                    .context("HTTP server task failed")
+                    .and_then(|result| result)
+                    .map(|()| ServerExit::Shutdown),
+                Some(CompletedService::Http),
+            )
         }
         result = &mut ssh => {
             http.abort();
@@ -132,8 +148,13 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
             backup_scheduler.abort();
             actions_state.cancel();
             actions_scheduler.abort();
-            result.context("SSH server task failed")??;
-            ServerExit::Shutdown
+            (
+                result
+                    .context("SSH server task failed")
+                    .and_then(|result| result)
+                    .map(|()| ServerExit::Shutdown),
+                Some(CompletedService::Ssh),
+            )
         }
         result = &mut mirror_scheduler => {
             http.abort();
@@ -141,8 +162,13 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
             backup_scheduler.abort();
             actions_state.cancel();
             actions_scheduler.abort();
-            result.context("mirror scheduler task failed")??;
-            ServerExit::Shutdown
+            (
+                result
+                    .context("mirror scheduler task failed")
+                    .and_then(|result| result)
+                    .map(|()| ServerExit::Shutdown),
+                Some(CompletedService::MirrorScheduler),
+            )
         }
         result = &mut backup_scheduler => {
             http.abort();
@@ -150,16 +176,26 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
             mirror_scheduler.abort();
             actions_state.cancel();
             actions_scheduler.abort();
-            result.context("backup scheduler task failed")??;
-            ServerExit::Shutdown
+            (
+                result
+                    .context("backup scheduler task failed")
+                    .and_then(|result| result)
+                    .map(|()| ServerExit::Shutdown),
+                Some(CompletedService::BackupScheduler),
+            )
         }
         result = &mut actions_scheduler => {
             http.abort();
             ssh.abort();
             mirror_scheduler.abort();
             backup_scheduler.abort();
-            result.context("Actions scheduler task failed")??;
-            ServerExit::Shutdown
+            (
+                result
+                    .context("Actions scheduler task failed")
+                    .and_then(|result| result)
+                    .map(|()| ServerExit::Shutdown),
+                Some(CompletedService::ActionsScheduler),
+            )
         }
         Some(action) = maintenance_receiver.recv() => {
             shutdown.cancel();
@@ -168,13 +204,35 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
             backup_scheduler.abort();
             actions_state.cancel();
             actions_scheduler.abort();
-            if tokio::time::timeout(Duration::from_secs(5), &mut http).await.is_err() {
+            let http_completed =
+                tokio::time::timeout(Duration::from_secs(5), &mut http).await.is_ok();
+            if !http_completed {
                 http.abort();
             }
-            ServerExit::Maintenance(Box::new(action))
+            (
+                Ok(ServerExit::Maintenance(Box::new(action))),
+                http_completed.then_some(CompletedService::Http),
+            )
         }
     };
-    Ok(exit)
+    if completed != Some(CompletedService::Http) {
+        let _ = http.await;
+    }
+    if completed != Some(CompletedService::Ssh) {
+        let _ = ssh.await;
+    }
+    if completed != Some(CompletedService::MirrorScheduler) {
+        let _ = mirror_scheduler.await;
+    }
+    if completed != Some(CompletedService::BackupScheduler) {
+        let _ = backup_scheduler.await;
+    }
+    if completed != Some(CompletedService::ActionsScheduler) {
+        let _ = actions_scheduler.await;
+    }
+    repository_state.close_tasks();
+    repository_state.wait_for_tasks().await;
+    outcome
 }
 
 #[derive(Clone)]

@@ -35,6 +35,10 @@ check:
 test:
     cargo test
 
+# Run the frontend test suite.
+frontend-test:
+    bun run --cwd frontend test
+
 # Build release artifacts.
 release-build:
     ./scripts/build-release.sh

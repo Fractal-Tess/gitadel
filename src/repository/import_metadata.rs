@@ -51,6 +51,10 @@ pub(super) struct ImportMetadataReport {
 }
 
 /// Imports provider metadata after the destination repository and its tags exist.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "arguments mirror the provider import metadata contract"
+)]
 pub async fn import_repository_metadata(
     state: &RepositoryState,
     repository: &repository::Model,

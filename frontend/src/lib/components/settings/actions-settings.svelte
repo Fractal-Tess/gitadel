@@ -1,15 +1,13 @@
 <script lang="ts">
-  import {
-    CircleAlert,
-    CircleCheck,
-    LoaderCircle,
-    RefreshCw,
-    Server,
-    Workflow,
-  } from "lucide-svelte";
+  import CircleAlert from "@lucide/svelte/icons/circle-alert";
+  import CircleCheck from "@lucide/svelte/icons/circle-check";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+  import Server from "@lucide/svelte/icons/server";
+  import Workflow from "@lucide/svelte/icons/workflow";
   import { onMount } from "svelte";
 
-  import type { ActionRunner } from "$lib/api.js";
+  import type { ActionRunner } from "$lib/api/actions.js";
   import RunnerRegistrationDialog from "$lib/components/actions/runner-registration-dialog.svelte";
   import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
   import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
@@ -18,7 +16,7 @@
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
-  import type { AccountSettingsState } from "$lib/settings/account-settings-state.svelte.js";
+  import type { ActionsSettingsState } from "$lib/settings/account/actions-settings-state.svelte.js";
 
   type Target = { slug: string; label: string };
   type RunnerCard = { target: Target; runner: ActionRunner };
@@ -29,7 +27,7 @@
     state: account,
     namespace,
   }: {
-    state: AccountSettingsState;
+    state: ActionsSettingsState;
     namespace: Target;
   } = $props();
 

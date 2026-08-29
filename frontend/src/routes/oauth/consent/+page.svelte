@@ -1,6 +1,9 @@
 <script lang="ts">
   import { page } from "$app/state";
-  import { Building2, FolderGit2, ShieldAlert, UserRound } from "lucide-svelte";
+  import Building2 from "@lucide/svelte/icons/building-2";
+  import FolderGit2 from "@lucide/svelte/icons/folder-git-2";
+  import ShieldAlert from "@lucide/svelte/icons/shield-alert";
+  import UserRound from "@lucide/svelte/icons/user-round";
 
   import { Button } from "$lib/components/ui/button/index.js";
   import BrandMark from "$lib/components/brand-mark.svelte";

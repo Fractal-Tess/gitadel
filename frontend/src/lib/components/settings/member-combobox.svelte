@@ -1,17 +1,12 @@
 <script lang="ts">
-  import {
-    Check,
-    ChevronsUpDown,
-    LoaderCircle,
-    UserRound,
-  } from "lucide-svelte";
+  import Check from "@lucide/svelte/icons/check";
+  import ChevronsUpDown from "@lucide/svelte/icons/chevrons-up-down";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import UserRound from "@lucide/svelte/icons/user-round";
 
-  import {
-    avatarUrl,
-    memberSuggestionSchema,
-    requestJson,
-    type MemberSuggestion,
-  } from "$lib/api.js";
+  import { avatarUrl } from "$lib/api/account.js";
+  import { memberSuggestionSchema, type MemberSuggestion } from "$lib/api/organizations.js";
+  import { requestJson } from "$lib/api/transport.js";
   import * as Avatar from "$lib/components/ui/avatar/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Command from "$lib/components/ui/command/index.js";

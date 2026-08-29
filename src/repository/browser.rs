@@ -499,8 +499,9 @@ pub async fn tree(
             let mut refreshing = state.commit_count_refreshing.lock().await;
             if refreshing.insert(cache_key.clone()) {
                 drop(refreshing);
+                let task_state = state.clone();
                 let state = state.clone();
-                tokio::spawn(async move {
+                task_state.spawn_task(async move {
                     let result = async {
                         let _permit = state
                             .commit_count_slots

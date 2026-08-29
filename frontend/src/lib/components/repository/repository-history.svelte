@@ -1,17 +1,15 @@
 <script lang="ts">
-  import {
-    ArrowLeft,
-    Check,
-    Copy,
-    History,
-    Rocket,
-    ShieldAlert,
-    ShieldCheck,
-    Tag,
-  } from "lucide-svelte";
+  import ArrowLeft from "@lucide/svelte/icons/arrow-left";
+  import Check from "@lucide/svelte/icons/check";
+  import Copy from "@lucide/svelte/icons/copy";
+  import History from "@lucide/svelte/icons/history";
+  import Rocket from "@lucide/svelte/icons/rocket";
+  import ShieldAlert from "@lucide/svelte/icons/shield-alert";
+  import ShieldCheck from "@lucide/svelte/icons/shield-check";
+  import Tag from "@lucide/svelte/icons/tag";
   import { toast } from "svelte-sonner";
 
-  import type { CommitRef } from "$lib/api.js";
+  import type { CommitRef } from "$lib/api/repositories.js";
   import { copyText } from "$lib/clipboard.js";
   import ActionStatusBadge from "$lib/components/actions/action-status-badge.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -67,12 +65,12 @@
     <History class="size-4 text-muted-foreground" />
     <h2 class="text-sm font-semibold">Commit history</h2>
     <span class="text-xs text-muted-foreground">
-      Page {repository.history?.page ?? repository.historyPage} on {repository.revision}
+      Page {repository.browser.history?.page ?? repository.historyPage} on {repository.revision}
     </span>
   </header>
   <ol>
-    {#each repository.history?.commits ?? [] as item, index (item.oid)}
-      {#if index === 0 || dayKey(item.committer.timestamp) !== dayKey(repository.history?.commits[index - 1].committer.timestamp ?? 0)}
+    {#each repository.browser.history?.commits ?? [] as item, index (item.oid)}
+      {#if index === 0 || dayKey(item.committer.timestamp) !== dayKey(repository.browser.history?.commits[index - 1].committer.timestamp ?? 0)}
         <li
           class="mb-3 mt-7 text-xs font-medium tracking-[0.12em] text-muted-foreground first:mt-0"
         >
@@ -80,7 +78,7 @@
         </li>
       {/if}
       {@const released = release(item.refs)}
-      {@const check = repository.actionCommitStatuses[item.oid]}
+      {@const check = repository.actions.actionCommitStatuses[item.oid]}
       {#if released}
         <li
           class="flex items-center gap-3 border-l border-border py-4 pl-5 text-xs"
@@ -202,23 +200,23 @@
     {/each}
   </ol>
 
-  {#if repository.history && (repository.history.page > 1 || repository.history.has_next)}
+  {#if repository.browser.history && (repository.browser.history.page > 1 || repository.browser.history.has_next)}
     <footer class="mt-8 flex justify-between border-t pt-4">
       <Button
         variant="outline"
         size="sm"
-        disabled={repository.history.page <= 1}
+        disabled={repository.browser.history.page <= 1}
         onclick={() =>
-          repository.navigate("history", { page: repository.history!.page - 1 })}
+          repository.navigate("history", { page: repository.browser.history!.page - 1 })}
       >
         Previous
       </Button>
       <Button
         variant="outline"
         size="sm"
-        disabled={!repository.history.has_next}
+        disabled={!repository.browser.history.has_next}
         onclick={() =>
-          repository.navigate("history", { page: repository.history!.page + 1 })}
+          repository.navigate("history", { page: repository.browser.history!.page + 1 })}
       >
         Next
       </Button>

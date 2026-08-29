@@ -1,16 +1,18 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { ImageIcon, Palette, RotateCcw } from "lucide-svelte";
+  import ImageIcon from "@lucide/svelte/icons/image";
+  import Palette from "@lucide/svelte/icons/palette";
+  import RotateCcw from "@lucide/svelte/icons/rotate-ccw";
 
   import AdminAccessSettings from "$lib/components/settings/admin-access-settings.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
   import {
     ApiFailure,
-    instanceSettingsSchema,
     jsonBody,
     requestEmpty,
     requestJson,
-  } from "$lib/api.js";
+  } from "$lib/api/transport.js";
+  import { instanceSettingsSchema } from "$lib/api/instance.js";
   import { AdminSettingsState } from "$lib/settings/admin-settings-state.svelte.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
   let {
@@ -19,7 +21,7 @@
 
 
   const app = useAppState();
-  const adminState = new AdminSettingsState();
+  const adminState = new AdminSettingsState(app);
   let siteName = $state(app.instance?.site_name ?? "Gitadel");
   let siteDescription = $state(app.instance?.site_description ?? "");
   type FaviconTheme = "light" | "dark";

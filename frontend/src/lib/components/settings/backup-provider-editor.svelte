@@ -1,18 +1,16 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import {
-    ArrowLeft,
-    CheckCircle2,
-    CloudUpload,
-    HardDrive,
-    LoaderCircle,
-  } from "lucide-svelte";
+  import ArrowLeft from "@lucide/svelte/icons/arrow-left";
+  import CheckCircle2 from "@lucide/svelte/icons/check-circle-2";
+  import CloudUpload from "@lucide/svelte/icons/cloud-upload";
+  import HardDrive from "@lucide/svelte/icons/hard-drive";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
 
   import type {
     BackupProvider,
     BackupProviderCatalogItem,
     BackupProviderKind,
-  } from "$lib/api.js";
+  } from "$lib/api/backups.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
 

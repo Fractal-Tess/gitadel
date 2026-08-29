@@ -1,6 +1,8 @@
 <script lang="ts">
   import { page } from "$app/state";
-  import { Plus, Trash2, UserRound } from "lucide-svelte";
+  import Plus from "@lucide/svelte/icons/plus";
+  import Trash2 from "@lucide/svelte/icons/trash-2";
+  import UserRound from "@lucide/svelte/icons/user-round";
 
   import ActionsSettings from "$lib/components/settings/actions-settings.svelte";
   import IntegrationsSettings from "$lib/components/settings/integrations-settings.svelte";
@@ -18,7 +20,9 @@
     "members" | "runners" | "integrations" | "mirror-credentials" | "settings";
 
   const app = useAppState();
-  const account = new AccountSettingsState(app);
+  const accountState = new AccountSettingsState(app);
+  const organizationState = accountState.organization;
+  const actionsState = accountState.actions;
   const slug = $derived(page.params.namespace ?? "");
   const requestedView = $derived(
     page.url.pathname.split("/").at(-1) ?? "runners",
@@ -41,49 +45,52 @@
   );
   const label = $derived(personal ? slug : organization?.display_name || slug);
   const namespace = $derived({ slug, label });
+  const scopeKey = $derived(
+    `${app.authorizationScope.viewer ?? "anonymous"}:${app.authorizationScope.epoch}`,
+  );
   let loadedMembersFor = "";
-  let membersLoading = $state(false);
-  let membersLoadError = $state<string | null>(null);
   const membersPending = $derived(
     view === "members" &&
       Boolean(organization) &&
-      (membersLoading || loadedMembersFor !== organization?.slug),
+      (organizationState.membersLoading ||
+        loadedMembersFor !== `${scopeKey}:${organization?.slug}`),
   );
   let addMemberDialogOpen = $state(false);
   let removeDialogOpen = $state(false);
   let pendingMember = $state<string | null>(null);
 
   $effect(() => {
+    accountState.syncScope();
     if (
       view !== "members" ||
       !organization ||
-      loadedMembersFor === organization.slug
+      loadedMembersFor === `${scopeKey}:${organization.slug}`
     )
       return;
-    const target = organization.slug;
+    const target = `${scopeKey}:${organization.slug}`;
     loadedMembersFor = target;
-    membersLoading = true;
-    membersLoadError = null;
-    void account
+    organizationState.membersLoading = true;
+    organizationState.membersLoadError = null;
+    void organizationState
       .selectOrganization(organization)
       .catch(() => {
-        membersLoadError = "Could not load organization members.";
+        organizationState.membersLoadError = "Could not load organization members.";
       })
       .finally(() => {
-        if (loadedMembersFor === target) membersLoading = false;
+        if (loadedMembersFor === target) organizationState.membersLoading = false;
       });
   });
 
   function openAddMember(): void {
-    account.memberUsername = "";
-    account.memberRole = "member";
-    account.error = null;
+    organizationState.memberUsername = "";
+    organizationState.memberRole = "member";
+    organizationState.error = null;
     addMemberDialogOpen = true;
   }
 
   async function addMember(): Promise<void> {
-    await account.addMember();
-    if (!account.error) addMemberDialogOpen = false;
+    await organizationState.addMember();
+    if (!organizationState.error) addMemberDialogOpen = false;
   }
 
   function requestRemoveMember(username: string): void {
@@ -93,8 +100,8 @@
 
   async function removeMember(): Promise<void> {
     if (!pendingMember) return;
-    await account.removeMember(pendingMember);
-    if (!account.error) {
+    await organizationState.removeMember(pendingMember);
+    if (!organizationState.error) {
       removeDialogOpen = false;
       pendingMember = null;
     }
@@ -184,15 +191,15 @@
                 <span class="mt-2 h-2.5 w-3/4 animate-pulse rounded bg-muted"
                 ></span>
               </article>
-            {:else if membersLoadError}
+            {:else if organizationState.membersLoadError}
               <p
                 class="rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive sm:col-span-2"
                 role="alert"
               >
-                {membersLoadError}
+                {organizationState.membersLoadError}
               </p>
             {:else}
-              {#each account.members as member (member.username)}
+              {#each organizationState.members as member (member.username)}
                 <article
                   class="flex min-h-40 flex-col rounded-xl border bg-card/40 p-4 shadow-sm"
                 >
@@ -246,11 +253,11 @@
           </div>
         </section>
       {:else if view === "runners"}
-        <ActionsSettings state={account} {namespace} />
+        <ActionsSettings state={actionsState} {namespace} />
       {:else if view === "integrations"}
-        <IntegrationsSettings state={account} {namespace} />
+        <IntegrationsSettings {namespace} />
       {:else if view === "mirror-credentials"}
-        <MirroringSettings state={account} {namespace} />
+        <MirroringSettings {namespace} />
       {:else if view === "settings" && organization}
         <OrganizationProfileSettings {organization} />
       {/if}
@@ -273,20 +280,20 @@
           void addMember();
         }}
       >
-        {#if account.error}
+        {#if organizationState.error}
           <p
             class="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
             role="alert"
           >
-            {account.error}
+            {organizationState.error}
           </p>
         {/if}
         <div class="grid gap-1.5 text-sm font-medium">
           <span>Username</span>
           <MemberCombobox
             slug={organization?.slug ?? ""}
-            bind:value={account.memberUsername}
-            disabled={account.working}
+            bind:value={organizationState.memberUsername}
+            disabled={organizationState.working}
             autofocus
           />
         </div>
@@ -294,14 +301,14 @@
           Role
           <Select.Root
             type="single"
-            value={account.memberRole}
+            value={organizationState.memberRole}
             onValueChange={(value) => {
               if (value === "owner" || value === "member")
-                account.memberRole = value;
+                organizationState.memberRole = value;
             }}
           >
             <Select.Trigger class="w-full">
-              {account.memberRole === "owner" ? "Owner" : "Member"}
+              {organizationState.memberRole === "owner" ? "Owner" : "Member"}
             </Select.Trigger>
             <Select.Content>
               <Select.Item value="member">Member</Select.Item>
@@ -317,9 +324,9 @@
           >
           <Button
             type="submit"
-            disabled={account.working || !account.memberUsername}
+            disabled={organizationState.working || !organizationState.memberUsername}
           >
-            {account.working ? "Adding…" : "Add member"}
+            {organizationState.working ? "Adding…" : "Add member"}
           </Button>
         </Dialog.Footer>
       </form>
@@ -340,7 +347,7 @@
         <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
         <AlertDialog.Action
           variant="destructive"
-          disabled={account.working}
+          disabled={organizationState.working}
           onclick={() => void removeMember()}>Remove member</AlertDialog.Action
         >
       </AlertDialog.Footer>

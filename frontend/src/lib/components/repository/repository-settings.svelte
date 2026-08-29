@@ -1,11 +1,9 @@
 <script lang="ts">
-  import {
-    Archive,
-    MapPin,
-    Settings2,
-    Trash2,
-    TriangleAlert,
-  } from "lucide-svelte";
+  import Archive from "@lucide/svelte/icons/archive";
+  import MapPin from "@lucide/svelte/icons/map-pin";
+  import Settings2 from "@lucide/svelte/icons/settings-2";
+  import Trash2 from "@lucide/svelte/icons/trash-2";
+  import TriangleAlert from "@lucide/svelte/icons/triangle-alert";
 
   import RepositoryIntegrationSettings from "$lib/components/repository/repository-integration-settings.svelte";
   import RepositoryMirrorSettings from "$lib/components/repository/repository-mirror-settings.svelte";
@@ -41,7 +39,7 @@
   // Only existing branches are valid targets for Git's symbolic HEAD, so the
   // current default is included even if the ref list has not loaded yet.
   const branches = $derived.by(() => {
-    const names = repository.refs?.branches.map((branch) => branch.name) ?? [];
+    const names = repository.browser.refs?.branches.map((branch) => branch.name) ?? [];
     return names.includes(defaultBranch) || !defaultBranch
       ? names
       : [defaultBranch, ...names];
@@ -61,7 +59,7 @@
     const current = repository.repository;
     if (!current) return;
     try {
-      await repository.updateRepositoryControl({
+      await repository.settings.updateRepositoryControl({
         ...(visibility !== current.visibility && { visibility }),
         ...(defaultBranch !== current.default_branch && {
           default_branch: defaultBranch,
@@ -74,7 +72,7 @@
 
   async function confirmMoveRepository() {
     try {
-      await repository.updateRepositoryControl({
+      await repository.settings.updateRepositoryControl({
         name: repositoryName,
         namespace: targetNamespace,
       });
@@ -86,7 +84,7 @@
 
   async function confirmDeleteRepository() {
     try {
-      await repository.softDelete();
+      await repository.settings.softDelete();
       deleteDialogOpen = false;
     } catch {
       // The page-level error region explains how to recover.
@@ -156,8 +154,8 @@
         </Field.Field>
 
         <div class="flex justify-end">
-          <Button type="submit" disabled={repository.repositoryControlPending}>
-            {repository.repositoryControlPending
+          <Button type="submit" disabled={repository.settings.repositoryControlPending}>
+            {repository.settings.repositoryControlPending
               ? "Saving…"
               : "Save general settings"}
           </Button>
@@ -207,7 +205,7 @@
           <Select.Root type="single" bind:value={targetNamespace}>
             <Select.Trigger class="w-full">{targetNamespace}</Select.Trigger>
             <Select.Content>
-              {#each repository.ownedNamespaces as namespace (namespace)}
+              {#each repository.settings.ownedNamespaces as namespace (namespace)}
                 <Select.Item value={namespace}>{namespace}</Select.Item>
               {/each}
             </Select.Content>
@@ -226,9 +224,9 @@
           <Button
             type="submit"
             variant="outline"
-            disabled={repository.repositoryControlPending}
+            disabled={repository.settings.repositoryControlPending}
           >
-            {repository.repositoryControlPending ? "Moving…" : "Save location"}
+            {repository.settings.repositoryControlPending ? "Moving…" : "Save location"}
           </Button>
         </div>
       </form>
@@ -268,10 +266,10 @@
         </p>
         <Switch
           checked={repository.repository?.archived_at !== null}
-          disabled={repository.lifecyclePending}
+          disabled={repository.settings.lifecyclePending}
           aria-label="Archive repository"
           onclick={() =>
-            void repository.setArchived(
+            void repository.settings.setArchived(
               repository.repository?.archived_at === null,
             )}
         />
@@ -305,7 +303,7 @@
           type="button"
           variant="destructive"
           class="gap-2"
-          disabled={repository.lifecyclePending}
+          disabled={repository.settings.lifecyclePending}
           onclick={() => (deleteDialogOpen = true)}
         >
           <Trash2 class="size-3.5" />Delete repository

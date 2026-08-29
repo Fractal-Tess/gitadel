@@ -23,7 +23,7 @@
 
   $effect(() => {
     if (!app.authStatus?.authenticated || !namespace) return;
-    preloadNamespaceTabs(namespace, {
+    preloadNamespaceTabs(namespace, app.authorizationScope, {
       members: Boolean(organization),
       management: personal || organization?.role === "owner",
     });

@@ -3,25 +3,20 @@
   import { resolve } from "$app/paths";
   import { onMount, untrack } from "svelte";
   import { toast } from "svelte-sonner";
-  import {
-    Braces,
-    Building2,
-    Check,
-    GitBranch,
-    Heart,
-    LockKeyhole,
-    RefreshCw,
-    Settings2,
-    X,
-  } from "lucide-svelte";
+  import Braces from "@lucide/svelte/icons/braces";
+  import Building2 from "@lucide/svelte/icons/building-2";
+  import Check from "@lucide/svelte/icons/check";
+  import GitBranch from "@lucide/svelte/icons/git-branch";
+  import Heart from "@lucide/svelte/icons/heart";
+  import LockKeyhole from "@lucide/svelte/icons/lock-keyhole";
+  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+  import Settings2 from "@lucide/svelte/icons/settings-2";
+  import X from "@lucide/svelte/icons/x";
   import RepositoryActivityChart from "$lib/components/repository/repository-activity-chart.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
 
-  import {
-    ApiFailure,
-    requestEmpty,
-    type RepositoryOverviewItem,
-  } from "$lib/api.js";
+  import { ApiFailure, requestEmpty } from "$lib/api/transport.js";
+  import type { RepositoryOverviewItem } from "$lib/api/repositories.js";
   import {
     invalidateExplore,
     peekExplore,
@@ -44,8 +39,14 @@
   const namespace = untrack(() => namespaceProp);
   const app = useAppState();
   const viewer = app.authStatus?.user?.username;
+  const scope = $derived(app.authorizationScope);
   const repositoryPageSize = 20;
-  const cachedExplore = peekExplore(1, repositoryPageSize, viewer, namespace);
+  const initialExplore = untrack(() =>
+    peekExplore(1, repositoryPageSize, app.authorizationScope, namespace),
+  );
+  const cachedExplore = $derived(
+    peekExplore(1, repositoryPageSize, scope, namespace),
+  );
   const listHref = namespace
     ? resolve("/[namespace]", { namespace })
     : resolve("/");
@@ -57,16 +58,16 @@
   );
   type CloneTarget = "ssh" | "http";
   let repositories = $state.raw<RepositoryOverviewItem[]>(
-    cachedExplore?.repositories ?? [],
+    initialExplore?.repositories ?? [],
   );
-  let nextPage = $state((cachedExplore?.page ?? 1) + 1);
-  let hasNextPage = $state(cachedExplore?.has_next ?? true);
+  let nextPage = $state((initialExplore?.page ?? 1) + 1);
+  let hasNextPage = $state(initialExplore?.has_next ?? true);
   let loadingMore = $state(false);
   let loadMoreError = $state<string | null>(null);
   let loadMoreQueued = false;
   let refreshingFirstPage = true;
   let activeLoadMore: Promise<boolean> | null = null;
-  let loading = $state(!cachedExplore);
+  let loading = $state(!initialExplore);
   let error = $state<string | null>(null);
   let favoriteError = $state<string | null>(null);
   let favoritePending = $state.raw<string[]>([]);
@@ -128,7 +129,7 @@
         const overview = await refreshExplore(
           nextPage,
           repositoryPageSize,
-          viewer,
+          scope,
           namespace,
         );
         const loadedIds = new Set(
@@ -168,7 +169,7 @@
       const overview = await refreshExplore(
         1,
         repositoryPageSize,
-        viewer,
+        scope,
         namespace,
       );
       repositories = overview.repositories;
@@ -262,7 +263,7 @@
         `/api/v1/repositories/${encodeURIComponent(repository.namespace)}/${encodeURIComponent(repository.name)}/favorite`,
         { method: favorited ? "PUT" : "DELETE" },
       );
-      invalidateExplore(viewer);
+      invalidateExplore(scope);
       repositories = repositories.map((item) =>
         item.id === repository.id ? { ...item, favorited } : item,
       );
@@ -287,7 +288,7 @@
         const overview = await refreshExplore(
           1,
           repositoryPageSize,
-          viewer,
+          scope,
           namespace,
         );
         repositories = overview.repositories;
@@ -430,23 +431,27 @@
                   scheduleRepositoryPreload(
                     repository.namespace,
                     repository.name,
+                    scope,
                     repository.default_branch,
                   )}
                 onpointerleave={() =>
                   cancelRepositoryPreload(
                     repository.namespace,
                     repository.name,
+                    scope,
                   )}
                 onfocus={() =>
                   scheduleRepositoryPreload(
                     repository.namespace,
                     repository.name,
+                    scope,
                     repository.default_branch,
                   )}
                 onblur={() =>
                   cancelRepositoryPreload(
                     repository.namespace,
                     repository.name,
+                    scope,
                   )}
               >
                 <div class="min-w-0 py-3">

@@ -1,6 +1,8 @@
 <script lang="ts">
   import { resolve } from "$app/paths";
-  import { Building2, GitBranch, Settings2 } from "lucide-svelte";
+  import Building2 from "@lucide/svelte/icons/building-2";
+  import GitBranch from "@lucide/svelte/icons/git-branch";
+  import Settings2 from "@lucide/svelte/icons/settings-2";
 
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
@@ -11,15 +13,17 @@
 
   const app = useAppState();
   const account = new AccountSettingsState(app);
+  const organizationState = account.organization;
   let createDialogOpen = $state(false);
 
   $effect(() => {
+    account.syncScope();
     void account.initialize("account");
   });
 
   async function createOrganization(): Promise<void> {
-    await account.createOrganization();
-    if (!account.error) createDialogOpen = false;
+    await organizationState.createOrganization();
+    if (!organizationState.error) createDialogOpen = false;
   }
 </script>
 
@@ -46,7 +50,7 @@
     </p>
   {:else}
     <div class="overflow-hidden rounded-xl border bg-card/30 shadow-sm">
-      {#each account.organizations as organization (organization.id)}
+      {#each organizationState.organizations as organization (organization.id)}
         <article
           class="flex flex-wrap items-center gap-4 border-b p-4 last:border-b-0"
         >
@@ -119,7 +123,7 @@
           <Field.Label for="organization-slug">Namespace</Field.Label>
           <Input
             id="organization-slug"
-            bind:value={account.organizationSlug}
+            bind:value={organizationState.organizationSlug}
             placeholder="acme"
             autofocus
             required
@@ -133,7 +137,7 @@
           >
           <Input
             id="organization-display-name"
-            bind:value={account.organizationDisplayName}
+            bind:value={organizationState.organizationDisplayName}
             placeholder="Acme"
             required
           />
@@ -146,8 +150,8 @@
                 variant="outline">Cancel</Button
               >{/snippet}
           </Dialog.Close>
-          <Button type="submit" disabled={account.working}
-            >{account.working ? "Creating…" : "Create organization"}</Button
+          <Button type="submit" disabled={organizationState.working}
+            >{organizationState.working ? "Creating…" : "Create organization"}</Button
           >
         </Dialog.Footer>
       </form>

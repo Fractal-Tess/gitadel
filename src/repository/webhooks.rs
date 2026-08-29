@@ -27,6 +27,7 @@ use uuid::Uuid;
 
 use super::{Permission, RepositoryState};
 use crate::{
+    actions::ActionsState,
     entity::{repository, repository_webhook, repository_webhook_delivery, user},
     identity::{ApiError, SCOPE_READ, SCOPE_WRITE},
 };
@@ -507,6 +508,7 @@ pub(super) async fn snapshot_refs(path: &Path) -> Result<RefSnapshot, ApiError> 
 
 pub(super) async fn dispatch_push(
     state: &RepositoryState,
+    actions: &ActionsState,
     repository: &repository::Model,
     actor_user_id: Uuid,
     before: RefSnapshot,
@@ -517,10 +519,6 @@ pub(super) async fn dispatch_push(
         .all(state.identity().database())
         .await?;
     let integrations_enabled = super::integrations::has_enabled(state, repository.id).await?;
-    let actions_available = state.actions().is_some();
-    if hooks.is_empty() && !integrations_enabled && !actions_available {
-        return Ok(());
-    }
     let path = state.repository_path(repository);
     let after = snapshot_refs(&path).await?;
     let actor = user::Entity::find_by_id(actor_user_id)
@@ -543,27 +541,25 @@ pub(super) async fn dispatch_push(
             zero: &zero,
         };
         let payload = push_payload(state, repository, &actor, &pushed, commits);
-        if let Some(actions) = state.actions() {
-            if let Err(error) = crate::actions::workflow::ingest_push(
-                actions,
-                repository,
-                actor_user_id,
+        if let Err(error) = crate::actions::workflow::ingest_push(
+            actions,
+            repository,
+            actor_user_id,
+            reference,
+            old_oid,
+            new_oid,
+            &zero,
+            changed_paths,
+        )
+        .await
+        {
+            tracing::error!(
+                %error,
+                repository_id = %repository.id,
                 reference,
-                old_oid,
-                new_oid,
-                &zero,
-                changed_paths,
-            )
-            .await
-            {
-                tracing::error!(
-                    %error,
-                    repository_id = %repository.id,
-                    reference,
-                    commit = new_oid,
-                    "could not enqueue Actions workflows"
-                );
-            }
+                commit = new_oid,
+                "could not enqueue Actions workflows"
+            );
         }
         for hook in &hooks {
             queue_delivery(
@@ -620,7 +616,8 @@ fn queue_delivery(
     event: String,
     payload: Value,
 ) {
-    tokio::spawn(async move {
+    let task_state = state.clone();
+    task_state.spawn_task(async move {
         if let Err(error) = deliver(&state, &hook, &event, &payload).await {
             tracing::warn!(%error, webhook_id = %hook.id, %event, "webhook delivery failed");
         }

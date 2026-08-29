@@ -24,15 +24,16 @@ use super::{
     resources::{CreateRepositoryOptions, create_owned_repository, record_push},
     webhooks::{RefSnapshot, dispatch_push, snapshot_refs},
 };
-use crate::config::SshSettings;
+use crate::{actions::ActionsState, config::SshSettings};
 
-#[derive(Clone)]
 struct SshServer {
     state: RepositoryState,
+    actions: ActionsState,
 }
 
 struct SshHandler {
     state: RepositoryState,
+    actions: ActionsState,
     actor_user_id: Option<Uuid>,
     channels: HashMap<ChannelId, SshChannel>,
 }
@@ -61,7 +62,11 @@ enum SshCommand {
     },
 }
 
-pub async fn serve(settings: SshSettings, state: RepositoryState) -> Result<()> {
+pub async fn serve(
+    settings: SshSettings,
+    state: RepositoryState,
+    actions: ActionsState,
+) -> Result<()> {
     let host_key = load_or_create_host_key(&settings.host_key)?;
     let config = Arc::new(russh::server::Config {
         inactivity_timeout: Some(Duration::from_secs(60 * 60)),
@@ -74,7 +79,7 @@ pub async fn serve(settings: SshSettings, state: RepositoryState) -> Result<()> 
         .await
         .with_context(|| format!("could not bind SSH listener to {}", settings.bind))?;
     tracing::info!(address = %settings.bind, "Gitadel SSH server listening");
-    let mut server = SshServer { state };
+    let mut server = SshServer { state, actions };
     server
         .run_on_socket(config, &listener)
         .await
@@ -87,6 +92,7 @@ impl russh::server::Server for SshServer {
     fn new_client(&mut self, _: Option<std::net::SocketAddr>) -> Self::Handler {
         SshHandler {
             state: self.state.clone(),
+            actions: self.actions.clone(),
             actor_user_id: None,
             channels: HashMap::new(),
         }
@@ -289,7 +295,13 @@ impl russh::server::Handler for SshHandler {
                     None
                 }
             };
-            Some((self.state.clone(), repository.clone(), actor_user_id, refs))
+            Some((
+                self.state.clone(),
+                self.actions.clone(),
+                repository.clone(),
+                actor_user_id,
+                refs,
+            ))
         } else {
             None
         };
@@ -318,6 +330,7 @@ impl russh::server::Handler for SshHandler {
             channel_state.channel,
             format!("{namespace}/{name}"),
             maintenance_path,
+            self.state.clone(),
             push_context,
         );
         Ok(())
@@ -359,14 +372,15 @@ async fn repository_for_git_service(
         }
     }
 }
-
 fn bridge_process(
     mut child: Child,
     mut channel: Channel<Msg>,
     repository: String,
     maintenance_path: Option<std::path::PathBuf>,
+    task_state: RepositoryState,
     push_audit: Option<(
         RepositoryState,
+        ActionsState,
         crate::entity::repository::Model,
         Uuid,
         Option<RefSnapshot>,
@@ -382,7 +396,7 @@ fn bridge_process(
         return;
     };
 
-    tokio::spawn(async move {
+    task_state.spawn_task(async move {
         let mut channel_writer = channel.make_writer();
         let mut stderr_writer = channel.make_writer_ext(Some(1));
         let mut channel_reader = channel.make_reader();
@@ -426,14 +440,16 @@ fn bridge_process(
         let successful = matches!(&result, Ok(Ok(status)) if status.success());
         let _ = errors.await;
         tracing::debug!(%repository, "Git SSH process error output closed");
-        if successful && let Some((state, model, actor_user_id, refs_before)) = push_audit {
+        if successful && let Some((state, actions, model, actor_user_id, refs_before)) = push_audit
+        {
             if let Err(error) =
                 record_push(&state, model.id, actor_user_id, repository.clone()).await
             {
                 tracing::warn!(%error, %repository, "could not record repository push");
             }
             if let Some(refs_before) = refs_before
-                && let Err(error) = dispatch_push(&state, &model, actor_user_id, refs_before).await
+                && let Err(error) =
+                    dispatch_push(&state, &actions, &model, actor_user_id, refs_before).await
             {
                 tracing::warn!(%error, %repository, "could not queue repository webhooks");
             }

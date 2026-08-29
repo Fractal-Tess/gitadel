@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { Copy, GitBranch } from "lucide-svelte";
+  import Copy from "@lucide/svelte/icons/copy";
+  import GitBranch from "@lucide/svelte/icons/git-branch";
   import { MediaQuery } from "svelte/reactivity";
 
   import RepositoryContent from "$lib/components/repository/repository-content.svelte";

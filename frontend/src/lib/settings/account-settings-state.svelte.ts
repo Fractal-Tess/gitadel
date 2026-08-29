@@ -1,36 +1,9 @@
-import {
-  getLocalTimeZone,
-  today,
-  type CalendarDate,
-} from "@internationalized/date";
 import { goto } from "$app/navigation";
 import { resolve } from "$app/paths";
 import { toast } from "svelte-sonner";
-import { z } from "zod";
 
-import {
-  ApiFailure,
-  actionRegistrationSchema,
-  authResponseSchema,
-  createdOauthApplicationSchema,
-  createdTokenSchema,
-  jsonBody,
-  memberSchema,
-  organizationSchema,
-  passkeySchema,
-  requestEmpty,
-  requestJson,
-  sshKeySchema,
-  webauthnCreationSchema,
-  type ActionRegistration,
-  type ActionRunner,
-  type ApiToken,
-  type Member,
-  type OauthApplication,
-  type Organization,
-  type PasskeySummary,
-  type SshKey,
-} from "$lib/api.js";
+import { requestEmpty } from "$lib/api/transport.js";
+import type { AuthorizationCacheScope } from "$lib/cache-scope.js";
 import {
   clearAccountSettings,
   loadAccountSettings,
@@ -38,71 +11,83 @@ import {
   updateAccountSettings,
   type AccountSettingsData,
 } from "$lib/navigation-cache.js";
-import {
-  takeNamespaceMembers,
-  takeNamespaceRunners,
-} from "$lib/namespace-preload.js";
 import type { AppState } from "$lib/state/app-state.svelte.js";
-import { createCredential, creationOptions } from "$lib/webauthn.js";
+import { ActionsSettingsState } from "$lib/settings/account/actions-settings-state.svelte.js";
+import { CredentialsSettingsState } from "$lib/settings/account/credentials-settings-state.svelte.js";
+import { OAuthSettingsState } from "$lib/settings/account/oauth-settings-state.svelte.js";
+import { OrganizationSettingsState } from "$lib/settings/account/organization-settings-state.svelte.js";
+import {
+  PasswordSettingsState,
+  ProfileSettingsState,
+} from "$lib/settings/account/profile-settings-state.svelte.js";
 
 export type AccountSettingsView =
   "account" | "authentication" | "ssh-keys" | "api-tokens" | "applications";
 
 export class AccountSettingsState {
-  passkeys = $state.raw<PasskeySummary[]>([]);
-  sshKeys = $state.raw<SshKey[]>([]);
-  tokens = $state.raw<ApiToken[]>([]);
-  oauthApplications = $state.raw<OauthApplication[]>([]);
-  organizations = $state.raw<Organization[]>([]);
-  selectedOrganization = $state.raw<Organization | null>(null);
-  actionRunners = $state.raw<Record<string, ActionRunner[]>>({});
-  actionRegistration = $state.raw<ActionRegistration | null>(null);
-  actionsLoading = $state(false);
-  actionsLoadError = $state<string | null>(null);
-  actionsWorking = $state<Record<string, boolean>>({});
-  actionErrors = $state<Record<string, string | null>>({});
-  members = $state.raw<Member[]>([]);
-  passkeyName = $state("This device");
-  sshKeyName = $state("");
-  sshPublicKey = $state("");
-  tokenName = $state("");
-  tokenRead = $state(true);
-  tokenWrite = $state(false);
-  tokenSshKeys = $state(false);
-  tokenExpiresOn = $state<CalendarDate | undefined>();
-  createdToken = $state<string | null>(null);
-  oauthApplicationName = $state("");
-  oauthRedirectUri = $state("");
-  createdOauthClientId = $state<string | null>(null);
-  createdOauthClientSecret = $state<string | null>(null);
-  organizationSlug = $state("");
-  organizationDisplayName = $state("");
-  memberUsername = $state("");
-  memberRole = $state<"owner" | "member">("member");
-  username = $state("");
-  defaultRepositoryVisibility = $state<"public" | "private">("private");
-  currentPassword = $state("");
-  newPassword = $state("");
-  confirmPassword = $state("");
-  working = $state(false);
+  readonly profile: ProfileSettingsState;
+  readonly password: PasswordSettingsState;
+  readonly credentials: CredentialsSettingsState;
+  readonly oauth: OAuthSettingsState;
+  readonly organization: OrganizationSettingsState;
+  readonly actions: ActionsSettingsState;
   loading = $state(true);
   error = $state<string | null>(null);
 
   #cacheUsername: string;
   #fullSettingsLoaded = false;
+  scope: AuthorizationCacheScope;
+
   constructor(private readonly app: AppState) {
+    this.scope = app.authorizationScope;
+    const current = (scope: AuthorizationCacheScope) =>
+      this.app.authorizationScope === scope;
     this.#cacheUsername = app.authStatus?.user?.username ?? "";
-    this.username = this.#cacheUsername;
-    this.defaultRepositoryVisibility =
-      app.authStatus?.user?.default_repository_visibility ?? "private";
-    const cached = this.#cacheUsername
-      ? peekAccountSettings(this.#cacheUsername)
-      : null;
+    this.profile = new ProfileSettingsState(app, this.scope, current, () =>
+      this.rotateScope(),
+    );
+    this.password = new PasswordSettingsState(this.scope, current);
+    this.credentials = new CredentialsSettingsState(
+      { passkeys: [], sshKeys: [], tokens: [] },
+      this.scope,
+      current,
+      (value) => this.#cacheSettings(value),
+    );
+    this.oauth = new OAuthSettingsState(
+      [],
+      this.scope,
+      current,
+      (oauthApplications) => this.#cacheSettings({ oauthApplications }),
+    );
+    this.organization = new OrganizationSettingsState(
+      app,
+      [],
+      this.scope,
+      current,
+      (organizations) => this.#cacheSettings({ organizations }),
+    );
+    this.actions = new ActionsSettingsState(this.scope, current);
+    const cached = this.#cacheUsername ? peekAccountSettings(this.scope) : null;
     if (cached) {
       this.#applySettings(cached);
       this.#fullSettingsLoaded = true;
       this.loading = false;
     }
+  }
+
+  private rotateScope(): void {
+    const scope = this.app.authorizationScope;
+    this.scope = scope;
+    this.#fullSettingsLoaded = false;
+    this.profile.setScope(scope);
+    this.password.setScope(scope);
+    this.credentials.setScope(scope);
+    this.oauth.setScope(scope);
+    this.organization.setScope(scope);
+    this.actions.setScope(scope);
+  }
+  syncScope(): void {
+    if (this.app.authorizationScope !== this.scope) this.rotateScope();
   }
 
   async initialize(_view: AccountSettingsView): Promise<void> {
@@ -111,16 +96,17 @@ export class AccountSettingsState {
       this.loading = false;
       return;
     }
-
     if (this.#fullSettingsLoaded) {
       this.loading = false;
       return;
     }
-
-    this.loading = !peekAccountSettings(username);
-    this.username = username;
+    const scope = this.scope;
+    this.loading = !peekAccountSettings(scope);
+    this.profile.username = username;
     await this.run(async () => {
-      this.#applySettings(await loadAccountSettings(username));
+      const settings = await loadAccountSettings(scope);
+      if (this.app.authorizationScope !== scope) return;
+      this.#applySettings(settings);
       this.#fullSettingsLoaded = true;
     });
     this.loading = false;
@@ -129,420 +115,48 @@ export class AccountSettingsState {
   async logout(): Promise<void> {
     await this.run(async () => {
       await requestEmpty("/api/v1/auth/logout", { method: "POST" });
+      this.app.advanceAuthorizationScope();
       await this.app.refreshAuth();
       await goto(resolve("/login"));
     });
   }
 
-  async updateUsername() {
-    const username = this.username.trim().toLowerCase();
-    this.username = username;
-    const previousUsername = this.app.authStatus?.user?.username;
-    if (!username || username === previousUsername) return;
-
-    await this.run(async () => {
-      const response = await requestJson(
-        "/api/v1/me/username",
-        authResponseSchema,
-        {
-          method: "PUT",
-          body: jsonBody({ username }),
-        },
-      );
-      this.username = response.user.username;
-      await this.app.refreshAuth();
-      toast.success("Username updated", {
-        description:
-          "Update remotes that use your previous repository namespace.",
-      });
-    });
-  }
-
-  async updateRepositoryVisibility(visibility: "public" | "private") {
-    const previous = this.defaultRepositoryVisibility;
-    if (visibility === previous) return;
-    this.defaultRepositoryVisibility = visibility;
-
-    await this.run(async () => {
-      try {
-        const response = await requestJson(
-          "/api/v1/me/repository-preferences",
-          authResponseSchema,
-          {
-            method: "PUT",
-            body: jsonBody({ default_repository_visibility: visibility }),
-          },
-        );
-        this.defaultRepositoryVisibility =
-          response.user.default_repository_visibility;
-        await this.app.refreshAuth();
-        toast.success("Repository default updated");
-      } catch (error) {
-        this.defaultRepositoryVisibility = previous;
-        throw error;
-      }
-    });
-  }
-
-  async updatePassword() {
-    if (this.newPassword !== this.confirmPassword) {
-      this.error = "The new passwords do not match.";
-      toast.error(this.error);
-      return;
-    }
-    await this.run(async () => {
-      await requestEmpty("/api/v1/me/password", {
-        method: "PUT",
-        body: jsonBody({
-          current_password: this.currentPassword,
-          new_password: this.newPassword,
-        }),
-      });
-      this.currentPassword = "";
-      this.newPassword = "";
-      this.confirmPassword = "";
-      toast.success("Password updated", {
-        description: "Other browser sessions were signed out.",
-      });
-    });
-  }
-
-  async addPasskey(): Promise<void> {
-    await this.run(async () => {
-      const challenge = await requestJson(
-        "/api/v1/me/passkeys/register/start",
-        webauthnCreationSchema,
-        { method: "POST", body: jsonBody({ name: this.passkeyName }) },
-      );
-      const credential = await createCredential(
-        creationOptions(challenge.options.publicKey),
-      );
-      await requestEmpty("/api/v1/me/passkeys/register/finish", {
-        method: "POST",
-        body: jsonBody({ challenge_id: challenge.challenge_id, credential }),
-      });
-      this.passkeys = await requestJson(
-        "/api/v1/me/passkeys",
-        z.array(passkeySchema),
-      );
-      toast.success("Passkey added");
-    });
-  }
-
-  async removePasskey(id: string): Promise<void> {
-    await this.run(async () => {
-      await requestEmpty(`/api/v1/me/passkeys/${id}`, { method: "DELETE" });
-      this.passkeys = this.passkeys.filter((passkey) => passkey.id !== id);
-      toast.success("Passkey removed");
-    });
-  }
-
-  async addSshKey(): Promise<void> {
-    await this.run(async () => {
-      const key = await requestJson("/api/v1/me/ssh-keys", sshKeySchema, {
-        method: "POST",
-        body: jsonBody({
-          name: this.sshKeyName,
-          public_key: this.sshPublicKey,
-        }),
-      });
-      this.sshKeys = [...this.sshKeys, key];
-      this.sshKeyName = "";
-      this.sshPublicKey = "";
-      toast.success("SSH key added");
-    });
-  }
-
-  async removeSshKey(id: string): Promise<void> {
-    await this.run(async () => {
-      await requestEmpty(`/api/v1/me/ssh-keys/${id}`, { method: "DELETE" });
-      this.sshKeys = this.sshKeys.filter((key) => key.id !== id);
-      toast.success("SSH key removed");
-    });
-  }
-
-  async createApiToken(): Promise<void> {
-    await this.run(async () => {
-      const scopes = [
-        this.tokenRead && "read",
-        this.tokenWrite && "write",
-        this.tokenSshKeys && "ssh_keys",
-      ].filter((scope): scope is string => Boolean(scope));
-      const expiresInDays =
-        this.tokenExpiresOn?.compare(today(getLocalTimeZone())) ?? null;
-      const response = await requestJson(
-        "/api/v1/me/tokens",
-        createdTokenSchema,
-        {
-          method: "POST",
-          body: jsonBody({
-            name: this.tokenName,
-            scopes,
-            expires_in_days: expiresInDays,
-          }),
-        },
-      );
-      this.tokens = [...this.tokens, response.details];
-      this.createdToken = response.token;
-      this.tokenName = "";
-      this.tokenExpiresOn = undefined;
-      this.tokenRead = true;
-      this.tokenWrite = false;
-      this.tokenSshKeys = false;
-      toast.success("API token created");
-    });
-  }
-
-  async revokeToken(id: string): Promise<void> {
-    await this.run(async () => {
-      await requestEmpty(`/api/v1/me/tokens/${id}`, { method: "DELETE" });
-      this.tokens = this.tokens.filter((token) => token.id !== id);
-      toast.success("API token revoked");
-    });
-  }
-
-  async createOauthApplication() {
-    await this.run(async () => {
-      const response = await requestJson(
-        "/api/v1/me/oauth-applications",
-        createdOauthApplicationSchema,
-        {
-          method: "POST",
-          body: jsonBody({
-            name: this.oauthApplicationName,
-            redirect_uri: this.oauthRedirectUri,
-          }),
-        },
-      );
-      this.oauthApplications = [
-        ...this.oauthApplications,
-        response.application,
-      ];
-      this.createdOauthClientId = response.application.client_id;
-      this.createdOauthClientSecret = response.client_secret;
-      this.oauthApplicationName = "";
-      this.oauthRedirectUri = "";
-      toast.success("OAuth application created", {
-        description: "Save the client secret now.",
-      });
-    });
-  }
-
-  async deleteOauthApplication(id: string) {
-    await this.run(async () => {
-      await requestEmpty(`/api/v1/me/oauth-applications/${id}`, {
-        method: "DELETE",
-      });
-      this.oauthApplications = this.oauthApplications.filter(
-        (application) => application.id !== id,
-      );
-      if (
-        this.createdOauthClientId &&
-        !this.oauthApplications.some(
-          (application) => application.client_id === this.createdOauthClientId,
-        )
-      ) {
-        this.createdOauthClientId = null;
-        this.createdOauthClientSecret = null;
-      }
-      toast.success("OAuth application revoked");
-    });
-  }
-
-  async createOrganization(): Promise<void> {
-    await this.run(async () => {
-      const organization = await requestJson(
-        "/api/v1/organizations",
-        organizationSchema,
-        {
-          method: "POST",
-          body: jsonBody({
-            slug: this.organizationSlug,
-            display_name: this.organizationDisplayName,
-          }),
-        },
-      );
-      this.organizations = [...this.organizations, organization];
-      this.app.addOrganization(organization);
-      this.organizationSlug = "";
-      this.organizationDisplayName = "";
-      await this.selectOrganization(organization);
-      toast.success("Organization created");
-    });
-  }
-
-  async selectOrganization(organization: Organization): Promise<void> {
-    this.selectedOrganization = organization;
-    this.members = await takeNamespaceMembers(organization.slug);
-  }
-
-  async addMember(): Promise<void> {
-    if (!this.selectedOrganization) return;
-    await this.run(async () => {
-      const member = await requestJson(
-        `/api/v1/organizations/${this.selectedOrganization!.slug}/members`,
-        memberSchema,
-        {
-          method: "POST",
-          body: jsonBody({
-            username: this.memberUsername,
-            role: this.memberRole,
-          }),
-        },
-      );
-      this.members = [...this.members, member];
-      this.memberUsername = "";
-      toast.success("Organization member added");
-    });
-  }
-
-  async removeMember(username: string): Promise<void> {
-    if (!this.selectedOrganization) return;
-    await this.run(async () => {
-      await requestEmpty(
-        `/api/v1/organizations/${this.selectedOrganization!.slug}/members/${username}`,
-        { method: "DELETE" },
-      );
-      this.members = this.members.filter(
-        (member) => member.username !== username,
-      );
-      toast.success("Organization member removed");
-    });
-  }
-
-  async loadActionRunners(namespaces: string[]): Promise<void> {
-    this.actionsLoading = true;
-    this.actionsLoadError = null;
-    const errors: Record<string, string | null> = {};
-    const loaded: Record<string, ActionRunner[]> = {};
-    let failures = 0;
-
-    await Promise.all(
-      namespaces.map(async (namespace) => {
-        try {
-          loaded[namespace] = await takeNamespaceRunners(namespace);
-          errors[namespace] = null;
-        } catch (caught) {
-          failures += 1;
-          loaded[namespace] = this.actionRunners[namespace] ?? [];
-          errors[namespace] =
-            caught instanceof ApiFailure || caught instanceof Error
-              ? caught.message
-              : `Could not load runners for ${namespace}.`;
-        }
-      }),
-    );
-
-    this.actionRunners = loaded;
-    this.actionErrors = errors;
-    if (failures === namespaces.length && namespaces.length > 0) {
-      this.actionsLoadError = "Could not load runners.";
-    }
-    this.actionsLoading = false;
-  }
-
-  async issueActionRunner(
-    namespace: string,
-    name: string,
-    labels: string[],
-  ): Promise<void> {
-    if (this.actionsWorking[namespace]) return;
-    this.actionsWorking[namespace] = true;
-    this.actionErrors[namespace] = null;
-    try {
-      this.actionRegistration = await requestJson(
-        `/api/v1/namespaces/${encodeURIComponent(namespace)}/actions/runner-registration-tokens`,
-        actionRegistrationSchema,
-        {
-          method: "POST",
-          body: jsonBody({ name, labels }),
-        },
-      );
-    } catch (caught) {
-      const message =
-        caught instanceof ApiFailure || caught instanceof Error
-          ? caught.message
-          : "Could not create the runner registration token.";
-      this.actionErrors[namespace] = message;
-      toast.error(message);
-    } finally {
-      this.actionsWorking[namespace] = false;
-    }
-  }
-
-  async removeActionRunner(namespace: string, runnerId: number): Promise<void> {
-    if (this.actionsWorking[namespace]) return;
-    this.actionsWorking[namespace] = true;
-    this.actionErrors[namespace] = null;
-    try {
-      await requestEmpty(
-        `/api/v1/namespaces/${encodeURIComponent(namespace)}/actions/runners/${runnerId}`,
-        { method: "DELETE" },
-      );
-      this.actionRunners = {
-        ...this.actionRunners,
-        [namespace]: (this.actionRunners[namespace] ?? []).filter(
-          (runner) => runner.id !== runnerId,
-        ),
-      };
-      toast.success("Runner removed");
-    } catch (caught) {
-      const message =
-        caught instanceof ApiFailure || caught instanceof Error
-          ? caught.message
-          : "Could not remove the runner.";
-      this.actionErrors[namespace] = message;
-      toast.error(message);
-    } finally {
-      this.actionsWorking[namespace] = false;
-    }
-  }
-
-  closeActionRegistration(): void {
-    this.actionRegistration = null;
-  }
-
   #applySettings(settings: AccountSettingsData): void {
-    this.passkeys = settings.passkeys;
-    this.sshKeys = settings.sshKeys;
-    this.tokens = settings.tokens;
-    this.oauthApplications = settings.oauthApplications;
-    this.organizations = settings.organizations;
+    this.credentials.passkeys = settings.passkeys;
+    this.credentials.sshKeys = settings.sshKeys;
+    this.credentials.tokens = settings.tokens;
+    this.oauth.oauthApplications = settings.oauthApplications;
+    this.organization.organizations = settings.organizations;
   }
 
-  #cacheSettings(): void {
+  #cacheSettings(changes: Partial<AccountSettingsData>): void {
     const username = this.app.authStatus?.user?.username;
     if (!username) {
-      if (this.#cacheUsername) clearAccountSettings(this.#cacheUsername);
+      if (this.#cacheUsername) clearAccountSettings(this.scope);
       return;
     }
-    if (this.#cacheUsername && this.#cacheUsername !== username) {
-      clearAccountSettings(this.#cacheUsername);
-    }
+    if (this.#cacheUsername && this.#cacheUsername !== username)
+      clearAccountSettings(this.scope);
     this.#cacheUsername = username;
-    updateAccountSettings(username, {
-      passkeys: this.passkeys,
-      sshKeys: this.sshKeys,
-      tokens: this.tokens,
-      oauthApplications: this.oauthApplications,
-      organizations: this.organizations,
+    const current = peekAccountSettings(this.scope);
+    if (!current) return;
+    updateAccountSettings(this.scope, {
+      passkeys: changes.passkeys ?? current.passkeys,
+      sshKeys: changes.sshKeys ?? current.sshKeys,
+      tokens: changes.tokens ?? current.tokens,
+      oauthApplications: changes.oauthApplications ?? current.oauthApplications,
+      organizations: changes.organizations ?? current.organizations,
     });
   }
 
   private async run(task: () => Promise<void>): Promise<void> {
-    this.working = true;
     this.error = null;
     try {
       await task();
-      this.#cacheSettings();
     } catch (caught) {
       this.error =
-        caught instanceof ApiFailure || caught instanceof Error
-          ? caught.message
-          : "The request failed.";
+        caught instanceof Error ? caught.message : "The request failed.";
       toast.error(this.error);
-    } finally {
-      this.working = false;
     }
   }
 }

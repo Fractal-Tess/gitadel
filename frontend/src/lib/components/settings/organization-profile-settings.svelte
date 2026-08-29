@@ -1,7 +1,8 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { resolve } from "$app/paths";
-  import { Building2, Camera } from "lucide-svelte";
+  import Building2 from "@lucide/svelte/icons/building-2";
+  import Camera from "@lucide/svelte/icons/camera";
   import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
 
@@ -9,12 +10,14 @@
   import {
     ApiFailure,
     jsonBody,
-    organizationAvatarUrl,
-    organizationSchema,
     requestEmpty,
     requestJson,
+  } from "$lib/api/transport.js";
+  import {
+    organizationAvatarUrl,
+    organizationSchema,
     type Organization,
-  } from "$lib/api.js";
+  } from "$lib/api/organizations.js";
   import AvatarCropDialog from "$lib/components/settings/avatar-crop-dialog.svelte";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import * as Avatar from "$lib/components/ui/avatar/index.js";

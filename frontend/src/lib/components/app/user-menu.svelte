@@ -2,16 +2,15 @@
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
   import { resolve } from "$app/paths";
-  import { LogOut, Settings2 } from "lucide-svelte";
+  import LogOut from "@lucide/svelte/icons/log-out";
+  import Settings2 from "@lucide/svelte/icons/settings-2";
 
   import * as Avatar from "$lib/components/ui/avatar/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as DropdownMenu from "$lib/components/ui/dropdown-menu/index.js";
-  import { avatarUrl, requestEmpty } from "$lib/api.js";
-  import {
-    clearAccountSettings,
-    preloadAccountSettings,
-  } from "$lib/navigation-cache.js";
+  import { avatarUrl } from "$lib/api/account.js";
+  import { requestEmpty } from "$lib/api/transport.js";
+  import { preloadAccountSettings } from "$lib/navigation-cache.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
   const app = useAppState();
@@ -31,7 +30,7 @@
     working = true;
     try {
       await requestEmpty("/api/v1/auth/logout", { method: "POST" });
-      if (username) clearAccountSettings(username);
+      app.advanceAuthorizationScope();
       await app.refreshAuth();
       await goto(resolve("/login"));
     } finally {
@@ -43,8 +42,8 @@
 {#if app.authStatus?.authenticated}
   <DropdownMenu.Root>
     <DropdownMenu.Trigger
-      onpointerenter={() => preloadAccountSettings(username)}
-      onfocus={() => preloadAccountSettings(username)}
+      onpointerenter={() => preloadAccountSettings(app.authorizationScope)}
+      onfocus={() => preloadAccountSettings(app.authorizationScope)}
     >
       {#snippet child({ props })}
         <Button

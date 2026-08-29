@@ -1,16 +1,14 @@
 <script lang="ts">
   import { resolve } from "$app/paths";
-  import {
-    CalendarDays,
-    Download,
-    FileArchive,
-    GitCommitHorizontal,
-    Package,
-    Pencil,
-    Plus,
-    Trash2,
-    Upload,
-  } from "lucide-svelte";
+  import CalendarDays from "@lucide/svelte/icons/calendar-days";
+  import Download from "@lucide/svelte/icons/download";
+  import FileArchive from "@lucide/svelte/icons/file-archive";
+  import GitCommitHorizontal from "@lucide/svelte/icons/git-commit-horizontal";
+  import Package from "@lucide/svelte/icons/package";
+  import Pencil from "@lucide/svelte/icons/pencil";
+  import Plus from "@lucide/svelte/icons/plus";
+  import Trash2 from "@lucide/svelte/icons/trash-2";
+  import Upload from "@lucide/svelte/icons/upload";
 
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Badge } from "$lib/components/ui/badge/index.js";
@@ -18,7 +16,7 @@
   import { Input } from "$lib/components/ui/input/index.js";
   import ReleaseComposerDialog from "$lib/components/repository/release-composer-dialog.svelte";
   import { formatSize, trustedHtml } from "$lib/repository/format.js";
-  import type { Release } from "$lib/api.js";
+  import type { Release } from "$lib/api/releases.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
 
   let { state: repository }: { state: RepositoryPageState } = $props();
@@ -48,7 +46,7 @@
     const release = pendingDelete;
     if (!release) return;
     try {
-      await repository.deleteRelease(release.id);
+      await repository.releases.deleteRelease(release.id);
       deleteDialogOpen = false;
       pendingDelete = null;
     } catch {
@@ -60,7 +58,7 @@
     const selected = assetFiles[releaseId] ?? [];
     if (!selected.length) return;
     try {
-      await repository.uploadReleaseAssets(releaseId, selected);
+      await repository.releases.uploadReleaseAssets(releaseId, selected);
       assetFiles = { ...assetFiles, [releaseId]: [] };
     } catch {
       // The page-level error explains the failure.
@@ -100,22 +98,22 @@
     {/if}
   </header>
 
-  {#if repository.releasesLoading && !repository.releasesLoaded}
+  {#if repository.releases.releasesLoading && !repository.releases.releasesLoaded}
     <p class="py-16 text-center text-sm text-muted-foreground">
       Loading releases…
     </p>
-  {:else if repository.releasesLoadFailed && !repository.releasesLoaded}
+  {:else if repository.releases.releasesLoadFailed && !repository.releases.releasesLoaded}
     <div class="py-16 text-center text-sm text-muted-foreground">
       <p>Releases could not be loaded.</p>
       <Button
         variant="link"
         class="mt-2"
-        onclick={() => void repository.refreshReleases()}>Try again</Button
+        onclick={() => void repository.releases.refreshReleases()}>Try again</Button
       >
     </div>
-  {:else if repository.releases.length}
+  {:else if repository.releases.releases.length}
     <div class="divide-y">
-      {#each repository.releases as release (release.id)}
+      {#each repository.releases.releases as release (release.id)}
         <article class="grid gap-5 py-7 md:grid-cols-[10rem_minmax(0,1fr)]">
           <div class="space-y-2 text-xs text-muted-foreground">
             <div class="flex items-center gap-2 font-mono text-foreground">
@@ -230,9 +228,9 @@
                         size="icon-sm"
                         class="text-muted-foreground hover:text-destructive"
                         aria-label={`Delete ${asset.name}`}
-                        disabled={repository.releaseAssetPending}
+                        disabled={repository.releases.releaseAssetPending}
                         onclick={() =>
-                          void repository.deleteReleaseAsset(
+                          void repository.releases.deleteReleaseAsset(
                             release.id,
                             asset.id,
                           )}
@@ -268,7 +266,7 @@
                     variant="outline"
                     size="sm"
                     class="gap-2"
-                    disabled={repository.releaseAssetPending ||
+                    disabled={repository.releases.releaseAssetPending ||
                       !assetFiles[release.id]?.length}
                     onclick={() => void uploadAssets(release.id)}
                   >

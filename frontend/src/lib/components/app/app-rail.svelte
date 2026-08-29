@@ -4,24 +4,22 @@
   import { cubicOut } from "svelte/easing";
   import { prefersReducedMotion } from "svelte/motion";
   import { crossfade } from "svelte/transition";
-  import {
-    Building2,
-    CircleDot,
-    Compass,
-    FileCode2,
-    Heart,
-    History,
-    Package,
-    PanelLeftClose,
-    PanelLeftOpen,
-    ScrollText,
-    Settings2,
-    ShieldCheck,
-    Tag,
-    UserRound,
-    Workflow,
-  } from "lucide-svelte";
-  import { organizationAvatarUrl } from "$lib/api.js";
+  import Building2 from "@lucide/svelte/icons/building-2";
+  import CircleDot from "@lucide/svelte/icons/circle-dot";
+  import Compass from "@lucide/svelte/icons/compass";
+  import FileCode2 from "@lucide/svelte/icons/file-code-2";
+  import Heart from "@lucide/svelte/icons/heart";
+  import History from "@lucide/svelte/icons/history";
+  import Package from "@lucide/svelte/icons/package";
+  import PanelLeftClose from "@lucide/svelte/icons/panel-left-close";
+  import PanelLeftOpen from "@lucide/svelte/icons/panel-left-open";
+  import ScrollText from "@lucide/svelte/icons/scroll-text";
+  import Settings2 from "@lucide/svelte/icons/settings-2";
+  import ShieldCheck from "@lucide/svelte/icons/shield-check";
+  import Tag from "@lucide/svelte/icons/tag";
+  import UserRound from "@lucide/svelte/icons/user-round";
+  import Workflow from "@lucide/svelte/icons/workflow";
+  import { organizationAvatarUrl } from "$lib/api/organizations.js";
 
   import * as Avatar from "$lib/components/ui/avatar/index.js";
   import * as Sidebar from "$lib/components/ui/sidebar/index.js";
@@ -41,7 +39,7 @@
   const sidebar = Sidebar.useSidebar();
   const shell = useShellState();
   const viewer = $derived(app.authStatus?.user?.username);
-  // Only the desktop rail shrinks to icons; the mobile sheet is always full
+  const scope = $derived(app.authorizationScope);
   // width, so it never needs the label as a tooltip.
   const collapsed = $derived(
     sidebar.state === "collapsed" && !sidebar.isMobile,
@@ -85,7 +83,7 @@
         href: resolve("/"),
         icon: Compass,
         active: onExplore && !page.url.searchParams.has("tab"),
-        preload: () => preloadExplore(viewer),
+        preload: () => preloadExplore(scope),
       },
     ];
   });
@@ -177,7 +175,7 @@
         href: resolve("/[namespace]", { namespace: viewer }),
         icon: UserRound,
         active: page.params.namespace === viewer,
-        preload: () => preloadExplore(viewer, viewer),
+        preload: () => preloadExplore(scope, viewer),
       },
       {
         label: "Favorites",
@@ -186,7 +184,7 @@
         active:
           page.url.pathname === "/" &&
           page.url.searchParams.get("tab") === "favorites",
-        preload: () => preloadExplore(viewer),
+        preload: () => preloadExplore(scope),
       },
     ];
   });
@@ -203,7 +201,7 @@
       active:
         page.params.namespace === organization.slug ||
         page.params.slug === organization.slug,
-      preload: () => preloadExplore(viewer, organization.slug),
+      preload: () => preloadExplore(scope, organization.slug),
     })),
   );
 
@@ -224,7 +222,7 @@
         href: resolve("/-/account/[view]", { view: "profile" }),
         icon: Settings2,
         active: page.url.pathname.startsWith("/-/account"),
-        preload: () => preloadAccountSettings(viewer),
+        preload: () => preloadAccountSettings(scope),
       },
     ];
     if (app.authStatus.user?.is_admin) {
@@ -233,7 +231,7 @@
         href: resolve("/-/administration/[view]", { view: "appearance" }),
         icon: ShieldCheck,
         active: page.url.pathname.startsWith("/-/administration"),
-        preload: preloadAdminActivity,
+        preload: () => preloadAdminActivity(scope),
       });
     }
     links.push({

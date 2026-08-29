@@ -1,7 +1,9 @@
 <script lang="ts">
   import { page } from "$app/state";
   import { resolve } from "$app/paths";
-  import { PanelLeft, Plus, Search } from "lucide-svelte";
+  import PanelLeft from "@lucide/svelte/icons/panel-left";
+  import Plus from "@lucide/svelte/icons/plus";
+  import Search from "@lucide/svelte/icons/search";
 
   import BrandMark from "$lib/components/brand-mark.svelte";
   import UserMenu from "$lib/components/app/user-menu.svelte";
@@ -28,16 +30,16 @@
     : "Ctrl K";
 
   $effect(() => {
-    const viewer = app.authStatus?.user?.username;
+    const scope = app.authorizationScope;
     if (typeof window.requestIdleCallback === "function") {
       const idle = window.requestIdleCallback(
-        () => preloadRepositoryIndex(viewer),
+        () => preloadRepositoryIndex(scope),
         { timeout: 2_000 },
       );
       return () => window.cancelIdleCallback(idle);
     }
     const timer = window.setTimeout(
-      () => preloadRepositoryIndex(viewer),
+      () => preloadRepositoryIndex(scope),
       1_000,
     );
     return () => window.clearTimeout(timer);
@@ -171,8 +173,8 @@
     <a
       class="flex shrink-0 items-center gap-2 font-bold tracking-[-0.035em]"
       href={resolve("/")}
-      onpointerenter={() => preloadExplore(app.authStatus?.user?.username)}
-      onfocus={() => preloadExplore(app.authStatus?.user?.username)}
+      onpointerenter={() => preloadExplore(app.authorizationScope)}
+      onfocus={() => preloadExplore(app.authorizationScope)}
       aria-label={`${siteName} home`}
     >
       <BrandMark />
@@ -213,9 +215,8 @@
     type="button"
     class="group hidden h-9 w-56 shrink-0 items-center gap-2.5 rounded-lg border border-input/40 bg-input/20 px-2.5 text-left outline-none hover:border-input hover:bg-input/35 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 md:flex xl:w-72"
     aria-keyshortcuts="Control+K Meta+K /"
-    onpointerenter={() =>
-      preloadRepositoryIndex(app.authStatus?.user?.username)}
-    onfocus={() => preloadRepositoryIndex(app.authStatus?.user?.username)}
+    onpointerenter={() => preloadRepositoryIndex(app.authorizationScope)}
+    onfocus={() => preloadRepositoryIndex(app.authorizationScope)}
     onclick={() => (shell.paletteOpen = true)}
   >
     <span
@@ -240,9 +241,8 @@
     size="icon"
     class="shrink-0 text-muted-foreground hover:text-foreground md:hidden"
     aria-label="Search repositories"
-    onpointerenter={() =>
-      preloadRepositoryIndex(app.authStatus?.user?.username)}
-    onfocus={() => preloadRepositoryIndex(app.authStatus?.user?.username)}
+    onpointerenter={() => preloadRepositoryIndex(app.authorizationScope)}
+    onfocus={() => preloadRepositoryIndex(app.authorizationScope)}
     onclick={() => (shell.paletteOpen = true)}
   >
     <Search class="size-4" />

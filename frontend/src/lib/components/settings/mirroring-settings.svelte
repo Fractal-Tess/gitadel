@@ -1,15 +1,14 @@
 <script lang="ts">
-  import { LoaderCircle } from "lucide-svelte";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import { onMount } from "svelte";
 
   import {
     ApiFailure,
     jsonBody,
-    mirrorIdentitySchema,
     requestEmpty,
     requestJson,
-    type MirrorIdentity,
-  } from "$lib/api.js";
+  } from "$lib/api/transport.js";
+  import { mirrorIdentitySchema, type MirrorIdentity } from "$lib/api/mirrors.js";
   import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
   import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
@@ -18,17 +17,14 @@
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
   import { takeNamespaceMirrorSettings } from "$lib/namespace-preload.js";
-  import type { AccountSettingsState } from "$lib/settings/account-settings-state.svelte.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
   type Target = { slug: string; label: string };
   type IdentityCard = { target: Target; identity: MirrorIdentity };
 
   let {
-    state: account,
     namespace = null,
   }: {
-    state: AccountSettingsState;
     namespace?: Target | null;
   } = $props();
 
@@ -37,26 +33,7 @@
     dateStyle: "medium",
     timeStyle: "short",
   });
-  const targets = $derived<Target[]>(
-    namespace
-      ? [namespace]
-      : [
-          ...(app.authStatus?.user?.username
-            ? [
-                {
-                  slug: app.authStatus.user.username,
-                  label: "Personal repositories",
-                },
-              ]
-            : []),
-          ...account.organizations
-            .filter((organization) => organization.role === "owner")
-            .map((organization) => ({
-              slug: organization.slug,
-              label: organization.display_name || organization.slug,
-            })),
-        ],
-  );
+  const targets = $derived<Target[]>(namespace ? [namespace] : []);
 
   let identities = $state<Record<string, MirrorIdentity[]>>({});
   let loading = $state(true);
@@ -100,15 +77,17 @@
   }
 
   async function load(): Promise<void> {
+    const scope = app.authorizationScope;
     loading = true;
     loadError = null;
     try {
       const responses = await Promise.all(
         targets.map(async ({ slug }) => ({
           slug,
-          values: (await takeNamespaceMirrorSettings(slug)).identities,
+          values: (await takeNamespaceMirrorSettings(slug, scope)).identities,
         })),
       );
+      if (app.authorizationScope !== scope) return;
       for (const response of responses) identities[response.slug] = response.values;
     } catch (caught) {
       loadError = message(caught, "Could not load mirror identities.");

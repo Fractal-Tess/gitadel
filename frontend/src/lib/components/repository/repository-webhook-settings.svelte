@@ -1,16 +1,14 @@
 <script lang="ts">
-  import {
-    Activity,
-    ChevronDown,
-    ChevronUp,
-    History,
-    Pencil,
-    Radio,
-    RotateCw,
-    Send,
-    Trash2,
-    Webhook,
-  } from "lucide-svelte";
+  import Activity from "@lucide/svelte/icons/activity";
+  import ChevronDown from "@lucide/svelte/icons/chevron-down";
+  import ChevronUp from "@lucide/svelte/icons/chevron-up";
+  import History from "@lucide/svelte/icons/history";
+  import Pencil from "@lucide/svelte/icons/pencil";
+  import Radio from "@lucide/svelte/icons/radio";
+  import RotateCw from "@lucide/svelte/icons/rotate-cw";
+  import Send from "@lucide/svelte/icons/send";
+  import Trash2 from "@lucide/svelte/icons/trash-2";
+  import Webhook from "@lucide/svelte/icons/webhook";
 
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -60,7 +58,7 @@
   async function toggleDeliveryHistory(hookId: string) {
     // Reopening a hook starts from the short list again.
     expandedDeliveryListId = null;
-    await repository.toggleWebhookDeliveries(hookId);
+    await repository.webhooks.toggleWebhookDeliveries(hookId);
   }
 
   function startEditing(id: string, url: string) {
@@ -69,9 +67,9 @@
     editSecret = "";
   }
 
-  async function saveEdit(hook: (typeof repository.webhooks)[number]) {
+  async function saveEdit(hook: (typeof repository.webhooks.webhooks)[number]) {
     try {
-      await repository.updateWebhook(hook, editUrl, editSecret);
+      await repository.webhooks.updateWebhook(hook, editUrl, editSecret);
       editingId = null;
       editSecret = "";
     } catch {
@@ -89,7 +87,7 @@
     if (!target) return;
     deleteDialogOpen = false;
     pendingDelete = null;
-    void repository.deleteWebhook(target.id);
+    void repository.webhooks.deleteWebhook(target.id);
   }
 </script>
 
@@ -110,18 +108,18 @@
   >
     <ul
       class="divide-y rounded-lg border"
-      aria-busy={repository.webhooksLoading}
+      aria-busy={repository.webhooks.webhooksLoading}
     >
-      {#if repository.webhooksLoading && !repository.webhooksLoaded}
+      {#if repository.webhooks.webhooksLoading && !repository.webhooks.webhooksLoaded}
         <li class="px-5 py-12 text-center text-sm text-foreground/70">
           Loading webhooks…
         </li>
-      {:else if !repository.webhooksLoaded}
+      {:else if !repository.webhooks.webhooksLoaded}
         <li class="px-5 py-12 text-center text-sm text-foreground/70">
           Webhooks are unavailable. Retry by reopening repository settings.
         </li>
       {:else}
-        {#each repository.webhooks as hook (hook.id)}
+        {#each repository.webhooks.webhooks as hook (hook.id)}
           <li class="grid gap-4 p-4">
             <div class="min-w-0">
               <div class="flex items-center gap-2">
@@ -175,10 +173,10 @@
                 <Switch
                   size="sm"
                   checked={hook.active}
-                  disabled={repository.webhookActionPending}
+                  disabled={repository.webhooks.webhookActionPending}
                   aria-label={`${hook.active ? "Disable" : "Enable"} webhook for ${hook.config.url}`}
                   onclick={() =>
-                    void repository.setWebhookActive(hook, !hook.active)}
+                    void repository.webhooks.setWebhookActive(hook, !hook.active)}
                 />
               </label>
               <Button
@@ -186,7 +184,7 @@
                 size="icon-sm"
                 variant="ghost"
                 class="max-sm:size-11"
-                disabled={repository.webhookActionPending}
+                disabled={repository.webhooks.webhookActionPending}
                 aria-label={`Edit webhook for ${hook.config.url}`}
                 onclick={() => startEditing(hook.id, hook.config.url)}
               >
@@ -197,18 +195,18 @@
                 size="sm"
                 variant="outline"
                 class="gap-2 max-sm:h-11"
-                disabled={repository.webhookActionPending}
-                onclick={() => void repository.pingWebhook(hook.id)}
+                disabled={repository.webhooks.webhookActionPending}
+                onclick={() => void repository.webhooks.pingWebhook(hook.id)}
               >
                 <Send class="size-3.5" />
-                {repository.webhookPingingId === hook.id ? "Pinging…" : "Ping"}
+                {repository.webhooks.webhookPingingId === hook.id ? "Pinging…" : "Ping"}
               </Button>
               <Button
                 type="button"
                 size="icon-sm"
                 variant="ghost"
                 class="text-foreground/70 hover:text-destructive max-sm:size-11"
-                disabled={repository.webhookActionPending}
+                disabled={repository.webhooks.webhookActionPending}
                 aria-label={`Delete webhook for ${hook.config.url}`}
                 onclick={() => requestDeleteWebhook(hook.id, hook.config.url)}
               >
@@ -264,9 +262,9 @@
                   <Button
                     type="submit"
                     class="max-sm:h-11"
-                    disabled={repository.webhookActionPending}
+                    disabled={repository.webhooks.webhookActionPending}
                   >
-                    {repository.webhookUpdatingId === hook.id
+                    {repository.webhooks.webhookUpdatingId === hook.id
                       ? "Saving…"
                       : "Save changes"}
                   </Button>
@@ -280,30 +278,30 @@
                 size="sm"
                 variant="ghost"
                 class="gap-2"
-                aria-expanded={repository.expandedWebhookId === hook.id}
+                aria-expanded={repository.webhooks.expandedWebhookId === hook.id}
                 onclick={() => void toggleDeliveryHistory(hook.id)}
               >
                 <History class="size-3.5" />
                 Recent deliveries
-                {#if repository.expandedWebhookId === hook.id}
+                {#if repository.webhooks.expandedWebhookId === hook.id}
                   <ChevronUp class="size-3.5" />
                 {:else}
                   <ChevronDown class="size-3.5" />
                 {/if}
               </Button>
-              {#if repository.expandedWebhookId === hook.id}
-                {#if repository.webhookDeliveriesLoadingId === hook.id && !repository.webhookDeliveries[hook.id]}
+              {#if repository.webhooks.expandedWebhookId === hook.id}
+                {#if repository.webhooks.webhookDeliveriesLoadingId === hook.id && !repository.webhooks.webhookDeliveries[hook.id]}
                   <p class="mt-2 text-xs text-foreground/70">
                     Loading deliveries…
                   </p>
-                {:else if !repository.webhookDeliveries[hook.id]?.length}
+                {:else if !repository.webhooks.webhookDeliveries[hook.id]?.length}
                   <p class="mt-2 text-xs leading-5 text-foreground/70">
                     No deliveries recorded yet. Use Ping or push to this
                     repository to trigger one.
                   </p>
                 {:else}
                   {@const deliveries =
-                    repository.webhookDeliveries[hook.id] ?? []}
+                    repository.webhooks.webhookDeliveries[hook.id] ?? []}
                   {@const collapsed =
                     expandedDeliveryListId !== hook.id &&
                     deliveries.length > DELIVERY_PREVIEW_COUNT}
@@ -369,17 +367,17 @@
                               size="sm"
                               variant="outline"
                               class="gap-1.5 max-sm:h-8"
-                              disabled={repository.redeliveringDeliveryId !==
-                                null || repository.webhookActionPending}
+                              disabled={repository.webhooks.redeliveringDeliveryId !==
+                                null || repository.webhooks.webhookActionPending}
                               aria-label={`Redeliver ${delivery.event} delivery`}
                               onclick={() =>
-                                void repository.redeliverWebhookDelivery(
+                                void repository.webhooks.redeliverWebhookDelivery(
                                   hook.id,
                                   delivery.id,
                                 )}
                             >
                               <RotateCw class="size-3" />
-                              {repository.redeliveringDeliveryId === delivery.id
+                              {repository.webhooks.redeliveringDeliveryId === delivery.id
                                 ? "Redelivering…"
                                 : "Redeliver"}
                             </Button>
@@ -448,7 +446,7 @@
       class="grid content-start gap-4 rounded-lg border bg-card/25 p-5"
       onsubmit={(event) => {
         event.preventDefault();
-        void repository.createWebhook();
+        void repository.webhooks.createWebhook();
       }}
     >
       <div>
@@ -464,7 +462,7 @@
           id="webhook-url"
           class="placeholder:text-foreground/60"
           type="url"
-          bind:value={repository.webhookUrl}
+          bind:value={repository.webhooks.webhookUrl}
           placeholder="https://deploy.example.com/hooks/gitadel"
           autocomplete="url"
           maxlength={2048}
@@ -477,7 +475,7 @@
           id="webhook-secret"
           class="placeholder:text-foreground/60"
           type="password"
-          bind:value={repository.webhookSecret}
+          bind:value={repository.webhooks.webhookSecret}
           placeholder="Optional signing secret"
           autocomplete="new-password"
           maxlength={256}
@@ -495,10 +493,10 @@
             >Deliver push events immediately.</span
           >
         </span>
-        <Switch bind:checked={repository.webhookActive} />
+        <Switch bind:checked={repository.webhooks.webhookActive} />
       </label>
-      <Button type="submit" disabled={repository.webhookCreating}>
-        {repository.webhookCreating ? "Adding webhook…" : "Add webhook"}
+      <Button type="submit" disabled={repository.webhooks.webhookCreating}>
+        {repository.webhooks.webhookCreating ? "Adding webhook…" : "Add webhook"}
       </Button>
     </form>
   </Card.Content>

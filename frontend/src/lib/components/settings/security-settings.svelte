@@ -1,16 +1,14 @@
 <script lang="ts">
   import { getLocalTimeZone, today } from "@internationalized/date";
-  import {
-    BookOpen,
-    CalendarDays,
-    ChevronDown,
-    Clipboard,
-    KeyRound,
-    KeySquare,
-    LockKeyhole,
-    Terminal,
-    UserRound,
-  } from "lucide-svelte";
+  import BookOpen from "@lucide/svelte/icons/book-open";
+  import CalendarDays from "@lucide/svelte/icons/calendar-days";
+  import ChevronDown from "@lucide/svelte/icons/chevron-down";
+  import Clipboard from "@lucide/svelte/icons/clipboard";
+  import KeyRound from "@lucide/svelte/icons/key-round";
+  import KeySquare from "@lucide/svelte/icons/key-square";
+  import LockKeyhole from "@lucide/svelte/icons/lock-keyhole";
+  import Terminal from "@lucide/svelte/icons/terminal";
+  import UserRound from "@lucide/svelte/icons/user-round";
   import { onMount } from "svelte";
   import { toast } from "svelte-sonner";
 
@@ -26,7 +24,11 @@
   import * as Popover from "$lib/components/ui/popover/index.js";
   import * as Select from "$lib/components/ui/select/index.js";
   import { Textarea } from "$lib/components/ui/textarea/index.js";
-  import type { AccountSettingsState } from "$lib/settings/account-settings-state.svelte.js";
+  import type { CredentialsSettingsState } from "$lib/settings/account/credentials-settings-state.svelte.js";
+  import type {
+    PasswordSettingsState,
+    ProfileSettingsState,
+  } from "$lib/settings/account/profile-settings-state.svelte.js";
 
   type DeletionTarget = {
     kind: "passkey" | "ssh-key" | "api-token";
@@ -35,10 +37,14 @@
   };
 
   let {
-    state: account,
+    profile,
+    password,
+    credentials,
     view,
   }: {
-    state: AccountSettingsState;
+    profile: ProfileSettingsState;
+    password: PasswordSettingsState;
+    credentials: CredentialsSettingsState;
     view: "account" | "authentication" | "ssh-keys" | "api-tokens";
   } = $props();
   const timestampFormatter = new Intl.DateTimeFormat(undefined, {
@@ -61,25 +67,25 @@
   });
 
   function updateSshPublicKey(publicKey: string): void {
-    account.sshPublicKey = publicKey;
-    if (account.sshKeyName.trim()) return;
+    credentials.sshPublicKey = publicKey;
+    if (credentials.sshKeyName.trim()) return;
 
     const firstLine = publicKey.trim().split(/\r?\n/u)[0] ?? "";
     const comment = firstLine.match(
       /^(?:ssh-(?:ed25519|rsa)|ecdsa-sha2-\S+|sk-\S+)\s+\S+\s+(.+?)\s*$/u,
     )?.[1];
-    if (comment) account.sshKeyName = comment;
+    if (comment) credentials.sshKeyName = comment;
   }
 
   async function addSshKey() {
-    await account.addSshKey();
-    if (!account.error) sshKeyDialogOpen = false;
+    await credentials.addSshKey();
+    if (!credentials.error) sshKeyDialogOpen = false;
   }
 
   async function createApiToken() {
-    account.createdToken = null;
-    await account.createApiToken();
-    if (!account.error && account.createdToken) {
+    credentials.createdToken = null;
+    await credentials.createApiToken();
+    if (!credentials.error && credentials.createdToken) {
       apiTokenDialogOpen = false;
       tokenRevealOpen = true;
     }
@@ -113,7 +119,7 @@
   }
 
   async function copyCreatedToken() {
-    const token = account.createdToken;
+    const token = credentials.createdToken;
     if (!token) return;
     await copyText(
       token,
@@ -124,7 +130,7 @@
 
   function setTokenRevealOpen(open: boolean) {
     tokenRevealOpen = open;
-    if (!open) account.createdToken = null;
+    if (!open) credentials.createdToken = null;
   }
 
   function requestDeletion(target: DeletionTarget) {
@@ -137,13 +143,13 @@
     if (!target) return;
 
     if (target.kind === "passkey") {
-      await account.removePasskey(target.id);
+      await credentials.removePasskey(target.id);
     } else if (target.kind === "ssh-key") {
-      await account.removeSshKey(target.id);
+      await credentials.removeSshKey(target.id);
     } else {
-      await account.revokeToken(target.id);
+      await credentials.revokeToken(target.id);
     }
-    if (!account.error) {
+    if (!credentials.error) {
       deleteDialogOpen = false;
       pendingDeletion = null;
     }
@@ -186,7 +192,7 @@
         class="grid max-w-2xl gap-4"
         onsubmit={(event) => {
           event.preventDefault();
-          void account.updateUsername();
+          void profile.updateUsername();
         }}
       >
         <Field.Field>
@@ -194,9 +200,9 @@
           <Input
             id="account-username"
             autocomplete="username"
-            bind:value={account.username}
+            bind:value={profile.username}
             maxlength={39}
-            disabled={account.working}
+            disabled={profile.working}
             required
           />
           <Field.Description>
@@ -229,19 +235,19 @@
         </Field.Label>
         <Select.Root
           type="single"
-          value={account.defaultRepositoryVisibility}
+          value={profile.defaultRepositoryVisibility}
           onValueChange={(value) => {
             if (value === "public" || value === "private") {
-              void account.updateRepositoryVisibility(value);
+              void profile.updateRepositoryVisibility(value);
             }
           }}
         >
           <Select.Trigger
             id="account-default-repository-visibility"
             class="w-full"
-            disabled={account.working}
+            disabled={profile.working}
           >
-            {account.defaultRepositoryVisibility === "private"
+            {profile.defaultRepositoryVisibility === "private"
               ? "Private"
               : "Public"}
           </Select.Trigger>
@@ -277,7 +283,7 @@
         class="grid max-w-2xl gap-4"
         onsubmit={(event) => {
           event.preventDefault();
-          void account.updatePassword();
+          void password.updatePassword();
         }}
       >
         <Field.Field>
@@ -286,7 +292,7 @@
             id="password-current"
             type="password"
             autocomplete="current-password"
-            bind:value={account.currentPassword}
+            bind:value={password.currentPassword}
             required
           />
         </Field.Field>
@@ -297,7 +303,7 @@
               id="password-new"
               type="password"
               autocomplete="new-password"
-              bind:value={account.newPassword}
+              bind:value={password.newPassword}
               minlength={12}
               required
             />
@@ -308,13 +314,13 @@
               id="password-confirm"
               type="password"
               autocomplete="new-password"
-              bind:value={account.confirmPassword}
+              bind:value={password.confirmPassword}
               minlength={12}
               required
             />
           </Field.Field>
         </div>
-        <Button class="w-fit" type="submit" disabled={account.working}>
+        <Button class="w-fit" type="submit" disabled={password.working}>
           Update password
         </Button>
       </form>
@@ -336,7 +342,7 @@
 
       <div class="grid max-w-2xl gap-5">
         <ul class="grid gap-2">
-          {#each account.passkeys as passkey (passkey.id)}
+          {#each credentials.passkeys as passkey (passkey.id)}
             <li
               class="flex items-center justify-between gap-3 rounded-lg border bg-background/30 p-3"
             >
@@ -371,14 +377,14 @@
           class="grid gap-4 border-t pt-5"
           onsubmit={(event) => {
             event.preventDefault();
-            void account.addPasskey();
+            void credentials.addPasskey();
           }}
         >
           <Field.Field>
             <Field.Label for="passkey-name">Passkey name</Field.Label>
             <Input
               id="passkey-name"
-              bind:value={account.passkeyName}
+              bind:value={credentials.passkeyName}
               disabled={!passkeysAvailable}
               required
             />
@@ -386,7 +392,7 @@
           <Button
             class="w-fit"
             type="submit"
-            disabled={account.working || !passkeysAvailable}
+            disabled={credentials.working || !passkeysAvailable}
           >
             Add passkey
           </Button>
@@ -404,7 +410,7 @@
           onclick={() => (sshKeyDialogOpen = true)}
         />
 
-        {#each account.sshKeys as key (key.id)}
+        {#each credentials.sshKeys as key (key.id)}
           <article
             class="flex min-h-72 flex-col rounded-xl border bg-card/40 p-5 shadow-sm transition-colors hover:bg-card/60"
           >
@@ -501,7 +507,7 @@
               <Field.Label for="ssh-key-name">Key name</Field.Label>
               <Input
                 id="ssh-key-name"
-                bind:value={account.sshKeyName}
+                bind:value={credentials.sshKeyName}
                 placeholder="Work laptop"
                 autofocus
                 required
@@ -513,7 +519,7 @@
                 id="ssh-public-key"
                 class="font-mono text-xs"
                 rows={5}
-                value={account.sshPublicKey}
+                value={credentials.sshPublicKey}
                 oninput={(event) =>
                   updateSshPublicKey(event.currentTarget.value)}
                 placeholder="ssh-ed25519 AAAA…"
@@ -531,8 +537,8 @@
                   </Button>
                 {/snippet}
               </Dialog.Close>
-              <Button type="submit" disabled={account.working}>
-                {account.working ? "Adding…" : "Add SSH key"}
+              <Button type="submit" disabled={credentials.working}>
+                {credentials.working ? "Adding…" : "Add SSH key"}
               </Button>
             </Dialog.Footer>
           </form>
@@ -550,7 +556,7 @@
           onclick={() => (apiTokenDialogOpen = true)}
         />
 
-        {#each account.tokens as token (token.id)}
+        {#each credentials.tokens as token (token.id)}
           <article
             class="flex min-h-72 flex-col rounded-xl border bg-card/40 p-5 shadow-sm transition-colors hover:bg-card/60"
           >
@@ -638,7 +644,7 @@
               <Field.Label for="token-name">Token name</Field.Label>
               <Input
                 id="token-name"
-                bind:value={account.tokenName}
+                bind:value={credentials.tokenName}
                 placeholder="Deployment script"
                 required
               />
@@ -656,8 +662,8 @@
                         class="min-w-0 flex-1 justify-between font-normal"
                       >
                         <span class="truncate">
-                          {account.tokenExpiresOn
-                            ? account.tokenExpiresOn
+                          {credentials.tokenExpiresOn
+                            ? credentials.tokenExpiresOn
                                 .toDate(getLocalTimeZone())
                                 .toLocaleDateString(undefined, {
                                   dateStyle: "medium",
@@ -676,7 +682,7 @@
                   >
                     <Calendar
                       type="single"
-                      bind:value={account.tokenExpiresOn}
+                      bind:value={credentials.tokenExpiresOn}
                       minValue={today(getLocalTimeZone()).add({ days: 1 })}
                       maxValue={today(getLocalTimeZone()).add({ days: 3650 })}
                       captionLayout="dropdown"
@@ -685,12 +691,12 @@
                     />
                   </Popover.Content>
                 </Popover.Root>
-                {#if account.tokenExpiresOn}
+                {#if credentials.tokenExpiresOn}
                   <Button
                     type="button"
                     variant="outline"
                     aria-label="Clear expiration date"
-                    onclick={() => (account.tokenExpiresOn = undefined)}
+                    onclick={() => (credentials.tokenExpiresOn = undefined)}
                   >
                     <CalendarDays class="size-4" />
                   </Button>
@@ -705,7 +711,7 @@
               </Field.Description>
               <div class="divide-y overflow-hidden rounded-lg border">
                 <div
-                  class={account.tokenRead
+                  class={credentials.tokenRead
                     ? "flex items-start justify-between gap-4 bg-primary/5 px-3.5 py-3"
                     : "flex items-start justify-between gap-4 px-3.5 py-3"}
                 >
@@ -721,11 +727,11 @@
                   <Checkbox
                     class="mt-0.5"
                     id="scope-read"
-                    bind:checked={account.tokenRead}
+                    bind:checked={credentials.tokenRead}
                   />
                 </div>
                 <div
-                  class={account.tokenWrite
+                  class={credentials.tokenWrite
                     ? "flex items-start justify-between gap-4 bg-primary/5 px-3.5 py-3"
                     : "flex items-start justify-between gap-4 px-3.5 py-3"}
                 >
@@ -740,11 +746,11 @@
                   <Checkbox
                     class="mt-0.5"
                     id="scope-write"
-                    bind:checked={account.tokenWrite}
+                    bind:checked={credentials.tokenWrite}
                   />
                 </div>
                 <div
-                  class={account.tokenSshKeys
+                  class={credentials.tokenSshKeys
                     ? "flex items-start justify-between gap-4 bg-primary/5 px-3.5 py-3"
                     : "flex items-start justify-between gap-4 px-3.5 py-3"}
                 >
@@ -762,7 +768,7 @@
                   <Checkbox
                     class="mt-0.5"
                     id="scope-ssh-keys"
-                    bind:checked={account.tokenSshKeys}
+                    bind:checked={credentials.tokenSshKeys}
                   />
                 </div>
               </div>
@@ -776,8 +782,8 @@
                   </Button>
                 {/snippet}
               </Dialog.Close>
-              <Button type="submit" disabled={account.working}>
-                {account.working ? "Creating…" : "Create token"}
+              <Button type="submit" disabled={credentials.working}>
+                {credentials.working ? "Creating…" : "Create token"}
               </Button>
             </Dialog.Footer>
           </form>
@@ -797,7 +803,7 @@
           </Dialog.Header>
           <div class="rounded-lg border bg-muted/40 p-3">
             <code class="block select-all break-all text-sm">
-              {account.createdToken}
+              {credentials.createdToken}
             </code>
           </div>
           <p class="text-xs leading-5 text-muted-foreground">
@@ -837,7 +843,7 @@
         <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
         <AlertDialog.Action
           variant="destructive"
-          disabled={account.working}
+          disabled={credentials.working}
           onclick={() => void confirmDeletion()}
         >
           {pendingDeletion?.kind === "api-token" ? "Revoke token" : "Remove"}

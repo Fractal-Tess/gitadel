@@ -303,10 +303,7 @@ function codeCopyIcon(copied: boolean) {
   return icon;
 }
 
-function addCodeCopyButton(
-  code: HTMLElement,
-  source: string,
-): () => void {
+function addCodeCopyButton(code: HTMLElement, source: string): () => void {
   const pre = code.closest("pre");
   if (!pre) return () => undefined;
 

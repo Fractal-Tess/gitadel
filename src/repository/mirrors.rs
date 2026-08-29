@@ -14,8 +14,8 @@ use axum_extra::extract::cookie::CookieJar;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
-    QuerySelect, Set, TransactionTrait, sea_query::Query,
+    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set,
+    TransactionTrait, sea_query::Query,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -35,9 +35,7 @@ use crate::{
         issue_comment, namespace_mirror_identity, repository, repository_issue, repository_mirror,
         repository_topic,
     },
-    identity::{
-        ApiError, SCOPE_WRITE, load_mirror_identity_secret, mark_repository_identity_used,
-    },
+    identity::{ApiError, SCOPE_WRITE, load_mirror_identity_secret, mark_repository_identity_used},
     network::is_public_ip,
     schedule,
 };
@@ -45,9 +43,7 @@ use crate::{
 const MAX_REMOTE_URL_LENGTH: usize = 2_048;
 const MAX_SCHEDULE_LENGTH: usize = 255;
 const MAX_ERROR_LENGTH: usize = 2_048;
-const SCHEDULER_INTERVAL: Duration = Duration::from_secs(30);
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-const SCHEDULER_BATCH_SIZE: u64 = 16;
 const TEMPORARY_FILE_MAX_AGE: Duration = Duration::from_secs(12 * 60);
 const LFS_IMPORT_STAGING_PREFIX: &str = ".gitadel-import-";
 
@@ -126,9 +122,14 @@ impl PreparedMirror {
             ));
         }
         let github = github_mirror::identify(&remote_url);
-        let authentication =
-            authentication(state, namespace, &remote_url, request.identity_id, github.is_some())
-                .await?;
+        let authentication = authentication(
+            state,
+            namespace,
+            &remote_url,
+            request.identity_id,
+            github.is_some(),
+        )
+        .await?;
         let (schedule, next_sync_at) = normalize_schedule(request.schedule, Utc::now())?;
         Ok(Self {
             remote_url,
@@ -622,64 +623,7 @@ async fn convert_inner(
     Ok(())
 }
 
-pub async fn serve_scheduler(state: RepositoryState) -> Result<(), anyhow::Error> {
-    let mut interval = tokio::time::interval(SCHEDULER_INTERVAL);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        interval.tick().await;
-        if let Err(error) = cleanup_temporary_files(&state.repository_root).await {
-            tracing::warn!(%error, "could not clean stale mirror credential files");
-        }
-        let due = repository_mirror::Entity::find()
-            .filter(repository_mirror::Column::NextSyncAt.is_not_null())
-            .filter(repository_mirror::Column::NextSyncAt.lte(Utc::now()))
-            .filter(
-                repository_mirror::Column::RepositoryId.in_subquery(
-                    Query::select()
-                        .column(repository::Column::Id)
-                        .from(repository::Entity)
-                        .and_where(repository::Column::DeletedAt.is_null())
-                        .to_owned(),
-                ),
-            )
-            .order_by_asc(repository_mirror::Column::NextSyncAt)
-            .limit(SCHEDULER_BATCH_SIZE)
-            .all(state.identity().database())
-            .await;
-        let due = match due {
-            Ok(due) => due,
-            Err(error) => {
-                tracing::error!(%error, "could not load scheduled repository mirrors");
-                continue;
-            }
-        };
-        for mirror in due {
-            let Some(repository) = repository::Entity::find_by_id(mirror.repository_id)
-                .one(state.identity().database())
-                .await
-                .inspect_err(|error| {
-                    tracing::error!(%error, repository_id = %mirror.repository_id, "could not load scheduled mirror repository");
-                })?
-            else {
-                continue;
-            };
-            let state = state.clone();
-            tokio::spawn(async move {
-                if let Err(error) = synchronize(&state, &repository, None).await
-                    && error.to_string() != "Mirror synchronization is already running."
-                {
-                    tracing::warn!(
-                        %error,
-                        repository_id = %repository.id,
-                        "scheduled repository mirror failed"
-                    );
-                }
-            });
-        }
-    }
-}
-
-async fn synchronize(
+pub(super) async fn synchronize(
     state: &RepositoryState,
     repository: &repository::Model,
     actor_user_id: Option<Uuid>,
@@ -1235,7 +1179,11 @@ async fn authentication(
         "github" => "x-access-token",
         "gitlab" => "oauth2",
         "gitea" | "forgejo" => "git",
-        _ => return Err(ApiError::bad_request("Mirror identity provider is invalid.")),
+        _ => {
+            return Err(ApiError::bad_request(
+                "Mirror identity provider is invalid.",
+            ));
+        }
     };
     let api_token = (github && provider == "github").then(|| identity.secret.clone());
     Ok(GitAuthentication {
@@ -1548,6 +1496,10 @@ async fn read_proxy_request(stream: &mut TcpStream) -> Result<String, String> {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "arguments describe one concrete Git process environment"
+)]
 async fn apply_git_environment(
     state: &RepositoryState,
     command: &mut Command,

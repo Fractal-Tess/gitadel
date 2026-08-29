@@ -51,6 +51,10 @@ struct WorkflowDiagnostic {
     summary: String,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "push fields mirror the external Git event contract"
+)]
 pub(crate) async fn ingest_push(
     state: &ActionsState,
     repository: &repository::Model,
@@ -104,11 +108,11 @@ async fn discover(
     let files = read_git(path, move |git| {
         let mut selected = None;
         for directory in WORKFLOW_DIRECTORIES {
-            if let Ok(resolved) = git.resolve_path(&revision, directory) {
-                if resolved.object_type == GitObjectType::Tree {
-                    selected = Some((directory, resolved.oid));
-                    break;
-                }
+            if let Ok(resolved) = git.resolve_path(&revision, directory)
+                && resolved.object_type == GitObjectType::Tree
+            {
+                selected = Some((directory, resolved.oid));
+                break;
             }
         }
         let Some((directory, tree_oid)) = selected else {

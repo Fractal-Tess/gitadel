@@ -2,16 +2,15 @@
   import { goto } from "$app/navigation";
   import { resolve } from "$app/paths";
   import { page } from "$app/state";
-  import { KeyRound } from "lucide-svelte";
+  import KeyRound from "@lucide/svelte/icons/key-round";
 
   import { Button } from "$lib/components/ui/button/index.js";
   import {
     ApiFailure,
-    authResponseSchema,
     jsonBody,
     requestJson,
-    webauthnRequestSchema,
-  } from "$lib/api.js";
+  } from "$lib/api/transport.js";
+  import { authResponseSchema, webauthnRequestSchema } from "$lib/api/auth.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
   import { getCredential, requestOptions } from "$lib/webauthn.js";
 

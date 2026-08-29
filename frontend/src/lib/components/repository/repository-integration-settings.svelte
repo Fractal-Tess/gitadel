@@ -1,33 +1,33 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { resolve } from "$app/paths";
-  import {
-    ArrowLeft,
-    Box,
-    CircleAlert,
-    GitBranch,
-    LoaderCircle,
-    PlugZap,
-  } from "lucide-svelte";
+  import ArrowLeft from "@lucide/svelte/icons/arrow-left";
+  import Box from "@lucide/svelte/icons/box";
+  import CircleAlert from "@lucide/svelte/icons/circle-alert";
+  import GitBranch from "@lucide/svelte/icons/git-branch";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import PlugZap from "@lucide/svelte/icons/plug-zap";
 
   import {
     ApiFailure,
+    jsonBody,
+    requestEmpty,
+    requestJson,
+  } from "$lib/api/transport.js";
+  import {
     integrationCredentialSchema,
     integrationSourceConnectionSchema,
     integrationTestResultSchema,
-    jsonBody,
     dokployResourceLinkSchema,
     namespaceIntegrationSchema,
     repositoryIntegrationSchema,
     repositoryIntegrationsSchema,
-    requestEmpty,
-    requestJson,
     type IntegrationProvider,
     type IntegrationSourceConnection,
     type NamespaceIntegration,
     type RepositoryIntegration,
     type RepositoryIntegrationConnection,
-  } from "$lib/api.js";
+  } from "$lib/api/integrations.js";
   import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
   import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
   import IntegrationConnectionEditor, {

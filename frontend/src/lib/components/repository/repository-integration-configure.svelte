@@ -1,16 +1,14 @@
 <script lang="ts">
-  import {
-    AppWindow,
-    ArrowLeft,
-    Box,
-    CircleAlert,
-    ExternalLink,
-    LoaderCircle,
-    Layers3,
-    Rocket,
-    Unlink,
-    Settings2,
-  } from "lucide-svelte";
+  import AppWindow from "@lucide/svelte/icons/app-window";
+  import ArrowLeft from "@lucide/svelte/icons/arrow-left";
+  import Box from "@lucide/svelte/icons/box";
+  import CircleAlert from "@lucide/svelte/icons/circle-alert";
+  import ExternalLink from "@lucide/svelte/icons/external-link";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import Layers3 from "@lucide/svelte/icons/layers-3";
+  import Rocket from "@lucide/svelte/icons/rocket";
+  import Unlink from "@lucide/svelte/icons/unlink";
+  import Settings2 from "@lucide/svelte/icons/settings-2";
   import SiDocker from "@icons-pack/svelte-simple-icons/icons/SiDocker";
 
   import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
@@ -26,19 +24,21 @@
   import { Switch } from "$lib/components/ui/switch/index.js";
   import {
     ApiFailure,
+    jsonBody,
+    requestJson,
+  } from "$lib/api/transport.js";
+  import {
     dokployCreatedEnvironmentSchema,
     dokployRemoteCatalogSchema,
     dokployProjectSchema,
     dokployResourceLinkSchema,
     integrationDeployResultSchema,
-    jsonBody,
     repositoryIntegrationSchema,
-    requestJson,
     type DokployProject,
     type DokployRemoteCatalog,
     type RemoteResource,
     type RepositoryIntegration,
-  } from "$lib/api.js";
+  } from "$lib/api/integrations.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
 
   let { state: repository }: { state: RepositoryPageState } = $props();

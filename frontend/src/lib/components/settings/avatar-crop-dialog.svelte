@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
-  import { ImagePlus, ZoomIn, ZoomOut } from "lucide-svelte";
+  import ImagePlus from "@lucide/svelte/icons/image-plus";
+  import ZoomIn from "@lucide/svelte/icons/zoom-in";
+  import ZoomOut from "@lucide/svelte/icons/zoom-out";
   import type { Attachment } from "svelte/attachments";
 
   import {

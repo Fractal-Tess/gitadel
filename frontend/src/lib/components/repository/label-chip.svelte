@@ -1,6 +1,6 @@
 <script lang="ts">
   import { labelForeground } from "$lib/repository/format.js";
-  import type { IssueLabel } from "$lib/api.js";
+  import type { IssueLabel } from "$lib/api/issues.js";
 
   let { label }: { label: IssueLabel } = $props();
 </script>

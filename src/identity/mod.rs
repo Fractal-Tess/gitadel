@@ -8,8 +8,7 @@ mod resources;
 
 pub(crate) use integrations::{authorize_namespace, validate_name as validate_integration_name};
 pub(crate) use mirror_identities::{
-    load_secret as load_mirror_identity_secret,
-    mark_identity_used as mark_repository_identity_used,
+    load_secret as load_mirror_identity_secret, mark_identity_used as mark_repository_identity_used,
 };
 use std::{
     collections::HashMap,

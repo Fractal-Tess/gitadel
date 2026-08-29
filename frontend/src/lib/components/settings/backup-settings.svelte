@@ -1,23 +1,21 @@
 <script lang="ts">
   import { toString as cronToString } from "cronstrue";
   import { onMount } from "svelte";
-  import {
-    ArchiveRestore,
-    Bot,
-    CalendarClock,
-    CalendarDays,
-    CheckCircle2,
-    CloudUpload,
-    Download,
-    HardDrive,
-    LoaderCircle,
-    RefreshCw,
-    ShieldCheck,
-    Tag,
-    Trash2,
-    TriangleAlert,
-    UserRound,
-  } from "lucide-svelte";
+  import ArchiveRestore from "@lucide/svelte/icons/archive-restore";
+  import Bot from "@lucide/svelte/icons/bot";
+  import CalendarClock from "@lucide/svelte/icons/calendar-clock";
+  import CalendarDays from "@lucide/svelte/icons/calendar-days";
+  import CheckCircle2 from "@lucide/svelte/icons/check-circle-2";
+  import CloudUpload from "@lucide/svelte/icons/cloud-upload";
+  import Download from "@lucide/svelte/icons/download";
+  import HardDrive from "@lucide/svelte/icons/hard-drive";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+  import ShieldCheck from "@lucide/svelte/icons/shield-check";
+  import Tag from "@lucide/svelte/icons/tag";
+  import Trash2 from "@lucide/svelte/icons/trash-2";
+  import TriangleAlert from "@lucide/svelte/icons/triangle-alert";
+  import UserRound from "@lucide/svelte/icons/user-round";
 
   import * as Alert from "$lib/components/ui/alert/index.js";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
@@ -34,24 +32,31 @@
   import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
   import {
     ApiFailure,
-    backupProgressSchema,
-    backupProviderSchema,
-    backupProvidersSchema,
-    backupProviderTestSchema,
-    backupScheduledSchema,
-    backupSnapshotSchema,
     jsonBody,
     requestEmpty,
     requestJson,
+  } from "$lib/api/transport.js";
+  import {
+    backupProgressSchema,
+    backupProviderSchema,
+    backupProviderTestSchema,
+    backupScheduledSchema,
+    backupSnapshotSchema,
     restorePreflightSchema,
     type BackupProgress,
     type BackupProvider,
     type BackupProviderCatalogItem,
     type BackupSnapshot,
     type RestorePreflight,
-  } from "$lib/api.js";
+  } from "$lib/api/backups.js";
   import { z } from "zod";
+  import {
+    clearBackupSettingsCache,
+    loadBackupSettings,
+  } from "$lib/settings/backup-settings-cache.js";
+  import { useAppState } from "$lib/state/app-state.svelte.js";
 
+  const app = useAppState();
   const CUSTOM_SCHEDULE = "custom";
   const DEFAULT_CUSTOM_CRON = "0 2 * * *";
   const SCHEDULE_OPTIONS = [
@@ -128,20 +133,25 @@
   });
 
   async function initialize() {
+    const scope = app.authorizationScope;
     await run(async () => {
-      const loaded = await requestJson(
-        "/api/v1/admin/backup/providers",
-        backupProvidersSchema,
-      );
-      providerCatalog = loaded.providers;
-      providers = loaded.connections;
+      const loaded = await loadBackupSettings(scope);
+      const providersValue = loaded.providers;
       const selected =
-        providers.find((provider) => provider.id === selectedProviderId) ??
-        providers[0] ??
+        providersValue.find((provider) => provider.id === selectedProviderId) ??
+        providersValue.find((provider) => provider.id === loaded.selectedProviderId) ??
         null;
+      const snapshotsValue =
+        selected?.id === loaded.selectedProviderId
+          ? loaded.snapshots
+          : selected
+            ? await fetchSnapshots(selected.id)
+            : [];
+      if (app.authorizationScope !== scope) return;
+      providers = providersValue;
       selectedProviderId = selected?.id ?? null;
       applyProvider(selected);
-      snapshots = selected ? await fetchSnapshots(selected.id) : [];
+      snapshots = snapshotsValue;
     });
   }
 
@@ -205,15 +215,14 @@
 
   async function saveProvider(value: BackupProviderEditorValue) {
     const saved = await requestJson(
-      value.id
-        ? providerPath(value.id)
-        : "/api/v1/admin/backup/providers",
+      value.id ? providerPath(value.id) : "/api/v1/admin/backup/providers",
       backupProviderSchema,
       {
         method: value.id ? "PUT" : "POST",
         body: jsonBody(providerPayload(value)),
       },
     );
+    clearBackupSettingsCache();
     providers = value.id
       ? providers.map((provider) =>
           provider.id === value.id ? saved : provider,
@@ -248,6 +257,7 @@
     if (!provider) return;
     await run(async () => {
       await requestEmpty(providerPath(provider.id), { method: "DELETE" });
+      clearBackupSettingsCache();
       providers = providers.filter((candidate) => candidate.id !== provider.id);
       const selected = providers[0] ?? null;
       selectedProviderId = selected?.id ?? null;
@@ -274,6 +284,7 @@
             body: jsonBody({ schedule: scheduleExpression }),
           },
         );
+        clearBackupSettingsCache();
         providers = providers.map((candidate) =>
           candidate.id === provider.id ? loaded : candidate,
         );
@@ -309,6 +320,7 @@
             body: jsonBody({ name: backupName.trim() || null }),
           },
         );
+        clearBackupSettingsCache();
         notice = response.message;
         backupProgress = {
           operation_id: response.operation_id,
@@ -400,6 +412,7 @@
           `${providerPath(provider.id)}/backups/object?key=${encodeURIComponent(snapshot.key)}`,
           { method: "DELETE" },
         );
+        clearBackupSettingsCache();
         snapshots = snapshots.filter(
           (candidate) => candidate.key !== snapshot.key,
         );
@@ -556,17 +569,22 @@
       Backups
     </h2>
     <p class="mt-1.5 max-w-2xl text-sm leading-6 text-muted-foreground">
-      Add backup providers, then create and schedule complete instance snapshots.
+      Add backup providers, then create and schedule complete instance
+      snapshots.
     </p>
   </header>
 
   {#if notice}
-    <p class="rounded-md border border-emerald-500/25 bg-emerald-500/8 p-3 text-sm text-emerald-300">
+    <p
+      class="rounded-md border border-emerald-500/25 bg-emerald-500/8 p-3 text-sm text-emerald-300"
+    >
       {notice}
     </p>
   {/if}
   {#if error}
-    <p class="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+    <p
+      class="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
+    >
       {error}
     </p>
   {/if}
@@ -654,15 +672,14 @@
   {/if}
 
   {#if settings}
-
     <section class="overflow-hidden rounded-xl border bg-card/40 shadow-sm">
       <header class="flex items-center gap-3 border-b px-5 py-4">
         <CalendarClock class="size-4 text-muted-foreground" />
         <div>
           <h3 class="text-sm font-semibold">Automatic backups</h3>
           <p class="mt-0.5 text-xs text-muted-foreground">
-            Create complete snapshots with {settings.name} on a predefined
-            interval or UTC cron schedule.
+            Create complete snapshots with {settings.name} on a predefined interval
+            or UTC cron schedule.
           </p>
         </div>
       </header>
@@ -677,8 +694,9 @@
             <Field.Label for="automatic-backup-schedule">Schedule</Field.Label>
             <Select.Root type="single" bind:value={scheduleMode}>
               <Select.Trigger id="automatic-backup-schedule" class="w-full">
-                {SCHEDULE_OPTIONS.find((option) => option.value === scheduleMode)
-                  ?.label ?? "Choose a schedule"}
+                {SCHEDULE_OPTIONS.find(
+                  (option) => option.value === scheduleMode,
+                )?.label ?? "Choose a schedule"}
               </Select.Trigger>
               <Select.Content>
                 <Select.Group>
@@ -698,7 +716,9 @@
 
           {#if scheduleMode === CUSTOM_SCHEDULE}
             <Field.Field data-invalid={!cronExplanation.valid}>
-              <Field.Label for="automatic-backup-cron">Cron expression</Field.Label>
+              <Field.Label for="automatic-backup-cron"
+                >Cron expression</Field.Label
+              >
               <Input
                 id="automatic-backup-cron"
                 bind:value={customCron}
@@ -709,22 +729,29 @@
                 placeholder="0 2 * * *"
               />
               <Field.Description>
-                Five-field cron uses minute, hour, day of month, month, and day of week.
-                Six- and seven-field expressions may include seconds and year.
+                Five-field cron uses minute, hour, day of month, month, and day
+                of week. Six- and seven-field expressions may include seconds
+                and year.
               </Field.Description>
             </Field.Field>
-            <Alert.Root variant={cronExplanation.valid ? "default" : "destructive"}>
+            <Alert.Root
+              variant={cronExplanation.valid ? "default" : "destructive"}
+            >
               <CalendarClock />
               <Alert.Title>
                 {cronExplanation.valid ? "Cron translation" : "Invalid cron"}
               </Alert.Title>
-              <Alert.Description>{cronExplanation.description}</Alert.Description>
+              <Alert.Description
+                >{cronExplanation.description}</Alert.Description
+              >
             </Alert.Root>
           {/if}
 
           <div class="flex flex-wrap items-end justify-between gap-3">
             <dl class="text-sm">
-              <dt class="text-xs text-muted-foreground">Next automatic backup</dt>
+              <dt class="text-xs text-muted-foreground">
+                Next automatic backup
+              </dt>
               <dd class="mt-1 font-medium">
                 {#if scheduleDirty}
                   Save the schedule to calculate the next run.
@@ -749,17 +776,26 @@
     </section>
 
     <section class="overflow-hidden rounded-xl border bg-card/40 shadow-sm">
-      <header class="flex flex-wrap items-center justify-between gap-3 border-b px-5 py-4">
+      <header
+        class="flex flex-wrap items-center justify-between gap-3 border-b px-5 py-4"
+      >
         <div class="flex items-center gap-3">
           <ArchiveRestore class="size-4 text-muted-foreground" />
           <div>
             <h3 class="text-sm font-semibold">Snapshots</h3>
             <p class="mt-0.5 text-xs text-muted-foreground">
-              Each snapshot includes the database, repositories, LFS, assets, host key, and effective configuration.
+              Each snapshot includes the database, repositories, LFS, assets,
+              host key, and effective configuration.
             </p>
           </div>
         </div>
-        <Button type="button" variant="outline" size="sm" disabled={working} onclick={() => void refreshSnapshots()}>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={working}
+          onclick={() => void refreshSnapshots()}
+        >
           <RefreshCw class="size-3.5" /> Refresh
         </Button>
       </header>
@@ -771,7 +807,9 @@
         }}
       >
         <label class="grid gap-1.5 text-sm font-medium">
-          Backup name <span class="text-xs font-normal text-muted-foreground">(optional)</span>
+          Backup name <span class="text-xs font-normal text-muted-foreground"
+            >(optional)</span
+          >
           <input
             class="rounded-md border bg-background px-3 py-2 outline-none focus:border-ring focus:ring-2 focus:ring-ring/20"
             bind:value={backupName}
@@ -801,7 +839,9 @@
             {#if backupProgress.phase === "completed"}
               <CheckCircle2 class="mt-0.5 size-4 shrink-0 text-emerald-400" />
             {:else}
-              <LoaderCircle class="mt-0.5 size-4 shrink-0 animate-spin text-primary" />
+              <LoaderCircle
+                class="mt-0.5 size-4 shrink-0 animate-spin text-primary"
+              />
             {/if}
             <div class="min-w-0 flex-1">
               <div class="flex items-center justify-between gap-3">
@@ -832,7 +872,8 @@
                 </p>
               {:else}
                 <p class="mt-1 text-xs text-muted-foreground">
-                  The server remains unavailable to normal requests while this phase runs.
+                  The server remains unavailable to normal requests while this
+                  phase runs.
                 </p>
               {/if}
             </div>
@@ -841,16 +882,22 @@
       {/if}
 
       {#if snapshots.length === 0}
-        <p class="p-5 text-sm text-muted-foreground">No snapshots found under this prefix.</p>
+        <p class="p-5 text-sm text-muted-foreground">
+          No snapshots found under this prefix.
+        </p>
       {:else}
         <div class="divide-y">
           {#each snapshots as snapshot (snapshot.key)}
-            <article class="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
+            <article
+              class="flex flex-wrap items-center justify-between gap-4 px-5 py-4"
+            >
               <div class="min-w-0">
                 <p class="truncate text-sm font-medium" title={snapshot.key}>
                   {snapshot.name ?? "Unnamed backup"}
                 </p>
-                <p class="mt-0.5 truncate font-mono text-xs text-muted-foreground">
+                <p
+                  class="mt-0.5 truncate font-mono text-xs text-muted-foreground"
+                >
                   {fileName(snapshot.key)}
                 </p>
                 <div class="mt-2 flex flex-wrap gap-1.5">
@@ -912,19 +959,29 @@
   {/if}
 
   {#if preflight}
-    <section class="overflow-hidden rounded-xl border border-destructive/35 bg-destructive/3 shadow-sm">
-      <header class="flex items-start gap-3 border-b border-destructive/20 px-5 py-4">
+    <section
+      class="overflow-hidden rounded-xl border border-destructive/35 bg-destructive/3 shadow-sm"
+    >
+      <header
+        class="flex items-start gap-3 border-b border-destructive/20 px-5 py-4"
+      >
         <TriangleAlert class="mt-0.5 size-4 shrink-0 text-destructive" />
         <div>
           <h3 class="text-sm font-semibold">Replace this instance</h3>
           <p class="mt-1 text-xs leading-relaxed text-muted-foreground">
-            Restoring <span class="font-medium text-foreground">{preflight.backup_name ?? "this backup"}</span>
-            from Gitadel {preflight.gitadel_version ?? "unknown"} will stop Gitadel and completely replace the current database, users, settings, repositories, LFS data, assets, and SSH host key.
+            Restoring <span class="font-medium text-foreground"
+              >{preflight.backup_name ?? "this backup"}</span
+            >
+            from Gitadel {preflight.gitadel_version ?? "unknown"} will stop Gitadel
+            and completely replace the current database, users, settings, repositories,
+            LFS data, assets, and SSH host key.
           </p>
         </div>
       </header>
       <div class="grid gap-5 p-5">
-        <dl class="grid gap-3 rounded-lg border bg-background/50 p-4 text-sm sm:grid-cols-3">
+        <dl
+          class="grid gap-3 rounded-lg border bg-background/50 p-4 text-sm sm:grid-cols-3"
+        >
           <div>
             <dt class="text-xs text-muted-foreground">Created</dt>
             <dd class="mt-1 font-medium">{formatDate(preflight.created_at)}</dd>
@@ -935,28 +992,45 @@
           </div>
           <div>
             <dt class="text-xs text-muted-foreground">Restored size</dt>
-            <dd class="mt-1 font-medium">{formatBytes(preflight.uncompressed_size)}</dd>
+            <dd class="mt-1 font-medium">
+              {formatBytes(preflight.uncompressed_size)}
+            </dd>
           </div>
         </dl>
 
         {#if preflight.version_warning}
-          <p class="rounded-md border border-amber-500/30 bg-amber-500/8 p-3 text-sm text-amber-200">
-            {preflight.version_warning} Review release notes and compatibility before continuing.
+          <p
+            class="rounded-md border border-amber-500/30 bg-amber-500/8 p-3 text-sm text-amber-200"
+          >
+            {preflight.version_warning} Review release notes and compatibility before
+            continuing.
           </p>
         {/if}
 
         <label class="flex items-start gap-3 rounded-lg border p-4 text-sm">
-          <input class="mt-0.5 size-4 accent-primary" type="checkbox" bind:checked={createSafetyBackup} />
+          <input
+            class="mt-0.5 size-4 accent-primary"
+            type="checkbox"
+            bind:checked={createSafetyBackup}
+          />
           <span>
-            <span class="flex items-center gap-2 font-medium"><ShieldCheck class="size-4 text-emerald-400" /> Back up the current instance first</span>
-            <span class="mt-1 block text-xs leading-relaxed text-muted-foreground">
-              Recommended. Restore will stop if this safety backup cannot be created with {settings?.name ?? "the selected provider"}.
+            <span class="flex items-center gap-2 font-medium"
+              ><ShieldCheck class="size-4 text-emerald-400" /> Back up the current
+              instance first</span
+            >
+            <span
+              class="mt-1 block text-xs leading-relaxed text-muted-foreground"
+            >
+              Recommended. Restore will stop if this safety backup cannot be
+              created with {settings?.name ?? "the selected provider"}.
             </span>
           </span>
         </label>
 
         {#if !createSafetyBackup}
-          <p class="rounded-md border border-amber-500/30 bg-amber-500/8 p-3 text-sm text-amber-200">
+          <p
+            class="rounded-md border border-amber-500/30 bg-amber-500/8 p-3 text-sm text-amber-200"
+          >
             No recovery snapshot of the current instance will be created.
           </p>
         {/if}
@@ -972,11 +1046,22 @@
           />
         </label>
         <label class="flex items-start gap-3 text-sm">
-          <input class="mt-0.5 size-4 accent-destructive" type="checkbox" bind:checked={confirmReplacement} />
-          <span>I understand that all current instance data will be replaced.</span>
+          <input
+            class="mt-0.5 size-4 accent-destructive"
+            type="checkbox"
+            bind:checked={confirmReplacement}
+          />
+          <span
+            >I understand that all current instance data will be replaced.</span
+          >
         </label>
         <div class="flex justify-end gap-2">
-          <Button type="button" variant="outline" disabled={working} onclick={() => (preflight = null)}>Cancel</Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={working}
+            onclick={() => (preflight = null)}>Cancel</Button
+          >
           <Button
             type="button"
             variant="destructive"
@@ -995,7 +1080,9 @@
   <Dialog.Content class="ring-foreground/20 sm:max-w-lg">
     <Dialog.Header>
       <Dialog.Title>
-        {editingProvider ? `Configure ${editingProvider.name}` : "Add backup provider"}
+        {editingProvider
+          ? `Configure ${editingProvider.name}`
+          : "Add backup provider"}
       </Dialog.Title>
       <Dialog.Description>
         {editingProvider
@@ -1045,8 +1132,11 @@
         Delete {pendingDelete?.name ?? "this backup"}?
       </AlertDialog.Title>
       <AlertDialog.Description>
-        This permanently removes {pendingDelete ? fileName(pendingDelete.key) : "the snapshot"}
-        from {settings?.name ?? "the selected provider"}. It cannot be restored after deletion.
+        This permanently removes {pendingDelete
+          ? fileName(pendingDelete.key)
+          : "the snapshot"}
+        from {settings?.name ?? "the selected provider"}. It cannot be restored
+        after deletion.
       </AlertDialog.Description>
     </AlertDialog.Header>
     <AlertDialog.Footer>

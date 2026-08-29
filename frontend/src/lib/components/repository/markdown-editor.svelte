@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { LoaderCircle, Paperclip } from "lucide-svelte";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import Paperclip from "@lucide/svelte/icons/paperclip";
 
-  import type { IssueAttachment } from "$lib/api.js";
+  import type { IssueAttachment } from "$lib/api/issues.js";
   import * as Tabs from "$lib/components/ui/tabs/index.js";
   import { Textarea } from "$lib/components/ui/textarea/index.js";
   import { trustedHtml } from "$lib/repository/format.js";
@@ -41,7 +42,7 @@
     }
     previewPending = true;
     try {
-      previewHtml = await repository.previewMarkdown(value);
+      previewHtml = await repository.issues.previewMarkdown(value);
       mode = "preview";
     } catch {
       // The page-level error explains the failure; the draft stays untouched.
@@ -58,7 +59,7 @@
   async function uploadFile(file: File) {
     pendingUploads += 1;
     try {
-      const attachment = await repository.uploadIssueAttachment(file);
+      const attachment = await repository.issues.uploadIssueAttachment(file);
       insertAtCursor(attachmentMarkdown(attachment));
       onattachment?.(attachment);
     } catch {

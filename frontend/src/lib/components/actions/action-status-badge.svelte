@@ -1,15 +1,13 @@
 <script lang="ts">
-  import {
-    Ban,
-    CheckCircle2,
-    CircleDashed,
-    CircleOff,
-    LoaderCircle,
-    XCircle,
-  } from "lucide-svelte";
+  import Ban from "@lucide/svelte/icons/ban";
+  import CheckCircle2 from "@lucide/svelte/icons/check-circle-2";
+  import CircleDashed from "@lucide/svelte/icons/circle-dashed";
+  import CircleOff from "@lucide/svelte/icons/circle-off";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import XCircle from "@lucide/svelte/icons/x-circle";
 
   import { Badge } from "$lib/components/ui/badge/index.js";
-  import type { ActionStatus } from "$lib/api.js";
+  import type { ActionStatus } from "$lib/api/actions.js";
 
   let { status }: { status: ActionStatus } = $props();
 

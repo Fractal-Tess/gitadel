@@ -10,14 +10,12 @@
 
 <script lang="ts">
   import { resolve } from "$app/paths";
-  import {
-    GitBranch,
-    KeyRound,
-    Rocket,
-    Server,
-    Settings2,
-    Users,
-  } from "lucide-svelte";
+  import GitBranch from "@lucide/svelte/icons/git-branch";
+  import KeyRound from "@lucide/svelte/icons/key-round";
+  import Rocket from "@lucide/svelte/icons/rocket";
+  import Server from "@lucide/svelte/icons/server";
+  import Settings2 from "@lucide/svelte/icons/settings-2";
+  import Users from "@lucide/svelte/icons/users";
 
   import ContextNav, {
     type ContextNavItem,
@@ -26,6 +24,7 @@
     preloadNamespaceTabs,
     refreshNamespaceTab,
   } from "$lib/namespace-preload.js";
+  import { useAppState } from "$lib/state/app-state.svelte.js";
 
   let {
     slug,
@@ -43,8 +42,9 @@
     scope?: "organization" | "personal";
   } = $props();
 
+  const app = useAppState();
   $effect(() => {
-    preloadNamespaceTabs(slug, {
+    preloadNamespaceTabs(slug, app.authorizationScope, {
       members: showMembers,
       management: canManage,
     });
@@ -66,7 +66,8 @@
             icon: Users,
             href: resolve("/[namespace]/members", { namespace: slug }),
             active: active === "members",
-            preload: () => refreshNamespaceTab(slug, "members"),
+            preload: () =>
+              refreshNamespaceTab(slug, app.authorizationScope, "members"),
           },
         ]
       : []),
@@ -78,7 +79,8 @@
             icon: Server,
             href: resolve("/[namespace]/runners", { namespace: slug }),
             active: active === "runners",
-            preload: () => refreshNamespaceTab(slug, "runners"),
+            preload: () =>
+              refreshNamespaceTab(slug, app.authorizationScope, "runners"),
           },
           {
             id: "integrations",
@@ -86,7 +88,8 @@
             icon: Rocket,
             href: resolve("/[namespace]/integrations", { namespace: slug }),
             active: active === "integrations",
-            preload: () => refreshNamespaceTab(slug, "integrations"),
+            preload: () =>
+              refreshNamespaceTab(slug, app.authorizationScope, "integrations"),
           },
           {
             id: "mirror-credentials",
@@ -96,7 +99,8 @@
               namespace: slug,
             }),
             active: active === "mirror-credentials",
-            preload: () => refreshNamespaceTab(slug, "mirror-credentials"),
+            preload: () =>
+              refreshNamespaceTab(slug, app.authorizationScope, "mirror-credentials"),
           },
         ]
       : []),

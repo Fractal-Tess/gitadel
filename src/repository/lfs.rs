@@ -23,7 +23,7 @@ use tokio::{
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
-use super::{LfsPermission, Permission, RepositoryState};
+use super::{LfsPermission, Permission, RepositoryState, git_http::GitHttpState};
 use crate::{
     entity::{lfs_lock, repository, user},
     identity::{ApiError, SCOPE_REPOSITORY_READ, SCOPE_WRITE},
@@ -152,7 +152,7 @@ struct VerifyLocksEnvelope {
     next_cursor: Option<String>,
 }
 
-pub fn router() -> Router<RepositoryState> {
+pub fn router() -> Router<GitHttpState> {
     Router::new()
         .route(
             "/{namespace}/{repository}/info/lfs/objects/batch",
@@ -177,7 +177,7 @@ pub fn router() -> Router<RepositoryState> {
 }
 
 async fn batch(
-    State(state): State<RepositoryState>,
+    State(state): State<GitHttpState>,
     Path((namespace, repository_segment)): Path<(String, String)>,
     headers: HeaderMap,
     Json(request): Json<BatchRequest>,
@@ -273,7 +273,7 @@ async fn batch(
 }
 
 async fn download(
-    State(state): State<RepositoryState>,
+    State(state): State<GitHttpState>,
     Path((namespace, repository_segment, oid)): Path<(String, String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
@@ -309,7 +309,7 @@ async fn download(
 }
 
 async fn upload(
-    State(state): State<RepositoryState>,
+    State(state): State<GitHttpState>,
     Path((namespace, repository_segment, oid)): Path<(String, String, String)>,
     headers: HeaderMap,
     mut body: Body,
@@ -375,7 +375,7 @@ async fn upload(
 }
 
 async fn authorized_repository(
-    state: &RepositoryState,
+    state: &GitHttpState,
     headers: &HeaderMap,
     namespace: &str,
     repository_segment: &str,
@@ -386,9 +386,7 @@ async fn authorized_repository(
         .ok_or_else(ApiError::not_found)?;
     let repository = state.find(namespace, name).await?;
     if permission == LfsPermission::Read
-        && state
-            .actions()
-            .is_some_and(|actions| actions.settings().lfs_read)
+        && state.actions_state().settings().lfs_read
         && let Some(token) = token_from_headers(headers)
         && crate::actions::tokens::authorize_job(state.identity().database(), &token, repository.id)
             .await?
@@ -484,7 +482,7 @@ fn token_from_headers(headers: &HeaderMap) -> Option<String> {
 }
 
 async fn create_lock(
-    State(state): State<RepositoryState>,
+    State(state): State<GitHttpState>,
     Path((namespace, repository_segment)): Path<(String, String)>,
     headers: HeaderMap,
     Json(request): Json<CreateLockRequest>,
@@ -539,7 +537,7 @@ async fn create_lock(
 }
 
 async fn list_locks(
-    State(state): State<RepositoryState>,
+    State(state): State<GitHttpState>,
     Path((namespace, repository_segment)): Path<(String, String)>,
     headers: HeaderMap,
     Query(query): Query<ListLocksQuery>,
@@ -561,7 +559,7 @@ async fn list_locks(
 }
 
 async fn verify_locks(
-    State(state): State<RepositoryState>,
+    State(state): State<GitHttpState>,
     Path((namespace, repository_segment)): Path<(String, String)>,
     headers: HeaderMap,
     Json(request): Json<VerifyLocksRequest>,
@@ -607,7 +605,7 @@ async fn verify_locks(
 }
 
 async fn unlock(
-    State(state): State<RepositoryState>,
+    State(state): State<GitHttpState>,
     Path((namespace, repository_segment, id)): Path<(String, String, Uuid)>,
     headers: HeaderMap,
     Json(request): Json<UnlockRequest>,

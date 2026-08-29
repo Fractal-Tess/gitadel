@@ -2,25 +2,25 @@
   import { goto } from "$app/navigation";
   import { resolve } from "$app/paths";
   import { page } from "$app/state";
-  import {
-    ArrowLeft,
-    CheckCircle2,
-    CircleDashed,
-    ExternalLink,
-    LoaderCircle,
-    RefreshCw,
-    XCircle,
-  } from "lucide-svelte";
+  import ArrowLeft from "@lucide/svelte/icons/arrow-left";
+  import CheckCircle2 from "@lucide/svelte/icons/check-circle-2";
+  import CircleDashed from "@lucide/svelte/icons/circle-dashed";
+  import ExternalLink from "@lucide/svelte/icons/external-link";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+  import XCircle from "@lucide/svelte/icons/x-circle";
 
   import {
     ApiFailure,
     jsonBody,
-    repositoryImportSchema,
     requestEmpty,
     requestJson,
+  } from "$lib/api/transport.js";
+  import {
+    repositoryImportSchema,
     type RepositoryImport,
     type RepositoryImportItem,
-  } from "$lib/api.js";
+  } from "$lib/api/imports.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";

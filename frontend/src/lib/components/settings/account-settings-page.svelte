@@ -1,13 +1,11 @@
 <script lang="ts">
   import { page } from "$app/state";
   import { resolve } from "$app/paths";
-  import {
-    AppWindow,
-    KeySquare,
-    LockKeyhole,
-    Terminal,
-    UserRound,
-  } from "lucide-svelte";
+  import AppWindow from "@lucide/svelte/icons/app-window";
+  import KeySquare from "@lucide/svelte/icons/key-square";
+  import LockKeyhole from "@lucide/svelte/icons/lock-keyhole";
+  import Terminal from "@lucide/svelte/icons/terminal";
+  import UserRound from "@lucide/svelte/icons/user-round";
   import ContextNav, {
     type ContextNavItem,
   } from "$lib/components/app/context-nav.svelte";
@@ -59,6 +57,7 @@
   );
 
   $effect(() => {
+    state.syncScope();
     void state.initialize(
       view === "profile"
         ? "account"
@@ -131,8 +130,13 @@
       Loading account settings…
     </p>
   {:else if view === "oauth-applications"}
-    <OauthApplicationSettings {state} showHeader={false} />
+    <OauthApplicationSettings state={state.oauth} showHeader={false} />
   {:else}
-    <SecuritySettings {state} view={view === "profile" ? "account" : view} />
+    <SecuritySettings
+      profile={state.profile}
+      password={state.password}
+      credentials={state.credentials}
+      view={view === "profile" ? "account" : view}
+    />
   {/if}
 </div>

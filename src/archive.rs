@@ -3,35 +3,33 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read as _, Write as _},
     path::{Component, Path, PathBuf},
-    pin::Pin,
-    task::{Context as TaskContext, Poll},
     time::Duration,
 };
 
+use ::s3::request::DataStream;
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, SecondsFormat, Utc};
 use fs2::FileExt as _;
-use s3::{Bucket, Region, creds::Credentials, request::DataStream};
 use sea_orm::{
     ActiveModelTrait as _, ColumnTrait as _, ConnectionTrait as _, DatabaseConnection,
     EntityTrait as _, QueryFilter as _, QueryOrder as _, Set, sea_query::Expr,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use tokio::{
-    io::{AsyncRead, AsyncWriteExt as _, ReadBuf},
-    sync::watch,
-};
+use tokio::sync::watch;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::{
     backup_provider::{self, BackupProvider, BackupProviderConfig, FilesystemSettings},
-    config::{BackupCommand, DatabaseSettings, S3Settings, Settings, validate_s3_settings},
+    config::{BackupCommand, DatabaseSettings, S3Settings, Settings},
     database,
     entity::backup_provider_schedule,
     identity::IdentityState,
 };
+
+mod filesystem;
+mod s3;
 
 const FORMAT_VERSION: u32 = 2;
 const MIN_FORMAT_VERSION: u32 = 1;
@@ -698,12 +696,9 @@ async fn snapshot_database(database: &DatabaseConnection, destination: &Path) ->
 
 async fn create_s3(key: Option<&str>, settings: &Settings, s3: &S3Settings) -> Result<()> {
     let key = s3_object_key(key, s3)?;
-    let bucket = s3_bucket(s3)?;
+    let bucket = s3::bucket(s3)?;
     ensure!(
-        !bucket
-            .object_exists(&key)
-            .await
-            .context("could not check S3 backup destination")?,
+        !s3::object_exists(&bucket, &key).await?,
         "S3 backup object already exists: s3://{}/{}",
         s3.bucket,
         key
@@ -712,7 +707,7 @@ async fn create_s3(key: Option<&str>, settings: &Settings, s3: &S3Settings) -> R
     let temporary = temporary_archive_path(settings, "s3-upload")?;
     let result = async {
         create_archive(&temporary, settings).await?;
-        upload_s3_archive(&bucket, &key, &temporary, None).await
+        s3::upload_archive(&bucket, &key, &temporary, None).await
     }
     .await;
     let _ = fs::remove_file(&temporary);
@@ -727,11 +722,11 @@ async fn restore_s3(
     config_path: &Path,
     s3: &S3Settings,
 ) -> Result<()> {
-    validate_s3_key(key)?;
-    let bucket = s3_bucket(s3)?;
+    s3::validate_key(key)?;
+    let bucket = s3::bucket(s3)?;
     let temporary = temporary_archive_path(settings, "s3-download")?;
     let result = async {
-        download_s3_archive(&bucket, key, &temporary).await?;
+        s3::download_archive(&bucket, key, &temporary).await?;
         restore_archive(&temporary, settings, config_path)
     }
     .await;
@@ -835,12 +830,12 @@ async fn create_filesystem_locked(
     backup_name: Option<&str>,
     reporter: &MaintenanceProgressReporter,
 ) -> Result<()> {
-    validate_filesystem_key(key)?;
+    filesystem::validate_filesystem_key(key)?;
     reporter.report(
         MaintenancePhase::CheckingDestination,
         "Checking the filesystem destination.",
     );
-    let directory = prepare_filesystem_directory(filesystem, settings)?;
+    let directory = filesystem::prepare_filesystem_directory(filesystem, settings)?;
     let output = directory.join(key);
     ensure!(
         !output.exists(),
@@ -853,51 +848,30 @@ async fn create_filesystem_locked(
 async fn create_s3_locked(
     key: &str,
     settings: &Settings,
-    s3: &S3Settings,
+    s3_settings: &S3Settings,
     backup_name: Option<&str>,
     reporter: &MaintenanceProgressReporter,
 ) -> Result<()> {
-    validate_s3_key(key)?;
+    s3::validate_key(key)?;
     reporter.report(
         MaintenancePhase::CheckingDestination,
         "Checking the S3 destination.",
     );
-    let bucket = s3_bucket(s3)?;
+    let bucket = s3::bucket(s3_settings)?;
     ensure!(
-        !bucket
-            .object_exists(key)
-            .await
-            .context("could not check S3 backup destination")?,
+        !s3::object_exists(&bucket, key).await?,
         "S3 backup object already exists: s3://{}/{}",
-        s3.bucket,
+        s3_settings.bucket,
         key
     );
     let temporary = temporary_archive_path(settings, "s3-upload")?;
     let result = async {
         create_archive_locked(&temporary, settings, backup_name, Some(reporter)).await?;
-        upload_s3_archive(&bucket, key, &temporary, Some(reporter)).await
+        s3::upload_archive(&bucket, key, &temporary, Some(reporter)).await
     }
     .await;
     let _ = fs::remove_file(&temporary);
     result
-}
-
-fn s3_bucket(settings: &S3Settings) -> Result<Box<Bucket>> {
-    let credentials = Credentials::new(
-        Some(&settings.access_key),
-        Some(&settings.secret_key),
-        None,
-        None,
-        None,
-    )
-    .context("could not configure S3 credentials")?;
-    let region = Region::Custom {
-        region: settings.region.clone(),
-        endpoint: settings.endpoint.as_str().trim_end_matches('/').to_owned(),
-    };
-    let bucket =
-        Bucket::new(&settings.bucket, region, credentials).context("could not configure S3")?;
-    Ok(bucket.with_path_style())
 }
 
 pub fn new_backup_key(
@@ -908,7 +882,7 @@ pub fn new_backup_key(
     match provider {
         BackupProviderConfig::Filesystem(_) => {
             let key = generated_backup_filename(backup_name.as_deref());
-            validate_filesystem_key(&key)?;
+            filesystem::validate_filesystem_key(&key)?;
             Ok(key)
         }
         BackupProviderConfig::S3(settings) => {
@@ -956,7 +930,7 @@ fn generated_s3_object_key(settings: &S3Settings, backup_name: Option<&str>) -> 
     } else {
         format!("{}/{filename}", settings.prefix)
     };
-    validate_s3_key(&key)?;
+    s3::validate_key(&key)?;
     Ok(key)
 }
 
@@ -965,98 +939,8 @@ fn s3_object_key(key: Option<&str>, settings: &S3Settings) -> Result<String> {
         Some(key) => key.to_owned(),
         None => generated_s3_object_key(settings, None)?,
     };
-    validate_s3_key(&key)?;
+    s3::validate_key(&key)?;
     Ok(key)
-}
-
-fn validate_s3_key(key: &str) -> Result<()> {
-    ensure!(
-        !key.is_empty()
-            && !key.starts_with('/')
-            && !key.ends_with('/')
-            && !key.contains('\\')
-            && !key.chars().any(char::is_control),
-        "S3 backup key must be non-empty, relative, and contain no control characters or backslashes"
-    );
-    Ok(())
-}
-
-fn validate_filesystem_key(key: &str) -> Result<()> {
-    let mut components = Path::new(key).components();
-    ensure!(
-        matches!(components.next(), Some(Component::Normal(_)))
-            && components.next().is_none()
-            && key.ends_with(".tar.zst")
-            && !key.chars().any(char::is_control),
-        "filesystem backup key must be a single .tar.zst filename"
-    );
-    Ok(())
-}
-
-pub fn test_filesystem_settings(
-    filesystem: &FilesystemSettings,
-    settings: &Settings,
-) -> Result<()> {
-    let directory = prepare_filesystem_directory(filesystem, settings)?;
-    let probe = directory.join(format!(
-        ".gitadel-backup-provider-test-{}",
-        Uuid::new_v4().simple()
-    ));
-    let result = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&probe)
-        .and_then(|mut file| file.write_all(b"gitadel backup provider test"))
-        .with_context(|| {
-            format!(
-                "backup filesystem destination is not writable: {}",
-                directory.display()
-            )
-        });
-    let _ = fs::remove_file(probe);
-    result
-}
-
-fn prepare_filesystem_directory(
-    filesystem: &FilesystemSettings,
-    settings: &Settings,
-) -> Result<PathBuf> {
-    ensure!(
-        filesystem.path.is_absolute(),
-        "backup filesystem path must be absolute"
-    );
-    fs::create_dir_all(&filesystem.path).with_context(|| {
-        format!(
-            "could not create backup filesystem destination {}",
-            filesystem.path.display()
-        )
-    })?;
-    let directory = fs::canonicalize(&filesystem.path).with_context(|| {
-        format!(
-            "could not resolve backup filesystem destination {}",
-            filesystem.path.display()
-        )
-    })?;
-    for source in [
-        &settings.storage.repository_root,
-        &settings.storage.lfs_root,
-    ] {
-        let source = if source.exists() {
-            fs::canonicalize(source)
-                .with_context(|| format!("could not resolve {}", source.display()))?
-        } else if source.is_absolute() {
-            source.clone()
-        } else {
-            std::env::current_dir()?.join(source)
-        };
-        ensure!(
-            directory != source && !directory.starts_with(&source),
-            "backup filesystem destination {} must be outside managed storage {}",
-            directory.display(),
-            source.display()
-        );
-    }
-    Ok(directory)
 }
 
 fn temporary_archive_path(settings: &Settings, operation: &str) -> Result<PathBuf> {
@@ -1069,176 +953,15 @@ fn temporary_archive_path(settings: &Settings, operation: &str) -> Result<PathBu
     )))
 }
 
-const UPLOAD_PROGRESS_INTERVAL: u64 = 1024 * 1024;
-
-struct UploadProgressReader<R> {
-    inner: R,
-    reporter: MaintenanceProgressReporter,
-    processed: u64,
-    reported: u64,
-    total: u64,
-}
-
-impl<R: AsyncRead + Unpin> AsyncRead for UploadProgressReader<R> {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        context: &mut TaskContext<'_>,
-        buffer: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        let this = self.get_mut();
-        let filled_before = buffer.filled().len();
-        let result = Pin::new(&mut this.inner).poll_read(context, buffer);
-        if let Poll::Ready(Ok(())) = &result {
-            let read = buffer.filled().len().saturating_sub(filled_before) as u64;
-            this.processed = this.processed.saturating_add(read);
-            if this.processed != this.reported
-                && (this.processed == this.total
-                    || this.processed.saturating_sub(this.reported) >= UPLOAD_PROGRESS_INTERVAL)
-            {
-                this.reporter.upload(this.processed, this.total);
-                this.reported = this.processed;
-            }
-        }
-        result
-    }
-}
-
-async fn upload_s3_archive(
-    bucket: &Bucket,
-    key: &str,
-    archive: &Path,
-    reporter: Option<&MaintenanceProgressReporter>,
-) -> Result<()> {
-    let expected_size = fs::metadata(archive)?.len();
-    let input = tokio::fs::File::open(archive)
-        .await
-        .with_context(|| format!("could not open {}", archive.display()))?;
-    let response = if let Some(reporter) = reporter {
-        reporter.upload(0, expected_size);
-        let mut input = UploadProgressReader {
-            inner: input,
-            reporter: reporter.clone(),
-            processed: 0,
-            reported: 0,
-            total: expected_size,
-        };
-        bucket
-            .put_object_stream_with_content_type(&mut input, key, "application/zstd")
-            .await
-    } else {
-        let mut input = input;
-        bucket
-            .put_object_stream_with_content_type(&mut input, key, "application/zstd")
-            .await
-    }
-    .context("could not upload S3 backup")?;
-    ensure!(
-        (200..300).contains(&response.status_code()),
-        "S3 backup upload returned HTTP {}",
-        response.status_code()
-    );
-    ensure!(
-        response.uploaded_bytes() as u64 == expected_size,
-        "S3 backup upload size mismatch"
-    );
-    let (metadata, status) = bucket
-        .head_object(key)
-        .await
-        .context("could not verify uploaded S3 backup")?;
-    ensure!(
-        (200..300).contains(&status),
-        "S3 backup verification returned HTTP {status}"
-    );
-    ensure!(
-        metadata
-            .content_length
-            .and_then(|size| u64::try_from(size).ok())
-            == Some(expected_size),
-        "uploaded S3 backup size does not match the local archive"
-    );
-    Ok(())
-}
-
-async fn download_s3_archive(bucket: &Bucket, key: &str, archive: &Path) -> Result<()> {
-    let mut output = tokio::fs::File::create(archive)
-        .await
-        .with_context(|| format!("could not create {}", archive.display()))?;
-    let status = bucket
-        .get_object_to_writer(key, &mut output)
-        .await
-        .context("could not download S3 backup")?;
-    ensure!(
-        (200..300).contains(&status),
-        "S3 backup download returned HTTP {status}"
-    );
-    output
-        .flush()
-        .await
-        .context("could not flush downloaded S3 backup")?;
-    output
-        .sync_all()
-        .await
-        .context("could not sync downloaded S3 backup")
-}
-
-pub async fn test_s3_settings(settings: &S3Settings) -> Result<()> {
-    validate_s3_settings(settings)?;
-    list_s3_backups(settings).await?;
-    let bucket = s3_bucket(settings)?;
-    let filename = format!(".gitadel-connection-test-{}", Uuid::new_v4().simple());
-    let key = if settings.prefix.is_empty() {
-        filename
-    } else {
-        format!("{}/{filename}", settings.prefix)
-    };
-    let payload = Uuid::new_v4().to_string();
-    let uploaded = bucket
-        .put_object(&key, payload.as_bytes())
-        .await
-        .context("could not write S3 connection test object")?;
-    ensure!(
-        (200..300).contains(&uploaded.status_code()),
-        "S3 connection test upload returned HTTP {}",
-        uploaded.status_code()
-    );
-    let verified = async {
-        let downloaded = bucket
-            .get_object(&key)
-            .await
-            .context("could not read S3 connection test object")?;
-        ensure!(
-            (200..300).contains(&downloaded.status_code()),
-            "S3 connection test download returned HTTP {}",
-            downloaded.status_code()
-        );
-        ensure!(
-            downloaded.as_slice() == payload.as_bytes(),
-            "S3 connection test returned different content"
-        );
-        Ok(())
-    }
-    .await;
-    let deleted = bucket
-        .delete_object(&key)
-        .await
-        .context("could not delete S3 connection test object")?;
-    ensure!(
-        (200..300).contains(&deleted.status_code()),
-        "S3 connection test cleanup returned HTTP {}",
-        deleted.status_code()
-    );
-    verified
-}
-
 pub async fn test_backup_provider(
     provider: &BackupProviderConfig,
     settings: &Settings,
 ) -> Result<()> {
     match provider {
         BackupProviderConfig::Filesystem(filesystem) => {
-            test_filesystem_settings(filesystem, settings)
+            filesystem::test_filesystem_settings(filesystem, settings)
         }
-        BackupProviderConfig::S3(s3) => test_s3_settings(s3).await,
+        BackupProviderConfig::S3(s3) => s3::test_settings(s3).await,
     }
 }
 
@@ -1247,38 +970,7 @@ pub async fn open_filesystem_backup(
     filesystem: &FilesystemSettings,
     key: &str,
 ) -> Result<(tokio::fs::File, u64)> {
-    let path = filesystem_backup_path(filesystem, settings, key)?;
-    let metadata = tokio::fs::symlink_metadata(&path)
-        .await
-        .with_context(|| format!("could not inspect filesystem backup {}", path.display()))?;
-    ensure!(
-        metadata.file_type().is_file(),
-        "filesystem backup is not a regular file: {}",
-        path.display()
-    );
-    let file = tokio::fs::File::open(&path)
-        .await
-        .with_context(|| format!("could not open filesystem backup {}", path.display()))?;
-    Ok((file, metadata.len()))
-}
-
-pub async fn delete_filesystem_backup(
-    settings: &Settings,
-    filesystem: &FilesystemSettings,
-    key: &str,
-) -> Result<()> {
-    let path = filesystem_backup_path(filesystem, settings, key)?;
-    let metadata = tokio::fs::symlink_metadata(&path)
-        .await
-        .with_context(|| format!("could not inspect filesystem backup {}", path.display()))?;
-    ensure!(
-        metadata.file_type().is_file(),
-        "filesystem backup is not a regular file: {}",
-        path.display()
-    );
-    tokio::fs::remove_file(&path)
-        .await
-        .with_context(|| format!("could not delete filesystem backup {}", path.display()))
+    filesystem::open_filesystem_backup(settings, filesystem, key).await
 }
 
 pub async fn list_backups(
@@ -1287,9 +979,9 @@ pub async fn list_backups(
 ) -> Result<Vec<BackupObject>> {
     match provider {
         BackupProviderConfig::Filesystem(filesystem) => {
-            list_filesystem_backups(filesystem, settings).await
+            filesystem::list_filesystem_backups(filesystem, settings).await
         }
-        BackupProviderConfig::S3(s3) => list_s3_backups(s3).await,
+        BackupProviderConfig::S3(s3) => s3::list_backups(s3).await,
     }
 }
 
@@ -1300,169 +992,17 @@ pub async fn delete_backup(
 ) -> Result<()> {
     match provider {
         BackupProviderConfig::Filesystem(filesystem) => {
-            delete_filesystem_backup(settings, filesystem, key).await
+            filesystem::delete_filesystem_backup(settings, filesystem, key).await
         }
-        BackupProviderConfig::S3(s3) => delete_s3_backup(s3, key).await,
+        BackupProviderConfig::S3(s3) => s3::delete_backup(s3, key).await,
     }
-}
-
-async fn list_filesystem_backups(
-    filesystem: &FilesystemSettings,
-    settings: &Settings,
-) -> Result<Vec<BackupObject>> {
-    let directory = prepare_filesystem_directory(filesystem, settings)?;
-    let mut entries = tokio::fs::read_dir(&directory)
-        .await
-        .with_context(|| format!("could not read backup directory {}", directory.display()))?;
-    let mut backups = Vec::new();
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .with_context(|| format!("could not read backup directory {}", directory.display()))?
-    {
-        let file_type = entry
-            .file_type()
-            .await
-            .with_context(|| format!("could not inspect {}", entry.path().display()))?;
-        if !file_type.is_file() {
-            continue;
-        }
-        let Some(key) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        if validate_filesystem_key(&key).is_err() {
-            continue;
-        }
-        let metadata = entry
-            .metadata()
-            .await
-            .with_context(|| format!("could not inspect {}", entry.path().display()))?;
-        let created_at = metadata
-            .modified()
-            .context("filesystem backup modification time is unavailable")?;
-        let (name, gitadel_version) = generated_backup_metadata(&key);
-        backups.push(BackupObject {
-            key,
-            name,
-            gitadel_version,
-            size: metadata.len(),
-            created_at: DateTime::<Utc>::from(created_at)
-                .to_rfc3339_opts(SecondsFormat::Secs, true),
-        });
-    }
-    sort_backups(&mut backups);
-    Ok(backups)
-}
-
-fn filesystem_backup_path(
-    filesystem: &FilesystemSettings,
-    settings: &Settings,
-    key: &str,
-) -> Result<PathBuf> {
-    validate_filesystem_key(key)?;
-    Ok(prepare_filesystem_directory(filesystem, settings)?.join(key))
 }
 
 pub async fn stream_s3_backup(settings: &S3Settings, key: &str) -> Result<S3BackupDownload> {
-    validate_managed_s3_backup_key(settings, key)?;
-    let bucket = s3_bucket(settings)?;
-    let (metadata, status) = bucket
-        .head_object(key)
-        .await
-        .context("could not inspect S3 backup")?;
-    ensure!(
-        (200..300).contains(&status),
-        "S3 backup inspection returned HTTP {status}"
-    );
-    let response = bucket
-        .get_object_stream(key)
-        .await
-        .context("could not stream S3 backup")?;
-    ensure!(
-        (200..300).contains(&response.status_code),
-        "S3 backup download returned HTTP {}",
-        response.status_code
-    );
-    Ok(S3BackupDownload {
-        size: metadata
-            .content_length
-            .and_then(|size| u64::try_from(size).ok()),
-        stream: response.bytes,
-    })
+    s3::stream_backup(settings, key).await
 }
 
-pub async fn delete_s3_backup(settings: &S3Settings, key: &str) -> Result<()> {
-    validate_managed_s3_backup_key(settings, key)?;
-    let bucket = s3_bucket(settings)?;
-    ensure!(
-        bucket
-            .object_exists(key)
-            .await
-            .context("could not inspect S3 backup")?,
-        "S3 backup object does not exist: s3://{}/{}",
-        settings.bucket,
-        key
-    );
-    let response = bucket
-        .delete_object(key)
-        .await
-        .context("could not delete S3 backup")?;
-    ensure!(
-        (200..300).contains(&response.status_code()),
-        "S3 backup deletion returned HTTP {}",
-        response.status_code()
-    );
-    Ok(())
-}
-
-fn validate_managed_s3_backup_key(settings: &S3Settings, key: &str) -> Result<()> {
-    validate_s3_key(key)?;
-    ensure!(
-        key.ends_with(".tar.zst"),
-        "S3 backup key must end with .tar.zst"
-    );
-    if !settings.prefix.is_empty() {
-        let prefix = format!("{}/", settings.prefix);
-        ensure!(
-            key.starts_with(&prefix),
-            "S3 backup key is outside the configured prefix"
-        );
-    }
-    Ok(())
-}
-
-pub async fn list_s3_backups(settings: &S3Settings) -> Result<Vec<BackupObject>> {
-    validate_s3_settings(settings)?;
-    let bucket = s3_bucket(settings)?;
-    let prefix = if settings.prefix.is_empty() {
-        String::new()
-    } else {
-        format!("{}/", settings.prefix)
-    };
-    let pages = bucket
-        .list(prefix, None)
-        .await
-        .context("could not list S3 backups")?;
-    let mut backups = pages
-        .into_iter()
-        .flat_map(|page| page.contents)
-        .filter(|object| object.key.ends_with(".tar.zst"))
-        .map(|object| {
-            let (name, gitadel_version) = generated_backup_metadata(&object.key);
-            BackupObject {
-                key: object.key,
-                name,
-                gitadel_version,
-                size: object.size,
-                created_at: object.last_modified,
-            }
-        })
-        .collect::<Vec<_>>();
-    sort_backups(&mut backups);
-    Ok(backups)
-}
-
-fn sort_backups(backups: &mut [BackupObject]) {
+pub(super) fn sort_backups(backups: &mut [BackupObject]) {
     backups.sort_unstable_by(|left, right| {
         right
             .created_at
@@ -1471,7 +1011,7 @@ fn sort_backups(backups: &mut [BackupObject]) {
     });
 }
 
-fn generated_backup_metadata(key: &str) -> (Option<String>, Option<String>) {
+pub(super) fn generated_backup_metadata(key: &str) -> (Option<String>, Option<String>) {
     let Some(filename) = key.rsplit('/').next() else {
         return (None, None);
     };
@@ -1516,7 +1056,7 @@ async fn copy_and_inspect_filesystem(
     filesystem: &FilesystemSettings,
     key: &str,
 ) -> Result<(PathBuf, BackupInspection)> {
-    let source = filesystem_backup_path(filesystem, settings, key)?;
+    let source = filesystem::filesystem_backup_path(filesystem, settings, key)?;
     let source_metadata = tokio::fs::symlink_metadata(&source)
         .await
         .with_context(|| format!("could not inspect filesystem backup {}", source.display()))?;
@@ -1532,12 +1072,7 @@ async fn copy_and_inspect_filesystem(
         "not enough free disk space to copy and validate this backup"
     );
     let result = async {
-        tokio::fs::copy(&source, &archive).await.with_context(|| {
-            format!(
-                "could not copy filesystem backup {} for validation",
-                source.display()
-            )
-        })?;
+        filesystem::copy_backup(&source, &archive).await?;
         tokio::fs::File::open(&archive)
             .await?
             .sync_all()
@@ -1560,20 +1095,9 @@ pub async fn download_and_inspect_s3(
     s3: &S3Settings,
     key: &str,
 ) -> Result<(PathBuf, BackupInspection)> {
-    validate_managed_s3_backup_key(s3, key)?;
-    let bucket = s3_bucket(s3)?;
-    let (metadata, status) = bucket
-        .head_object(key)
-        .await
-        .context("could not read S3 backup metadata")?;
-    ensure!(
-        (200..300).contains(&status),
-        "S3 backup metadata returned HTTP {status}"
-    );
-    let object_size = metadata
-        .content_length
-        .and_then(|size| u64::try_from(size).ok())
-        .context("S3 backup size is missing")?;
+    s3::validate_managed_key(s3, key)?;
+    let bucket = s3::bucket(s3)?;
+    let object_size = s3::backup_size(&bucket, key).await?;
     let archive = temporary_archive_path(settings, "s3-validate")?;
     let parent = archive.parent().unwrap_or_else(|| Path::new("."));
     let required_space = object_size.saturating_mul(2);
@@ -1583,7 +1107,7 @@ pub async fn download_and_inspect_s3(
     );
 
     let result = async {
-        download_s3_archive(&bucket, key, &archive).await?;
+        s3::download_archive(&bucket, key, &archive).await?;
         inspect_backup(&archive)
     }
     .await;
@@ -2159,6 +1683,7 @@ mod tests {
     use chrono::Duration as ChronoDuration;
     use sea_orm::{ActiveModelTrait as _, EntityTrait as _, Set};
 
+    use super::s3::validate_managed_key as validate_managed_s3_backup_key;
     use super::*;
     use crate::entity::{backup_provider_schedule, instance, user};
 

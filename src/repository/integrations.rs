@@ -20,13 +20,16 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::{Permission, RepositoryState};
 use crate::entity::{
     dokploy_source_binding, namespace_integration, repository, repository_integration,
 };
 use crate::identity::{ApiError, SCOPE_READ, SCOPE_WRITE};
-use crate::integrations::{self, Credential, Event, EventContext};
-
-use super::{Permission, RepositoryState};
+use crate::integrations::{
+    self, CreateEnvironmentRequest, CreateProjectRequest, CreateRemoteRequest, Credential,
+    EnablementRequest, Event, EventContext, LinkRemoteRequest, PushEvent, RemoteResourcesRequest,
+    RepositoryIdentity,
+};
 
 /// Distinguishes "field absent - leave stored value alone" from "field null -
 /// clear the stored value" on optional request fields.
@@ -454,14 +457,14 @@ pub async fn update_integration(
         if let Some(stored) = row.resource.as_deref() {
             let resource = serde_json::from_str::<Value>(stored)
                 .map_err(|error| ApiError::internal(error.to_string()))?;
+            let request = enablement_request(
+                provider_credential(&credential, source.as_ref()),
+                &resource,
+                enabled,
+            )?;
             provider
                 .integration
-                .set_remote_enabled(
-                    &state,
-                    provider_credential(&credential, source.as_ref()),
-                    &resource,
-                    enabled,
-                )
+                .set_remote_enabled(request)
                 .await
                 .map_err(ApiError::internal)?;
         } else if enabled {
@@ -527,18 +530,96 @@ pub async fn list_remote_resources(
     }
     let resources = provider
         .integration
-        .remote_resources(&state, provider_credential(&credential, source.as_ref()))
+        .remote_resources(RemoteResourcesRequest {
+            credential: provider_credential(&credential, source.as_ref()),
+        })
         .await
         .map_err(ApiError::internal)?;
     Ok(Json(resources))
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectMutation {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnvironmentMutation {
+    project_id: String,
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LinkMutation {
+    kind: String,
+    id: String,
+    branch: String,
+    #[serde(default)]
+    repository_path: Option<String>,
+    #[serde(default)]
+    compose_path: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateResourceMutation {
+    kind: String,
+    name: String,
+    environment_id: String,
+    branch: String,
+    #[serde(default)]
+    server_id: Option<String>,
+    #[serde(default)]
+    repository_path: Option<String>,
+    #[serde(default)]
+    compose_path: Option<String>,
+}
+
+fn repository_path(value: Option<String>) -> String {
+    value.unwrap_or_else(|| "/".to_owned())
+}
+
+fn compose_path(value: Option<String>) -> String {
+    value.unwrap_or_else(|| "./docker-compose.yml".to_owned())
+}
+
+#[derive(Deserialize)]
+struct StoredResource {
+    kind: String,
+    id: String,
+}
+
+fn enablement_request<'a>(
+    credential: Credential<'a>,
+    resource: &Value,
+    enabled: bool,
+) -> Result<EnablementRequest<'a>, ApiError> {
+    let resource: StoredResource = serde_json::from_value(resource.clone())
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(EnablementRequest {
+        credential,
+        kind: resource.kind,
+        id: resource.id,
+        enabled,
+    })
+}
+#[derive(Deserialize)]
 pub struct RemoteMutationRequest {
     #[serde(flatten)]
     body: Value,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "arguments combine the authorized integration persistence context"
+)]
 async fn store_remote_link(
     state: &RepositoryState,
     actor_id: uuid::Uuid,
@@ -554,27 +635,25 @@ async fn store_remote_link(
         .integration
         .validate_repository_settings(Some(&link), None)
         .map_err(ApiError::bad_request)?;
+    let request = enablement_request(provider_credential(credential, source), &link, false)?;
     provider
         .integration
-        .set_remote_enabled(state, provider_credential(credential, source), &link, false)
+        .set_remote_enabled(request)
         .await
         .map_err(ApiError::internal)?;
-    if row.enabled {
-        if let Some(stored) = row.resource.as_deref() {
-            let previous = serde_json::from_str::<Value>(stored)
-                .map_err(|error| ApiError::internal(error.to_string()))?;
-            if previous != link {
-                provider
-                    .integration
-                    .set_remote_enabled(
-                        state,
-                        provider_credential(credential, source),
-                        &previous,
-                        false,
-                    )
-                    .await
-                    .map_err(ApiError::internal)?;
-            }
+    if row.enabled
+        && let Some(stored) = row.resource.as_deref()
+    {
+        let previous = serde_json::from_str::<Value>(stored)
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        if previous != link {
+            let request =
+                enablement_request(provider_credential(credential, source), &previous, false)?;
+            provider
+                .integration
+                .set_remote_enabled(request)
+                .await
+                .map_err(ApiError::internal)?;
         }
     }
     let name = link
@@ -635,13 +714,15 @@ pub async fn create_remote_project(
     if !provider.repository_setup {
         return Err(ApiError::not_found());
     }
+    let body: ProjectMutation = serde_json::from_value(request.body)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     let project = provider
         .integration
-        .create_remote_project(
-            &state,
-            provider_credential(&credential, source.as_ref()),
-            request.body,
-        )
+        .create_remote_project(CreateProjectRequest {
+            credential: provider_credential(&credential, source.as_ref()),
+            name: body.name,
+            description: body.description,
+        })
         .await
         .map_err(ApiError::internal)?;
     state
@@ -682,13 +763,16 @@ pub async fn create_remote_environment(
     if !provider.repository_setup {
         return Err(ApiError::not_found());
     }
+    let body: EnvironmentMutation = serde_json::from_value(request.body)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     let environment = provider
         .integration
-        .create_remote_environment(
-            &state,
-            provider_credential(&credential, source.as_ref()),
-            request.body,
-        )
+        .create_remote_environment(CreateEnvironmentRequest {
+            credential: provider_credential(&credential, source.as_ref()),
+            project_id: body.project_id,
+            name: body.name,
+            description: body.description,
+        })
         .await
         .map_err(ApiError::internal)?;
     state
@@ -730,14 +814,22 @@ pub async fn link_remote_resource(
     if !provider.repository_setup {
         return Err(ApiError::not_found());
     }
+    let body: LinkMutation = serde_json::from_value(request.body)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     let link = provider
         .integration
-        .link_remote(
-            &state,
-            &repository_row,
-            provider_credential(&credential, source.as_ref()),
-            request.body,
-        )
+        .link_remote(LinkRemoteRequest {
+            repository: RepositoryIdentity {
+                namespace: &repository_row.namespace,
+                name: &repository_row.name,
+            },
+            credential: provider_credential(&credential, source.as_ref()),
+            kind: body.kind,
+            id: body.id,
+            branch: body.branch,
+            repository_path: repository_path(body.repository_path),
+            compose_path: compose_path(body.compose_path),
+        })
         .await
         .map_err(ApiError::internal)?;
     store_remote_link(
@@ -779,14 +871,24 @@ pub async fn create_remote_resource(
     if !provider.repository_setup {
         return Err(ApiError::not_found());
     }
+    let body: CreateResourceMutation = serde_json::from_value(request.body)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
     let link = provider
         .integration
-        .create_remote(
-            &state,
-            &repository_row,
-            provider_credential(&credential, source.as_ref()),
-            request.body,
-        )
+        .create_remote(CreateRemoteRequest {
+            repository: RepositoryIdentity {
+                namespace: &repository_row.namespace,
+                name: &repository_row.name,
+            },
+            credential: provider_credential(&credential, source.as_ref()),
+            kind: body.kind,
+            name: body.name,
+            environment_id: body.environment_id,
+            branch: body.branch,
+            server_id: body.server_id,
+            repository_path: repository_path(body.repository_path),
+            compose_path: compose_path(body.compose_path),
+        })
         .await
         .map_err(ApiError::internal)?;
     store_remote_link(
@@ -829,7 +931,6 @@ pub async fn deploy_integration(
     let integration = provider.integration;
 
     let context = EventContext {
-        state: &state,
         event: Event::Manual,
         resource: row.resource.as_deref(),
         credential: provider_credential(&credential, source.as_ref()),
@@ -895,10 +996,11 @@ pub(super) fn dispatch_push(
     deleted: bool,
     payload: Value,
 ) {
+    let task_state = state.clone();
     let state = state.clone();
     let repository = repository.clone();
     let reference = reference.to_owned();
-    tokio::spawn(async move {
+    task_state.spawn_task(async move {
         if let Err(error) = trigger_push(&state, &repository, &reference, deleted, &payload).await {
             tracing::warn!(
                 repository = %format!("{}/{}", repository.namespace, repository.name),
@@ -982,12 +1084,11 @@ async fn trigger_push(
             continue;
         }
         let context = EventContext {
-            state,
-            event: Event::Push {
+            event: Event::Push(PushEvent {
                 reference,
                 deleted,
                 payload,
-            },
+            }),
             resource: row.resource.as_deref(),
             credential: provider_credential(connection, source),
         };

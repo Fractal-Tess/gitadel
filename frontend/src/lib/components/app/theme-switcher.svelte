@@ -3,7 +3,8 @@
   import SunIcon from "@lucide/svelte/icons/sun";
   import { toast } from "svelte-sonner";
 
-  import { ApiFailure, type ThemePreference } from "$lib/api.js";
+  import type { ThemePreference } from "$lib/api/auth.js";
+  import { ApiFailure } from "$lib/api/transport.js";
   import * as DropdownMenu from "$lib/components/ui/dropdown-menu/index.js";
   import { buttonVariants } from "$lib/components/ui/button/index.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";

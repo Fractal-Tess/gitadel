@@ -1,11 +1,9 @@
-import {
-  MapPin,
-  Plug,
-  RefreshCw,
-  Settings2,
-  TriangleAlert,
-  Webhook,
-} from "lucide-svelte";
+import MapPin from "@lucide/svelte/icons/map-pin";
+import Plug from "@lucide/svelte/icons/plug";
+import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+import Settings2 from "@lucide/svelte/icons/settings-2";
+import TriangleAlert from "@lucide/svelte/icons/triangle-alert";
+import Webhook from "@lucide/svelte/icons/webhook";
 
 import type { ShellIcon } from "$lib/state/shell-state.svelte.js";
 

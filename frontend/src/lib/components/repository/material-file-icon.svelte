@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { File, Folder } from "lucide-svelte";
+  import File from "@lucide/svelte/icons/file";
+  import Folder from "@lucide/svelte/icons/folder";
 
   import {
     materialFileIcon,

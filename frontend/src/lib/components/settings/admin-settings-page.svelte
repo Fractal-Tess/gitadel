@@ -1,7 +1,10 @@
 <script lang="ts">
   import { page } from "$app/state";
   import { resolve } from "$app/paths";
-  import { Activity, ArchiveRestore, Palette, UserPlus } from "lucide-svelte";
+  import Activity from "@lucide/svelte/icons/activity";
+  import ArchiveRestore from "@lucide/svelte/icons/archive-restore";
+  import Palette from "@lucide/svelte/icons/palette";
+  import UserPlus from "@lucide/svelte/icons/user-plus";
   import ContextNav, {
     type ContextNavItem,
   } from "$lib/components/app/context-nav.svelte";
@@ -9,6 +12,7 @@
   import BackupSettings from "$lib/components/settings/backup-settings.svelte";
   import InstanceSettings from "$lib/components/settings/instance-settings.svelte";
   import { useAppState } from "$lib/state/app-state.svelte.js";
+  import { preloadBackupSettings } from "$lib/settings/backup-settings-cache.js";
 
   type AdminView = "appearance" | "access" | "backups" | "activity";
 
@@ -51,6 +55,7 @@
       label: "Backups",
       icon: ArchiveRestore,
       href: resolve("/-/administration/[view]", { view: "backups" }),
+      preload: () => preloadBackupSettings(app.authorizationScope),
       active: view === "backups",
     },
     {

@@ -1,24 +1,22 @@
 <script lang="ts">
   import { resolve } from "$app/paths";
-  import {
-    ArrowLeft,
-    CheckCircle2,
-    CircleDot,
-    MessageSquare,
-    Pencil,
-    Plus,
-    Search,
-    Tag,
-    Trash2,
-    UserRound,
-  } from "lucide-svelte";
+  import ArrowLeft from "@lucide/svelte/icons/arrow-left";
+  import CheckCircle2 from "@lucide/svelte/icons/check-circle-2";
+  import CircleDot from "@lucide/svelte/icons/circle-dot";
+  import MessageSquare from "@lucide/svelte/icons/message-square";
+  import Pencil from "@lucide/svelte/icons/pencil";
+  import Plus from "@lucide/svelte/icons/plus";
+  import Search from "@lucide/svelte/icons/search";
+  import Tag from "@lucide/svelte/icons/tag";
+  import Trash2 from "@lucide/svelte/icons/trash-2";
+  import UserRound from "@lucide/svelte/icons/user-round";
 
-  import {
-    avatarUrl,
-    type Issue,
-    type IssueComment,
-    type IssueUser,
-  } from "$lib/api.js";
+  import { avatarUrl } from "$lib/api/account.js";
+  import type {
+    Issue,
+    IssueComment,
+    IssueUser,
+  } from "$lib/api/issues.js";
   import * as Avatar from "$lib/components/ui/avatar/index.js";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Badge } from "$lib/components/ui/badge/index.js";
@@ -55,7 +53,7 @@
 
   const filteredIssues = $derived.by(() => {
     const query = search.trim().toLocaleLowerCase();
-    return repository.issues.filter(
+    return repository.issues.issues.filter(
       (issue) =>
         issue.state === filterState &&
         (!labelFilter ||
@@ -69,7 +67,7 @@
 
   async function toggleIssueState(issue: Issue) {
     try {
-      await repository.updateIssue(issue.number, {
+      await repository.issues.updateIssue(issue.number, {
         state: issue.state === "open" ? "closed" : "open",
       });
     } catch {
@@ -79,18 +77,18 @@
 
   async function submitComment(event: SubmitEvent) {
     event.preventDefault();
-    const issue = repository.selectedIssue;
+    const issue = repository.issues.selectedIssue;
     if (!issue) return;
     const commentDraft = commentDrafts[issue.number] ?? "";
     try {
       if (editingComment?.issueNumber === issue.number) {
-        await repository.updateIssueComment(
+        await repository.issues.updateIssueComment(
           issue.number,
           editingComment.id,
           commentDraft,
         );
       } else {
-        await repository.createIssueComment(issue.number, commentDraft);
+        await repository.issues.createIssueComment(issue.number, commentDraft);
       }
       commentDrafts = { ...commentDrafts, [issue.number]: "" };
       editingComment = null;
@@ -161,7 +159,7 @@
 {/snippet}
 
 <div class="mx-auto max-w-6xl">
-  {#if repository.issueNumber && !repository.selectedIssue}
+  {#if repository.issueNumber && !repository.issues.selectedIssue}
     <div class="py-20 text-center text-sm text-muted-foreground">
       {#if repository.error}
         <p>This issue could not be loaded.</p>
@@ -174,8 +172,8 @@
         <p>Loading issue…</p>
       {/if}
     </div>
-  {:else if repository.issueNumber && repository.selectedIssue}
-    {@const issue = repository.selectedIssue}
+  {:else if repository.issueNumber && repository.issues.selectedIssue}
+    {@const issue = repository.issues.selectedIssue}
     <Button
       variant="ghost"
       size="sm"
@@ -259,7 +257,7 @@
           {/if}
         </article>
 
-        {#each repository.issueComments as comment (comment.id)}
+        {#each repository.issues.issueComments as comment (comment.id)}
           <article class="overflow-hidden rounded-md border">
             <header
               class="flex items-center gap-3 border-b bg-muted/20 px-4 py-3 text-sm"
@@ -335,7 +333,7 @@
                   type="button"
                   variant="outline"
                   size="sm"
-                  disabled={repository.issuePending}
+                  disabled={repository.issues.issuePending}
                   onclick={() => void toggleIssueState(issue)}
                 >
                   {issue.state === "open" ? "Close issue" : "Reopen issue"}
@@ -361,10 +359,10 @@
                 <Button
                   type="submit"
                   size="sm"
-                  disabled={repository.commentPending ||
+                  disabled={repository.issues.commentPending ||
                     !(commentDrafts[issue.number] ?? "").trim()}
                 >
-                  {repository.commentPending
+                  {repository.issues.commentPending
                     ? "Saving…"
                     : editingComment?.issueNumber === issue.number
                       ? "Update comment"
@@ -495,7 +493,7 @@
           />
         </div>
       </div>
-      {#if repository.issueLabels.length}
+      {#if repository.issues.issueLabels.length}
         <div class="flex flex-wrap items-center gap-2 border-b px-4 py-2">
           <button
             type="button"
@@ -505,7 +503,7 @@
             aria-pressed={labelFilter === null}
             onclick={() => (labelFilter = null)}>All labels</button
           >
-          {#each repository.issueLabels as label (label.id)}
+          {#each repository.issues.issueLabels as label (label.id)}
             <button
               type="button"
               class="opacity-80 hover:opacity-100"
@@ -519,11 +517,11 @@
         </div>
       {/if}
       <ul class="divide-y">
-        {#if repository.issuesLoading && !repository.issuesLoaded}
+        {#if repository.issues.issuesLoading && !repository.issues.issuesLoaded}
           <li class="py-16 text-center text-sm text-muted-foreground">
             Loading issues…
           </li>
-        {:else if repository.error && !repository.issuesLoaded}
+        {:else if repository.error && !repository.issues.issuesLoaded}
           <li class="py-16 text-center text-sm text-muted-foreground">
             <p>Issues could not be loaded.</p>
             <Button
@@ -618,7 +616,7 @@
           if (!target) return;
           deleteCommentDialogOpen = false;
           pendingDeleteComment = null;
-          void repository.deleteIssueComment(target.issueNumber, target.id);
+          void repository.issues.deleteIssueComment(target.issueNumber, target.id);
         }}>Delete comment</AlertDialog.Action
       >
     </AlertDialog.Footer>
@@ -643,7 +641,7 @@
           if (id == null) return;
           deleteIssueDialogOpen = false;
           pendingDeleteIssue = null;
-          void repository.deleteIssue(id);
+          void repository.issues.deleteIssue(id);
         }}>Delete issue</AlertDialog.Action
       >
     </AlertDialog.Footer>

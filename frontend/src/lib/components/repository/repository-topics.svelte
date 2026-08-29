@@ -1,5 +1,8 @@
 <script lang="ts">
-  import { Check, Pencil, Plus, X } from "lucide-svelte";
+  import Check from "@lucide/svelte/icons/check";
+  import Pencil from "@lucide/svelte/icons/pencil";
+  import Plus from "@lucide/svelte/icons/plus";
+  import X from "@lucide/svelte/icons/x";
 
   import { Badge } from "$lib/components/ui/badge/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -20,7 +23,7 @@
   let optimistic = $state.raw<string[] | null>(null);
   let queue: Promise<unknown> = Promise.resolve();
 
-  const topics = $derived(optimistic ?? repository.topics);
+  const topics = $derived(optimistic ?? repository.settings.topics);
   const available = $derived(
     suggestions.filter((topic) => !topics.includes(topic)),
   );
@@ -34,7 +37,7 @@
   function commit(next: string[]): void {
     optimistic = next;
     queue = queue
-      .then(() => repository.saveTopics(next))
+      .then(() => repository.settings.saveTopics(next))
       .catch(() => {
         // saveTopics surfaces the message; fall back to the server's list.
       })
@@ -95,9 +98,9 @@
     const query = normalize(entry);
     const controller = new AbortController();
     const timer = setTimeout(() => {
-      void repository
+      void repository.settings
         .suggestTopics(query, { signal: controller.signal })
-        .then((topics) => {
+        .then((topics: string[]) => {
           suggestions = topics;
         })
         .catch(() => {});

@@ -226,7 +226,7 @@ impl Default for ActionsSettings {
             retention_days: 90,
             max_artifact_bytes: 2 * 1024 * 1024 * 1024,
             max_artifact_upload_request_bytes: 16 * 1024 * 1024,
-            max_artifact_block_list_bytes: 1 * 1024 * 1024,
+            max_artifact_block_list_bytes: 1024 * 1024,
             max_artifact_blocks: 50_000,
             max_artifact_name_bytes: 255,
             artifact_grant_lifetime_seconds: 3_600,

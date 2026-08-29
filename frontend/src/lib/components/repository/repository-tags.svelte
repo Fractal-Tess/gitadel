@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Tag } from "lucide-svelte";
+  import Tag from "@lucide/svelte/icons/tag";
 
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
 
@@ -13,7 +13,7 @@
     <Tag class="size-4 text-muted-foreground" />Tags
   </header>
   <ul class="divide-y">
-    {#each state.refs?.tags ?? [] as item (item.name)}
+    {#each state.browser.refs?.tags ?? [] as item (item.name)}
       <li class="flex items-center justify-between gap-4 px-5 py-4">
         <button
           class="font-mono text-sm font-medium hover:underline"

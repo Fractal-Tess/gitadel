@@ -1,12 +1,10 @@
 <script lang="ts">
-  import {
-    ArrowRight,
-    BarChart3,
-    Check,
-    Copy,
-    Package,
-    Pencil,
-  } from "lucide-svelte";
+  import ArrowRight from "@lucide/svelte/icons/arrow-right";
+  import BarChart3 from "@lucide/svelte/icons/bar-chart-3";
+  import Check from "@lucide/svelte/icons/check";
+  import Copy from "@lucide/svelte/icons/copy";
+  import Package from "@lucide/svelte/icons/package";
+  import Pencil from "@lucide/svelte/icons/pencil";
 
   import RepositoryToolbar from "$lib/components/repository/repository-toolbar.svelte";
   import RepositoryTopics from "$lib/components/repository/repository-topics.svelte";
@@ -42,7 +40,7 @@
       return;
     }
     try {
-      await repository.updateRepositoryControl({ description: next || null });
+      await repository.settings.updateRepositoryControl({ description: next || null });
       cancelEditingDescription();
     } catch {
       // updateRepositoryControl surfaces the message; keep the draft editable.
@@ -207,9 +205,9 @@
             <Button
               type="submit"
               size="sm"
-              disabled={repository.repositoryControlPending}
+              disabled={repository.settings.repositoryControlPending}
             >
-              {repository.repositoryControlPending ? "Saving…" : "Save"}
+              {repository.settings.repositoryControlPending ? "Saving…" : "Save"}
             </Button>
           </div>
         </form>
@@ -229,7 +227,7 @@
         <div class="flex justify-between gap-4">
           <dt class="text-muted-foreground">Repository size</dt>
           <dd class="tabular-nums">
-            {formatRepositorySize(repository.refs?.size_bytes)}
+            {formatRepositorySize(repository.browser.refs?.size_bytes)}
           </dd>
         </div>
         <div class="flex justify-between gap-4">
@@ -239,16 +237,16 @@
         <div class="flex justify-between gap-4">
           <dt class="text-muted-foreground">Commits</dt>
           <dd>
-            {repository.commitCount?.toLocaleString() ?? "—"}
+            {repository.browser.commitCount?.toLocaleString() ?? "—"}
           </dd>
         </div>
         <div class="flex justify-between gap-4">
           <dt class="text-muted-foreground">Branches</dt>
-          <dd>{repository.refs?.branches.length ?? 0}</dd>
+          <dd>{repository.browser.refs?.branches.length ?? 0}</dd>
         </div>
         <div class="flex justify-between gap-4">
           <dt class="text-muted-foreground">Tags</dt>
-          <dd>{repository.refs?.tags.length ?? 0}</dd>
+          <dd>{repository.browser.refs?.tags.length ?? 0}</dd>
         </div>
       </dl>
     </section>
@@ -260,20 +258,20 @@
         >
           <Package class="size-3.5" />Releases
         </h2>
-        {#if repository.releases.length}
+        {#if repository.releases.releases.length}
           <button
             type="button"
             class="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
             onclick={() => repository.navigate("releases")}
           >
-            {repository.releases.length} total<ArrowRight class="size-3" />
+            {repository.releases.releases.length} total<ArrowRight class="size-3" />
           </button>
         {/if}
       </div>
-      {#if repository.releases[0]}
+      {#if repository.releases.releases[0]}
         {@const latest =
-          repository.releases.find((release) => release.latest) ??
-          repository.releases[0]}
+          repository.releases.releases.find((release) => release.latest) ??
+          repository.releases.releases[0]}
         <button
           type="button"
           class="mt-3 block w-full text-left"
@@ -291,13 +289,13 @@
             >
           </span>
         </button>
-      {:else if repository.releasesLoading}
+      {:else if repository.releases.releasesLoading}
         <p class="mt-3 text-xs text-muted-foreground">Loading releases…</p>
-      {:else if repository.releasesLoadFailed}
+      {:else if repository.releases.releasesLoadFailed}
         <button
           type="button"
           class="mt-3 text-left text-xs text-muted-foreground hover:text-foreground"
-          onclick={() => void repository.refreshReleases()}
+          onclick={() => void repository.releases.refreshReleases()}
         >
           Releases unavailable. Try again.
         </button>
@@ -321,22 +319,22 @@
         </h2>
         <span
           class="text-[11px] tabular-nums text-muted-foreground"
-          title={`${repository.totalLines.toLocaleString()} non-blank lines`}
+          title={`${repository.browser.totalLines.toLocaleString()} non-blank lines`}
         >
-          {compactCount(repository.totalLines)}
+          {compactCount(repository.browser.totalLines)}
         </span>
       </div>
-      {#if repository.stats.length}
+      {#if repository.browser.stats.length}
         <div class="mt-4 flex h-1.5 overflow-hidden rounded-full bg-muted">
-          {#each repository.stats as item (item.language)}
+          {#each repository.browser.stats as item (item.language)}
             <span
-              style:width={`${repository.totalLines ? ((item.code + item.comments) / repository.totalLines) * 100 : 0}%`}
+              style:width={`${repository.browser.totalLines ? ((item.code + item.comments) / repository.browser.totalLines) * 100 : 0}%`}
               style:background={languageColor(item.language)}
             ></span>
           {/each}
         </div>
         <ul class="mt-4 space-y-3">
-          {#each repository.stats as item (item.language)}
+          {#each repository.browser.stats as item (item.language)}
             <li>
               <div class="flex items-center justify-between gap-3 text-xs">
                 <span class="flex min-w-0 items-center gap-2 font-medium">

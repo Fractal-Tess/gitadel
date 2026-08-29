@@ -123,7 +123,6 @@ pub(crate) async fn load_secret(
     })
 }
 
-
 pub(crate) async fn mark_identity_used(
     state: &IdentityState,
     namespace: &str,
@@ -364,12 +363,17 @@ async fn detect_provider(server_url: &str, token: &str) -> Result<(String, Strin
         let client = pinned_public_https_client(&api)
             .await
             .map_err(ApiError::bad_request)?;
-        if authenticated_get(&client, endpoint(&api, "/user")?, token, TokenHeader::Bearer).await {
+        if authenticated_get(
+            &client,
+            endpoint(&api, "/user")?,
+            token,
+            TokenHeader::Bearer,
+        )
+        .await
+        {
             return Ok(("github".to_owned(), server_url));
         }
-        return Err(ApiError::bad_request(
-            "GitHub rejected this access token.",
-        ));
+        return Err(ApiError::bad_request("GitHub rejected this access token."));
     }
 
     let client = pinned_public_https_client(&origin)
@@ -386,9 +390,7 @@ async fn detect_provider(server_url: &str, token: &str) -> Result<(String, Strin
         {
             return Ok(("forgejo".to_owned(), server_url));
         }
-        return Err(ApiError::bad_request(
-            "Forgejo rejected this access token.",
-        ));
+        return Err(ApiError::bad_request("Forgejo rejected this access token."));
     }
     if plain_get(&client, endpoint(&origin, "/api/v1/version")?).await {
         if authenticated_get(
@@ -449,7 +451,12 @@ async fn plain_get(client: &Client, url: Url) -> bool {
         .is_ok_and(|response| response.status() == StatusCode::OK)
 }
 
-async fn authenticated_get(client: &Client, url: Url, token: &str, header_kind: TokenHeader) -> bool {
+async fn authenticated_get(
+    client: &Client,
+    url: Url,
+    token: &str,
+    header_kind: TokenHeader,
+) -> bool {
     let request = client.get(url).header(header::USER_AGENT, "Gitadel");
     let request = match header_kind {
         TokenHeader::Bearer => request.bearer_auth(token),

@@ -1,4 +1,4 @@
-use std::{process::Stdio, time::Duration};
+use std::{ops::Deref, process::Stdio, time::Duration};
 
 use axum::{
     Router,
@@ -17,14 +17,41 @@ use tokio::{
 use tokio_util::io::ReaderStream;
 
 use super::{Permission, RepositoryState};
-use crate::{entity::repository, identity::SCOPE_REPOSITORY_READ};
+use crate::{actions::ActionsState, entity::repository, identity::SCOPE_REPOSITORY_READ};
+
+#[derive(Clone)]
+pub(crate) struct GitHttpState {
+    repository: RepositoryState,
+    actions: ActionsState,
+}
+
+impl GitHttpState {
+    pub(crate) fn new(repository: RepositoryState, actions: ActionsState) -> Self {
+        Self {
+            repository,
+            actions,
+        }
+    }
+
+    pub(super) fn actions_state(&self) -> &ActionsState {
+        &self.actions
+    }
+}
+
+impl Deref for GitHttpState {
+    type Target = RepositoryState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.repository
+    }
+}
 
 #[derive(Deserialize)]
 struct InfoRefsQuery {
     service: String,
 }
 
-pub fn router() -> Router<RepositoryState> {
+pub fn router() -> Router<GitHttpState> {
     Router::new()
         .route("/{namespace}/{repository}/info/refs", get(info_refs))
         .route(
@@ -34,7 +61,7 @@ pub fn router() -> Router<RepositoryState> {
 }
 
 async fn info_refs(
-    State(state): State<RepositoryState>,
+    State(state): State<GitHttpState>,
     Path((namespace, repository_segment)): Path<(String, String)>,
     Query(query): Query<InfoRefsQuery>,
     headers: HeaderMap,
@@ -82,7 +109,7 @@ async fn info_refs(
 }
 
 async fn upload_pack(
-    State(state): State<RepositoryState>,
+    State(state): State<GitHttpState>,
     Path((namespace, repository_segment)): Path<(String, String)>,
     headers: HeaderMap,
     body: Bytes,
@@ -121,7 +148,8 @@ async fn upload_pack(
         }
     });
     let display_path = repository_path(&repository);
-    tokio::spawn(async move {
+    let task_state = state.clone();
+    task_state.spawn_task(async move {
         let stderr_task = tokio::spawn(async move {
             let mut bytes = Vec::new();
             if let Some(mut stderr) = stderr {
@@ -157,7 +185,7 @@ async fn upload_pack(
 }
 
 async fn authorized_repository(
-    state: &RepositoryState,
+    state: &GitHttpState,
     headers: &HeaderMap,
     namespace: &str,
     repository_segment: &str,
@@ -176,11 +204,10 @@ async fn authorized_repository(
         return Ok(repository);
     }
     let token = token_from_headers(headers).ok_or_else(authentication_required)?;
-    if state.actions().is_some()
-        && crate::actions::tokens::authorize_job(state.identity().database(), &token, repository.id)
-            .await
-            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())?
-            .is_some()
+    if crate::actions::tokens::authorize_job(state.identity().database(), &token, repository.id)
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())?
+        .is_some()
     {
         return Ok(repository);
     }

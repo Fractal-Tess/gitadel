@@ -1,14 +1,14 @@
 import {
   ApiFailure,
-  invitationSchema,
   jsonBody,
   requestJson,
-  type AuditEvent,
-} from "$lib/api.js";
+} from "$lib/api/transport.js";
+import { invitationSchema, type AuditEvent } from "$lib/api/instance.js";
 import {
   loadAdminActivity,
   refreshAdminActivity,
 } from "$lib/navigation-cache.js";
+import type { AppState } from "$lib/state/app-state.svelte.js";
 
 export class AdminSettingsState {
   auditEvents = $state.raw<AuditEvent[]>([]);
@@ -17,13 +17,18 @@ export class AdminSettingsState {
   working = $state(false);
   error = $state<string | null>(null);
 
+  constructor(private readonly app: AppState) {}
+
   async initialize(): Promise<void> {
+    const scope = this.app.authorizationScope;
     await this.run(async () => {
-      this.auditEvents = await loadAdminActivity();
+      const events = await loadAdminActivity(scope);
+      if (this.app.authorizationScope === scope) this.auditEvents = events;
     });
   }
 
   async createInvitation(): Promise<void> {
+    const scope = this.app.authorizationScope;
     await this.run(async () => {
       const response = await requestJson(
         "/api/v1/invitations",
@@ -34,7 +39,8 @@ export class AdminSettingsState {
         },
       );
       this.invitation = response.token;
-      this.auditEvents = await refreshAdminActivity();
+      const events = await refreshAdminActivity(scope);
+      if (this.app.authorizationScope === scope) this.auditEvents = events;
     });
   }
 

@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { LoaderCircle, Tag } from "lucide-svelte";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import Tag from "@lucide/svelte/icons/tag";
 
-  import type { Issue, IssueAttachment } from "$lib/api.js";
+  import type { Issue, IssueAttachment } from "$lib/api/issues.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
@@ -50,9 +51,9 @@
       open &&
       canManage &&
       repository.authStatus?.authenticated &&
-      !repository.assignableUsers.length
+      !repository.issues.assignableUsers.length
     ) {
-      void repository.loadAssignableUsers().catch(() => undefined);
+      void repository.issues.loadAssignableUsers().catch(() => undefined);
     }
   });
 
@@ -65,7 +66,7 @@
     failure = "";
     try {
       if (issue) {
-        await repository.updateIssue(issue.number, {
+        await repository.issues.updateIssue(issue.number, {
           title,
           body,
           ...(issue.can_manage && {
@@ -77,7 +78,7 @@
           }),
         });
       } else {
-        await repository.createIssue({
+        await repository.issues.createIssue({
           title,
           body,
           label_ids: canManage ? selectedLabelIds : [],
@@ -139,7 +140,7 @@
           <Field.Field class="min-w-48 flex-1">
             <Field.Label>Assignee</Field.Label>
             <AssigneeCombobox
-              users={repository.assignableUsers}
+              users={repository.issues.assignableUsers}
               bind:value={assignee}
             />
           </Field.Field>
@@ -168,11 +169,11 @@
         <Button type="button" variant="ghost" onclick={() => (open = false)}
           >Cancel</Button
         >
-        <Button type="submit" disabled={repository.issuePending}>
-          {#if repository.issuePending}
+        <Button type="submit" disabled={repository.issues.issuePending}>
+          {#if repository.issues.issuePending}
             <LoaderCircle class="size-4 animate-spin" />
           {/if}
-          {repository.issuePending
+          {repository.issues.issuePending
             ? "Saving…"
             : issue
               ? "Save changes"

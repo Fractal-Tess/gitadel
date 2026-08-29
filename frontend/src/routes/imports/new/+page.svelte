@@ -1,7 +1,10 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { resolve } from "$app/paths";
-  import { ArrowLeft, KeyRound, LoaderCircle, Search } from "lucide-svelte";
+  import ArrowLeft from "@lucide/svelte/icons/arrow-left";
+  import KeyRound from "@lucide/svelte/icons/key-round";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import Search from "@lucide/svelte/icons/search";
   import type { Component } from "svelte";
   import SiForgejo from "@icons-pack/svelte-simple-icons/icons/SiForgejo";
   import SiGitea from "@icons-pack/svelte-simple-icons/icons/SiGitea";
@@ -10,15 +13,16 @@
 
   import {
     ApiFailure,
-    importDiscoverySchema,
     jsonBody,
-    mirrorIdentitiesSchema,
-    repositoryImportSchema,
     requestJson,
+  } from "$lib/api/transport.js";
+  import {
+    importDiscoverySchema,
+    repositoryImportSchema,
     type ImportDiscovery,
-    type MirrorIdentity,
     type RemoteImportRepository,
-  } from "$lib/api.js";
+  } from "$lib/api/imports.js";
+  import { mirrorIdentitiesSchema, type MirrorIdentity } from "$lib/api/mirrors.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";

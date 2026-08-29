@@ -1,11 +1,9 @@
 <script lang="ts">
-  import {
-    Activity,
-    Clipboard,
-    RefreshCw,
-    ShieldCheck,
-    UserPlus,
-  } from "lucide-svelte";
+  import Activity from "@lucide/svelte/icons/activity";
+  import Clipboard from "@lucide/svelte/icons/clipboard";
+  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+  import ShieldCheck from "@lucide/svelte/icons/shield-check";
+  import UserPlus from "@lucide/svelte/icons/user-plus";
 
   import { Button } from "$lib/components/ui/button/index.js";
   import type { AdminSettingsState } from "$lib/settings/admin-settings-state.svelte.js";

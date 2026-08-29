@@ -1,14 +1,10 @@
 import { getContext, setContext } from "svelte";
-import type { Icon } from "lucide-svelte";
+import type { Component } from "svelte";
 
 const SHELL_STATE = Symbol("gitadel-shell-state");
 const RAIL_STORAGE_KEY = "gitadel:rail-open";
 
-/**
- * lucide-svelte still ships legacy component classes, so icons are typed by the
- * package's own base component rather than Svelte 5's `Component`.
- */
-export type ShellIcon = typeof Icon;
+export type ShellIcon = Component;
 
 export type ActiveRepositoryNavigation = {
   namespace: string;

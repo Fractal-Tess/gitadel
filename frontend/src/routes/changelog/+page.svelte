@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { ScrollText } from "lucide-svelte";
+  import ScrollText from "@lucide/svelte/icons/scroll-text";
 
-  import { ApiFailure, changelogSchema, requestJson } from "$lib/api.js";
+  import { ApiFailure, requestJson } from "$lib/api/transport.js";
+  import { changelogSchema } from "$lib/api/instance.js";
   import { trustedHtml } from "$lib/repository/format.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 

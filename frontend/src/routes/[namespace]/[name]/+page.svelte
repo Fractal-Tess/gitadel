@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from "$app/state";
   import { resolve } from "$app/paths";
-  import { ArrowLeft } from "lucide-svelte";
+  import ArrowLeft from "@lucide/svelte/icons/arrow-left";
 
   import RepositoryCommit from "$lib/components/repository/repository-commit.svelte";
   import RepositoryActions from "$lib/components/repository/repository-actions.svelte";
@@ -16,15 +16,19 @@
   import { Button } from "$lib/components/ui/button/index.js";
   import { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
   import { recordRepositoryVisit } from "$lib/state/recent-repositories.js";
+  import { useAppState } from "$lib/state/app-state.svelte.js";
   import { useShellState } from "$lib/state/shell-state.svelte.js";
 
+  const app = useAppState();
   const shell = useShellState();
-  const state = $derived(
-    new RepositoryPageState(
+  const state = $derived.by(() => {
+    app.authorizationScope;
+    return new RepositoryPageState(
       page.params.namespace ?? "",
       page.params.name ?? "",
-    ),
-  );
+      app,
+    );
+  });
   const inSettings = $derived(
     state.view === "settings" || state.view === "integrations",
   );

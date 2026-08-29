@@ -2,15 +2,16 @@
   import { goto } from "$app/navigation";
   import { resolve } from "$app/paths";
   import { page } from "$app/state";
-  import { ShieldCheck, UserPlus } from "lucide-svelte";
+  import ShieldCheck from "@lucide/svelte/icons/shield-check";
+  import UserPlus from "@lucide/svelte/icons/user-plus";
 
   import { Button } from "$lib/components/ui/button/index.js";
   import {
     ApiFailure,
-    authResponseSchema,
     jsonBody,
     requestJson,
-  } from "$lib/api.js";
+  } from "$lib/api/transport.js";
+  import { authResponseSchema } from "$lib/api/auth.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
   const app = useAppState();

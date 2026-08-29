@@ -1,5 +1,8 @@
 <script lang="ts">
-  import { GitBranch, Heart, LockKeyhole, RefreshCw } from "lucide-svelte";
+  import GitBranch from "@lucide/svelte/icons/git-branch";
+  import Heart from "@lucide/svelte/icons/heart";
+  import LockKeyhole from "@lucide/svelte/icons/lock-keyhole";
+  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
 
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Select from "$lib/components/ui/select/index.js";
@@ -31,7 +34,7 @@
         </span>
       </Select.Trigger>
       <Select.Content align="end">
-        {#each state.refs?.branches ?? [] as branch (branch.name)}
+        {#each state.browser.refs?.branches ?? [] as branch (branch.name)}
           <Select.Item value={branch.name}>{branch.name}</Select.Item>
         {/each}
       </Select.Content>
@@ -67,8 +70,8 @@
     variant={state.repository?.favorited ? "secondary" : "outline"}
     class="ml-auto gap-2 max-sm:h-11"
     aria-pressed={state.repository?.favorited ?? false}
-    disabled={state.favoritePending}
-    onclick={() => void state.toggleFavorite()}
+    disabled={state.settings.favoritePending}
+    onclick={() => void state.settings.toggleFavorite()}
   >
     <Heart
       class={state.repository?.favorited

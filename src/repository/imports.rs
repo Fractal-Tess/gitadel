@@ -312,7 +312,8 @@ pub async fn create_import(
         secret: Some(token.clone()),
         ssh_private_key: None,
     };
-    tokio::spawn(async move {
+    let task_state = worker_state.clone();
+    task_state.spawn_task(async move {
         run_items(
             worker_state,
             worker_import,
@@ -437,7 +438,8 @@ pub async fn create_direct_import(
     let worker_state = state.clone();
     let worker_import = import.clone();
     let worker_item = item.clone();
-    tokio::spawn(async move {
+    let task_state = worker_state.clone();
+    task_state.spawn_task(async move {
         run_items(
             worker_state,
             worker_import,
@@ -554,7 +556,8 @@ pub async fn retry_import(
         secret: Some(token.clone()),
         ssh_private_key: None,
     };
-    tokio::spawn(async move {
+    let task_state = worker_state.clone();
+    task_state.spawn_task(async move {
         run_items(
             worker_state,
             worker_import,

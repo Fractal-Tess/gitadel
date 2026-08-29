@@ -1,20 +1,22 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { LoaderCircle } from "lucide-svelte";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
 
   import {
     ApiFailure,
+    jsonBody,
+    requestEmpty,
+    requestJson,
+  } from "$lib/api/transport.js";
+  import {
     integrationCredentialSchema,
     integrationSourceConnectionSchema,
     integrationTestResultSchema,
-    jsonBody,
     namespaceIntegrationSchema,
-    requestEmpty,
-    requestJson,
     type IntegrationProvider,
     type IntegrationSourceConnection,
     type NamespaceIntegration,
-  } from "$lib/api.js";
+  } from "$lib/api/integrations.js";
   import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
   import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
   import IntegrationConnectionEditor, {
@@ -24,18 +26,16 @@
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import { takeNamespaceIntegrations } from "$lib/namespace-preload.js";
-  import type { AccountSettingsState } from "$lib/settings/account-settings-state.svelte.js";
-
+  import { useAppState } from "$lib/state/app-state.svelte.js";
   type Target = { slug: string; label: string };
   let {
-    state: account,
     namespace,
   }: {
-    state: AccountSettingsState;
     namespace: Target;
   } = $props();
 
   const targets = $derived<Target[]>([namespace]);
+  const app = useAppState();
   type Provider = IntegrationProvider;
   type Integration = NamespaceIntegration;
   type Card = { target: Target; integration: Integration };
@@ -87,14 +87,15 @@
   function sourcePath(card: Card) {
     return `${integrationPath(card.target.slug, card.integration.id)}/source`;
   }
-
   async function load() {
+    const scope = app.authorizationScope;
     loading = true;
     loadError = null;
     try {
       const responses = await Promise.all(
-        targets.map(({ slug }) => takeNamespaceIntegrations(slug)),
+        targets.map(({ slug }) => takeNamespaceIntegrations(slug, scope)),
       );
+      if (app.authorizationScope !== scope) return;
       for (const integrationResponse of responses) {
         integrations[integrationResponse.namespace] =
           integrationResponse.integrations;

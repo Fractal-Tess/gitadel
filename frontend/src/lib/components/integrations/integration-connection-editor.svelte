@@ -1,24 +1,22 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import {
-    ArrowLeft,
-    CircleAlert,
-    CircleCheck,
-    ExternalLink,
-    Eye,
-    EyeOff,
-    LoaderCircle,
-    PlugZap,
-    RefreshCw,
-    Rocket,
-    Unplug,
-  } from "lucide-svelte";
+  import ArrowLeft from "@lucide/svelte/icons/arrow-left";
+  import CircleAlert from "@lucide/svelte/icons/circle-alert";
+  import CircleCheck from "@lucide/svelte/icons/circle-check";
+  import ExternalLink from "@lucide/svelte/icons/external-link";
+  import Eye from "@lucide/svelte/icons/eye";
+  import EyeOff from "@lucide/svelte/icons/eye-off";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import PlugZap from "@lucide/svelte/icons/plug-zap";
+  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+  import Rocket from "@lucide/svelte/icons/rocket";
+  import Unplug from "@lucide/svelte/icons/unplug";
   import type {
     IntegrationProvider,
     IntegrationTestResult,
     IntegrationSourceConnection,
     NamespaceIntegration,
-  } from "$lib/api.js";
+  } from "$lib/api/integrations.js";
   import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
   import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
   import { Button } from "$lib/components/ui/button/index.js";

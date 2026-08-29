@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { Copy, ShieldAlert } from "lucide-svelte";
+  import Copy from "@lucide/svelte/icons/copy";
+  import ShieldAlert from "@lucide/svelte/icons/shield-alert";
 
-  import type { ActionRegistration } from "$lib/api.js";
+  import type { ActionRegistration } from "$lib/api/actions.js";
   import { copyText } from "$lib/clipboard.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";

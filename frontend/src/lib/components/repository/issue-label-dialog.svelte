@@ -1,5 +1,8 @@
 <script lang="ts">
-  import { LoaderCircle, Plus, Tag, Trash2 } from "lucide-svelte";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import Plus from "@lucide/svelte/icons/plus";
+  import Tag from "@lucide/svelte/icons/tag";
+  import Trash2 from "@lucide/svelte/icons/trash-2";
 
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -54,7 +57,7 @@
     failure = "";
     creating = true;
     try {
-      await repository.createIssueLabel({
+      await repository.issues.createIssueLabel({
         name,
         color: color.replace("#", ""),
         description,
@@ -81,7 +84,7 @@
     if (!target) return;
     deleteDialogOpen = false;
     pendingDeleteLabel = null;
-    void repository.deleteIssueLabel(target.id).catch(() => undefined);
+    void repository.issues.deleteIssueLabel(target.id).catch(() => undefined);
   }
 </script>
 
@@ -100,7 +103,7 @@
 
     <div class="max-h-72 overflow-y-auto rounded-md border">
       <ul class="divide-y">
-        {#each repository.issueLabels as label (label.id)}
+        {#each repository.issues.issueLabels as label (label.id)}
           <li class="flex items-center gap-3 p-2.5">
             {#if selecting}
               <input
@@ -129,7 +132,7 @@
                 size="icon-sm"
                 class="text-muted-foreground hover:text-destructive"
                 aria-label={`Delete ${label.name}`}
-                disabled={repository.labelPending}
+                disabled={repository.issues.labelPending}
                 onclick={() => requestRemoveLabel(label.id, label.name)}
               >
                 <Trash2 class="size-3" />
@@ -193,9 +196,9 @@
           size="sm"
           variant="outline"
           class="justify-self-start gap-2"
-          disabled={creating || repository.labelPending}
+          disabled={creating || repository.issues.labelPending}
         >
-          {#if creating || repository.labelPending}
+          {#if creating || repository.issues.labelPending}
             <LoaderCircle class="size-3.5 animate-spin" />
           {:else}
             <Plus class="size-3.5" />

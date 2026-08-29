@@ -2,22 +2,20 @@
   import { goto } from "$app/navigation";
   import { resolve } from "$app/paths";
   import { Command as CommandPrimitive } from "bits-ui";
-  import {
-    Archive,
-    Building2,
-    Compass,
-    Heart,
-    LockKeyhole,
-    Plus,
-    RefreshCw,
-    ScrollText,
-    Settings2,
-    ShieldCheck,
-  } from "lucide-svelte";
+  import Archive from "@lucide/svelte/icons/archive";
+  import Building2 from "@lucide/svelte/icons/building-2";
+  import Compass from "@lucide/svelte/icons/compass";
+  import Heart from "@lucide/svelte/icons/heart";
+  import LockKeyhole from "@lucide/svelte/icons/lock-keyhole";
+  import Plus from "@lucide/svelte/icons/plus";
+  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+  import ScrollText from "@lucide/svelte/icons/scroll-text";
+  import Settings2 from "@lucide/svelte/icons/settings-2";
+  import ShieldCheck from "@lucide/svelte/icons/shield-check";
 
   import * as Command from "$lib/components/ui/command/index.js";
   import * as Kbd from "$lib/components/ui/kbd/index.js";
-  import type { Repository } from "$lib/api.js";
+  import type { Repository } from "$lib/api/repositories.js";
   import {
     loadRepositoryIndex,
     peekRepositoryIndex,
@@ -38,12 +36,35 @@
   const app = useAppState();
   const shell = useShellState();
   const viewer = $derived(app.authStatus?.user?.username);
-
+  const scope = $derived(app.authorizationScope);
   let repositories = $state.raw<Repository[]>([]);
   let recentPaths = $state.raw<string[]>([]);
   let query = $state("");
   let selected = $state("");
   let loading = $state(false);
+
+  type IndexedRepository = {
+    repository: Repository;
+    path: string;
+    normalizedName: string;
+    normalizedPath: string;
+    normalizedDescription: string;
+    updatedAt: number;
+  };
+
+  const indexedRepositories = $derived(
+    repositories.map((repository) => {
+      const path = `${repository.namespace}/${repository.name}`;
+      return {
+        repository,
+        path,
+        normalizedName: repository.name.toLowerCase(),
+        normalizedPath: path.toLowerCase(),
+        normalizedDescription: (repository.description ?? "").toLowerCase(),
+        updatedAt: Date.parse(repository.updated_at),
+      };
+    }),
+  );
 
   const relative = new Intl.RelativeTimeFormat(undefined, {
     numeric: "auto",
@@ -63,12 +84,12 @@
 
     query = "";
     recentPaths = recentRepositoryPaths();
-    const cached = peekRepositoryIndex(viewer);
+    const cached = peekRepositoryIndex(scope);
     repositories = cached ?? [];
     loading = !cached;
 
     let cancelled = false;
-    void loadRepositoryIndex(viewer)
+    void loadRepositoryIndex(scope)
       .then((loaded) => {
         if (!cancelled) repositories = loaded;
       })
@@ -96,15 +117,13 @@
    * which outrank descriptions, so typing `web` finds `acme/web` before it
    * finds `web-team/billing` or anything that merely mentions the web.
    */
-  function score(repository: Repository, path: string, needle: string): number {
-    const name = repository.name.toLowerCase();
-    if (name.startsWith(needle)) return 100;
-    if (path.startsWith(needle)) return 90;
-    if (name.includes(needle)) return 70;
-    if (path.includes(needle)) return 55;
-    if (isSubsequence(path, needle)) return 35;
-    if ((repository.description ?? "").toLowerCase().includes(needle))
-      return 20;
+  function score(repository: IndexedRepository, needle: string): number {
+    if (repository.normalizedName.startsWith(needle)) return 100;
+    if (repository.normalizedPath.startsWith(needle)) return 90;
+    if (repository.normalizedName.includes(needle)) return 70;
+    if (repository.normalizedPath.includes(needle)) return 55;
+    if (isSubsequence(repository.normalizedPath, needle)) return 35;
+    if (repository.normalizedDescription.includes(needle)) return 20;
     return 0;
   }
 
@@ -113,22 +132,24 @@
 
     if (!needle) {
       const byPath = new Map(
-        repositories.map((repository) => [
-          `${repository.namespace}/${repository.name}`,
-          repository,
+        indexedRepositories.map((repository) => [
+          repository.path,
+          repository.repository,
         ]),
       );
       const recent = recentPaths
         .map((path) => byPath.get(path))
         .filter((repository) => repository !== undefined);
       const recentIds = new Set(recent.map((repository) => repository.id));
-      const matches = repositories
-        .filter((repository) => !recentIds.has(repository.id))
+      const matches = indexedRepositories
+        .filter((entry) => !recentIds.has(entry.repository.id))
         .sort(
           (left, right) =>
-            Number(right.favorited) - Number(left.favorited) ||
-            Date.parse(right.updated_at) - Date.parse(left.updated_at),
-        );
+            Number(right.repository.favorited) -
+              Number(left.repository.favorited) ||
+            right.updatedAt - left.updatedAt,
+        )
+        .map((entry) => entry.repository);
       return {
         recent,
         matches: matches.slice(0, resultLimit),
@@ -139,31 +160,31 @@
     const recency = new Map(
       recentPaths.map((path, index) => [path, recentPaths.length - index]),
     );
-    const ranked = repositories
+    const ranked = indexedRepositories
       .map((repository) => {
-        const path = `${repository.namespace}/${repository.name}`;
-        const base = score(repository, path.toLowerCase(), needle);
+        const base = score(repository, needle);
         return {
           repository,
           rank:
             base === 0
               ? 0
               : base +
-                (repository.favorited ? 4 : 0) +
-                (recency.get(path) ?? 0),
+                (repository.repository.favorited ? 4 : 0) +
+                (recency.get(repository.path) ?? 0),
         };
       })
       .filter((entry) => entry.rank > 0)
       .sort(
         (left, right) =>
           right.rank - left.rank ||
-          Date.parse(right.repository.updated_at) -
-            Date.parse(left.repository.updated_at),
+          right.repository.updatedAt - left.repository.updatedAt,
       );
 
     return {
       recent: [],
-      matches: ranked.slice(0, resultLimit).map((entry) => entry.repository),
+      matches: ranked
+        .slice(0, resultLimit)
+        .map((entry) => entry.repository.repository),
       matched: ranked.length,
     };
   });
@@ -205,7 +226,8 @@
           id: "organizations",
           label: "Organizations",
           icon: Building2,
-          keywords: "organizations runners integrations mirror identities tokens",
+          keywords:
+            "organizations runners integrations mirror identities tokens",
           run: () => void goto(resolve("/-/organizations")),
         },
       );
@@ -278,9 +300,11 @@
     scheduleRepositoryPreload(
       repository.namespace,
       repository.name,
+      scope,
       repository.default_branch,
     );
-    return () => cancelRepositoryPreload(repository.namespace, repository.name);
+    return () =>
+      cancelRepositoryPreload(repository.namespace, repository.name, scope);
   });
 
   function updatedLabel(value: string): string {
@@ -359,10 +383,11 @@
       scheduleRepositoryPreload(
         repository.namespace,
         repository.name,
+        scope,
         repository.default_branch,
       )}
     onmouseleave={() =>
-      cancelRepositoryPreload(repository.namespace, repository.name)}
+      cancelRepositoryPreload(repository.namespace, repository.name, scope)}
   >
     <span class="min-w-0 flex-1 truncate font-mono text-[0.8rem]">
       <span class="text-muted-foreground">{repository.namespace}/</span><span

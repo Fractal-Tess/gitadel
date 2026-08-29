@@ -1,18 +1,23 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { Clock3, KeyRound, LoaderCircle, RefreshCw } from "lucide-svelte";
+  import Clock3 from "@lucide/svelte/icons/clock-3";
+  import KeyRound from "@lucide/svelte/icons/key-round";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
   import { toast } from "svelte-sonner";
 
   import {
     ApiFailure,
     jsonBody,
-    mirrorIdentitiesSchema,
-    repositoryMirrorSchema,
     requestEmpty,
     requestJson,
+  } from "$lib/api/transport.js";
+  import {
+    mirrorIdentitiesSchema,
+    repositoryMirrorSchema,
     type MirrorIdentity,
     type RepositoryMirror,
-  } from "$lib/api.js";
+  } from "$lib/api/mirrors.js";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Field from "$lib/components/ui/field/index.js";

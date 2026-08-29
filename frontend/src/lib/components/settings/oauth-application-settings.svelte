@@ -1,5 +1,8 @@
 <script lang="ts">
-  import { Check, Clipboard, KeyRound, Trash2 } from "lucide-svelte";
+  import Check from "@lucide/svelte/icons/check";
+  import Clipboard from "@lucide/svelte/icons/clipboard";
+  import KeyRound from "@lucide/svelte/icons/key-round";
+  import Trash2 from "@lucide/svelte/icons/trash-2";
   import { toast } from "svelte-sonner";
 
   import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
@@ -8,13 +11,13 @@
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
-  import type { AccountSettingsState } from "$lib/settings/account-settings-state.svelte.js";
+  import type { OAuthSettingsState } from "$lib/settings/account/oauth-settings-state.svelte.js";
 
   let {
     state: account,
     showHeader = true,
   }: {
-    state: AccountSettingsState;
+    state: OAuthSettingsState;
     showHeader?: boolean;
   } = $props();
   let createDialogOpen = $state(false);

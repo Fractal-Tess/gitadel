@@ -5,15 +5,13 @@
     SiGithub,
     SiGitlab,
   } from "@icons-pack/svelte-simple-icons";
-  import {
-    Check,
-    ExternalLink,
-    Globe2,
-    LoaderCircle,
-    Rocket,
-    Settings2,
-    Trash2,
-  } from "lucide-svelte";
+  import Check from "@lucide/svelte/icons/check";
+  import ExternalLink from "@lucide/svelte/icons/external-link";
+  import Globe2 from "@lucide/svelte/icons/globe-2";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import Rocket from "@lucide/svelte/icons/rocket";
+  import Settings2 from "@lucide/svelte/icons/settings-2";
+  import Trash2 from "@lucide/svelte/icons/trash-2";
   import type { Snippet } from "svelte";
 
   import { Button } from "$lib/components/ui/button/index.js";

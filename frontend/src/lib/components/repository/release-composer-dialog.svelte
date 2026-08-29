@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { LoaderCircle } from "lucide-svelte";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
 
-  import type { Release } from "$lib/api.js";
+  import type { Release } from "$lib/api/releases.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import { Checkbox } from "$lib/components/ui/checkbox/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
@@ -29,8 +29,8 @@
   let failure = $state("");
 
   const targetSuggestions = $derived([
-    ...(repository.refs?.tags.map((tag) => tag.name) ?? []),
-    ...(repository.refs?.branches.map((branch) => branch.name) ?? []),
+    ...(repository.browser.refs?.tags.map((tag) => tag.name) ?? []),
+    ...(repository.browser.refs?.branches.map((branch) => branch.name) ?? []),
   ]);
 
   // Prefill the draft each time the dialog opens.
@@ -49,14 +49,14 @@
     failure = "";
     try {
       if (release) {
-        await repository.updateRelease(release.id, {
+        await repository.releases.updateRelease(release.id, {
           target_revision: targetRevision,
           title,
           body,
           prerelease,
         });
       } else {
-        await repository.createRelease(
+        await repository.releases.createRelease(
           {
             target_revision: targetRevision,
             title,
@@ -165,14 +165,14 @@
         >
         <Button
           type="submit"
-          disabled={repository.releasePending || repository.releaseAssetPending}
+          disabled={repository.releases.releasePending || repository.releases.releaseAssetPending}
         >
-          {#if repository.releasePending || repository.releaseAssetPending}
+          {#if repository.releases.releasePending || repository.releases.releaseAssetPending}
             <LoaderCircle class="size-4 animate-spin" />
           {/if}
-          {repository.releaseAssetPending
+          {repository.releases.releaseAssetPending
             ? "Uploading assets…"
-            : repository.releasePending
+            : repository.releases.releasePending
               ? "Publishing…"
               : release
                 ? "Save release"

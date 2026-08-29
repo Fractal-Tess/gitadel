@@ -28,9 +28,7 @@ pub async fn pinned_public_https_client(origin: &Url) -> Result<Client, String> 
         Some(Host::Domain(host)) => host.trim_end_matches('.'),
         _ => return Err("Git server URL must use a public DNS hostname.".to_owned()),
     };
-    if host.eq_ignore_ascii_case("localhost")
-        || host.to_ascii_lowercase().ends_with(".localhost")
-    {
+    if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
         return Err("Git server URL must use a public DNS hostname.".to_owned());
     }
     let port = origin.port_or_known_default().unwrap_or(443);
@@ -39,7 +37,9 @@ pub async fn pinned_public_https_client(origin: &Url) -> Result<Client, String> 
         .map_err(|error| format!("Could not resolve git server: {error}"))?
         .collect::<Vec<_>>();
     if addresses.is_empty() || addresses.iter().any(|address| !is_public_ip(address.ip())) {
-        return Err("Git server must not resolve to a private or reserved network address.".to_owned());
+        return Err(
+            "Git server must not resolve to a private or reserved network address.".to_owned(),
+        );
     }
     Client::builder()
         .redirect(Policy::none())

@@ -4,29 +4,44 @@ import { setMode } from "mode-watcher";
 import {
   authResponseSchema,
   authStatusSchema,
-  instanceSettingsSchema,
-  jsonBody,
-  requestJson,
   type AuthStatus,
-  type InstanceSettings,
-  type Organization,
   type ThemePreference,
-} from "$lib/api.js";
+} from "$lib/api/auth.js";
+import { instanceSettingsSchema, type InstanceSettings } from "$lib/api/instance.js";
+import { jsonBody, requestJson } from "$lib/api/transport.js";
+import type { AuthorizationCacheScope } from "$lib/cache-scope.js";
+import type { Organization } from "$lib/api/organizations.js";
 import {
+  clearNavigationCaches,
   loadOrganizations as loadOrganizationMemberships,
   refreshOrganizations as refreshOrganizationMemberships,
   updateOrganizations,
 } from "$lib/navigation-cache.js";
+import { clearNamespaceCaches } from "$lib/namespace-preload.js";
+import { clearRepositoryCaches } from "$lib/repository/repository-data-cache.js";
+import { clearRepositoryPreloads } from "$lib/repository/repository-preload.js";
+import { clearBackupSettingsCache } from "$lib/settings/backup-settings-cache.js";
 
 const APP_STATE = Symbol("gitadel-app-state");
+function organizationPermissionsKey(organizations: Organization[]): string {
+  return organizations
+    .map((organization) => `${organization.id}:${organization.role}`)
+    .sort()
+    .join("|");
+}
 
 export class AppState {
   authStatus = $state.raw<AuthStatus | null>(null);
+  authorizationScope = $state.raw<AuthorizationCacheScope>({
+    viewer: null,
+    epoch: 0,
+  });
   instance = $state.raw<InstanceSettings | null>(null);
   organizations = $state.raw<Organization[]>([]);
   loading = $state(true);
   error = $state<string | null>(null);
 
+  #authFingerprint = "";
   #initializedAt = 0;
   #organizationsFor: string | null = null;
   #initializing: Promise<AuthStatus> | null = null;
@@ -57,7 +72,7 @@ export class AppState {
         requestJson("/api/v1/auth/status", authStatusSchema),
         requestJson("/api/v1/instance", instanceSettingsSchema),
       ]);
-      this.authStatus = status;
+      this.#setAuthStatus(status);
       this.#applyTheme(status);
       this.instance = instance;
       this.#loadOrganizationsFor(status);
@@ -92,7 +107,7 @@ export class AppState {
           body: jsonBody({ theme_preference: preference }),
         },
       );
-      this.authStatus = { ...status, user: response.user };
+      this.#setAuthStatus({ ...status, user: response.user });
     } catch (error) {
       setMode(previous);
       throw error;
@@ -115,13 +130,28 @@ export class AppState {
       this.organizations = [];
       return [];
     }
-    const organizations = await refreshOrganizationMemberships(username);
-    if (this.authStatus?.user?.username === username) {
+    const scope = this.authorizationScope;
+    const organizations = await refreshOrganizationMemberships(scope);
+    if (
+      this.authStatus?.user?.username === username &&
+      this.authorizationScope === scope
+    ) {
+      if (
+        organizationPermissionsKey(this.organizations) !==
+        organizationPermissionsKey(organizations)
+      ) {
+        this.advanceAuthorizationScope();
+        this.#organizationsFor = username;
+        this.organizations = organizations;
+        updateOrganizations(this.authorizationScope, organizations);
+        return organizations;
+      }
       this.#organizationsFor = username;
       this.organizations = organizations;
-      updateOrganizations(username, organizations);
+      updateOrganizations(scope, organizations);
+      return organizations;
     }
-    return organizations;
+    return [];
   }
 
   addOrganization(organization: Organization): void {
@@ -131,7 +161,7 @@ export class AppState {
       ...this.organizations.filter((item) => item.id !== organization.id),
       organization,
     ].sort((left, right) => left.slug.localeCompare(right.slug));
-    updateOrganizations(username, this.organizations);
+    updateOrganizations(this.authorizationScope, this.organizations);
   }
 
   #loadOrganizationsFor(status: AuthStatus): void {
@@ -150,7 +180,7 @@ export class AppState {
     this.error = null;
     try {
       const status = await requestJson("/api/v1/auth/status", authStatusSchema);
-      this.authStatus = status;
+      this.#setAuthStatus(status);
       this.#applyTheme(status);
       this.#loadOrganizationsFor(status);
       this.#initializedAt = Date.now();
@@ -162,6 +192,42 @@ export class AppState {
     } finally {
       this.loading = false;
     }
+  }
+  advanceAuthorizationScope(): void {
+    this.authorizationScope = {
+      viewer: this.authStatus?.user?.id ?? null,
+      epoch: this.authorizationScope.epoch + 1,
+    };
+    clearNavigationCaches();
+    clearNamespaceCaches();
+    clearRepositoryCaches();
+    clearRepositoryPreloads();
+    clearBackupSettingsCache();
+  }
+
+  #setAuthStatus(status: AuthStatus): void {
+    const user = status.user;
+    const fingerprint = [
+      status.setup_required,
+      status.authenticated,
+      user?.id ?? "",
+      user?.username ?? "",
+      user?.is_admin ?? false,
+      user?.default_repository_visibility ?? "",
+    ].join("|");
+    if (fingerprint !== this.#authFingerprint) {
+      this.#authFingerprint = fingerprint;
+      this.authorizationScope = {
+        viewer: user?.id ?? null,
+        epoch: this.authorizationScope.epoch + 1,
+      };
+      clearNavigationCaches();
+      clearNamespaceCaches();
+      clearRepositoryCaches();
+      clearRepositoryPreloads();
+      clearBackupSettingsCache();
+    }
+    this.authStatus = status;
   }
 }
 

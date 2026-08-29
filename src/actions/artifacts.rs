@@ -646,8 +646,7 @@ async fn upload(
     let additional_bytes = new_size.saturating_sub(old_size);
     let additional_bytes = i64::try_from(additional_bytes)
         .map_err(|_| ApiError::bad_request("Artifact size is invalid."))?;
-    let maximum_bytes = i64::try_from(state.settings().max_artifact_bytes)
-        .map_err(|_| ApiError::internal("invalid artifact size setting"))?;
+    let maximum_bytes = state.settings().max_artifact_bytes;
     let reservation = action_artifact::Entity::update_many()
         .col_expr(
             action_artifact::Column::SizeBytes,
