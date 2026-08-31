@@ -5,7 +5,12 @@
   import ShieldCheck from "@lucide/svelte/icons/shield-check";
   import UserPlus from "@lucide/svelte/icons/user-plus";
 
+  import * as Alert from "$lib/components/ui/alert/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
+  import * as Card from "$lib/components/ui/card/index.js";
+  import * as Field from "$lib/components/ui/field/index.js";
+  import { Input } from "$lib/components/ui/input/index.js";
+  import { Spinner } from "$lib/components/ui/spinner/index.js";
   import type { AdminSettingsState } from "$lib/settings/admin-settings-state.svelte.js";
 
   let {
@@ -15,8 +20,6 @@
     state: AdminSettingsState;
     view: "access" | "activity";
   } = $props();
-  const inputClass =
-    "w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus:border-ring focus:ring-2 focus:ring-ring/20";
 
   const actionLabels: Record<string, string> = {
     "account.password.update": "Password updated",
@@ -58,11 +61,10 @@
 </script>
 
 {#if state.error}
-  <p
-    class="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
-  >
-    {state.error}
-  </p>
+  <Alert.Root variant="destructive">
+    <Alert.Title>Administration data unavailable</Alert.Title>
+    <Alert.Description>{state.error}</Alert.Description>
+  </Alert.Root>
 {/if}
 
 <div class="grid gap-6 lg:grid-cols-2">
@@ -91,106 +93,126 @@
         >
       </div>
     </section>
-  <section class="overflow-hidden rounded-xl border bg-card/40 shadow-sm">
-    <header class="flex items-center gap-3 border-b px-5 py-4">
-      <UserPlus class="size-4 text-muted-foreground" />
-      <div>
-        <h2 class="text-sm font-semibold">Invite a user</h2>
-        <p class="mt-0.5 text-xs text-muted-foreground">
-          Send the token over a private channel.
-        </p>
-      </div>
-    </header>
-    <div class="p-5">
-      {#if state.invitation}
-        <div class="mb-4 rounded-md border bg-muted p-3">
-          <div class="flex items-start justify-between gap-3">
-            <code class="min-w-0 break-all text-sm">{state.invitation}</code>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onclick={() =>
-                navigator.clipboard.writeText(state.invitation ?? "")}
-              aria-label="Copy invitation token"
-            >
-              <Clipboard class="size-3.5" />
-            </Button>
+    <Card.Root>
+      <Card.Header class="border-b">
+        <div class="flex items-center gap-3">
+          <UserPlus class="size-4 text-muted-foreground" />
+          <div>
+            <Card.Title>Invite a user</Card.Title>
+            <Card.Description>
+              Send the token over a private channel.
+            </Card.Description>
           </div>
-          <p class="mt-2 text-xs text-muted-foreground">
-            Register at /register?token=&lt;token&gt;.
-          </p>
         </div>
-      {/if}
-      <form
-        class="flex items-end gap-2"
-        onsubmit={(event) => {
-          event.preventDefault();
-          void state.createInvitation();
-        }}
-      >
-        <label class="grid flex-1 gap-1.5 text-sm font-medium">
-          Expires in hours
-          <input
-            class={inputClass}
-            type="number"
-            min="1"
-            max="720"
-            bind:value={state.invitationHours}
-          />
-        </label>
-        <Button type="submit" disabled={state.working}>Create invitation</Button
+      </Card.Header>
+      <Card.Content>
+        {#if state.invitation}
+          <div class="mb-4 rounded-md border bg-muted p-3">
+            <div class="flex items-start justify-between gap-3">
+              <code class="min-w-0 break-all text-sm">{state.invitation}</code>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onclick={() =>
+                  navigator.clipboard.writeText(state.invitation ?? "")}
+                aria-label="Copy invitation token"
+              >
+                <Clipboard class="size-3.5" />
+              </Button>
+            </div>
+            <p class="mt-2 text-xs text-muted-foreground">
+              Register at /register?token=&lt;token&gt;.
+            </p>
+          </div>
+        {/if}
+        <form
+          class="flex items-end gap-2"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void state.createInvitation();
+          }}
         >
-      </form>
-    </div>
-  </section>
+          <Field.Field class="flex-1">
+            <Field.Label for="invitation-hours">Expires in hours</Field.Label>
+            <Input
+              id="invitation-hours"
+              type="number"
+              min={1}
+              max={720}
+              bind:value={state.invitationHours}
+            />
+          </Field.Field>
+          <Button type="submit" disabled={state.working}
+            >Create invitation</Button
+          >
+        </form>
+      </Card.Content>
+    </Card.Root>
   {/if}
 
   {#if view === "activity"}
-  <section class="overflow-hidden rounded-xl border bg-card/40 shadow-sm lg:col-span-2">
-    <header class="flex items-center justify-between gap-3 border-b px-5 py-4">
-      <div class="flex items-center gap-3">
-        <Activity class="size-4 text-muted-foreground" />
-        <div>
-          <h2 class="text-sm font-semibold">Instance activity</h2>
-          <p class="mt-0.5 text-xs text-muted-foreground">
-            Repository, authentication, and administration events.
-          </p>
-        </div>
-      </div>
-      <Button
-        variant="outline"
-        size="sm"
-        disabled={state.working}
-        onclick={() => void state.initialize()}
+    <section
+      class="overflow-hidden rounded-xl border bg-card/40 shadow-sm lg:col-span-2"
+    >
+      <header
+        class="flex items-center justify-between gap-3 border-b px-5 py-4"
       >
-        <RefreshCw
-          class={state.working ? "size-3.5 animate-spin" : "size-3.5"}
-        />
-        Refresh
-      </Button>
-    </header>
-    <ul class="max-h-[32rem] divide-y overflow-auto px-5" aria-live="polite">
-      {#each state.auditEvents as event (event.id)}
-        <li class="grid gap-1 py-3">
-          <div class="flex items-baseline justify-between gap-4">
-            <span class="font-medium">{actionLabel(event.action)}</span>
-            <time class="shrink-0 text-xs text-muted-foreground">
-              {new Date(event.created_at).toLocaleString()}
-            </time>
+        <div class="flex items-center gap-3">
+          <Activity class="size-4 text-muted-foreground" />
+          <div>
+            <h2 class="text-sm font-semibold">Instance activity</h2>
+            <p class="mt-0.5 text-xs text-muted-foreground">
+              Repository, authentication, and administration events.
+            </p>
           </div>
-          <p class="text-xs text-muted-foreground">
-            {event.actor_username ?? "System"}
-            {#if event.target}
-              <span> · {event.target}</span>
-            {/if}
-          </p>
-        </li>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={state.working}
+          onclick={() => void state.refreshActivity()}
+        >
+          {#if state.working}
+            <Spinner data-icon="inline-start" />
+          {:else}
+            <RefreshCw data-icon="inline-start" />
+          {/if}
+          Refresh
+        </Button>
+      </header>
+      {#if state.loading}
+        <p
+          class="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground"
+        >
+          <Spinner class="size-4" /> Loading activity…
+        </p>
       {:else}
-        <li class="py-5 text-sm text-muted-foreground">
-          No instance activity yet.
-        </li>
-      {/each}
-    </ul>
-  </section>
+        <ul
+          class="max-h-[32rem] divide-y overflow-auto px-5"
+          aria-live="polite"
+        >
+          {#each state.auditEvents as event (event.id)}
+            <li class="grid gap-1 py-3">
+              <div class="flex items-baseline justify-between gap-4">
+                <span class="font-medium">{actionLabel(event.action)}</span>
+                <time class="shrink-0 text-xs text-muted-foreground">
+                  {new Date(event.created_at).toLocaleString()}
+                </time>
+              </div>
+              <p class="text-xs text-muted-foreground">
+                {event.actor_username ?? "System"}
+                {#if event.target}
+                  <span> · {event.target}</span>
+                {/if}
+              </p>
+            </li>
+          {:else}
+            <li class="py-5 text-sm text-muted-foreground">
+              No instance activity yet.
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </section>
   {/if}
 </div>

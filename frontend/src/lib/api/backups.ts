@@ -17,6 +17,7 @@ export const backupProviderSchema = z.object({
   name: z.string(),
   provider: backupProviderKindSchema,
   managed_by_config: z.boolean(),
+  managed_by_storage: z.boolean(),
   path: z.string().nullable(),
   endpoint: z.string().nullable(),
   bucket: z.string().nullable(),

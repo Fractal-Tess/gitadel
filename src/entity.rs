@@ -11,6 +11,8 @@ pub mod instance {
         pub created_at: DateTimeUtc,
         pub site_name: String,
         pub site_description: Option<String>,
+        pub password_login_enabled: bool,
+        pub passkey_login_enabled: bool,
         pub updated_at: DateTimeUtc,
     }
 
@@ -41,6 +43,23 @@ pub mod backup_provider {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod backup_provider_exclusion {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "backup_provider_exclusions")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub provider_id: Uuid,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod backup_provider_schedule {
     use super::*;
 
@@ -52,6 +71,93 @@ pub mod backup_provider_schedule {
         pub schedule: String,
         pub next_backup_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod lfs_storage_target {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "lfs_storage_targets")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub name: String,
+        pub kind: String,
+        pub configuration: String,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod lfs_storage_state {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "lfs_storage_state")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: i32,
+        pub active_target_id: Option<Uuid>,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod lfs_object {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "lfs_objects")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub repository_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub oid: String,
+        pub size: i64,
+        pub storage_target_id: Option<Uuid>,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod lfs_storage_migration {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "lfs_storage_migrations")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub source_target_id: Option<Uuid>,
+        pub target_id: Option<Uuid>,
+        pub state: String,
+        pub phase: String,
+        pub last_key: Option<String>,
+        pub copied_objects: i64,
+        pub copied_bytes: i64,
+        pub error: Option<String>,
+        pub started_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+        pub completed_at: Option<DateTimeUtc>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -150,6 +256,50 @@ pub mod instance_asset {
         pub content_type: String,
         pub content: Vec<u8>,
         pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod oidc_provider {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "oidc_providers")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub name: String,
+        pub issuer_url: String,
+        pub client_id: String,
+        pub client_secret: String,
+        pub enabled: bool,
+        pub auto_provision: bool,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod oidc_identity {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "oidc_identities")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub provider_id: Uuid,
+        pub subject: String,
+        pub user_id: Uuid,
+        pub created_at: DateTimeUtc,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -6,9 +6,10 @@
   import CheckCircle2 from "@lucide/svelte/icons/check-circle-2";
   import CircleDashed from "@lucide/svelte/icons/circle-dashed";
   import ExternalLink from "@lucide/svelte/icons/external-link";
-  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
   import XCircle from "@lucide/svelte/icons/x-circle";
+  import { toast } from "svelte-sonner";
+  import { Spinner } from "$lib/components/ui/spinner/index.js";
 
   import {
     ApiFailure,
@@ -22,6 +23,8 @@
     type RepositoryImportItem,
   } from "$lib/api/imports.js";
   import { Button } from "$lib/components/ui/button/index.js";
+  import * as Alert from "$lib/components/ui/alert/index.js";
+  import * as Card from "$lib/components/ui/card/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
@@ -32,7 +35,7 @@
   let loading = $state(true);
   let working = $state(false);
   let token = $state("");
-  let error = $state<string | null>(null);
+  let loadError = $state<string | null>(null);
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
 
   const active = $derived(
@@ -73,9 +76,11 @@
         `/api/v1/repository-imports/${encodeURIComponent(id)}`,
         repositoryImportSchema,
       );
-      error = null;
+      loadError = null;
     } catch (caught) {
-      if (!background) error = message(caught, "Could not load this import.");
+      if (!background) {
+        loadError = message(caught, "Could not load this import.");
+      }
     } finally {
       if (!background) loading = false;
     }
@@ -84,7 +89,7 @@
   async function retry(): Promise<void> {
     if (!token.trim()) return;
     working = true;
-    error = null;
+    loadError = null;
     try {
       batch = await requestJson(
         `/api/v1/repository-imports/${encodeURIComponent(id)}/retry`,
@@ -93,7 +98,7 @@
       );
       token = "";
     } catch (caught) {
-      error = message(caught, "Could not retry this import.");
+      toast.error(message(caught, "Could not retry this import."));
     } finally {
       working = false;
     }
@@ -101,7 +106,7 @@
 
   async function cancel(): Promise<void> {
     working = true;
-    error = null;
+    loadError = null;
     try {
       await requestEmpty(
         `/api/v1/repository-imports/${encodeURIComponent(id)}`,
@@ -109,7 +114,9 @@
       );
       await load(true);
     } catch (caught) {
-      error = message(caught, "Could not cancel queued repositories.");
+      toast.error(
+        message(caught, "Could not cancel queued repositories."),
+      );
     } finally {
       working = false;
     }
@@ -176,18 +183,16 @@
     {/if}
   </div>
 
-  {#if error}
-    <p
-      class="mb-5 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
-      role="alert"
-    >
-      {error}
-    </p>
+  {#if loadError}
+    <Alert.Root class="mb-5" variant="destructive">
+      <Alert.Title>Import unavailable</Alert.Title>
+      <Alert.Description>{loadError}</Alert.Description>
+    </Alert.Root>
   {/if}
 
   {#if loading}
     <div class="grid place-items-center py-20 text-sm text-muted-foreground">
-      <LoaderCircle class="mb-3 size-5 animate-spin" />Loading import…
+      <Spinner class="mb-3 size-5 animate-spin" />Loading import…
     </div>
   {:else if batch}
     <section class="overflow-hidden rounded-xl border bg-card/20">
@@ -204,11 +209,15 @@
           <span
             class="inline-flex items-center gap-2 text-sm text-muted-foreground"
           >
-            <LoaderCircle class="size-4 animate-spin" />Importing…
+            <Spinner class="size-4 animate-spin" />Importing…
           </span>
         {:else}
-          <Button variant="outline" size="sm" onclick={() => void load()}>
-            <RefreshCw class="size-4" />Refresh
+          <Button
+            variant="outline"
+            size="sm"
+            onclick={() => void load()}
+          >
+            <RefreshCw data-icon="inline-start" />Refresh
           </Button>
         {/if}
       </div>
@@ -225,10 +234,8 @@
             {:else if item.state === "failed" || item.state === "credentials_required"}
               <XCircle class="size-5 text-destructive" aria-hidden="true" />
             {:else if item.state === "cloning" || item.state === "metadata"}
-              <LoaderCircle
-                class="size-5 animate-spin text-primary"
-                aria-hidden="true"
-              />
+              <Spinner class="size-5 animate-spin text-primary"
+              aria-hidden="true" />
             {:else}
               <CircleDashed
                 class="size-5 text-muted-foreground"
@@ -271,18 +278,21 @@
 
     {#if failedCount > 0 && !active}
       <form
-        class="mt-5 rounded-xl border bg-card/20 p-5"
+        class="mt-5"
         onsubmit={(event) => {
           event.preventDefault();
           void retry();
         }}
       >
-        <h2 class="font-medium">Retry {failedCount} failed repositories</h2>
-        <p class="mt-1 text-sm text-muted-foreground">
-          Reconnect the source token. It is used for this retry and is not
-          saved.
-        </p>
-        <div class="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end">
+        <Card.Root>
+          <Card.Header>
+            <Card.Title>Retry {failedCount} failed repositories</Card.Title>
+            <Card.Description>
+              Reconnect the source token. It is used for this retry and is not
+              saved.
+            </Card.Description>
+          </Card.Header>
+          <Card.Content class="flex flex-col gap-3 sm:flex-row sm:items-end">
           <Field.Field class="flex-1">
             <Field.Label for="retry-import-token">Access token</Field.Label>
             <Input
@@ -294,10 +304,11 @@
             />
           </Field.Field>
           <Button type="submit" disabled={working || !token.trim()}>
-            {#if working}<LoaderCircle class="size-4 animate-spin" />{/if}
+            {#if working}<Spinner class="size-4 animate-spin" />{/if}
             Retry failed
           </Button>
-        </div>
+          </Card.Content>
+        </Card.Root>
       </form>
     {/if}
   {/if}

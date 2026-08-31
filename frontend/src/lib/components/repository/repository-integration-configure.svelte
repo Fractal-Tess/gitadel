@@ -1,10 +1,10 @@
 <script lang="ts">
+  import { toast } from "svelte-sonner";
   import AppWindow from "@lucide/svelte/icons/app-window";
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import Box from "@lucide/svelte/icons/box";
   import CircleAlert from "@lucide/svelte/icons/circle-alert";
   import ExternalLink from "@lucide/svelte/icons/external-link";
-  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import Layers3 from "@lucide/svelte/icons/layers-3";
   import Rocket from "@lucide/svelte/icons/rocket";
   import Unlink from "@lucide/svelte/icons/unlink";
@@ -14,11 +14,13 @@
   import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
   import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
+  import * as Alert from "$lib/components/ui/alert/index.js";
   import * as Breadcrumb from "$lib/components/ui/breadcrumb/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
+  import { Spinner } from "$lib/components/ui/spinner/index.js";
   import * as Select from "$lib/components/ui/select/index.js";
   import { Separator } from "$lib/components/ui/separator/index.js";
   import { Switch } from "$lib/components/ui/switch/index.js";
@@ -55,7 +57,6 @@
   let working = $state(false);
   let loadError = $state<string | null>(null);
   let operationError = $state<string | null>(null);
-  let notice = $state<string | null>(null);
   let showSetup = $state(false);
   let setupStep = $state<SetupStep>("environments");
   let retainedConfigureStep = $state<ConfigureStep | null>(null);
@@ -145,7 +146,6 @@
 
   function resetMessages() {
     operationError = null;
-    notice = null;
   }
 
   function chooseEnvironment(project: DokployProject, environmentId: string) {
@@ -262,7 +262,7 @@
       selectedResource = null;
       retainedConfigureStep = null;
       setupStep = "resources";
-      notice = `Created ${created.name}.`;
+      toast.success(`Created ${created.name}.`);
     } catch (error) {
       if (createdProject && catalog) {
         catalog = {
@@ -276,7 +276,7 @@
         };
         environmentProjectId = createdProject.id;
       }
-      operationError = errorMessage(error);
+      toast.error(errorMessage(error));
     } finally {
       working = false;
     }
@@ -334,9 +334,9 @@
         },
       );
       showSetup = false;
-      notice = `${selectedResource.name} is connected.`;
+      toast.success(`${selectedResource.name} is connected.`);
     } catch (error) {
-      operationError = errorMessage(error);
+      toast.error(errorMessage(error));
     } finally {
       working = false;
     }
@@ -364,9 +364,9 @@
         },
       );
       showSetup = false;
-      notice = `${resourceName} was created and connected.`;
+      toast.success(`${resourceName} was created and connected.`);
     } catch (error) {
-      operationError = errorMessage(error);
+      toast.error(errorMessage(error));
     } finally {
       working = false;
     }
@@ -383,12 +383,12 @@
         method: "PUT",
         body: jsonBody({ enabled }),
       });
-      notice = enabled
-        ? "Push deployments are enabled."
-        : "Push deployments are disabled.";
+      toast.success(
+        enabled ? "Push deployments are enabled." : "Push deployments are disabled.",
+      );
     } catch (error) {
       detail = previous;
-      operationError = errorMessage(error);
+      toast.error(errorMessage(error));
     } finally {
       working = false;
     }
@@ -398,16 +398,15 @@
     if (working) return;
     working = true;
     operationError = null;
-    notice = null;
     try {
       const result = await requestJson(
         `${basePath}/deploy`,
         integrationDeployResultSchema,
         { method: "POST", body: jsonBody({}) },
       );
-      notice = result.summary;
+      toast.success(result.summary);
     } catch (error) {
-      operationError = errorMessage(error);
+      toast.error(errorMessage(error));
     } finally {
       working = false;
     }
@@ -435,10 +434,11 @@
       unlinkDialogOpen = false;
       showSetup = true;
       setupStep = "environments";
-      notice =
-        "The Dokploy resource was unlinked. It was not deleted from Dokploy.";
+      toast.success(
+        "The Dokploy resource was unlinked. It was not deleted from Dokploy.",
+      );
     } catch (error) {
-      operationError = errorMessage(error);
+      toast.error(errorMessage(error));
     } finally {
       working = false;
     }
@@ -495,14 +495,13 @@
     <div
       class="flex min-h-48 items-center justify-center rounded-xl border bg-card"
     >
-      <LoaderCircle class="size-5 animate-spin text-muted-foreground" />
+      <Spinner class="size-5 animate-spin text-muted-foreground" />
     </div>
   {:else if loadError}
-    <div
-      class="rounded-xl border border-destructive/35 bg-destructive/5 p-5 text-sm text-destructive"
-    >
-      {loadError}
-    </div>
+    <Alert.Root variant="destructive">
+      <Alert.Title>Integration unavailable</Alert.Title>
+      <Alert.Description>{loadError}</Alert.Description>
+    </Alert.Root>
   {:else if detail && link && !showSetup}
     <div class="grid gap-4 xl:grid-cols-2">
       <IntegrationConnectionCard
@@ -561,9 +560,7 @@
             disabled={working}
             onclick={() => void deployNow()}
           >
-            {#if working}<LoaderCircle
-                class="size-4 animate-spin"
-              />{:else}<Rocket class="size-4" />{/if}
+            {#if working}<Spinner class="size-4 animate-spin" />{:else}<Rocket data-icon="inline-start" />{/if}
             Deploy now
           </Button>
           <Button variant="outline" disabled={working} onclick={changeResource}
@@ -769,7 +766,7 @@
         <div
           class="flex min-h-48 items-center justify-center rounded-xl border bg-card"
         >
-          <LoaderCircle class="size-5 animate-spin text-muted-foreground" />
+          <Spinner class="size-5 animate-spin text-muted-foreground" />
         </div>
       {:else if catalog && setupStep === "environments"}
         {#if catalog.projects.length === 0}
@@ -918,12 +915,10 @@
             rejected.
           </p>
           <div class="flex justify-end">
-            <Button type="submit" class="gap-2" disabled={working}>
-              {#if working}<LoaderCircle
-                  class="size-4 animate-spin"
-                />{:else}<Unlink class="size-4 rotate-45" />{/if}
-              Connect resource
-            </Button>
+          <Button type="submit" class="gap-2" disabled={working}>
+            {#if working}<Spinner class="size-4 animate-spin" />{:else}<Unlink data-icon="inline-start" class="rotate-45" />{/if}
+            Connect resource
+          </Button>
           </div>
         </form>
       {:else if catalog && setupStep === "create" && selectedEnvironment}
@@ -986,35 +981,25 @@
             remain in Dokploy.
           </div>
           <div class="flex justify-end">
-            <Button type="submit" class="gap-2" disabled={working}>
-              {#if working}<LoaderCircle
-                  class="size-4 animate-spin"
-                />{:else}<Rocket class="size-4" />{/if}
-              Create resource
-            </Button>
+          <Button type="submit" class="gap-2" disabled={working}>
+            {#if working}<Spinner class="size-4 animate-spin" />{:else}<Rocket data-icon="inline-start" />{/if}
+            Create resource
+          </Button>
           </div>
         </form>
       {/if}
     </section>
   {/if}
 
-  {#if notice}
-    <p
-      class="rounded-lg border border-emerald-500/25 bg-emerald-500/5 px-4 py-3 text-sm text-emerald-700 dark:text-emerald-300"
-    >
-      {notice}
-    </p>
-  {/if}
-  {#if operationError}
-    <p
-      class="flex items-start gap-2 rounded-lg border border-destructive/35 bg-destructive/5 px-4 py-3 text-sm text-destructive"
-    >
-      <CircleAlert class="mt-0.5 size-4 shrink-0" />
-      {operationError}
-    </p>
-  {/if}
-</div>
 
+{#if operationError}
+  <Alert.Root variant="destructive">
+    <CircleAlert class="mt-0.5 size-4 shrink-0" />
+    <Alert.Title>Deployment operation failed</Alert.Title>
+    <Alert.Description>{operationError}</Alert.Description>
+  </Alert.Root>
+{/if}
+</div>
 <Dialog.Root bind:open={environmentDialogOpen}>
   <Dialog.Content>
     <form
@@ -1119,7 +1104,7 @@
             (environmentProjectId === NEW_DOKPLOY_PROJECT &&
               !environmentProjectName.trim())}
         >
-          {#if working}<LoaderCircle class="size-4 animate-spin" />{/if}
+          {#if working}<Spinner class="size-4 animate-spin" />{/if}
           Create environment
         </Button>
       </Dialog.Footer>
@@ -1140,13 +1125,13 @@
       <AlertDialog.Cancel disabled={working}>Cancel</AlertDialog.Cancel>
       <AlertDialog.Action
         disabled={working}
-        class="bg-destructive text-white hover:bg-destructive/90"
+        variant="destructive"
         onclick={(event) => {
           event.preventDefault();
           void unlinkResource();
         }}
       >
-        {#if working}<LoaderCircle class="size-4 animate-spin" />{/if}
+        {#if working}<Spinner class="size-4 animate-spin" />{/if}
         Unlink resource
       </AlertDialog.Action>
     </AlertDialog.Footer>

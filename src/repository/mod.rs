@@ -49,6 +49,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
+    blob_store::{BlobStore, ObjectKey, ObjectPrefix, lfs_object_key, targets},
     config::StorageSettings,
     entity::{
         namespace, organization_member, repository, repository_alias, repository_collaborator, user,
@@ -75,6 +76,8 @@ pub struct RepositoryState {
     mirror_syncing: Arc<Mutex<HashSet<Uuid>>>,
     github_known_hosts: Arc<Mutex<Option<(String, Instant)>>>,
     lfs_root: Arc<PathBuf>,
+    lfs_store: Arc<dyn BlobStore>,
+    lfs_target_id: Option<Uuid>,
     public_url: Arc<Url>,
     ssh_port: u16,
     lfs_tokens: Arc<RwLock<HashMap<String, LfsAuthorization>>>,
@@ -126,7 +129,8 @@ impl RepositoryState {
     ) -> Result<Self, anyhow::Error> {
         fs::create_dir_all(&settings.repository_root).await?;
         mirrors::cleanup_temporary_files(&settings.repository_root).await?;
-        fs::create_dir_all(&settings.lfs_root).await?;
+        let active_storage =
+            targets::load_active(identity.database(), settings.lfs_root.clone()).await?;
         mirrors::cleanup_lfs_staging(&settings.lfs_root).await?;
         fs::create_dir_all(&settings.actions_artifact_root).await?;
         Ok(Self {
@@ -149,6 +153,8 @@ impl RepositoryState {
             mirror_syncing: Arc::new(Mutex::new(HashSet::new())),
             github_known_hosts: Arc::new(Mutex::new(None)),
             lfs_root: Arc::new(settings.lfs_root),
+            lfs_store: active_storage.store,
+            lfs_target_id: active_storage.target_id,
             public_url: Arc::new(public_url),
             ssh_port,
             lfs_tokens: Arc::new(RwLock::new(HashMap::new())),
@@ -188,6 +194,10 @@ impl RepositoryState {
         self.actions_artifact_root.as_ref()
     }
 
+    pub(super) fn local_lfs_root(&self) -> &Path {
+        self.lfs_root.as_ref()
+    }
+
     pub(super) fn lfs_repository_path(&self, repository: &repository::Model) -> PathBuf {
         self.lfs_root_path(repository.storage_key)
     }
@@ -201,11 +211,20 @@ impl RepositoryState {
             .join(format!(".gitadel-import-{}", Uuid::new_v4().simple()))
     }
 
-    pub(super) fn lfs_object_path(&self, repository: &repository::Model, oid: &str) -> PathBuf {
-        self.lfs_repository_path(repository)
-            .join(&oid[..2])
-            .join(&oid[2..4])
-            .join(oid)
+    pub(super) fn lfs_object_key(
+        &self,
+        repository: &repository::Model,
+        oid: &str,
+    ) -> Result<ObjectKey, ApiError> {
+        lfs_object_key(repository.storage_key, oid).map_err(ApiError::internal)
+    }
+
+    pub(super) fn lfs_store(&self) -> &dyn BlobStore {
+        self.lfs_store.as_ref()
+    }
+
+    pub(super) fn lfs_target_id(&self) -> Option<Uuid> {
+        self.lfs_target_id
     }
 
     pub(super) fn lfs_endpoint(&self, repository: &repository::Model) -> String {
@@ -376,15 +395,20 @@ impl RepositoryState {
             .copied()
             .unwrap_or_default();
         let repository_path = self.repository_path(repository);
-        let lfs_path = self.lfs_repository_path(repository);
-        let bytes = tokio::task::spawn_blocking(move || {
-            let git_bytes = directory_size(&repository_path)?;
-            let lfs_bytes = directory_size(&lfs_path)?;
-            Ok::<_, anyhow::Error>(git_bytes.saturating_add(lfs_bytes))
-        })
-        .await
-        .map_err(ApiError::internal)?
-        .map_err(ApiError::internal)?;
+        let git_bytes = tokio::task::spawn_blocking(move || directory_size(&repository_path))
+            .await
+            .map_err(ApiError::internal)?
+            .map_err(ApiError::internal)?;
+        let lfs_prefix =
+            ObjectPrefix::new(repository.storage_key.to_string()).map_err(ApiError::internal)?;
+        let lfs_bytes = self
+            .lfs_store()
+            .list(&lfs_prefix)
+            .await
+            .map_err(ApiError::internal)?
+            .into_iter()
+            .fold(0_u64, |total, object| total.saturating_add(object.size));
+        let bytes = git_bytes.saturating_add(lfs_bytes);
         let current_generation = self
             .size_generations
             .read()

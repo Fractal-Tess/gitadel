@@ -75,7 +75,17 @@
     return true;
   }
 
+  function recordCompletedLoginMethod(url: URL): void {
+    const method = url.searchParams.get("loginMethod");
+    if (!method?.startsWith("sso:")) return;
+    try {
+      globalThis.localStorage?.setItem("gitadel:last-login-method", method);
+    } catch {
+      // Authentication does not depend on browser storage.
+    }
+  }
   async function guardRoute(url: URL, sequence: number): Promise<void> {
+    recordCompletedLoginMethod(url);
     try {
       const status = await app.initialize();
       if (sequence !== guardSequence) return;
@@ -134,7 +144,7 @@
           returnTo?.startsWith("/-/") ||
           (returnTo && managedNamespace(returnTo.split("?")[0] ?? "") !== null)
         ) {
-          await goto(returnTo, { replaceState: true });
+          window.location.assign(returnTo);
         } else {
           await goto(resolve("/"), { replaceState: true });
         }

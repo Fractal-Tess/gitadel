@@ -13,6 +13,7 @@
   import RepositorySidebar from "$lib/components/repository/repository-sidebar.svelte";
   import RepositoryTags from "$lib/components/repository/repository-tags.svelte";
   import RepositoryIntegrationConfigure from "$lib/components/repository/repository-integration-configure.svelte";
+  import * as Alert from "$lib/components/ui/alert/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
   import { recordRepositoryVisit } from "$lib/state/recent-repositories.js";
@@ -87,27 +88,29 @@
     <p class="text-sm text-muted-foreground">Opening repository…</p>
   </div>
 {:else if state.error && !state.repository}
-  <div
-    class="mx-auto mt-16 max-w-lg rounded-lg border border-destructive/30 bg-destructive/5 p-6 text-center"
+  <Alert.Root
+    class="mx-auto mt-16 max-w-lg text-center"
+    variant="destructive"
   >
-    <p class="font-medium">Repository unavailable</p>
-    <p class="mt-2 text-sm text-destructive">{state.error}</p>
-    <Button class="mt-5 gap-2" variant="link" href={resolve("/")}>
-      <ArrowLeft class="size-4" />Back to repositories
+    <Alert.Title>Repository unavailable</Alert.Title>
+    <Alert.Description>{state.error}</Alert.Description>
+    <Button class="mt-5" variant="link" href={resolve("/")}>
+      <ArrowLeft data-icon="inline-start" />Back to repositories
     </Button>
-  </div>
+  </Alert.Root>
 {:else if state.repository}
   <!-- On wide screens the page itself never scrolls: it fills the shell and each
        column owns its own scrollbar, so a short file tree stays on screen while
        a long file scrolls. Narrow screens keep one ordinary page scroll. -->
   <div class="flex flex-col xl:h-full xl:min-h-0">
     {#if state.error}
-      <div
-        class="shrink-0 border-b border-destructive/30 bg-destructive/5 px-5 py-3 text-sm text-destructive"
-        role="alert"
+      <Alert.Root
+        class="shrink-0 rounded-none border-x-0 border-t-0 px-5 py-3"
+        variant="destructive"
       >
-        {state.error}
-      </div>
+        <Alert.Title>Repository update failed</Alert.Title>
+        <Alert.Description>{state.error}</Alert.Description>
+      </Alert.Root>
     {/if}
 
     {#if inSettings}

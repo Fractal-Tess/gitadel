@@ -3,12 +3,12 @@
   import { resolve } from "$app/paths";
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import KeyRound from "@lucide/svelte/icons/key-round";
-  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import Search from "@lucide/svelte/icons/search";
   import type { Component } from "svelte";
   import SiForgejo from "@icons-pack/svelte-simple-icons/icons/SiForgejo";
   import SiGitea from "@icons-pack/svelte-simple-icons/icons/SiGitea";
   import SiGithub from "@icons-pack/svelte-simple-icons/icons/SiGithub";
+  import { toast } from "svelte-sonner";
   import SiGitlab from "@icons-pack/svelte-simple-icons/icons/SiGitlab";
 
   import {
@@ -23,10 +23,16 @@
     type RemoteImportRepository,
   } from "$lib/api/imports.js";
   import { mirrorIdentitiesSchema, type MirrorIdentity } from "$lib/api/mirrors.js";
+  import * as Alert from "$lib/components/ui/alert/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
+  import * as Card from "$lib/components/ui/card/index.js";
+  import { Checkbox } from "$lib/components/ui/checkbox/index.js";
+  import * as Empty from "$lib/components/ui/empty/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
   import * as Select from "$lib/components/ui/select/index.js";
+  import { Spinner } from "$lib/components/ui/spinner/index.js";
+  import * as Tabs from "$lib/components/ui/tabs/index.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
   type Provider = "github" | "gitlab" | "gitea" | "forgejo";
@@ -81,7 +87,7 @@
   let directVisibility = $state("private");
   let connecting = $state(false);
   let importing = $state(false);
-  let error = $state<string | null>(null);
+  let identityLoadError = $state<string | null>(null);
   let identityLoadSequence = 0;
 
   const viewer = $derived(app.authStatus?.user?.username ?? "");
@@ -149,10 +155,14 @@
       if (sequence !== identityLoadSequence) return;
       identities = next;
       if (!next.some((identity) => identity.id === identityId)) identityId = "";
+      identityLoadError = null;
     } catch (caught) {
       if (sequence !== identityLoadSequence) return;
       identities = [];
-      error = message(caught, "Could not load repository identities.");
+      identityLoadError = message(
+        caught,
+        "Could not load repository identities.",
+      );
     } finally {
       if (sequence === identityLoadSequence) identitiesLoading = false;
     }
@@ -164,7 +174,7 @@
     discovery = null;
     selected = {};
     targetNames = {};
-    error = null;
+    identityLoadError = null;
   }
 
   function chooseMode(next: ImportMode): void {
@@ -173,13 +183,12 @@
     discovery = null;
     selected = {};
     targetNames = {};
-    error = null;
+    identityLoadError = null;
   }
 
   async function connect(): Promise<void> {
     if (!namespace || !identityId) return;
     connecting = true;
-    error = null;
     try {
       const result = await requestJson(
         "/api/v1/repository-imports/discover",
@@ -204,7 +213,9 @@
       );
       discovery = result;
     } catch (caught) {
-      error = message(caught, "Could not load repositories from the source.");
+      toast.error(
+        message(caught, "Could not load repositories from the source."),
+      );
     } finally {
       connecting = false;
     }
@@ -219,7 +230,6 @@
   async function startImport(): Promise<void> {
     if (!namespace || !identityId || selectedCount === 0) return;
     importing = true;
-    error = null;
     try {
       const result = await requestJson(
         "/api/v1/repository-imports",
@@ -242,7 +252,7 @@
       );
       await goto(resolve("/imports/[id]", { id: result.id }));
     } catch (caught) {
-      error = message(caught, "Could not start the repository import.");
+      toast.error(message(caught, "Could not start the repository import."));
     } finally {
       importing = false;
     }
@@ -257,7 +267,6 @@
     )
       return;
     importing = true;
-    error = null;
     try {
       const result = await requestJson(
         "/api/v1/repository-imports/direct",
@@ -275,7 +284,7 @@
       );
       await goto(resolve("/imports/[id]", { id: result.id }));
     } catch (caught) {
-      error = message(caught, "Could not start the repository import.");
+      toast.error(message(caught, "Could not start the repository import."));
     } finally {
       importing = false;
     }
@@ -332,42 +341,26 @@
     </div>
   </div>
 
-  {#if error}
-    <p
-      class="mb-5 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
-      role="alert"
-    >
-      {error}
-    </p>
+  {#if identityLoadError}
+    <Alert.Root class="mb-5" variant="destructive">
+      <Alert.Title>Repository identities unavailable</Alert.Title>
+      <Alert.Description>{identityLoadError}</Alert.Description>
+    </Alert.Root>
   {/if}
 
   {#if !discovery}
-    <div
-      class="mb-6 grid grid-cols-2 gap-2 rounded-lg bg-muted/40 p-1 sm:w-fit"
+    <Tabs.Root
+      class="mb-6 w-fit"
+      value={mode}
+      onValueChange={(value) => {
+        if (value === "provider" || value === "direct") chooseMode(value);
+      }}
     >
-      <button
-        type="button"
-        class={[
-          "rounded-md px-4 py-2 text-sm font-medium transition-colors",
-          mode === "provider"
-            ? "bg-background shadow-sm"
-            : "text-muted-foreground",
-        ]}
-        aria-pressed={mode === "provider"}
-        onclick={() => chooseMode("provider")}>Provider account</button
-      >
-      <button
-        type="button"
-        class={[
-          "rounded-md px-4 py-2 text-sm font-medium transition-colors",
-          mode === "direct"
-            ? "bg-background shadow-sm"
-            : "text-muted-foreground",
-        ]}
-        aria-pressed={mode === "direct"}
-        onclick={() => chooseMode("direct")}>Direct Git URL</button
-      >
-    </div>
+      <Tabs.List>
+        <Tabs.Trigger value="provider">Provider account</Tabs.Trigger>
+        <Tabs.Trigger value="direct">Direct Git URL</Tabs.Trigger>
+      </Tabs.List>
+    </Tabs.Root>
 
     <div class="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,0.8fr)]">
       {#if mode === "provider"}
@@ -400,13 +393,15 @@
           </div>
         </section>
       {:else}
-        <section class="rounded-xl border bg-card/20 p-5">
-          <h2 class="font-medium">Import one Git repository</h2>
-          <p class="mt-1 text-sm leading-5 text-muted-foreground">
-            Use an HTTPS URL with a token or password identity, or an SSH URL
-            with an SSH identity.
-          </p>
-          <div class="mt-5 grid gap-4">
+        <Card.Root>
+          <Card.Header>
+            <Card.Title>Import one Git repository</Card.Title>
+            <Card.Description>
+              Use an HTTPS URL with a token or password identity, or an SSH URL
+              with an SSH identity.
+            </Card.Description>
+          </Card.Header>
+          <Card.Content class="grid gap-4">
             <Field.Field>
               <Field.Label for="direct-url">Git URL</Field.Label>
               <Input
@@ -439,25 +434,25 @@
                 </Select.Content>
               </Select.Root>
             </Field.Field>
-          </div>
-        </section>
+          </Card.Content>
+        </Card.Root>
       {/if}
 
       <form
-        class="rounded-xl border bg-card/20 p-5"
         onsubmit={(event) => {
           event.preventDefault();
           if (mode === "provider") void connect();
           else void startDirectImport();
         }}
       >
-        <h2 class="font-medium">
-          {mode === "provider" ? "2." : "2."} Choose destination and identity
-        </h2>
-        <p class="mt-1 text-sm text-muted-foreground">
-          Secrets stay in namespace settings and are never entered here.
-        </p>
-        <div class="mt-5 grid gap-4">
+        <Card.Root>
+          <Card.Header>
+            <Card.Title>2. Choose destination and identity</Card.Title>
+            <Card.Description>
+              Secrets stay in namespace settings and are never entered here.
+            </Card.Description>
+          </Card.Header>
+          <Card.Content class="grid gap-4">
           <Field.Field>
             <Field.Label>Destination namespace</Field.Label>
             <Select.Root
@@ -526,7 +521,7 @@
                 resolve("/[namespace]/mirror-credentials", { namespace }),
               )}
           >
-            <KeyRound class="size-4" /> Manage identities
+            <KeyRound data-icon="inline-start" /> Manage identities
           </Button>
 
           <Button
@@ -536,9 +531,7 @@
               !selectedIdentity ||
               (mode === "direct" && (!directUrl.trim() || !directName.trim()))}
           >
-            {#if connecting || importing}<LoaderCircle
-                class="size-4 animate-spin"
-              />{/if}
+            {#if connecting || importing}<Spinner class="size-4 animate-spin" />{/if}
             {mode === "provider"
               ? connecting
                 ? "Loading repositories…"
@@ -547,31 +540,32 @@
                 ? "Starting import…"
                 : "Import repository"}
           </Button>
-        </div>
+          </Card.Content>
+        </Card.Root>
       </form>
     </div>
   {:else}
     <div class="grid gap-5">
-      <section class="rounded-xl border bg-card/20 p-5">
-        <div class="flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <p class="text-sm font-medium">
-              Connected to {selectedProvider.name} as {discovery.account}
-            </p>
-            <p class="mt-1 text-sm text-muted-foreground">
-              {selectedCount} selected for {namespace} · {discovery.repositories
-                .length} detected
-            </p>
-          </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onclick={() => (discovery = null)}
-          >
-            Change source
-          </Button>
-        </div>
-        <div class="mt-5">
+      <Card.Root>
+        <Card.Header>
+          <Card.Title>
+            Connected to {selectedProvider.name} as {discovery.account}
+          </Card.Title>
+          <Card.Description>
+            {selectedCount} selected for {namespace} · {discovery.repositories
+              .length} detected
+          </Card.Description>
+          <Card.Action>
+            <Button
+              variant="outline"
+              size="sm"
+              onclick={() => (discovery = null)}
+            >
+              Change source
+            </Button>
+          </Card.Action>
+        </Card.Header>
+        <Card.Content class="grid gap-4">
           <Field.Field>
             <Field.Label for="import-search">Filter repositories</Field.Label>
             <div class="relative">
@@ -586,30 +580,34 @@
               />
             </div>
           </Field.Field>
-        </div>
-        <label class="mt-4 flex w-fit items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            bind:checked={includeArchived}
-            class="size-4 accent-primary"
-          />
-          Include archived repositories
-        </label>
-      </section>
+          <label
+            for="include-archived-repositories"
+            class="flex w-fit items-center gap-2 text-sm"
+          >
+            <Checkbox
+              id="include-archived-repositories"
+              bind:checked={includeArchived}
+            />
+            Include archived repositories
+          </label>
+        </Card.Content>
+      </Card.Root>
 
       <section class="overflow-hidden rounded-xl border bg-card/20">
         <div
           class="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3"
         >
-          <label class="flex items-center gap-2 text-sm font-medium">
-            <input
-              type="checkbox"
+          <label
+            for="select-visible-repositories"
+            class="flex items-center gap-2 text-sm font-medium"
+          >
+            <Checkbox
+              id="select-visible-repositories"
               checked={filteredRepositories.length > 0 &&
                 filteredRepositories.every(
                   (repository) => selected[repository.id],
                 )}
-              onchange={(event) => toggleVisible(event.currentTarget.checked)}
-              class="size-4 accent-primary"
+              onCheckedChange={(checked) => toggleVisible(checked === true)}
             />
             Select all shown
           </label>
@@ -622,11 +620,9 @@
             <div
               class="grid gap-3 p-4 md:grid-cols-[auto_minmax(0,1fr)_15rem_8rem] md:items-center"
             >
-              <input
-                type="checkbox"
+              <Checkbox
                 bind:checked={selected[repository.id]}
                 aria-label={`Import ${repository.full_name}`}
-                class="size-4 accent-primary"
               />
               <div class="min-w-0">
                 <button
@@ -651,9 +647,14 @@
               </span>
             </div>
           {:else}
-            <p class="p-8 text-center text-sm text-muted-foreground">
-              No repositories match this filter.
-            </p>
+            <Empty.Root class="rounded-none border-0 py-10">
+              <Empty.Header>
+                <Empty.Title>No repositories match this filter</Empty.Title>
+                <Empty.Description>
+                  Adjust the search or include archived repositories.
+                </Empty.Description>
+              </Empty.Header>
+            </Empty.Root>
           {/each}
         </div>
       </section>
@@ -672,7 +673,7 @@
           disabled={importing || selectedCount === 0}
           onclick={() => void startImport()}
         >
-          {#if importing}<LoaderCircle class="size-4 animate-spin" />{/if}
+          {#if importing}<Spinner data-icon="inline-start" />{/if}
           {importing
             ? "Starting import…"
             : `Import ${selectedCount} repositories`}

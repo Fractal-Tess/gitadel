@@ -66,7 +66,7 @@
         }),
       });
     } catch {
-      // The page-level error region explains how to recover.
+      // The repository settings state owns mutation error toasts.
     }
   }
 
@@ -78,7 +78,7 @@
       });
       moveDialogOpen = false;
     } catch {
-      // The page-level error region explains how to recover.
+      // The repository settings state owns mutation error toasts.
     }
   }
 
@@ -87,7 +87,7 @@
       await repository.settings.softDelete();
       deleteDialogOpen = false;
     } catch {
-      // The page-level error region explains how to recover.
+      // The repository settings state owns mutation error toasts.
     }
   }
 </script>

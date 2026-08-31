@@ -70,11 +70,11 @@
           <div>
             <p>This file is too large to render inline.</p>
             <Button
-              class="mt-4 gap-2"
+              class="mt-4"
               variant="outline"
               onclick={() => window.open(state.rawUrl, "_blank", "noopener")}
             >
-              <Download class="size-4" />Download raw file
+              <Download data-icon="inline-start" />Download raw file
             </Button>
           </div>
         </div>

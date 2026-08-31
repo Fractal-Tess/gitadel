@@ -15,6 +15,14 @@ import {
   loadBackupSettings,
 } from "../src/lib/settings/backup-settings-cache.js";
 import {
+  clearSettingsDataCache,
+  loadLfsStatus,
+  loadStorageTargets,
+  loadApiTokens,
+  preloadAccountSettingsView,
+  preloadAdminSettingsView,
+} from "../src/lib/settings/settings-data-cache.js";
+import {
   clearRepositoryCaches,
   clearRepositoryDataCache,
   loadRepositoryHistory,
@@ -67,6 +75,11 @@ const cacheCases: readonly CacheCase[] = [
     load: loadBackupSettings,
     response: emptyBackupResponse,
   },
+  {
+    name: "settings data cache",
+    load: loadApiTokens,
+    response: [],
+  },
 ];
 
 type PendingRequest = {
@@ -88,6 +101,7 @@ beforeEach(() => {
   clearNamespaceCaches();
   clearRepositoryCaches();
   clearBackupSettingsCache();
+  clearSettingsDataCache();
 });
 
 afterEach(() => {
@@ -167,6 +181,59 @@ describe("authorization cache scopes", () => {
   });
 });
 
+describe("settings data cache", () => {
+  test("deduplicates one settings dataset until caches clear", async () => {
+    const paths: string[] = [];
+    globalThis.fetch = ((input: string | URL | Request) => {
+      paths.push(String(input));
+      return Promise.resolve(Response.json([]));
+    }) as typeof fetch;
+
+    await Promise.all([loadApiTokens(scope), loadApiTokens(scope)]);
+    await loadApiTokens(scope);
+    clearSettingsDataCache();
+    await loadApiTokens(scope);
+
+    assert.deepEqual(paths, ["/api/v1/me/tokens", "/api/v1/me/tokens"]);
+  });
+  test("preloads only the requested account settings dataset", async () => {
+    const paths: string[] = [];
+    globalThis.fetch = ((input: string | URL | Request) => {
+      paths.push(String(input));
+      return Promise.resolve(Response.json([]));
+    }) as typeof fetch;
+
+    preloadAccountSettingsView(scope, "ssh-keys");
+    await loadApiTokens(scope);
+
+    assert.deepEqual(paths.sort(), [
+      "/api/v1/me/ssh-keys",
+      "/api/v1/me/tokens",
+    ]);
+  });
+
+  test("preloads both datasets required by Git LFS administration", async () => {
+    const paths: string[] = [];
+    globalThis.fetch = ((input: string | URL | Request) => {
+      const path = String(input);
+      paths.push(path);
+      return Promise.resolve(
+        Response.json(
+          path.endsWith("/targets") ? [] : { object_count: 0, total_bytes: 0 },
+        ),
+      );
+    }) as typeof fetch;
+
+    preloadAdminSettingsView(scope, "lfs");
+    await Promise.all([loadStorageTargets(scope), loadLfsStatus(scope)]);
+
+    assert.deepEqual(paths.sort(), [
+      "/api/v1/admin/storage/lfs/status",
+      "/api/v1/admin/storage/targets",
+    ]);
+  });
+});
+
 describe("repository data cache", () => {
   test("deduplicates revision-keyed history within one scope", async () => {
     const paths: string[] = [];
@@ -239,6 +306,7 @@ describe("backup settings cache", () => {
                 name: "Local",
                 provider: "filesystem",
                 managed_by_config: false,
+                managed_by_storage: false,
                 path: "/backups",
                 endpoint: null,
                 bucket: null,

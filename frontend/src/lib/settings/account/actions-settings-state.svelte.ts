@@ -22,7 +22,7 @@ export class ActionsSettingsState {
   actionsLoading = $state(false);
   actionsLoadError = $state<string | null>(null);
   actionsWorking = $state<Record<string, boolean>>({});
-  actionErrors = $state<Record<string, string | null>>({});
+  actionLoadErrors = $state<Record<string, string | null>>({});
   private scope: AuthorizationCacheScope;
   constructor(
     scope: AuthorizationCacheScope,
@@ -38,18 +38,18 @@ export class ActionsSettingsState {
     const scope = this.scope;
     this.actionsLoading = true;
     this.actionsLoadError = null;
-    const errors: Record<string, string | null> = {};
+    const loadErrors: Record<string, string | null> = {};
     const loaded: Record<string, ActionRunner[]> = {};
     let failures = 0;
     await Promise.all(
       namespaces.map(async (namespace) => {
         try {
           loaded[namespace] = await takeNamespaceRunners(namespace, scope);
-          errors[namespace] = null;
+          loadErrors[namespace] = null;
         } catch (caught) {
           failures += 1;
           loaded[namespace] = this.actionRunners[namespace] ?? [];
-          errors[namespace] =
+          loadErrors[namespace] =
             caught instanceof ApiFailure || caught instanceof Error
               ? caught.message
               : `Could not load runners for ${namespace}.`;
@@ -58,7 +58,7 @@ export class ActionsSettingsState {
     );
     if (!this.current(scope)) return;
     this.actionRunners = loaded;
-    this.actionErrors = errors;
+    this.actionLoadErrors = loadErrors;
     if (failures === namespaces.length && namespaces.length > 0)
       this.actionsLoadError = "Could not load runners.";
     this.actionsLoading = false;
@@ -72,7 +72,6 @@ export class ActionsSettingsState {
     const scope = this.scope;
     if (this.actionsWorking[namespace]) return;
     this.actionsWorking[namespace] = true;
-    this.actionErrors[namespace] = null;
     try {
       const registration = await requestJson(
         `/api/v1/namespaces/${encodeURIComponent(namespace)}/actions/runner-registration-tokens`,
@@ -87,24 +86,22 @@ export class ActionsSettingsState {
         caught instanceof ApiFailure || caught instanceof Error
           ? caught.message
           : "Could not create the runner registration token.";
-      this.actionErrors[namespace] = message;
       toast.error(message);
     } finally {
       this.actionsWorking[namespace] = false;
     }
   }
 
-  async removeActionRunner(namespace: string, runnerId: number): Promise<void> {
+  async removeActionRunner(namespace: string, runnerId: number): Promise<boolean> {
     const scope = this.scope;
-    if (this.actionsWorking[namespace]) return;
+    if (this.actionsWorking[namespace]) return false;
     this.actionsWorking[namespace] = true;
-    this.actionErrors[namespace] = null;
     try {
       await requestEmpty(
         `/api/v1/namespaces/${encodeURIComponent(namespace)}/actions/runners/${runnerId}`,
         { method: "DELETE" },
       );
-      if (!this.current(scope)) return;
+      if (!this.current(scope)) return false;
       this.actionRunners = {
         ...this.actionRunners,
         [namespace]: (this.actionRunners[namespace] ?? []).filter(
@@ -112,14 +109,15 @@ export class ActionsSettingsState {
         ),
       };
       toast.success("Runner removed");
+      return true;
     } catch (caught) {
-      if (!this.current(scope)) return;
+      if (!this.current(scope)) return false;
       const message =
         caught instanceof ApiFailure || caught instanceof Error
           ? caught.message
           : "Could not remove the runner.";
-      this.actionErrors[namespace] = message;
       toast.error(message);
+      return false;
     } finally {
       this.actionsWorking[namespace] = false;
     }

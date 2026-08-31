@@ -68,12 +68,15 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 url = { version = "2.5.7", features = ["serde"] }
 uuid = { version = "1.19.0", features = ["serde", "v4"] }
-webauthn-rs = { version = "0.5.5", default-features = false }
+webauthn-rs = { version = "0.5.5", default-features = false, features = ["conditional-ui"] }
 fs2 = "0.4.3"
 futures-util = "0.3.31"
 tar = "0.4.46"
 walkdir = "2.5.0"
 zstd = "0.13.3"
+axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls"] }
+rustls = { version = "0.23.43", default-features = false, features = ["aws-lc-rs"] }
+openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
 
 
 [build-dependencies]

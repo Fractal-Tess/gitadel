@@ -7,7 +7,10 @@ import {
   type AuthStatus,
   type ThemePreference,
 } from "$lib/api/auth.js";
-import { instanceSettingsSchema, type InstanceSettings } from "$lib/api/instance.js";
+import {
+  instanceSettingsSchema,
+  type InstanceSettings,
+} from "$lib/api/instance.js";
 import { jsonBody, requestJson } from "$lib/api/transport.js";
 import type { AuthorizationCacheScope } from "$lib/cache-scope.js";
 import type { Organization } from "$lib/api/organizations.js";
@@ -21,6 +24,7 @@ import { clearNamespaceCaches } from "$lib/namespace-preload.js";
 import { clearRepositoryCaches } from "$lib/repository/repository-data-cache.js";
 import { clearRepositoryPreloads } from "$lib/repository/repository-preload.js";
 import { clearBackupSettingsCache } from "$lib/settings/backup-settings-cache.js";
+import { clearSettingsDataCache } from "$lib/settings/settings-data-cache.js";
 
 const APP_STATE = Symbol("gitadel-app-state");
 function organizationPermissionsKey(organizations: Organization[]): string {
@@ -203,6 +207,7 @@ export class AppState {
     clearRepositoryCaches();
     clearRepositoryPreloads();
     clearBackupSettingsCache();
+    clearSettingsDataCache();
   }
 
   #setAuthStatus(status: AuthStatus): void {
@@ -226,6 +231,7 @@ export class AppState {
       clearRepositoryCaches();
       clearRepositoryPreloads();
       clearBackupSettingsCache();
+      clearSettingsDataCache();
     }
     this.authStatus = status;
   }

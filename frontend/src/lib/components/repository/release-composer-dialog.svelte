@@ -1,5 +1,4 @@
 <script lang="ts">
-  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
 
   import type { Release } from "$lib/api/releases.js";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -7,6 +6,7 @@
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
+  import { Spinner } from "$lib/components/ui/spinner/index.js";
   import MarkdownEditor from "$lib/components/repository/markdown-editor.svelte";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
 
@@ -26,7 +26,6 @@
   let body = $state("");
   let prerelease = $state(false);
   let files = $state<File[]>([]);
-  let failure = $state("");
 
   const targetSuggestions = $derived([
     ...(repository.browser.refs?.tags.map((tag) => tag.name) ?? []),
@@ -41,12 +40,10 @@
     body = release?.body ?? "";
     prerelease = release?.prerelease ?? false;
     files = [];
-    failure = "";
   });
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
-    failure = "";
     try {
       if (release) {
         await repository.releases.updateRelease(release.id, {
@@ -67,9 +64,8 @@
         );
       }
       open = false;
-    } catch (caught) {
-      failure =
-        caught instanceof Error ? caught.message : "The request failed.";
+    } catch {
+      // The repository release state owns mutation error toasts.
     }
   }
 </script>
@@ -155,9 +151,6 @@
         Mark as a pre-release
       </label>
 
-      {#if failure}
-        <p class="text-sm text-destructive">{failure}</p>
-      {/if}
 
       <Dialog.Footer class="mt-2 gap-2">
         <Button type="button" variant="ghost" onclick={() => (open = false)}
@@ -168,7 +161,7 @@
           disabled={repository.releases.releasePending || repository.releases.releaseAssetPending}
         >
           {#if repository.releases.releasePending || repository.releases.releaseAssetPending}
-            <LoaderCircle class="size-4 animate-spin" />
+            <Spinner class="size-4 animate-spin" />
           {/if}
           {repository.releases.releaseAssetPending
             ? "Uploading assets…"

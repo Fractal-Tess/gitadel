@@ -13,7 +13,7 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use chrono::{DateTime, Utc};
 use futures_util::stream;
-use sea_orm::{ActiveModelTrait, ConnectionTrait, EntityTrait, Set, TransactionTrait};
+use sea_orm::{ActiveModelTrait, ConnectionTrait, EntityTrait, Set, Statement, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use tokio_util::io::ReaderStream;
 use url::Url;
@@ -22,9 +22,10 @@ use uuid::Uuid;
 use crate::{
     archive::{self, MaintenanceAction},
     backup_provider::{
-        self, BackupProvider, BackupProviderConfig, BackupProviderKind, FilesystemSettings,
-        RUNTIME_S3_PROVIDER_ID,
+        self, BackupProvider, BackupProviderConfig, BackupProviderKind, BackupProviderSource,
+        FilesystemSettings, RUNTIME_S3_PROVIDER_ID,
     },
+    blob_store::targets::{self, StorageTargetConfiguration, StorageTargetView},
     config::S3Settings,
     entity::{audit_event, instance, instance_asset},
 };
@@ -293,6 +294,7 @@ pub struct BackupProviderResponse {
     name: String,
     provider: BackupProviderKind,
     managed_by_config: bool,
+    managed_by_storage: bool,
     path: Option<String>,
     endpoint: Option<String>,
     bucket: Option<String>,
@@ -368,16 +370,293 @@ pub struct RestoreBackupRequest {
     create_safety_backup: bool,
 }
 
+#[derive(Deserialize)]
+pub struct StorageTargetRequest {
+    name: Option<String>,
+    kind: String,
+    path: Option<PathBuf>,
+    endpoint: Option<Url>,
+    bucket: Option<String>,
+    access_key: Option<String>,
+    secret_key: Option<String>,
+    region: Option<String>,
+    prefix: Option<String>,
+}
+
+impl StorageTargetRequest {
+    fn configuration(&self) -> Result<StorageTargetConfiguration, ApiError> {
+        match self.kind.as_str() {
+            "filesystem" => Ok(StorageTargetConfiguration::Filesystem {
+                path: self
+                    .path
+                    .clone()
+                    .ok_or_else(|| ApiError::bad_request("A filesystem path is required."))?,
+            }),
+            "s3" => Ok(StorageTargetConfiguration::S3 {
+                s3: S3Settings {
+                    endpoint: self
+                        .endpoint
+                        .clone()
+                        .ok_or_else(|| ApiError::bad_request("An S3 endpoint is required."))?,
+                    bucket: required_storage_value(&self.bucket, "An S3 bucket is required.")?,
+                    access_key: required_storage_value(
+                        &self.access_key,
+                        "An S3 access key is required.",
+                    )?,
+                    secret_key: required_storage_value(
+                        &self.secret_key,
+                        "An S3 secret key is required.",
+                    )?,
+                    region: self
+                        .region
+                        .clone()
+                        .unwrap_or_else(|| "us-east-1".to_owned()),
+                    prefix: self
+                        .prefix
+                        .clone()
+                        .unwrap_or_else(|| "gitadel-lfs".to_owned()),
+                },
+            }),
+            _ => Err(ApiError::bad_request("The storage target kind is invalid.")),
+        }
+    }
+}
+
+fn required_storage_value(
+    value: &Option<String>,
+    message: &'static str,
+) -> Result<String, ApiError> {
+    value
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .ok_or_else(|| ApiError::bad_request(message))
+}
+
+#[derive(Serialize)]
+pub struct StorageTargetTestResponse {
+    message: &'static str,
+}
+
+#[derive(Deserialize)]
+pub struct StorageMigrationRequest {
+    target_id: Uuid,
+    #[serde(default = "default_storage_migration_batch_size")]
+    batch_size: usize,
+}
+
+fn default_storage_migration_batch_size() -> usize {
+    100
+}
+
+#[derive(Serialize)]
+pub struct StorageMigrationScheduledResponse {
+    operation_id: Uuid,
+    target_id: Uuid,
+    message: &'static str,
+}
+
+pub async fn list_storage_targets(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Json<Vec<StorageTargetView>>, ApiError> {
+    require_admin(&state, &headers, &jar, SCOPE_READ).await?;
+    let settings = state.runtime_settings()?;
+    Ok(Json(
+        targets::list(state.database(), &settings.storage.lfs_root)
+            .await
+            .map_err(ApiError::internal)?,
+    ))
+}
+
+#[derive(Serialize)]
+pub struct LfsStorageStatusResponse {
+    object_count: u64,
+    total_bytes: u64,
+}
+
+pub async fn lfs_storage_status(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Json<LfsStorageStatusResponse>, ApiError> {
+    require_admin(&state, &headers, &jar, SCOPE_READ).await?;
+    let statement = Statement::from_string(
+        state.database().get_database_backend(),
+        "SELECT COUNT(*) AS object_count, COALESCE(SUM(size), 0) AS total_bytes FROM lfs_objects",
+    );
+    let row = state
+        .database()
+        .query_one_raw(statement)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::internal(anyhow::anyhow!("LFS usage query returned no row")))?;
+    let object_count = row
+        .try_get::<i64>("", "object_count")
+        .map_err(ApiError::internal)?;
+    let total_bytes = row
+        .try_get::<i64>("", "total_bytes")
+        .map_err(ApiError::internal)?;
+    Ok(Json(LfsStorageStatusResponse {
+        object_count: u64::try_from(object_count).map_err(ApiError::internal)?,
+        total_bytes: u64::try_from(total_bytes).map_err(ApiError::internal)?,
+    }))
+}
+
+pub async fn test_storage_target(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(request): Json<StorageTargetRequest>,
+) -> Result<Json<StorageTargetTestResponse>, ApiError> {
+    require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
+    targets::test_configuration(&request.configuration()?)
+        .await
+        .map_err(|error| ApiError::bad_request(format!("Storage target test failed: {error:#}")))?;
+    Ok(Json(StorageTargetTestResponse {
+        message: "Storage target passed write, stat, read, and delete checks.",
+    }))
+}
+
+pub async fn test_saved_storage_target(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(target_id): Path<Uuid>,
+) -> Result<Json<StorageTargetTestResponse>, ApiError> {
+    require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
+    let (_, configuration) = targets::find(state.database(), target_id)
+        .await
+        .map_err(ApiError::internal)?;
+    targets::test_configuration(&configuration)
+        .await
+        .map_err(|error| ApiError::bad_request(format!("Storage target test failed: {error:#}")))?;
+    Ok(Json(StorageTargetTestResponse {
+        message: "Storage target passed write, stat, read, and delete checks.",
+    }))
+}
+
+pub async fn create_storage_target(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(request): Json<StorageTargetRequest>,
+) -> Result<(StatusCode, Json<StorageTargetView>), ApiError> {
+    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
+    let name = request
+        .name
+        .clone()
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| ApiError::bad_request("A storage target name is required."))?;
+    let target = targets::create(state.database(), name, request.configuration()?)
+        .await
+        .map_err(|error| {
+            ApiError::bad_request(format!("Could not create storage target: {error:#}"))
+        })?;
+    state
+        .audit(
+            Some(actor.user.id),
+            "storage.target.create",
+            Some(target.id.to_string()),
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(target)))
+}
+
+pub async fn delete_storage_target(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(target_id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
+    targets::delete(state.database(), target_id)
+        .await
+        .map_err(|error| {
+            ApiError::bad_request(format!("Could not delete storage target: {error:#}"))
+        })?;
+    state
+        .audit(
+            Some(actor.user.id),
+            "storage.target.delete",
+            Some(target_id.to_string()),
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn migrate_storage(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(request): Json<StorageMigrationRequest>,
+) -> Result<(StatusCode, Json<StorageMigrationScheduledResponse>), ApiError> {
+    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
+    if request.batch_size == 0 {
+        return Err(ApiError::bad_request(
+            "The storage migration batch size must be greater than zero.",
+        ));
+    }
+    if !request.target_id.is_nil() {
+        targets::find(state.database(), request.target_id)
+            .await
+            .map_err(|_| ApiError::bad_request("The storage target does not exist."))?;
+    }
+    let operation_id = Uuid::new_v4();
+    state
+        .audit(
+            Some(actor.user.id),
+            "storage.migration.schedule",
+            Some(request.target_id.to_string()),
+        )
+        .await?;
+    state
+        .schedule_maintenance(MaintenanceAction::LfsMigrate {
+            operation_id,
+            target_id: request.target_id,
+            batch_size: request.batch_size,
+        })
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(StorageMigrationScheduledResponse {
+            operation_id,
+            target_id: request.target_id,
+            message: "Gitadel is restarting to migrate Git LFS storage.",
+        }),
+    ))
+}
+
+pub async fn storage_progress(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(_operation_id): Path<Uuid>,
+) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
+    let events = stream::once(async {
+        Ok(Event::default()
+            .event("reconnecting")
+            .data(r#"{"phase":"scheduled","message":"Waiting for maintenance mode."}"#))
+    });
+    Ok(Sse::new(events))
+}
+
 pub async fn list_backup_providers(
     State(state): State<IdentityState>,
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<BackupProvidersResponse>, ApiError> {
     require_admin(&state, &headers, &jar, SCOPE_READ).await?;
-    let fallback = state.runtime_settings()?.backup.s3.as_ref();
-    let providers = backup_provider::list(state.database(), fallback)
-        .await
-        .map_err(ApiError::internal)?;
+    let settings = state.runtime_settings()?;
+    let providers = backup_provider::list_with_storage(
+        state.database(),
+        settings.backup.s3.as_ref(),
+        &settings.storage.lfs_root,
+    )
+    .await
+    .map_err(ApiError::internal)?;
     let schedules = archive::list_backup_schedules(state.database())
         .await
         .map_err(ApiError::internal)?;
@@ -451,6 +730,7 @@ pub async fn create_backup_provider(
         id: Uuid::new_v4(),
         name: request.name.trim().to_owned(),
         config,
+        source: BackupProviderSource::Stored,
         created_at: now,
         updated_at: now,
     };
@@ -484,6 +764,11 @@ pub async fn update_backup_provider(
         ));
     }
     let mut existing = required_backup_provider(&state, provider_id).await?;
+    if existing.source == BackupProviderSource::StorageTarget {
+        return Err(ApiError::bad_request(
+            "Storage targets are configured on the Storage page.",
+        ));
+    }
     let config = requested_backup_provider_config(&state, &request).await?;
     consume_provider_test(&state, actor.user.id, request.test_token, &config).await?;
     if existing.id == RUNTIME_S3_PROVIDER_ID {
@@ -516,16 +801,24 @@ pub async fn delete_backup_provider(
     Path(provider_id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    if provider_id == RUNTIME_S3_PROVIDER_ID {
-        return Err(ApiError::bad_request(
-            "A provider from gitadel.toml cannot be removed here.",
-        ));
-    }
-    if !backup_provider::delete(state.database(), provider_id)
-        .await
-        .map_err(ApiError::internal)?
-    {
-        return Err(ApiError::not_found());
+    let provider = required_backup_provider(&state, provider_id).await?;
+    match provider.source {
+        BackupProviderSource::Stored => {
+            if !backup_provider::delete(state.database(), provider_id)
+                .await
+                .map_err(ApiError::internal)?
+            {
+                return Err(ApiError::not_found());
+            }
+        }
+        BackupProviderSource::StorageTarget => {
+            backup_provider::exclude_storage_target(state.database(), provider_id)
+                .await
+                .map_err(ApiError::internal)?;
+        }
+        BackupProviderSource::RuntimeConfig => {
+            return Err(ApiError::not_found());
+        }
     }
     state
         .audit(
@@ -546,13 +839,24 @@ pub async fn update_backup_schedule(
 ) -> Result<Json<BackupProviderResponse>, ApiError> {
     let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
     let mut provider = required_backup_provider(&state, provider_id).await?;
-    if provider.id == RUNTIME_S3_PROVIDER_ID {
-        provider.id = Uuid::new_v4();
-        provider.created_at = Utc::now();
-        provider.updated_at = provider.created_at;
-        backup_provider::save(state.database(), &provider)
-            .await
-            .map_err(ApiError::internal)?;
+    match provider.source {
+        BackupProviderSource::RuntimeConfig => {
+            provider.id = Uuid::new_v4();
+            provider.created_at = Utc::now();
+            provider.updated_at = provider.created_at;
+            provider.source = BackupProviderSource::Stored;
+            backup_provider::save(state.database(), &provider)
+                .await
+                .map_err(ApiError::internal)?;
+        }
+        BackupProviderSource::StorageTarget => {
+            let mut persisted = provider.clone();
+            persisted.source = BackupProviderSource::Stored;
+            backup_provider::save(state.database(), &persisted)
+                .await
+                .map_err(ApiError::internal)?;
+        }
+        BackupProviderSource::Stored => {}
     }
     archive::validate_backup_schedule(request.schedule.as_deref())
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
@@ -808,11 +1112,16 @@ async fn required_backup_provider(
     state: &IdentityState,
     provider_id: Uuid,
 ) -> Result<BackupProvider, ApiError> {
-    let fallback = state.runtime_settings()?.backup.s3.as_ref();
-    backup_provider::load(state.database(), fallback, provider_id)
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(ApiError::not_found)
+    let settings = state.runtime_settings()?;
+    backup_provider::load_with_storage(
+        state.database(),
+        settings.backup.s3.as_ref(),
+        &settings.storage.lfs_root,
+        provider_id,
+    )
+    .await
+    .map_err(ApiError::internal)?
+    .ok_or_else(ApiError::not_found)
 }
 
 async fn requested_backup_provider_config(
@@ -906,13 +1215,15 @@ fn backup_provider_response(
     let (schedule, next_backup_at) = schedule
         .map(|schedule| (Some(schedule.schedule), Some(schedule.next_backup_at)))
         .unwrap_or((None, None));
-    let managed_by_config = provider.id == RUNTIME_S3_PROVIDER_ID;
+    let managed_by_config = provider.source == BackupProviderSource::RuntimeConfig;
+    let managed_by_storage = provider.source == BackupProviderSource::StorageTarget;
     match provider.config {
         BackupProviderConfig::Filesystem(settings) => BackupProviderResponse {
             id: provider.id,
             name: provider.name,
             provider: BackupProviderKind::Filesystem,
             managed_by_config,
+            managed_by_storage,
             path: Some(settings.path.to_string_lossy().into_owned()),
             endpoint: None,
             bucket: None,
@@ -927,6 +1238,7 @@ fn backup_provider_response(
             name: provider.name,
             provider: BackupProviderKind::S3,
             managed_by_config,
+            managed_by_storage,
             path: None,
             endpoint: Some(settings.endpoint.to_string()),
             bucket: Some(settings.bucket),
@@ -1017,7 +1329,7 @@ async fn touch_instance<C: ConnectionTrait>(
     Ok(())
 }
 
-async fn require_admin(
+pub(super) async fn require_admin(
     state: &IdentityState,
     headers: &HeaderMap,
     jar: &CookieJar,

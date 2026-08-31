@@ -4,10 +4,13 @@
   import GitCommit from "@lucide/svelte/icons/git-commit";
   import PackageOpen from "@lucide/svelte/icons/package-open";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+  import Workflow from "@lucide/svelte/icons/workflow";
   import { tick } from "svelte";
 
   import ActionStatusBadge from "$lib/components/actions/action-status-badge.svelte";
+  import * as Alert from "$lib/components/ui/alert/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
+  import * as Empty from "$lib/components/ui/empty/index.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
 
   let { state: repository }: { state: RepositoryPageState } = $props();
@@ -71,14 +74,14 @@
       <Button
         type="button"
         variant="ghost"
-        class="-ml-3 gap-2"
+        class="-ml-3"
         onclick={() =>
           repository.navigate("actions", {
             commit: repository.actionCommit,
             page: repository.actionPage,
           })}
       >
-        <ArrowLeft class="size-4" />All runs
+        <ArrowLeft data-icon="inline-start" />All runs
       </Button>
     </div>
     <header
@@ -113,12 +116,13 @@
     </header>
 
     {#if repository.actions.actionRun.diagnostic}
-      <div class="rounded-md border border-destructive/30 bg-destructive/5 p-4">
-        <p class="font-medium text-destructive">Workflow could not run</p>
-        <pre
-          class="mt-2 overflow-x-auto whitespace-pre-wrap text-xs text-destructive">{repository
+      <Alert.Root variant="destructive">
+        <Alert.Title>Workflow could not run</Alert.Title>
+        <Alert.Description>
+          <pre class="overflow-x-auto whitespace-pre-wrap text-xs">{repository
             .actions.actionRun.diagnostic}</pre>
-      </div>
+        </Alert.Description>
+      </Alert.Root>
     {/if}
 
     <div class="grid gap-5 lg:grid-cols-[18rem_minmax(0,1fr)]">
@@ -231,12 +235,12 @@
           Loading artifacts…
         </p>
       {:else if repository.actions.actionArtifactsError}
-        <p
-          class="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
-          role="alert"
-        >
-          Could not load artifacts: {repository.actions.actionArtifactsError}
-        </p>
+        <Alert.Root variant="destructive">
+          <Alert.Title>Artifacts unavailable</Alert.Title>
+          <Alert.Description>
+            Could not load artifacts: {repository.actions.actionArtifactsError}
+          </Alert.Description>
+        </Alert.Root>
       {:else if repository.actions.actionArtifacts.length === 0}
         <div class="rounded-lg border border-dashed p-4">
           <p class="font-medium">No artifacts for this run</p>
@@ -262,9 +266,9 @@
                 download
                 variant="outline"
                 size="sm"
-                class="gap-2 self-start sm:self-auto"
+                class="self-start sm:self-auto"
               >
-                <Download class="size-4" />Download
+                <Download data-icon="inline-start" />Download
               </Button>
             </li>
           {/each}
@@ -273,14 +277,19 @@
     </section>
   </div>
 {:else if !repository.actions.actionRuns || repository.actions.actionRuns.runs.length === 0}
-  <div class="mx-auto max-w-xl rounded-lg border border-dashed p-8 text-center">
-    <h1 class="text-lg font-semibold">No workflow runs</h1>
-    <p class="mt-2 text-sm leading-6 text-muted-foreground">
-      Push a supported workflow in <code>.forgejo/workflows</code>,
-      <code>.gitea/workflows</code>, or <code>.github/workflows</code>. The
-      first directory that exists takes precedence.
-    </p>
-  </div>
+  <Empty.Root class="mx-auto max-w-xl border border-dashed">
+    <Empty.Header>
+      <Empty.Media variant="icon">
+        <Workflow />
+      </Empty.Media>
+      <Empty.Title>No workflow runs</Empty.Title>
+      <Empty.Description>
+        Push a supported workflow in <code>.forgejo/workflows</code>,
+        <code>.gitea/workflows</code>, or <code>.github/workflows</code>. The
+        first directory that exists takes precedence.
+      </Empty.Description>
+    </Empty.Header>
+  </Empty.Root>
 {:else}
   <div class="mx-auto max-w-5xl">
     <header class="mb-5 flex items-center justify-between gap-4">
@@ -296,7 +305,7 @@
         class="gap-2"
         onclick={() => void repository.actions.loadActions()}
       >
-        <RefreshCw class="size-4" />Refresh
+        <RefreshCw data-icon="inline-start" />Refresh
       </Button>
     </header>
     <div class="overflow-hidden rounded-lg border">

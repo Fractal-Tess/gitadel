@@ -1,7 +1,7 @@
 <script lang="ts">
   import Check from "@lucide/svelte/icons/check";
   import ChevronsUpDown from "@lucide/svelte/icons/chevrons-up-down";
-  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import { Spinner } from "$lib/components/ui/spinner/index.js";
   import UserRound from "@lucide/svelte/icons/user-round";
 
   import { avatarUrl } from "$lib/api/account.js";
@@ -156,7 +156,7 @@
             <div
               class="flex items-center gap-2 px-3 py-4 text-sm text-muted-foreground"
             >
-              <LoaderCircle class="size-4 animate-spin" />
+              <Spinner class="size-4" />
               Searching users…
             </div>
           </Command.Loading>

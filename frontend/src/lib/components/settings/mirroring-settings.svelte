@@ -1,5 +1,6 @@
 <script lang="ts">
-  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import { Spinner } from "$lib/components/ui/spinner/index.js";
+  import { toast } from "svelte-sonner";
   import { onMount } from "svelte";
 
   import {
@@ -12,6 +13,7 @@
   import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
   import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
+  import * as Alert from "$lib/components/ui/alert/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
@@ -39,7 +41,6 @@
   let loading = $state(true);
   let loadError = $state<string | null>(null);
   let working = $state<Record<string, boolean>>({});
-  let errors = $state<Record<string, string | null>>({});
 
   let modalOpen = $state(false);
   let editing = $state<IdentityCard | null>(null);
@@ -148,7 +149,7 @@
       token = "";
       modalOpen = false;
     } catch (caught) {
-      formError = message(caught, "Could not save the mirror identity.");
+      toast.error(message(caught, "Could not save the mirror identity."));
     } finally {
       saving = false;
     }
@@ -158,7 +159,6 @@
     const card = pendingRemove;
     if (!card) return;
     working[card.identity.id] = true;
-    errors[card.identity.id] = null;
     try {
       await requestEmpty(
         `${identitiesPath(card.target.slug)}/${encodeURIComponent(card.identity.id)}`,
@@ -170,9 +170,8 @@
       pendingRemove = null;
       removeDialogOpen = false;
     } catch (caught) {
-      errors[card.identity.id] = message(
-        caught,
-        `Could not remove ${card.identity.name}.`,
+      toast.error(
+        message(caught, `Could not remove ${card.identity.name}.`),
       );
       removeDialogOpen = false;
     } finally {
@@ -209,12 +208,13 @@
 
   {#if loading}
     <p class="flex items-center gap-2 text-sm text-muted-foreground">
-      <LoaderCircle class="size-4 animate-spin" />Loading identities…
+      <Spinner class="size-4" />Loading identities…
     </p>
   {:else if loadError}
-    <p class="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive" role="alert">
-      {loadError}
-    </p>
+    <Alert.Root variant="destructive">
+      <Alert.Title>Mirror identities unavailable</Alert.Title>
+      <Alert.Description>{loadError}</Alert.Description>
+    </Alert.Root>
   {:else}
     <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
       {#each targets as currentTarget (currentTarget.slug)}
@@ -248,7 +248,6 @@
           statusHealthy={true}
           detailLabel={`Last used ${formatTimestamp(card.identity.last_used_at)}`}
           busy={working[card.identity.id]}
-          error={errors[card.identity.id]}
           configureLabel="Configure"
           onconfigure={() => openEdit(card)}
           onremove={() => {
@@ -290,9 +289,10 @@
         </div>
       {/if}
       {#if formError}
-        <p class="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive" role="alert">
-          {formError}
-        </p>
+        <Alert.Root variant="destructive">
+          <Alert.Title>Could not save mirror identity</Alert.Title>
+          <Alert.Description>{formError}</Alert.Description>
+        </Alert.Root>
       {/if}
       <Field.Field>
         <Field.Label for="mirror-identity-name">Name</Field.Label>

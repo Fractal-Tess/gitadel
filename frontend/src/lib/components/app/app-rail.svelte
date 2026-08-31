@@ -23,11 +23,7 @@
 
   import * as Avatar from "$lib/components/ui/avatar/index.js";
   import * as Sidebar from "$lib/components/ui/sidebar/index.js";
-  import {
-    preloadAdminActivity,
-    preloadAccountSettings,
-    preloadExplore,
-  } from "$lib/navigation-cache.js";
+  import { preloadExplore } from "$lib/navigation-cache.js";
   import { repositorySettingsSections } from "$lib/repository/settings-sections.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
   import {
@@ -222,7 +218,6 @@
         href: resolve("/-/account/[view]", { view: "profile" }),
         icon: Settings2,
         active: page.url.pathname.startsWith("/-/account"),
-        preload: () => preloadAccountSettings(scope),
       },
     ];
     if (app.authStatus.user?.is_admin) {
@@ -231,7 +226,6 @@
         href: resolve("/-/administration/[view]", { view: "appearance" }),
         icon: ShieldCheck,
         active: page.url.pathname.startsWith("/-/administration"),
-        preload: () => preloadAdminActivity(scope),
       });
     }
     links.push({

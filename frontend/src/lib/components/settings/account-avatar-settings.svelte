@@ -7,6 +7,7 @@
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import * as Avatar from "$lib/components/ui/avatar/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
+  import * as Card from "$lib/components/ui/card/index.js";
   import {
     ApiFailure,
     jsonBody,
@@ -53,22 +54,28 @@
 </script>
 
 <section
-  class="grid gap-5 p-5 md:grid-cols-[minmax(12rem,0.72fr)_minmax(0,1.5fr)] md:gap-10 md:p-6"
+  class="grid gap-5 py-(--card-spacing) md:grid-cols-[minmax(12rem,0.72fr)_minmax(0,1.5fr)] md:gap-10"
   aria-labelledby="profile-picture-heading"
 >
-  <header class="flex items-start gap-3">
+  <Card.Header class="flex flex-row items-start gap-3">
     <Camera class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
     <div>
-      <h2 id="profile-picture-heading" class="font-semibold">
+      <Card.Title
+        id="profile-picture-heading"
+        role="heading"
+        aria-level={2}
+      >
         Profile picture
-      </h2>
-      <p class="mt-1 max-w-xs text-sm leading-5 text-muted-foreground">
+      </Card.Title>
+      <Card.Description class="mt-1 max-w-xs leading-5">
         Choose how your account appears across Gitadel.
-      </p>
+      </Card.Description>
     </div>
-  </header>
+  </Card.Header>
 
-  <div class="flex max-w-2xl flex-col gap-4 sm:flex-row sm:items-center">
+  <Card.Content
+    class="flex max-w-2xl flex-col gap-4 sm:flex-row sm:items-center"
+  >
     <Avatar.Root class="size-24 ring-1 ring-foreground/15">
       {#if imageUrl}
         <Avatar.Image src={imageUrl} alt="" />
@@ -98,7 +105,7 @@
         saving.
       </p>
     </div>
-  </div>
+  </Card.Content>
 </section>
 
 <AvatarCropDialog bind:open={editorOpen} onsave={saveAvatar} />

@@ -4,8 +4,11 @@
   import { page } from "$app/state";
   import ShieldCheck from "@lucide/svelte/icons/shield-check";
   import UserPlus from "@lucide/svelte/icons/user-plus";
+  import { toast } from "svelte-sonner";
 
   import { Button } from "$lib/components/ui/button/index.js";
+  import * as Field from "$lib/components/ui/field/index.js";
+  import { Input } from "$lib/components/ui/input/index.js";
   import {
     ApiFailure,
     jsonBody,
@@ -20,13 +23,13 @@
   let username = $state("");
   let password = $state("");
   let confirmation = $state("");
-  let error = $state<string | null>(null);
+  let validationError = $state<string | null>(null);
   let working = $state(false);
 
   async function createAccount(): Promise<void> {
-    error = null;
+    validationError = null;
     if (password !== confirmation) {
-      error = "Passwords do not match.";
+      validationError = "Passwords do not match.";
       return;
     }
     working = true;
@@ -49,10 +52,11 @@
         await goto(resolve("/"));
       }
     } catch (caught) {
-      error =
+      toast.error(
         caught instanceof ApiFailure || caught instanceof Error
           ? caught.message
-          : "Could not create the account.";
+          : "Could not create the account.",
+      );
     } finally {
       working = false;
     }
@@ -91,13 +95,6 @@
         : "This private invitation grants access to this Gitadel instance."}
     </p>
 
-    {#if error}
-      <p
-        class="mt-5 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
-      >
-        {error}
-      </p>
-    {/if}
 
     <form
       class="mt-6 grid gap-4"
@@ -106,38 +103,42 @@
         void createAccount();
       }}
     >
-      <label class="grid gap-1.5 text-sm font-medium">
-        Username
-        <input
-          class="rounded-md border bg-background px-3 py-2 outline-none focus:border-ring focus:ring-2 focus:ring-ring/20"
+      <Field.Field>
+        <Field.Label for="register-username">Username</Field.Label>
+        <Input
+          id="register-username"
           bind:value={username}
           autocomplete="username"
-          minlength="3"
+          minlength={3}
           required
         />
-      </label>
-      <label class="grid gap-1.5 text-sm font-medium">
-        Password
-        <input
+      </Field.Field>
+      <Field.Field>
+        <Field.Label for="register-password">Password</Field.Label>
+        <Input
+          id="register-password"
           type="password"
-          class="rounded-md border bg-background px-3 py-2 outline-none focus:border-ring focus:ring-2 focus:ring-ring/20"
           bind:value={password}
           autocomplete="new-password"
-          minlength="12"
+          minlength={12}
           required
         />
-      </label>
-      <label class="grid gap-1.5 text-sm font-medium">
-        Confirm password
-        <input
+      </Field.Field>
+      <Field.Field data-invalid={validationError !== null}>
+        <Field.Label for="register-confirmation">Confirm password</Field.Label>
+        <Input
+          id="register-confirmation"
           type="password"
-          class="rounded-md border bg-background px-3 py-2 outline-none focus:border-ring focus:ring-2 focus:ring-ring/20"
           bind:value={confirmation}
           autocomplete="new-password"
-          minlength="12"
+          minlength={12}
+          aria-invalid={validationError !== null}
           required
         />
-      </label>
+        {#if validationError}
+          <Field.Error>{validationError}</Field.Error>
+        {/if}
+      </Field.Field>
       <Button
         class="mt-2"
         type="submit"

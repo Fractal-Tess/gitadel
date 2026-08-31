@@ -9,6 +9,7 @@
   import RepositoryToolbar from "$lib/components/repository/repository-toolbar.svelte";
   import RepositoryTopics from "$lib/components/repository/repository-topics.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
+  import * as Alert from "$lib/components/ui/alert/index.js";
   import { Textarea } from "$lib/components/ui/textarea/index.js";
   import { languageColor } from "$lib/repository/language-colors.js";
   import type {
@@ -292,13 +293,17 @@
       {:else if repository.releases.releasesLoading}
         <p class="mt-3 text-xs text-muted-foreground">Loading releases…</p>
       {:else if repository.releases.releasesLoadFailed}
-        <button
-          type="button"
-          class="mt-3 text-left text-xs text-muted-foreground hover:text-foreground"
-          onclick={() => void repository.releases.refreshReleases()}
-        >
-          Releases unavailable. Try again.
-        </button>
+        <Alert.Root class="mt-3 p-2 text-xs" variant="destructive">
+          <Alert.Title>Releases unavailable</Alert.Title>
+          <Alert.Description>
+            <Button
+              variant="link"
+              class="h-auto p-0 text-xs"
+              onclick={() => void repository.releases.refreshReleases()}
+              >Releases unavailable. Try again.</Button
+            >
+          </Alert.Description>
+        </Alert.Root>
       {:else}
         <button
           type="button"

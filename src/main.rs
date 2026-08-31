@@ -4,6 +4,7 @@ mod actions;
 mod api;
 mod archive;
 mod backup_provider;
+mod blob_store;
 mod client;
 mod config;
 mod database;
@@ -15,6 +16,7 @@ mod network;
 mod repository;
 mod schedule;
 mod server;
+mod storage;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -38,6 +40,11 @@ async fn main() -> Result<()> {
             config::GitadelCommand::Backup { command } => {
                 let settings = Settings::load(&cli)?;
                 archive::run(command, &settings, cli.config_path()).await
+            }
+            config::GitadelCommand::Lfs { command } => {
+                let settings = Settings::load(&cli)?;
+                let _storage_lock = archive::acquire_storage_lock(&settings.database)?;
+                storage::run(command, &settings).await
             }
         };
     }

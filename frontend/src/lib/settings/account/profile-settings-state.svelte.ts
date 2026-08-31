@@ -16,7 +16,6 @@ export class ProfileSettingsState {
   username = $state("");
   defaultRepositoryVisibility = $state<"public" | "private">("private");
   working = $state(false);
-  error = $state<string | null>(null);
 
   private scope: AuthorizationCacheScope;
   constructor(
@@ -96,16 +95,15 @@ export class ProfileSettingsState {
     task: () => Promise<void>,
   ): Promise<void> {
     this.working = true;
-    this.error = null;
     try {
       await task();
     } catch (caught) {
       if (!this.current(scope)) return;
-      this.error =
+      const message =
         caught instanceof ApiFailure || caught instanceof Error
           ? caught.message
           : "The request failed.";
-      toast.error(this.error);
+      toast.error(message);
     } finally {
       this.working = false;
     }
@@ -117,7 +115,6 @@ export class PasswordSettingsState {
   newPassword = $state("");
   confirmPassword = $state("");
   working = $state(false);
-  error = $state<string | null>(null);
 
   private scope: AuthorizationCacheScope;
   constructor(
@@ -132,8 +129,7 @@ export class PasswordSettingsState {
   }
   async updatePassword(): Promise<void> {
     if (this.newPassword !== this.confirmPassword) {
-      this.error = "The new passwords do not match.";
-      toast.error(this.error);
+      toast.error("The new passwords do not match.");
       return;
     }
     const scope = this.scope;
@@ -160,16 +156,15 @@ export class PasswordSettingsState {
     task: () => Promise<void>,
   ): Promise<void> {
     this.working = true;
-    this.error = null;
     try {
       await task();
     } catch (caught) {
       if (!this.current(scope)) return;
-      this.error =
+      const message =
         caught instanceof ApiFailure || caught instanceof Error
           ? caught.message
           : "The request failed.";
-      toast.error(this.error);
+      toast.error(message);
     } finally {
       this.working = false;
     }

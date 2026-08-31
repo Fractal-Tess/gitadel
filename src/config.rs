@@ -29,6 +29,24 @@ pub struct Cli {
     #[arg(long, env = "GITADEL_PUBLIC_URL", value_name = "URL")]
     public_url: Option<Url>,
 
+    /// PEM certificate chain for the embedded HTTPS listener.
+    #[arg(
+        long,
+        env = "GITADEL_TLS_CERTIFICATE",
+        value_name = "PATH",
+        requires = "tls_private_key"
+    )]
+    tls_certificate: Option<PathBuf>,
+
+    /// PEM private key for the embedded HTTPS listener.
+    #[arg(
+        long,
+        env = "GITADEL_TLS_PRIVATE_KEY",
+        value_name = "PATH",
+        requires = "tls_certificate"
+    )]
+    tls_private_key: Option<PathBuf>,
+
     /// SeaORM database URL. The default creates ./gitadel.db when SQLite opens it.
     #[arg(long, env = "GITADEL_DATABASE_URL", value_name = "URL")]
     database_url: Option<String>,
@@ -72,6 +90,64 @@ pub enum GitadelCommand {
     Backup {
         #[command(subcommand)]
         command: BackupCommand,
+    },
+    /// Manage Git LFS storage targets and offline migrations.
+    Lfs {
+        #[command(subcommand)]
+        command: LfsCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LfsCommand {
+    /// Manage configured LFS storage targets.
+    Target {
+        #[command(subcommand)]
+        command: Box<LfsTargetCommand>,
+    },
+    /// Copy, verify, and select an LFS storage target. Gitadel must be stopped.
+    Migrate {
+        /// Destination target UUID.
+        #[arg(value_name = "TARGET_ID")]
+        target_id: uuid::Uuid,
+        /// Maximum objects copied before durable progress is updated.
+        #[arg(long, default_value_t = 100)]
+        batch_size: usize,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LfsTargetCommand {
+    /// List configured targets and the active selection.
+    List,
+    /// Add and test a local filesystem target.
+    AddFilesystem {
+        #[arg(long)]
+        name: String,
+        #[arg(long, value_name = "PATH")]
+        path: PathBuf,
+    },
+    /// Add and test an S3-compatible target.
+    AddS3 {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        endpoint: Url,
+        #[arg(long)]
+        bucket: String,
+        #[arg(long, env = "GITADEL_LFS_S3_ACCESS_KEY", hide_env_values = true)]
+        access_key: String,
+        #[arg(long, env = "GITADEL_LFS_S3_SECRET_KEY", hide_env_values = true)]
+        secret_key: String,
+        #[arg(long, default_value = "us-east-1")]
+        region: String,
+        #[arg(long, default_value = "gitadel-lfs")]
+        prefix: String,
+    },
+    /// Exercise write, stat, read, and delete against a target.
+    Test {
+        #[arg(value_name = "TARGET_ID")]
+        target_id: uuid::Uuid,
     },
 }
 
@@ -159,6 +235,14 @@ pub struct Settings {
 pub struct ServerSettings {
     pub bind: SocketAddr,
     pub public_url: Url,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsSettings>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TlsSettings {
+    pub certificate: PathBuf,
+    pub private_key: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -276,6 +360,7 @@ impl Default for Settings {
                 bind: SocketAddr::from(([127, 0, 0, 1], 3000)),
                 public_url: Url::parse("http://localhost:3000")
                     .expect("default public URL is valid"),
+                tls: None,
             },
             database: DatabaseSettings {
                 url: "sqlite://gitadel.db?mode=rwc".to_owned(),
@@ -354,6 +439,13 @@ impl Settings {
         if let Some(public_url) = &cli.public_url {
             settings.server.public_url.clone_from(public_url);
         }
+        if let (Some(certificate), Some(private_key)) = (&cli.tls_certificate, &cli.tls_private_key)
+        {
+            settings.server.tls = Some(TlsSettings {
+                certificate: certificate.clone(),
+                private_key: private_key.clone(),
+            });
+        }
         if let Some(database_url) = &cli.database_url {
             settings.database.url.clone_from(database_url);
         }
@@ -373,11 +465,22 @@ impl Settings {
         if let Some(s3) = &settings.backup.s3 {
             validate_s3_settings(s3)?;
         }
+        validate_server_settings(&settings.server)?;
         validate_actions_settings(&settings.actions)?;
 
         Ok(settings)
     }
 }
+fn validate_server_settings(settings: &ServerSettings) -> Result<()> {
+    if settings.tls.is_some() {
+        ensure!(
+            settings.public_url.scheme() == "https",
+            "server.public_url must use https when server.tls is configured"
+        );
+    }
+    Ok(())
+}
+
 fn validate_actions_settings(settings: &ActionsSettings) -> Result<()> {
     ensure!(
         (30..=3_600).contains(&settings.runner_loss_seconds),
@@ -495,5 +598,39 @@ impl Cli {
 
     pub const fn password_stdin(&self) -> bool {
         self.password_stdin
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tls_settings(public_url: &str) -> ServerSettings {
+        ServerSettings {
+            bind: SocketAddr::from(([127, 0, 0, 1], 3000)),
+            public_url: Url::parse(public_url).expect("test public URL is valid"),
+            tls: Some(TlsSettings {
+                certificate: PathBuf::from("cert.pem"),
+                private_key: PathBuf::from("key.pem"),
+            }),
+        }
+    }
+
+    #[test]
+    fn local_tls_requires_an_https_public_url() {
+        let error = validate_server_settings(&tls_settings("http://localhost:3000"))
+            .expect_err("HTTP must be rejected when local TLS is enabled");
+
+        assert!(
+            error
+                .to_string()
+                .contains("server.public_url must use https")
+        );
+    }
+
+    #[test]
+    fn local_tls_accepts_an_https_public_url() {
+        validate_server_settings(&tls_settings("https://localhost:3000"))
+            .expect("HTTPS is valid with local TLS");
     }
 }

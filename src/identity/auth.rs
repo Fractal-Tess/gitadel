@@ -16,8 +16,8 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use webauthn_rs::prelude::{
-    CreationChallengeResponse, Passkey, PublicKeyCredential, RegisterPublicKeyCredential,
-    RequestChallengeResponse,
+    CreationChallengeResponse, DiscoverableKey, Passkey, PublicKeyCredential,
+    RegisterPublicKeyCredential, RequestChallengeResponse,
 };
 
 use super::{
@@ -32,6 +32,7 @@ pub struct AuthStatusResponse {
     setup_required: bool,
     authenticated: bool,
     user: Option<UserResponse>,
+    authentication: super::sso::AuthenticationConfiguration,
 }
 
 pub async fn status(
@@ -40,9 +41,11 @@ pub async fn status(
 ) -> Result<Json<AuthStatusResponse>, ApiError> {
     let setup_required = user::Entity::find().count(state.database()).await? == 0;
     let account = state.session_user(&jar).await?;
+    let authentication = super::sso::public_configuration(state.database()).await?;
     Ok(Json(AuthStatusResponse {
         setup_required,
         authenticated: account.is_some(),
+        authentication,
         user: account.map(UserResponse::from),
     }))
 }
@@ -79,6 +82,12 @@ pub async fn login(
     jar: CookieJar,
     Json(request): Json<CredentialsRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if !super::sso::public_configuration(state.database())
+        .await?
+        .password_enabled
+    {
+        return Err(ApiError::forbidden("Password login is disabled."));
+    }
     let username = validate_slug(&request.username, "Username")?;
     let account = user::Entity::find()
         .filter(user::Column::Username.eq(username))
@@ -540,10 +549,21 @@ pub async fn start_passkey_registration(
     jar: CookieJar,
     Json(request): Json<StartPasskeyRegistrationRequest>,
 ) -> Result<Json<PasskeyCreationResponse>, ApiError> {
+    if !super::sso::public_configuration(state.database())
+        .await?
+        .passkey_enabled
+    {
+        return Err(ApiError::forbidden("Passkeys are disabled."));
+    }
     let actor = state
         .authenticate(&headers, &jar, super::SCOPE_WRITE)
         .await?;
     if actor.via_api_token {
+        tracing::warn!(
+            user_id = %actor.user.id,
+            reason = "api_token_session",
+            "passkey registration rejected"
+        );
         return Err(ApiError::forbidden(
             "Register passkeys from a browser session.",
         ));
@@ -559,6 +579,7 @@ pub async fn start_passkey_registration(
             serde_json::from_str(&row.credential).map_err(ApiError::internal)?;
         excluded.push(credential.cred_id().clone());
     }
+    let excluded_count = excluded.len();
     let (options, registration) = state
         .webauthn()
         .start_passkey_registration(
@@ -567,7 +588,14 @@ pub async fn start_passkey_registration(
             &actor.user.username,
             Some(excluded),
         )
-        .map_err(ApiError::internal)?;
+        .map_err(|error| {
+            tracing::warn!(
+                %error,
+                user_id = %actor.user.id,
+                "could not create passkey registration challenge"
+            );
+            ApiError::internal(error)
+        })?;
     let challenge_id = random_secret(24);
     state.registration_challenges().await.insert(
         challenge_id.clone(),
@@ -577,6 +605,11 @@ pub async fn start_passkey_registration(
             state: registration,
             created_at: Instant::now(),
         },
+    );
+    tracing::info!(
+        user_id = %actor.user.id,
+        excluded_credentials = excluded_count,
+        "passkey registration challenge issued"
     );
     Ok(Json(PasskeyCreationResponse {
         challenge_id,
@@ -603,12 +636,28 @@ pub async fn finish_passkey_registration(
         .registration_challenges()
         .await
         .remove(&request.challenge_id)
-        .filter(|challenge| challenge.user_id == actor.user.id)
-        .ok_or_else(|| ApiError::bad_request("The passkey registration challenge expired."))?;
+        .filter(|challenge| challenge.user_id == actor.user.id);
+    let Some(challenge) = challenge else {
+        tracing::warn!(
+            user_id = %actor.user.id,
+            reason = "challenge_missing_or_wrong_user",
+            "passkey registration rejected"
+        );
+        return Err(ApiError::bad_request(
+            "The passkey registration challenge expired.",
+        ));
+    };
     let credential = state
         .webauthn()
         .finish_passkey_registration(&request.credential, &challenge.state)
-        .map_err(|_| ApiError::bad_request("The passkey registration could not be verified."))?;
+        .map_err(|error| {
+            tracing::warn!(
+                %error,
+                user_id = %actor.user.id,
+                "passkey registration verification failed"
+            );
+            ApiError::bad_request("The passkey registration could not be verified.")
+        })?;
     let transaction = state.database().begin().await?;
     let row = passkey::ActiveModel {
         id: Set(Uuid::new_v4()),
@@ -630,6 +679,11 @@ pub async fn finish_passkey_registration(
         )
         .await?;
     transaction.commit().await?;
+    tracing::info!(
+        user_id = %actor.user.id,
+        passkey_id = %row.id,
+        "passkey registration completed"
+    );
     Ok(StatusCode::CREATED)
 }
 
@@ -663,11 +717,6 @@ pub async fn delete_passkey(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Deserialize)]
-pub struct StartPasskeyLoginRequest {
-    username: String,
-}
-
 #[derive(Serialize)]
 pub struct PasskeyRequestResponse {
     challenge_id: String,
@@ -676,39 +725,29 @@ pub struct PasskeyRequestResponse {
 
 pub async fn start_passkey_login(
     State(state): State<IdentityState>,
-    Json(request): Json<StartPasskeyLoginRequest>,
 ) -> Result<Json<PasskeyRequestResponse>, ApiError> {
-    let username = validate_slug(&request.username, "Username")?;
-    let account = user::Entity::find()
-        .filter(user::Column::Username.eq(username))
-        .filter(user::Column::DisabledAt.is_null())
-        .one(state.database())
+    if !super::sso::public_configuration(state.database())
         .await?
-        .ok_or_else(invalid_credentials)?;
-    let rows = passkey::Entity::find()
-        .filter(passkey::Column::UserId.eq(account.id))
-        .all(state.database())
-        .await?;
-    if rows.is_empty() {
-        return Err(invalid_credentials());
+        .passkey_enabled
+    {
+        return Err(ApiError::forbidden("Passkey login is disabled."));
     }
-    let credentials = rows
-        .into_iter()
-        .map(|row| serde_json::from_str(&row.credential).map_err(ApiError::internal))
-        .collect::<Result<Vec<Passkey>, ApiError>>()?;
     let (options, authentication) = state
         .webauthn()
-        .start_passkey_authentication(&credentials)
-        .map_err(ApiError::internal)?;
+        .start_discoverable_authentication()
+        .map_err(|error| {
+            tracing::warn!(%error, "could not create discoverable passkey login challenge");
+            ApiError::internal(error)
+        })?;
     let challenge_id = random_secret(24);
     state.authentication_challenges().await.insert(
         challenge_id.clone(),
         AuthenticationChallenge {
-            user_id: account.id,
             state: authentication,
             created_at: Instant::now(),
         },
     );
+    tracing::info!("discoverable passkey login challenge issued");
     Ok(Json(PasskeyRequestResponse {
         challenge_id,
         options,
@@ -729,38 +768,81 @@ pub async fn finish_passkey_login(
     let challenge = state
         .authentication_challenges()
         .await
-        .remove(&request.challenge_id)
-        .ok_or_else(|| ApiError::bad_request("The passkey login challenge expired."))?;
-    let result = state
+        .remove(&request.challenge_id);
+    let Some(challenge) = challenge else {
+        tracing::warn!(
+            reason = "challenge_missing_or_expired",
+            "passkey login rejected"
+        );
+        return Err(ApiError::bad_request(
+            "The passkey login challenge expired.",
+        ));
+    };
+    let (user_id, credential_id) = state
         .webauthn()
-        .finish_passkey_authentication(&request.credential, &challenge.state)
-        .map_err(|_| invalid_credentials())?;
-    let credential_id = URL_SAFE_NO_PAD.encode(result.cred_id());
+        .identify_discoverable_authentication(&request.credential)
+        .map_err(|error| {
+            tracing::warn!(%error, "could not identify discoverable passkey");
+            invalid_credentials()
+        })?;
+    let credential_id = URL_SAFE_NO_PAD.encode(credential_id);
     let transaction = state.database().begin().await?;
     let stored = passkey::Entity::find()
-        .filter(passkey::Column::UserId.eq(challenge.user_id))
+        .filter(passkey::Column::UserId.eq(user_id))
         .filter(passkey::Column::CredentialId.eq(credential_id))
         .one(&transaction)
-        .await?
-        .ok_or_else(invalid_credentials)?;
+        .await?;
+    let Some(stored) = stored else {
+        tracing::warn!(
+            %user_id,
+            reason = "credential_not_registered",
+            "discoverable passkey login rejected"
+        );
+        return Err(invalid_credentials());
+    };
+    let passkey_id = stored.id;
     let mut credential: Passkey =
         serde_json::from_str(&stored.credential).map_err(ApiError::internal)?;
+    let discoverable = DiscoverableKey::from(&credential);
+    let result = state
+        .webauthn()
+        .finish_discoverable_authentication(&request.credential, challenge.state, &[discoverable])
+        .map_err(|error| {
+            tracing::warn!(
+                %error,
+                %user_id,
+                "discoverable passkey login verification failed"
+            );
+            invalid_credentials()
+        })?;
     credential.update_credential(&result);
     let mut active: passkey::ActiveModel = stored.into();
     active.credential = Set(serde_json::to_string(&credential).map_err(ApiError::internal)?);
     active.last_used_at = Set(Some(Utc::now()));
     active.update(&transaction).await?;
 
-    let account = user::Entity::find_by_id(challenge.user_id)
+    let account = user::Entity::find_by_id(user_id)
         .filter(user::Column::DisabledAt.is_null())
         .one(&transaction)
-        .await?
-        .ok_or_else(invalid_credentials)?;
+        .await?;
+    let Some(account) = account else {
+        tracing::warn!(
+            %user_id,
+            reason = "account_disabled_or_deleted",
+            "discoverable passkey login rejected"
+        );
+        return Err(invalid_credentials());
+    };
     let (_, cookie) = state.create_session_on(&transaction, account.id).await?;
     state
         .audit_on(&transaction, Some(account.id), "auth.login.passkey", None)
         .await?;
     transaction.commit().await?;
+    tracing::info!(
+        user_id = %account.id,
+        %passkey_id,
+        "passkey login completed"
+    );
     Ok((
         jar.add(cookie),
         Json(AuthResponse {

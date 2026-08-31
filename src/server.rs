@@ -1,4 +1,4 @@
-use std::{borrow::Cow, convert::Infallible};
+use std::{borrow::Cow, convert::Infallible, net::TcpListener as StdTcpListener};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -51,9 +51,30 @@ pub enum ServerExit {
 
 pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<ServerExit> {
     let http_bind = settings.server.bind;
-    let listener = TcpListener::bind(http_bind)
-        .await
-        .with_context(|| format!("could not bind HTTP listener to {http_bind}"))?;
+    let listener = StdTcpListener::bind(http_bind)
+        .with_context(|| format!("could not bind web listener to {http_bind}"))?;
+    listener
+        .set_nonblocking(true)
+        .context("could not configure web listener as non-blocking")?;
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let tls = if let Some(tls) = &settings.server.tls {
+        Some(
+            axum_server::tls_rustls::RustlsConfig::from_pem_file(
+                &tls.certificate,
+                &tls.private_key,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "could not load TLS certificate {} and private key {}",
+                    tls.certificate.display(),
+                    tls.private_key.display()
+                )
+            })?,
+        )
+    } else {
+        None
+    };
 
     let (maintenance_sender, mut maintenance_receiver) = mpsc::channel(1);
     let identity_state =
@@ -94,19 +115,38 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http());
 
-    info!(address = %http_bind, "Gitadel HTTP server listening");
+    info!(
+        address = %http_bind,
+        protocol = if tls.is_some() { "https" } else { "http" },
+        "Gitadel web server listening"
+    );
     let shutdown = CancellationToken::new();
     let http_shutdown = shutdown.clone();
+    let http_handle = axum_server::Handle::new();
+    let graceful_handle = http_handle.clone();
     let mut http = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                tokio::select! {
-                    () = shutdown_signal() => {}
-                    () = http_shutdown.cancelled() => {}
-                }
-            })
-            .await
-            .context("HTTP server stopped unexpectedly")
+        let shutdown_task = tokio::spawn(async move {
+            tokio::select! {
+                () = shutdown_signal() => {}
+                () = http_shutdown.cancelled() => {}
+            }
+            graceful_handle.graceful_shutdown(None);
+        });
+        let result = if let Some(tls) = tls {
+            axum_server::from_tcp_rustls(listener, tls)
+                .context("could not configure HTTPS listener")?
+                .handle(http_handle)
+                .serve(app.into_make_service())
+                .await
+        } else {
+            axum_server::from_tcp(listener)
+                .context("could not configure HTTP listener")?
+                .handle(http_handle)
+                .serve(app.into_make_service())
+                .await
+        };
+        shutdown_task.abort();
+        result.context("web server stopped unexpectedly")
     });
     let mut mirror_scheduler =
         tokio::spawn(repository::serve_mirror_scheduler(repository_state.clone()));
@@ -255,6 +295,10 @@ pub async fn perform_maintenance(settings: &Settings, action: MaintenanceAction)
             let app = Router::new()
                 .route(
                     "/api/v1/admin/backups/progress/{operation_id}",
+                    get(maintenance_progress),
+                )
+                .route(
+                    "/api/v1/admin/storage/progress/{operation_id}",
                     get(maintenance_progress),
                 )
                 .with_state(state);

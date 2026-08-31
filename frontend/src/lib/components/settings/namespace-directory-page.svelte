@@ -18,12 +18,11 @@
 
   $effect(() => {
     account.syncScope();
-    void account.initialize("account");
+    void account.initialize("profile");
   });
 
   async function createOrganization(): Promise<void> {
-    await organizationState.createOrganization();
-    if (!organizationState.error) createDialogOpen = false;
+    if (await organizationState.createOrganization()) createDialogOpen = false;
   }
 </script>
 
@@ -39,8 +38,8 @@
         Open an organization and manage its repositories and shared resources.
       </p>
     </div>
-    <Button class="gap-2" onclick={() => (createDialogOpen = true)}>
-      <Building2 class="size-4" />New organization
+    <Button onclick={() => (createDialogOpen = true)}>
+      <Building2 data-icon="inline-start" />New organization
     </Button>
   </header>
 
@@ -77,21 +76,19 @@
             <Button
               variant="ghost"
               size="sm"
-              class="gap-2"
               href={resolve("/[namespace]", { namespace: organization.slug })}
             >
-              <GitBranch class="size-4" />Repositories
+              <GitBranch data-icon="inline-start" />Repositories
             </Button>
             {#if organization.role === "owner"}
               <Button
                 variant="outline"
                 size="sm"
-                class="gap-2"
                 href={resolve("/[namespace]/members", {
                   namespace: organization.slug,
                 })}
               >
-                <Settings2 class="size-4" />Manage
+                <Settings2 data-icon="inline-start" />Manage
               </Button>
             {/if}
           </div>

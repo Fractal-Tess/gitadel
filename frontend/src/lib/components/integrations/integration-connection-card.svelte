@@ -8,13 +8,14 @@
   import Check from "@lucide/svelte/icons/check";
   import ExternalLink from "@lucide/svelte/icons/external-link";
   import Globe2 from "@lucide/svelte/icons/globe-2";
-  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import { Spinner } from "$lib/components/ui/spinner/index.js";
   import Rocket from "@lucide/svelte/icons/rocket";
   import Settings2 from "@lucide/svelte/icons/settings-2";
   import Trash2 from "@lucide/svelte/icons/trash-2";
   import type { Snippet } from "svelte";
 
   import { Button } from "$lib/components/ui/button/index.js";
+  import * as Alert from "$lib/components/ui/alert/index.js";
   import { Switch } from "$lib/components/ui/switch/index.js";
 
   let {
@@ -38,6 +39,7 @@
     configureLabel = "Configure",
     configureExternal = false,
     onremove = null,
+    actions = null,
   }: {
     name: string;
     provider: string;
@@ -59,6 +61,7 @@
     configureLabel?: string;
     configureExternal?: boolean;
     onremove?: (() => void) | null;
+    actions?: Snippet | null;
   } = $props();
 
   function providerLogo(slug: string) {
@@ -140,10 +143,17 @@
     {/if}
   </span>
   {#if error}
-    <p class="mt-3 text-xs text-destructive" role="alert">{error}</p>
+    <Alert.Root class="mt-3 p-2 text-xs" variant="destructive">
+      <Alert.Title>Connection error</Alert.Title>
+      <Alert.Description>{error}</Alert.Description>
+    </Alert.Root>
   {/if}
 
-  {#if onconfigure || onremove}
+  {#if actions}
+    <span class="mt-auto flex items-center gap-2 pt-5">
+      {@render actions()}
+    </span>
+  {:else if onconfigure || onremove}
     <span class="mt-auto flex items-center gap-2 pt-5">
       {#if onconfigure}
         <Button
@@ -172,7 +182,7 @@
           onclick={onremove}
         >
           {#if busy}
-            <LoaderCircle class="size-4 animate-spin" />
+            <Spinner class="size-4" />
           {:else}
             <Trash2 class="size-4" />
           {/if}

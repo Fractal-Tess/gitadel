@@ -110,11 +110,13 @@ export class RepositoryReleasesState {
           return release;
         }
       }
-      await this.loadReleases({});
+      await this.loadReleases({}).catch((caught) => {
+        this.setError(errorMessage(caught));
+      });
       toast.success(`Release “${release.title}” published.`);
       return release;
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
       throw caught;
     } finally {
       this.releasePending = false;
@@ -138,11 +140,13 @@ export class RepositoryReleasesState {
         { method: "PATCH", body: jsonBody(values) },
       );
       if (!this.isScopeCurrent()) return release;
-      await this.loadReleases({});
+      await this.loadReleases({}).catch((caught) => {
+        this.setError(errorMessage(caught));
+      });
       toast.success("Release updated.");
       return release;
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
       throw caught;
     } finally {
       this.releasePending = false;
@@ -164,12 +168,14 @@ export class RepositoryReleasesState {
           },
         );
       if (!this.isScopeCurrent()) return;
-      await this.loadReleases({});
+      await this.loadReleases({}).catch((caught) => {
+        this.setError(errorMessage(caught));
+      });
       toast.success(
         `${files.length} release asset${files.length === 1 ? "" : "s"} uploaded.`,
       );
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
       throw caught;
     } finally {
       this.releaseAssetPending = false;
@@ -182,10 +188,12 @@ export class RepositoryReleasesState {
         method: "DELETE",
       });
       if (!this.isScopeCurrent()) return;
-      await this.loadReleases({});
+      await this.loadReleases({}).catch((caught) => {
+        this.setError(errorMessage(caught));
+      });
       toast.success("Release deleted. Its Git target was not changed.");
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
       throw caught;
     } finally {
       this.releasePending = false;
@@ -199,10 +207,12 @@ export class RepositoryReleasesState {
         { method: "DELETE" },
       );
       if (!this.isScopeCurrent()) return;
-      await this.loadReleases({});
+      await this.loadReleases({}).catch((caught) => {
+        this.setError(errorMessage(caught));
+      });
       toast.success("Release asset deleted.");
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
       throw caught;
     } finally {
       this.releaseAssetPending = false;

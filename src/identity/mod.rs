@@ -5,6 +5,7 @@ mod integrations;
 mod mirror_identities;
 mod oauth;
 mod resources;
+mod sso;
 
 pub(crate) use integrations::{authorize_namespace, validate_name as validate_integration_name};
 pub(crate) use mirror_identities::{
@@ -41,7 +42,7 @@ use url::Url;
 use uuid::Uuid;
 use webauthn_rs::{
     Webauthn, WebauthnBuilder,
-    prelude::{PasskeyAuthentication, PasskeyRegistration},
+    prelude::{DiscoverableAuthentication, PasskeyRegistration},
 };
 
 use crate::{
@@ -69,6 +70,7 @@ pub struct IdentityState {
     registration_challenges: Arc<Mutex<HashMap<String, RegistrationChallenge>>>,
     authentication_challenges: Arc<Mutex<HashMap<String, AuthenticationChallenge>>>,
     authorization_requests: Arc<Mutex<HashMap<String, oauth::AuthorizationRequest>>>,
+    oidc_authorizations: Arc<sso::OidcAuthorizations>,
     runtime_settings: Option<Arc<Settings>>,
     maintenance_sender: Option<mpsc::Sender<MaintenanceAction>>,
     maintenance_pending: Arc<Mutex<bool>>,
@@ -97,8 +99,7 @@ pub struct RegistrationChallenge {
 }
 
 pub struct AuthenticationChallenge {
-    pub user_id: Uuid,
-    pub state: PasskeyAuthentication,
+    pub state: DiscoverableAuthentication,
     pub created_at: Instant,
 }
 
@@ -264,6 +265,7 @@ impl IdentityState {
             registration_challenges: Arc::new(Mutex::new(HashMap::new())),
             authentication_challenges: Arc::new(Mutex::new(HashMap::new())),
             authorization_requests: Arc::new(Mutex::new(HashMap::new())),
+            oidc_authorizations: Arc::new(Mutex::new(HashMap::new())),
             runtime_settings,
             maintenance_sender,
             maintenance_pending: Arc::new(Mutex::new(false)),
@@ -274,6 +276,14 @@ impl IdentityState {
 
     pub fn database(&self) -> &DatabaseConnection {
         &self.database
+    }
+
+    pub fn public_url(&self) -> &Url {
+        &self.public_url
+    }
+
+    fn oidc_authorizations(&self) -> &sso::OidcAuthorizations {
+        &self.oidc_authorizations
     }
 
     pub fn runtime_settings(&self) -> Result<&Settings, ApiError> {
@@ -718,6 +728,20 @@ pub async fn bootstrap_admin(
 pub fn router() -> Router<IdentityState> {
     Router::new()
         .route("/auth/status", get(auth::status))
+        .route("/auth/oidc/{provider_id}/start", get(sso::start))
+        .route("/auth/oidc/{provider_id}/callback", get(sso::callback))
+        .route(
+            "/admin/authentication",
+            get(sso::admin_configuration).put(sso::update_configuration),
+        )
+        .route(
+            "/admin/authentication/providers",
+            get(sso::list_providers).post(sso::create_provider),
+        )
+        .route(
+            "/admin/authentication/providers/{provider_id}",
+            put(sso::update_provider).delete(sso::delete_provider),
+        )
         .route("/instance", get(admin::public_instance_settings))
         .route(
             "/instance/favicon/{theme}",
@@ -758,6 +782,28 @@ pub fn router() -> Router<IdentityState> {
         .route(
             "/admin/backup/providers/{provider_id}/backups/restore",
             post(admin::restore_backup),
+        )
+        .route(
+            "/admin/storage/targets",
+            get(admin::list_storage_targets).post(admin::create_storage_target),
+        )
+        .route("/admin/storage/lfs/status", get(admin::lfs_storage_status))
+        .route(
+            "/admin/storage/targets/test",
+            post(admin::test_storage_target),
+        )
+        .route(
+            "/admin/storage/targets/{target_id}",
+            delete(admin::delete_storage_target),
+        )
+        .route(
+            "/admin/storage/targets/{target_id}/test",
+            post(admin::test_saved_storage_target),
+        )
+        .route("/admin/storage/migrations", post(admin::migrate_storage))
+        .route(
+            "/admin/storage/progress/{operation_id}",
+            get(admin::storage_progress),
         )
         .route("/setup", post(auth::setup))
         .route("/register", post(auth::register))

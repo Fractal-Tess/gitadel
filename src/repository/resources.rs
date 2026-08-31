@@ -14,7 +14,8 @@ use axum_extra::extract::cookie::CookieJar;
 use chrono::{Duration, Utc};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, Set,
-    TransactionTrait, sea_query::Expr,
+    TransactionTrait,
+    sea_query::{Expr, OnConflict},
 };
 use serde::{Deserialize, Serialize};
 use sley::{ObjectFormat, Repository as SleyRepository};
@@ -23,9 +24,10 @@ use uuid::Uuid;
 
 use super::{Permission, RepositoryState, mirrors, validate_repository_name};
 use crate::{
+    blob_store::{ObjectPrefix, targets},
     entity::{
-        namespace, organization_member, repository, repository_alias, repository_collaborator,
-        repository_favorite, user,
+        lfs_object, namespace, organization_member, repository, repository_alias,
+        repository_collaborator, repository_favorite, user,
     },
     identity::{ApiError, SCOPE_READ, SCOPE_WRITE, validate_slug},
 };
@@ -507,6 +509,7 @@ pub(super) async fn create_imported_repository(
     };
     let path = state.repository_path(&repository);
     let lfs_path = state.lfs_repository_path(&repository);
+    let storage_key = repository.storage_key;
     let initialized = match mirrors::initialize_import(
         state,
         &path,
@@ -519,6 +522,7 @@ pub(super) async fn create_imported_repository(
     {
         Ok(initialized) => initialized,
         Err(error) => {
+            cleanup_lfs_blobs(state, storage_key).await;
             cleanup_repository_storage(&path, &lfs_path).await;
             return Err(error);
         }
@@ -529,6 +533,7 @@ pub(super) async fn create_imported_repository(
     let transaction = match state.identity().database().begin().await {
         Ok(transaction) => transaction,
         Err(error) => {
+            cleanup_lfs_blobs(state, storage_key).await;
             cleanup_repository_storage(&path, &lfs_path).await;
             return Err(error.into());
         }
@@ -536,10 +541,16 @@ pub(super) async fn create_imported_repository(
     let repository = match repository.into_active_model().insert(&transaction).await {
         Ok(repository) => repository,
         Err(error) => {
+            cleanup_lfs_blobs(state, storage_key).await;
             cleanup_repository_storage(&path, &lfs_path).await;
             return Err(error.into());
         }
     };
+    if let Err(error) = catalog_repository_lfs(state, &transaction, &repository).await {
+        cleanup_lfs_blobs(state, repository.storage_key).await;
+        cleanup_repository_storage(&path, &lfs_path).await;
+        return Err(error);
+    }
     if let Err(error) = state
         .identity()
         .audit_on(
@@ -550,10 +561,12 @@ pub(super) async fn create_imported_repository(
         )
         .await
     {
+        cleanup_lfs_blobs(state, repository.storage_key).await;
         cleanup_repository_storage(&path, &lfs_path).await;
         return Err(error);
     }
     if let Err(error) = transaction.commit().await {
+        cleanup_lfs_blobs(state, repository.storage_key).await;
         cleanup_repository_storage(&path, &lfs_path).await;
         return Err(error.into());
     }
@@ -849,6 +862,7 @@ pub async fn purge_repository(
         .exec(&transaction)
         .await?;
     transaction.commit().await?;
+    cleanup_lfs_blobs(&state, repository.storage_key).await;
     cleanup_repository_storage(
         &state.repository_path(&repository),
         &state.lfs_repository_path(&repository),
@@ -1276,6 +1290,65 @@ async fn cleanup_repository(path: &Path) {
         && error.kind() != std::io::ErrorKind::NotFound
     {
         tracing::error!(%error, path = %path.display(), "could not clean up repository directory");
+    }
+}
+
+async fn catalog_repository_lfs(
+    state: &RepositoryState,
+    transaction: &sea_orm::DatabaseTransaction,
+    repository: &repository::Model,
+) -> Result<(), ApiError> {
+    let prefix =
+        ObjectPrefix::new(repository.storage_key.to_string()).map_err(ApiError::internal)?;
+    for object in state
+        .lfs_store()
+        .list(&prefix)
+        .await
+        .map_err(ApiError::internal)?
+    {
+        let oid = object
+            .key
+            .as_str()
+            .rsplit('/')
+            .next()
+            .ok_or_else(|| ApiError::internal("LFS object key has no digest"))?;
+        lfs_object::Entity::insert(lfs_object::ActiveModel {
+            repository_id: Set(repository.id),
+            oid: Set(oid.to_owned()),
+            size: Set(i64::try_from(object.size).map_err(ApiError::internal)?),
+            storage_target_id: Set(state.lfs_target_id()),
+            created_at: Set(Utc::now()),
+        })
+        .on_conflict(
+            OnConflict::columns([lfs_object::Column::RepositoryId, lfs_object::Column::Oid])
+                .update_columns([
+                    lfs_object::Column::Size,
+                    lfs_object::Column::StorageTargetId,
+                ])
+                .to_owned(),
+        )
+        .exec(transaction)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn cleanup_lfs_blobs(state: &RepositoryState, storage_key: Uuid) {
+    let prefix = match ObjectPrefix::new(storage_key.to_string()) {
+        Ok(prefix) => prefix,
+        Err(error) => {
+            tracing::error!(%error, "could not construct repository LFS cleanup prefix");
+            return;
+        }
+    };
+    if let Err(error) = targets::delete_prefix_from_all(
+        state.identity().database(),
+        state.local_lfs_root().to_path_buf(),
+        &prefix,
+    )
+    .await
+    {
+        tracing::error!(%error, "could not clean repository LFS objects from every target");
     }
 }
 

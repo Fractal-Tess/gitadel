@@ -1,10 +1,10 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
-  import CheckCircle2 from "@lucide/svelte/icons/check-circle-2";
   import CloudUpload from "@lucide/svelte/icons/cloud-upload";
   import HardDrive from "@lucide/svelte/icons/hard-drive";
-  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import { Spinner } from "$lib/components/ui/spinner/index.js";
+  import { toast } from "svelte-sonner";
 
   import type {
     BackupProvider,
@@ -60,8 +60,6 @@
   let prefix = $state(untrack(() => connection?.prefix ?? "backups"));
   let testing = $state(false);
   let saving = $state(false);
-  let error = $state<string | null>(null);
-  let testMessage = $state<string | null>(null);
   let testToken = $state<string | null>(null);
   let testedFingerprint = $state<string | null>(null);
 
@@ -113,8 +111,6 @@
   function selectProvider(selected: BackupProviderCatalogItem) {
     provider = selected.slug;
     name = selected.name;
-    error = null;
-    testMessage = null;
     testToken = null;
     testedFingerprint = null;
     step = "details";
@@ -126,16 +122,16 @@
 
   async function test() {
     testing = true;
-    error = null;
-    testMessage = null;
+    testToken = null;
+    testedFingerprint = null;
     const tested = fingerprint;
     try {
       const response = await ontest(value());
       testToken = response.test_token;
       testedFingerprint = tested;
-      testMessage = response.message;
+      toast.success(response.message);
     } catch (caught) {
-      error = message(caught, "Could not test the backup provider.");
+      toast.error(message(caught, "Could not test the backup provider."));
     } finally {
       testing = false;
     }
@@ -144,11 +140,10 @@
   async function submit() {
     if (!testPassed) return;
     saving = true;
-    error = null;
     try {
       await onsave(value());
     } catch (caught) {
-      error = message(caught, "Could not save the backup provider.");
+      toast.error(message(caught, "Could not save the backup provider."));
     } finally {
       saving = false;
     }
@@ -302,14 +297,6 @@
       </label>
     {/if}
 
-    {#if error}
-      <p class="text-sm text-destructive" role="alert">{error}</p>
-    {:else if testPassed && testMessage}
-      <p class="flex items-center gap-2 text-sm text-emerald-400">
-        <CheckCircle2 class="size-4" />{testMessage}
-      </p>
-    {/if}
-
     <div class="flex flex-wrap items-center justify-end gap-2 border-t pt-4">
       <Button
         type="button"
@@ -326,14 +313,14 @@
         onclick={() => void test()}
       >
         {#if testing}
-          <LoaderCircle class="size-3.5 animate-spin" />Testing…
+          <Spinner class="size-3.5" data-icon="inline-start" />Testing…
         {:else}
           Test provider
         {/if}
       </Button>
       <Button type="submit" disabled={testing || saving || !testPassed}>
         {#if saving}
-          <LoaderCircle class="size-3.5 animate-spin" />Saving…
+          <Spinner class="size-3.5" data-icon="inline-start" />Saving…
         {:else}
           Save provider
         {/if}

@@ -1,11 +1,11 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
+  import { toast } from "svelte-sonner";
   import { resolve } from "$app/paths";
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import Box from "@lucide/svelte/icons/box";
   import CircleAlert from "@lucide/svelte/icons/circle-alert";
   import GitBranch from "@lucide/svelte/icons/git-branch";
-  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import PlugZap from "@lucide/svelte/icons/plug-zap";
 
   import {
@@ -34,11 +34,13 @@
     type ConnectionEditorValue,
   } from "$lib/components/integrations/integration-connection-editor.svelte";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
+  import * as Alert from "$lib/components/ui/alert/index.js";
   import * as Breadcrumb from "$lib/components/ui/breadcrumb/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
   import { Separator } from "$lib/components/ui/separator/index.js";
+  import { Spinner } from "$lib/components/ui/spinner/index.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
 
   let { state: repository }: { state: RepositoryPageState } = $props();
@@ -54,11 +56,9 @@
   let loadError = $state<string | null>(null);
   let integrationIdentity = $state<string | null>(null);
   let working = $state<Record<string, boolean>>({});
-  let errors = $state<Record<string, string | null>>({});
   let createOpen = $state(false);
   let formConnection = $state("");
   let formName = $state("");
-  let formError = $state<string | null>(null);
   let creating = $state(false);
   let createStep = $state<"connections" | "connection" | "source" | "instance">(
     "connections",
@@ -119,7 +119,6 @@
     loading = true;
     loadError = null;
     working = {};
-    errors = {};
 
     async function load() {
       try {
@@ -145,7 +144,6 @@
   function openCreate() {
     formConnection = "";
     formName = "";
-    formError = null;
     stagedConnection = null;
     sourceConnection = null;
     sourceError = null;
@@ -156,7 +154,6 @@
   function selectConnection(connection: RepositoryIntegrationConnection) {
     formConnection = connection.id;
     formName = connection.name;
-    formError = null;
     createStep = "instance";
   }
 
@@ -289,9 +286,8 @@
         ),
       );
     } catch (caught) {
-      sourceError = errorMessage(
-        caught,
-        "Could not connect the Dokploy source.",
+      toast.error(
+        errorMessage(caught, "Could not connect the Dokploy source."),
       );
     } finally {
       sourceWorking = false;
@@ -313,9 +309,8 @@
         ),
       );
     } catch (caught) {
-      sourceError = errorMessage(
-        caught,
-        "Could not create the Dokploy source.",
+      toast.error(
+        errorMessage(caught, "Could not create the Dokploy source."),
       );
     } finally {
       sourceWorking = false;
@@ -330,9 +325,8 @@
       updateStagedSource(null);
       await loadStagedSource();
     } catch (caught) {
-      sourceError = errorMessage(
-        caught,
-        "Could not disconnect the Dokploy source.",
+      toast.error(
+        errorMessage(caught, "Could not disconnect the Dokploy source."),
       );
     } finally {
       sourceWorking = false;
@@ -383,7 +377,6 @@
   async function createIntegration() {
     if (!namespace || !name || !formConnection) return;
     creating = true;
-    formError = null;
     try {
       const created = await requestJson(
         integrationsPath(namespace, name),
@@ -399,7 +392,7 @@
       integrations = [...integrations, created];
       createOpen = false;
     } catch (caught) {
-      formError = errorMessage(caught, "Could not add the integration.");
+      toast.error(errorMessage(caught, "Could not add the integration."));
     } finally {
       creating = false;
     }
@@ -411,7 +404,6 @@
   ) {
     if (!namespace || !name) return;
     working[integration.id] = true;
-    errors[integration.id] = null;
     try {
       const updated = await requestJson(
         `${integrationsPath(namespace, name)}/${encodeURIComponent(integration.id)}`,
@@ -423,9 +415,8 @@
       );
       if (index !== -1) integrations[index] = updated;
     } catch (caught) {
-      errors[integration.id] = errorMessage(
-        caught,
-        `Could not update ${integration.name}.`,
+      toast.error(
+        errorMessage(caught, `Could not update ${integration.name}.`),
       );
     } finally {
       working[integration.id] = false;
@@ -441,7 +432,6 @@
     if (!namespace || !name || !pendingRemove) return;
     const integration = pendingRemove;
     working[integration.id] = true;
-    errors[integration.id] = null;
     try {
       await requestEmpty(
         `${integrationsPath(namespace, name)}/${encodeURIComponent(integration.id)}`,
@@ -453,9 +443,8 @@
       removeOpen = false;
       pendingRemove = null;
     } catch (caught) {
-      errors[integration.id] = errorMessage(
-        caught,
-        `Could not remove ${integration.name}.`,
+      toast.error(
+        errorMessage(caught, `Could not remove ${integration.name}.`),
       );
       removeOpen = false;
     } finally {
@@ -522,15 +511,14 @@
 
   {#if loading}
     <p class="flex items-center gap-2 text-sm text-muted-foreground">
-      <LoaderCircle class="size-4 animate-spin" />Loading integrations…
+      <Spinner class="size-4 animate-spin" />Loading integrations…
     </p>
   {:else if loadError}
-    <p
-      class="flex items-center gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
-      role="alert"
-    >
-      <CircleAlert class="size-4 shrink-0" />{loadError}
-    </p>
+    <Alert.Root variant="destructive">
+      <CircleAlert class="size-4 shrink-0" />
+      <Alert.Title>Integrations unavailable</Alert.Title>
+      <Alert.Description>{loadError}</Alert.Description>
+    </Alert.Root>
   {:else}
     <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
       <IntegrationAddCard
@@ -559,7 +547,6 @@
                 : "Docker Compose"
               : "Setup required"}
           busy={working[integration.id]}
-          error={errors[integration.id]}
           onenabledchange={integration.configured && connectionReady
             ? (enabled) => void updateIntegration(integration, enabled)
             : null}
@@ -805,20 +792,16 @@
             Use a name that distinguishes this target from other instances.
           </span>
         </label>
-        {#if formError}
-          <p class="text-sm text-destructive" role="alert">{formError}</p>
-        {/if}
         <Dialog.Footer class="gap-2 sm:justify-between">
           <Button
             type="button"
             variant="ghost"
-            class="gap-2"
             onclick={() => (createStep = "connections")}
           >
-            <ArrowLeft class="size-4" />Back
+            <ArrowLeft data-icon="inline-start" />Back
           </Button>
           <Button type="submit" disabled={creating || !formConnection}>
-            {#if creating}<LoaderCircle class="size-4 animate-spin" />{/if}
+            {#if creating}<Spinner class="size-4 animate-spin" />{/if}
             {creating ? "Adding…" : "Add integration"}
           </Button>
         </Dialog.Footer>
@@ -841,7 +824,7 @@
     <AlertDialog.Footer>
       <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
       <AlertDialog.Action
-        class="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+        variant="destructive"
         onclick={() => void removeIntegration()}
       >
         Remove integration

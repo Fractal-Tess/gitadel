@@ -11,6 +11,7 @@
   import Webhook from "@lucide/svelte/icons/webhook";
 
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
+  import * as Alert from "$lib/components/ui/alert/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Card from "$lib/components/ui/card/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
@@ -73,7 +74,7 @@
       editingId = null;
       editSecret = "";
     } catch {
-      // The page-level error region explains how to recover.
+      // The repository webhook state owns mutation error toasts.
     }
   }
 
@@ -115,8 +116,13 @@
           Loading webhooks…
         </li>
       {:else if !repository.webhooks.webhooksLoaded}
-        <li class="px-5 py-12 text-center text-sm text-foreground/70">
-          Webhooks are unavailable. Retry by reopening repository settings.
+        <li class="px-5 py-12">
+          <Alert.Root variant="destructive">
+            <Alert.Title>Webhooks unavailable</Alert.Title>
+            <Alert.Description>
+              Webhooks are unavailable. Retry by reopening repository settings.
+            </Alert.Description>
+          </Alert.Root>
         </li>
       {:else}
         {#each repository.webhooks.webhooks as hook (hook.id)}

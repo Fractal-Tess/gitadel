@@ -19,8 +19,10 @@
   } from "$lib/api/issues.js";
   import * as Avatar from "$lib/components/ui/avatar/index.js";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
+  import * as Alert from "$lib/components/ui/alert/index.js";
   import { Badge } from "$lib/components/ui/badge/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
+  import * as Empty from "$lib/components/ui/empty/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
   import { Textarea } from "$lib/components/ui/textarea/index.js";
   import IssueComposerDialog from "$lib/components/repository/issue-composer-dialog.svelte";
@@ -71,7 +73,7 @@
         state: issue.state === "open" ? "closed" : "open",
       });
     } catch {
-      // The page-level error explains the failure.
+      // The repository issue state owns mutation error toasts.
     }
   }
 
@@ -93,7 +95,7 @@
       commentDrafts = { ...commentDrafts, [issue.number]: "" };
       editingComment = null;
     } catch {
-      // The page-level error keeps the comment draft available.
+      // The repository issue state owns mutation error toasts and keeps drafts.
     }
   }
 
@@ -162,12 +164,15 @@
   {#if repository.issueNumber && !repository.issues.selectedIssue}
     <div class="py-20 text-center text-sm text-muted-foreground">
       {#if repository.error}
-        <p>This issue could not be loaded.</p>
-        <Button
-          variant="link"
-          class="mt-2"
-          onclick={() => repository.selectIssue(null)}>Back to issues</Button
-        >
+        <Alert.Root class="mx-auto max-w-md" variant="destructive">
+          <Alert.Title>Issue unavailable</Alert.Title>
+          <Alert.Description>This issue could not be loaded.</Alert.Description>
+          <Button
+            variant="link"
+            class="mt-2"
+            onclick={() => repository.selectIssue(null)}>Back to issues</Button
+          >
+        </Alert.Root>
       {:else}
         <p>Loading issue…</p>
       {/if}
@@ -177,10 +182,10 @@
     <Button
       variant="ghost"
       size="sm"
-      class="-ml-2 mb-4 gap-2 text-muted-foreground"
+      class="-ml-2 mb-4 text-muted-foreground"
       onclick={() => repository.selectIssue(null)}
     >
-      <ArrowLeft class="size-4" />Back to issues
+      <ArrowLeft data-icon="inline-start" />Back to issues
     </Button>
 
     <header class="border-b pb-5">
@@ -447,15 +452,14 @@
         {#if repository.repository?.can_manage}
           <Button
             variant="outline"
-            class="gap-2"
             onclick={() => (labelsOpen = true)}
           >
-            <Tag class="size-4" />Labels
+            <Tag data-icon="inline-start" />Labels
           </Button>
         {/if}
-        <Button class="gap-2" onclick={openComposer}
-          ><Plus class="size-4" />New issue</Button
-        >
+        <Button onclick={openComposer}>
+          <Plus data-icon="inline-start" />New issue
+        </Button>
       </div>
     </header>
 
@@ -523,12 +527,15 @@
           </li>
         {:else if repository.error && !repository.issues.issuesLoaded}
           <li class="py-16 text-center text-sm text-muted-foreground">
-            <p>Issues could not be loaded.</p>
-            <Button
-              variant="link"
-              class="mt-2"
-              onclick={() => void repository.loadView()}>Try again</Button
-            >
+            <Alert.Root class="mx-auto max-w-md" variant="destructive">
+              <Alert.Title>Issues unavailable</Alert.Title>
+              <Alert.Description>Issues could not be loaded.</Alert.Description>
+              <Button
+                variant="link"
+                class="mt-2"
+                onclick={() => void repository.loadView()}>Try again</Button
+              >
+            </Alert.Root>
           </li>
         {:else}
           {#each filteredIssues as issue (issue.id)}
@@ -575,14 +582,18 @@
               {/if}
             </li>
           {:else}
-            <li class="py-16 text-center">
-              <CircleDot class="mx-auto size-8 text-muted-foreground" />
-              <p class="mt-3 text-sm font-medium">
-                No {filterState} issues match
-              </p>
-              <p class="mt-1 text-xs text-muted-foreground">
-                Try another search, label, or state.
-              </p>
+            <li>
+              <Empty.Root class="border-0 py-16">
+                <Empty.Header>
+                  <Empty.Media variant="icon">
+                    <CircleDot />
+                  </Empty.Media>
+                  <Empty.Title>No {filterState} issues match</Empty.Title>
+                  <Empty.Description>
+                    Try another search, label, or state.
+                  </Empty.Description>
+                </Empty.Header>
+              </Empty.Root>
             </li>
           {/each}
         {/if}

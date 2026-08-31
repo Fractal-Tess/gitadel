@@ -22,7 +22,6 @@ export class OAuthSettingsState {
   createdOauthClientId = $state<string | null>(null);
   createdOauthClientSecret = $state<string | null>(null);
   working = $state(false);
-  error = $state<string | null>(null);
   private scope: AuthorizationCacheScope;
   constructor(
     initial: OauthApplication[],
@@ -38,9 +37,9 @@ export class OAuthSettingsState {
     this.scope = scope;
   }
 
-  async createOauthApplication(): Promise<void> {
+  async createOauthApplication(): Promise<boolean> {
     const scope = this.scope;
-    await this.run(scope, async () => {
+    return this.run(scope, async () => {
       const response = await requestJson(
         "/api/v1/me/oauth-applications",
         createdOauthApplicationSchema,
@@ -68,9 +67,9 @@ export class OAuthSettingsState {
     });
   }
 
-  async deleteOauthApplication(id: string): Promise<void> {
+  async deleteOauthApplication(id: string): Promise<boolean> {
     const scope = this.scope;
-    await this.run(scope, async () => {
+    return this.run(scope, async () => {
       await requestEmpty(`/api/v1/me/oauth-applications/${id}`, {
         method: "DELETE",
       });
@@ -95,18 +94,19 @@ export class OAuthSettingsState {
   private async run(
     scope: AuthorizationCacheScope,
     task: () => Promise<void>,
-  ): Promise<void> {
+  ): Promise<boolean> {
     this.working = true;
-    this.error = null;
     try {
       await task();
+      return true;
     } catch (caught) {
-      if (!this.current(scope)) return;
-      this.error =
+      if (!this.current(scope)) return false;
+      const message =
         caught instanceof ApiFailure || caught instanceof Error
           ? caught.message
           : "The request failed.";
-      toast.error(this.error);
+      toast.error(message);
+      return false;
     } finally {
       this.working = false;
     }

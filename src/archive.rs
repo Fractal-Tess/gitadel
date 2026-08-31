@@ -11,17 +11,21 @@ use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, SecondsFormat, Utc};
 use fs2::FileExt as _;
 use sea_orm::{
-    ActiveModelTrait as _, ColumnTrait as _, ConnectionTrait as _, DatabaseConnection,
-    EntityTrait as _, QueryFilter as _, QueryOrder as _, Set, sea_query::Expr,
+    ActiveModelTrait as _, ColumnTrait as _, ConnectOptions, ConnectionTrait as _, Database,
+    DatabaseConnection, EntityTrait as _, QueryFilter as _, QueryOrder as _, Set, sea_query::Expr,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use tokio::sync::watch;
+use tokio::{
+    io::{AsyncReadExt as _, AsyncWriteExt as _},
+    sync::watch,
+};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::{
     backup_provider::{self, BackupProvider, BackupProviderConfig, FilesystemSettings},
+    blob_store::{BlobDigest, ObjectPrefix, targets},
     config::{BackupCommand, DatabaseSettings, S3Settings, Settings},
     database,
     entity::backup_provider_schedule,
@@ -58,12 +62,19 @@ pub enum MaintenanceAction {
         provider: BackupProvider,
         safety_key: Option<String>,
     },
+    LfsMigrate {
+        operation_id: Uuid,
+        target_id: Uuid,
+        batch_size: usize,
+    },
 }
 
 impl MaintenanceAction {
     pub fn operation_id(&self) -> Uuid {
         match self {
-            Self::Create { operation_id, .. } | Self::Restore { operation_id, .. } => *operation_id,
+            Self::Create { operation_id, .. }
+            | Self::Restore { operation_id, .. }
+            | Self::LfsMigrate { operation_id, .. } => *operation_id,
         }
     }
 
@@ -71,12 +82,14 @@ impl MaintenanceAction {
         match self {
             Self::Create { .. } => MaintenanceOperation::Create,
             Self::Restore { .. } => MaintenanceOperation::Restore,
+            Self::LfsMigrate { .. } => MaintenanceOperation::LfsMigrate,
         }
     }
 
-    fn key(&self) -> &str {
+    fn key(&self) -> String {
         match self {
-            Self::Create { key, .. } | Self::Restore { key, .. } => key,
+            Self::Create { key, .. } | Self::Restore { key, .. } => key.clone(),
+            Self::LfsMigrate { target_id, .. } => target_id.to_string(),
         }
     }
 }
@@ -86,6 +99,7 @@ impl MaintenanceAction {
 pub enum MaintenanceOperation {
     Create,
     Restore,
+    LfsMigrate,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -124,7 +138,7 @@ impl MaintenanceProgressReporter {
     pub fn new(action: &MaintenanceAction) -> Self {
         let progress = MaintenanceProgress {
             operation_id: action.operation_id(),
-            key: action.key().to_owned(),
+            key: action.key(),
             operation: action.operation(),
             phase: MaintenancePhase::Scheduled,
             message: "Maintenance is scheduled.".to_owned(),
@@ -143,6 +157,7 @@ impl MaintenanceProgressReporter {
         let message = match self.sender.borrow().operation {
             MaintenanceOperation::Create => "Backup completed. Gitadel is restarting.",
             MaintenanceOperation::Restore => "Restore completed. Gitadel is restarting.",
+            MaintenanceOperation::LfsMigrate => "LFS migration completed. Gitadel is restarting.",
         };
         self.report(MaintenancePhase::Completed, message);
     }
@@ -151,6 +166,7 @@ impl MaintenanceProgressReporter {
         let operation = match self.sender.borrow().operation {
             MaintenanceOperation::Create => "Backup",
             MaintenanceOperation::Restore => "Restore",
+            MaintenanceOperation::LfsMigrate => "LFS migration",
         };
         self.report(
             MaintenancePhase::Failed,
@@ -158,7 +174,7 @@ impl MaintenanceProgressReporter {
         );
     }
 
-    fn report(&self, phase: MaintenancePhase, message: impl Into<String>) {
+    pub(crate) fn report(&self, phase: MaintenancePhase, message: impl Into<String>) {
         let (operation_id, key, operation) = self.identity();
         self.sender.send_replace(MaintenanceProgress {
             operation_id,
@@ -168,6 +184,25 @@ impl MaintenanceProgressReporter {
             message: message.into(),
             processed_bytes: None,
             total_bytes: None,
+        });
+    }
+
+    pub(crate) fn report_progress(
+        &self,
+        phase: MaintenancePhase,
+        message: impl Into<String>,
+        processed_bytes: u64,
+        total_bytes: u64,
+    ) {
+        let (operation_id, key, operation) = self.identity();
+        self.sender.send_replace(MaintenanceProgress {
+            operation_id,
+            key,
+            operation,
+            phase,
+            message: message.into(),
+            processed_bytes: Some(processed_bytes),
+            total_bytes: Some(total_bytes),
         });
     }
 
@@ -371,14 +406,16 @@ async fn schedule_due_backup(state: &IdentityState) -> Result<()> {
     let Some(claimed) = claim_due_backup_schedule(state.database(), Utc::now()).await? else {
         return Ok(());
     };
-    let fallback = state
+    let settings = state
         .runtime_settings()
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?
-        .backup
-        .s3
-        .as_ref();
-    let Some(provider) =
-        backup_provider::load(state.database(), fallback, claimed.provider_id).await?
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let Some(provider) = backup_provider::load_with_storage(
+        state.database(),
+        settings.backup.s3.as_ref(),
+        &settings.storage.lfs_root,
+        claimed.provider_id,
+    )
+    .await?
     else {
         tracing::warn!(
             provider_id = %claimed.provider_id,
@@ -604,11 +641,14 @@ async fn create_staged_backup(
     }
 
     let database = database::connect_and_migrate(&settings.database).await?;
-    snapshot_database(&database, &staging.join("database.sqlite")).await?;
+    let lfs_storage = targets::load_active(&database, settings.storage.lfs_root.clone()).await?;
+    let snapshot_path = staging.join("database.sqlite");
+    snapshot_database(&database, &snapshot_path).await?;
     database
         .close()
         .await
         .context("could not close database snapshot connection")?;
+    prepare_restored_snapshot(&snapshot_path).await?;
 
     if let Some(reporter) = reporter {
         reporter.report(
@@ -623,7 +663,7 @@ async fn create_staged_backup(
     if let Some(reporter) = reporter {
         reporter.report(MaintenancePhase::CopyingLfs, "Copying Git LFS objects.");
     }
-    copy_tree(&settings.storage.lfs_root, &staging.join("lfs"))?;
+    materialize_lfs(lfs_storage.store.as_ref(), &staging.join("lfs")).await?;
     if let Some(reporter) = reporter {
         reporter.report(
             MaintenancePhase::WritingMetadata,
@@ -680,6 +720,69 @@ async fn create_staged_backup(
         .finish()
         .context("could not finish Zstandard stream")?;
     output.sync_all().context("could not sync backup archive")
+}
+async fn prepare_restored_snapshot(path: &Path) -> Result<()> {
+    let mut options = ConnectOptions::new(format!("sqlite://{}?mode=rwc", path.display()));
+    options.max_connections(1).sqlx_logging(false);
+    let database = Database::connect(options)
+        .await
+        .context("could not open staged backup database")?;
+    database
+        .execute_unprepared(
+            "PRAGMA foreign_keys = ON;\
+             UPDATE lfs_storage_state SET active_target_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = 1;\
+             UPDATE lfs_objects SET storage_target_id = NULL;\
+             DELETE FROM lfs_storage_migrations;\
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .await
+        .context("could not rebind staged backup to runtime-local LFS storage")?;
+    database.close().await?;
+    Ok(())
+}
+
+async fn materialize_lfs(
+    store: &dyn crate::blob_store::BlobStore,
+    destination: &Path,
+) -> Result<()> {
+    let objects = store.list(&ObjectPrefix::new("")?).await?;
+    for metadata in objects {
+        let parts = metadata.key.as_str().split('/').collect::<Vec<_>>();
+        if parts.len() != 4
+            || Uuid::parse_str(parts[0]).is_err()
+            || parts[1].len() != 2
+            || parts[2].len() != 2
+            || parts[3].parse::<BlobDigest>().is_err()
+        {
+            continue;
+        }
+        let path = destination.join(metadata.key.as_str());
+        let parent = path.parent().context("backup LFS object has no parent")?;
+        tokio::fs::create_dir_all(parent).await?;
+        let mut source = store.read(&metadata.key).await?;
+        let mut output = tokio::fs::File::create(&path).await?;
+        let mut digest = Sha256::new();
+        let mut size = 0_u64;
+        let mut buffer = vec![0_u8; 128 * 1024];
+        loop {
+            let read = source.read(&mut buffer).await?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+            output.write_all(&buffer[..read]).await?;
+            size = size.saturating_add(read as u64);
+        }
+        output.flush().await?;
+        output.sync_all().await?;
+        ensure!(size == metadata.size, "backup LFS object size mismatch");
+        let actual: [u8; 32] = digest.finalize().into();
+        ensure!(
+            actual == *metadata.digest.as_bytes(),
+            "backup LFS object digest mismatch"
+        );
+    }
+    Ok(())
 }
 
 async fn snapshot_database(database: &DatabaseConnection, destination: &Path) -> Result<()> {
@@ -802,6 +905,18 @@ pub async fn perform_maintenance(
                 "administrative restore completed"
             );
             Ok(())
+        }
+        MaintenanceAction::LfsMigrate {
+            operation_id: _,
+            target_id,
+            batch_size,
+        } => {
+            let database = database::connect_and_migrate(&settings.database).await?;
+            let result =
+                crate::storage::migrate(&database, settings, target_id, batch_size, Some(reporter))
+                    .await;
+            database.close().await?;
+            result
         }
     }
 }
@@ -1685,7 +1800,10 @@ mod tests {
 
     use super::s3::validate_managed_key as validate_managed_s3_backup_key;
     use super::*;
-    use crate::entity::{backup_provider_schedule, instance, user};
+    use crate::{
+        blob_store::lfs_object_key,
+        entity::{backup_provider_schedule, instance, user},
+    };
 
     #[derive(Debug, PartialEq, Eq)]
     struct RestoredState {
@@ -1771,12 +1889,12 @@ mod tests {
                 .context("repository file has no parent")?,
         )?;
         fs::write(&repository_file, b"repository-object")?;
-        let lfs_file = source_settings
-            .storage
-            .lfs_root
-            .join("repository/lfs-object");
+        let lfs_payload = b"lfs-object";
+        let lfs_digest = BlobDigest::from_bytes(Sha256::digest(lfs_payload).into());
+        let lfs_relative = lfs_object_key(Uuid::new_v4(), &lfs_digest.to_hex())?;
+        let lfs_file = source_settings.storage.lfs_root.join(lfs_relative.as_str());
         fs::create_dir_all(lfs_file.parent().context("LFS file has no parent")?)?;
-        fs::write(&lfs_file, b"lfs-object")?;
+        fs::write(&lfs_file, lfs_payload)?;
         fs::write(&source_settings.ssh.host_key, b"ssh-host-key")?;
 
         let backup = directory.path().join("complete.tar.zst");
@@ -1819,7 +1937,7 @@ mod tests {
                 restored_settings
                     .storage
                     .lfs_root
-                    .join("repository/lfs-object"),
+                    .join(lfs_relative.as_str()),
             )?,
             host_key: fs::read(&restored_settings.ssh.host_key)?,
             effective_settings: fs::read_to_string(&restored_config)?,
@@ -2015,6 +2133,7 @@ mod tests {
                     region: "us-east-1".to_owned(),
                     prefix: "snapshots".to_owned(),
                 }),
+                source: crate::backup_provider::BackupProviderSource::Stored,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             },
@@ -2052,6 +2171,7 @@ mod tests {
             id: Uuid::new_v4(),
             name: "Filesystem".to_owned(),
             config: BackupProviderConfig::Filesystem(FilesystemSettings { path }),
+            source: crate::backup_provider::BackupProviderSource::Stored,
             created_at: now,
             updated_at: now,
         }

@@ -33,7 +33,7 @@ export class RepositoryIssuesState {
   readonly namespace: string;
   readonly name: string;
   readonly scope: RepositoryFeatureContext["scope"];
-  readonly setError: (message: string) => void;
+  readonly setError: IssuesCallbacks["setError"];
   readonly invalidateData: IssuesCallbacks["invalidateData"];
   readonly selectIssue: IssuesCallbacks["selectIssue"];
   readonly getIssueNumber: IssuesCallbacks["getIssueNumber"];
@@ -134,11 +134,13 @@ export class RepositoryIssuesState {
       );
       if (!this.isScopeCurrent()) return issue;
       toast.success(`Issue #${issue.number} opened.`);
-      await this.loadIssues();
+      await this.loadIssues().catch((caught) => {
+        this.setError(errorMessage(caught));
+      });
       this.selectIssue(issue.number);
       return issue;
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
       throw caught;
     } finally {
       this.issuePending = false;
@@ -171,7 +173,7 @@ export class RepositoryIssuesState {
       toast.success(`Issue #${number} updated.`);
       return issue;
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
       throw caught;
     } finally {
       this.issuePending = false;
@@ -187,10 +189,12 @@ export class RepositoryIssuesState {
       toast.success(`Issue #${number} deleted.`);
       this.selectedIssue = null;
       this.issueComments = [];
-      await this.loadIssues();
+      await this.loadIssues().catch((caught) => {
+        this.setError(errorMessage(caught));
+      });
       this.selectIssue(null);
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
       throw caught;
     } finally {
       this.issuePending = false;
@@ -214,10 +218,12 @@ export class RepositoryIssuesState {
           ...this.selectedIssue,
           comment_count: this.selectedIssue.comment_count + 1,
         };
-      await this.loadIssues();
+      await this.loadIssues().catch((caught) => {
+        this.setError(errorMessage(caught));
+      });
       return comment;
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
       throw caught;
     } finally {
       this.commentPending = false;
@@ -241,7 +247,7 @@ export class RepositoryIssuesState {
       );
       return comment;
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
       throw caught;
     } finally {
       this.commentPending = false;
@@ -261,9 +267,11 @@ export class RepositoryIssuesState {
           ...this.selectedIssue,
           comment_count: Math.max(0, this.selectedIssue.comment_count - 1),
         };
-      await this.loadIssues();
+      await this.loadIssues().catch((caught) => {
+        this.setError(errorMessage(caught));
+      });
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
       throw caught;
     } finally {
       this.commentPending = false;
@@ -288,7 +296,7 @@ export class RepositoryIssuesState {
       );
       return label;
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
       throw caught;
     } finally {
       this.labelPending = false;
@@ -303,36 +311,51 @@ export class RepositoryIssuesState {
       if (!this.isScopeCurrent()) return;
       this.invalidateData(["issue-labels"]);
       this.issueLabels = this.issueLabels.filter((label) => label.id !== id);
-      await this.loadIssues();
+      await this.loadIssues().catch((caught) => {
+        this.setError(errorMessage(caught));
+      });
       const number = this.getIssueNumber();
-      if (number) await this.loadIssue(number);
+      if (number)
+        await this.loadIssue(number).catch((caught) => {
+          this.setError(errorMessage(caught));
+        });
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
       throw caught;
     } finally {
       this.labelPending = false;
     }
   }
   async uploadIssueAttachment(file: File): Promise<IssueAttachment> {
-    return requestJson(
-      `${repositoryApi(this, "/issue-attachments")}?${new URLSearchParams({ name: file.name })}`,
-      issueAttachmentSchema,
-      {
-        method: "PUT",
-        headers: { "content-type": file.type || "application/octet-stream" },
-        body: file,
-      },
-    );
+    try {
+      return await requestJson(
+        `${repositoryApi(this, "/issue-attachments")}?${new URLSearchParams({ name: file.name })}`,
+        issueAttachmentSchema,
+        {
+          method: "PUT",
+          headers: { "content-type": file.type || "application/octet-stream" },
+          body: file,
+        },
+      );
+    } catch (caught) {
+      toast.error(errorMessage(caught));
+      throw caught;
+    }
   }
   async previewMarkdown(markdown: string): Promise<string> {
-    const response = await requestJson(
-      repositoryApi(this, "/markdown-preview"),
-      renderedMarkdownSchema,
-      {
-        method: "POST",
-        body: jsonBody({ markdown }),
-      },
-    );
-    return response.rendered_html;
+    try {
+      const response = await requestJson(
+        repositoryApi(this, "/markdown-preview"),
+        renderedMarkdownSchema,
+        {
+          method: "POST",
+          body: jsonBody({ markdown }),
+        },
+      );
+      return response.rendered_html;
+    } catch (caught) {
+      toast.error(errorMessage(caught));
+      throw caught;
+    }
   }
 }

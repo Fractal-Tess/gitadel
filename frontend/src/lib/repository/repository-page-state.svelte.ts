@@ -373,7 +373,7 @@ export class RepositoryPageState {
         if (this.copied === target) this.copied = null;
       }, 1600);
     } catch {
-      this.setError("The clone URL could not be copied.");
+      toast.error("The clone URL could not be copied.");
     }
   }
   handleVisibilityChange(): void {

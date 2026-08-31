@@ -1,12 +1,13 @@
 <script lang="ts">
   import { untrack } from "svelte";
+  import { toast } from "svelte-sonner";
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import CircleAlert from "@lucide/svelte/icons/circle-alert";
   import CircleCheck from "@lucide/svelte/icons/circle-check";
   import ExternalLink from "@lucide/svelte/icons/external-link";
   import Eye from "@lucide/svelte/icons/eye";
   import EyeOff from "@lucide/svelte/icons/eye-off";
-  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import { Spinner } from "$lib/components/ui/spinner/index.js";
   import PlugZap from "@lucide/svelte/icons/plug-zap";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
   import Rocket from "@lucide/svelte/icons/rocket";
@@ -20,6 +21,7 @@
   import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
   import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
+  import * as Alert from "$lib/components/ui/alert/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
   import * as Select from "$lib/components/ui/select/index.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
@@ -98,7 +100,6 @@
   let revealing = $state(false);
   let saving = $state(false);
   let testing = $state(false);
-  let error = $state<string | null>(null);
   let testResult = $state<IntegrationTestResult | null>(null);
   let creatingSource = $state(false);
   let sourceName = $state(untrack(() => app.instance?.site_name.trim() ?? ""));
@@ -170,7 +171,6 @@
     credentialRevision += 1;
     testResult = null;
     step = "details";
-    error = null;
     onproviderchange?.(selected);
   }
 
@@ -186,11 +186,10 @@
     }
     if (integration && !apiKey && onreveal) {
       revealing = true;
-      error = null;
       try {
         apiKey = await onreveal();
       } catch (caught) {
-        error = message(caught, "Could not reveal the stored API key.");
+        toast.error(message(caught, "Could not reveal the stored API key."));
         return;
       } finally {
         revealing = false;
@@ -202,23 +201,21 @@
   async function submit() {
     if (!target || !provider) return;
     saving = true;
-    error = null;
     try {
       await onsave({ target, provider, name, url, internalUrl, apiKey });
     } catch (caught) {
-      error = message(caught, "Could not save the integration.");
+      toast.error(message(caught, "Could not save the integration."));
     } finally {
       saving = false;
-    }
+  }
   }
 
   async function testConnection() {
     if (!ontest) return;
     testing = true;
-    error = null;
     testResult = null;
     try {
-      testResult = await ontest({
+      const result = await ontest({
         target,
         provider,
         name,
@@ -226,12 +223,22 @@
         internalUrl,
         apiKey,
       });
+      testResult = result;
       testedCredentialRevision = credentialRevision;
+      const account = result.account ? ` — signed in as ${result.account}` : "";
+      const successMessage = `Connection works${account}.`;
+      if (result.warnings.length > 0) {
+        toast.success(successMessage, {
+          description: result.warnings.join(" "),
+        });
+      } else {
+        toast.success(successMessage);
+      }
     } catch (caught) {
-      error = message(caught, "The connection test failed.");
+      toast.error(message(caught, "The connection test failed."));
     } finally {
       testing = false;
-    }
+  }
   }
 </script>
 
@@ -360,7 +367,7 @@
             onclick={() => void toggleApiKey()}
           >
             {#if revealing}
-              <LoaderCircle class="size-4 animate-spin" />
+              <Spinner class="size-4" />
             {:else if apiKeyVisible}
               <EyeOff class="size-4" />
             {:else}
@@ -409,7 +416,7 @@
 
         {#if sourceLoading && !sourceConnection}
           <p class="flex items-center gap-2 text-xs text-muted-foreground">
-            <LoaderCircle class="size-3.5 animate-spin" />Checking source
+            <Spinner class="size-3.5" />Checking source
             connection…
           </p>
         {:else if sourceConnection?.binding}
@@ -449,7 +456,7 @@
                   class="grid size-5 shrink-0 place-items-center rounded-full bg-primary/10"
                   aria-hidden="true"
                 >
-                  <LoaderCircle
+                  <Spinner
                     class={`size-3.5 text-primary ${sourcePollActive ? "animate-spin" : ""}`}
                   />
                 </span>
@@ -520,8 +527,8 @@
                 disabled={!sourceName.trim() || sourceWorking}
                 onclick={() => void oncreatesource?.(sourceName)}
               >
-                {#if sourceWorking}<LoaderCircle
-                    class="size-3.5 animate-spin"
+                {#if sourceWorking}<Spinner
+                    class="size-3.5"
                   />{/if}
                 Create provider
               </Button>
@@ -558,40 +565,15 @@
         {/if}
 
         {#if sourceError}
-          <p
-            class="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive"
-            role="alert"
-          >
-            {sourceError}
-          </p>
+          <Alert.Root variant="destructive">
+            <CircleAlert class="size-4 shrink-0" />
+            <Alert.Title>Source unavailable</Alert.Title>
+            <Alert.Description>{sourceError}</Alert.Description>
+          </Alert.Root>
         {/if}
       </section>
     {/if}
 
-    {#if mode === "connection" && testResult}
-      <div
-        class="rounded-md border border-emerald-500/25 bg-emerald-500/8 p-3 text-sm text-emerald-300"
-        role="status"
-      >
-        <p class="flex items-center gap-2">
-          <CircleCheck class="size-4 shrink-0" />
-          Connection works{testResult.account
-            ? ` — signed in as ${testResult.account}`
-            : ""}.
-        </p>
-        {#each testResult.warnings as warning (warning)}
-          <p class="mt-1.5 text-xs leading-5 text-amber-300">{warning}</p>
-        {/each}
-      </div>
-    {/if}
-    {#if error}
-      <p
-        class="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
-        role="alert"
-      >
-        {error}
-      </p>
-    {/if}
 
     {#if mode === "connection"}
       <div
@@ -607,9 +589,9 @@
               onclick={() => void testConnection()}
             >
               {#if testing}
-                <LoaderCircle class="size-4 animate-spin" />
+                <Spinner class="size-4" data-icon="inline-start" />
               {:else}
-                <PlugZap class="size-4" />
+                <PlugZap class="size-4" data-icon="inline-start" />
               {/if}
               Test connection
             </Button>
@@ -617,10 +599,9 @@
             <Button
               type="button"
               variant="ghost"
-              class="gap-2"
               onclick={() => (step = "provider")}
             >
-              <ArrowLeft class="size-4" />Back
+              <ArrowLeft data-icon="inline-start" />Back
             </Button>
           {/if}
         </div>
@@ -635,7 +616,7 @@
               !provider ||
               (requireSuccessfulTest && !testPassed)}
           >
-            {#if saving}<LoaderCircle class="size-4 animate-spin" />{/if}
+            {#if saving}<Spinner class="size-4" data-icon="inline-start" />{/if}
             {integration
               ? "Save changes"
               : requireSuccessfulTest

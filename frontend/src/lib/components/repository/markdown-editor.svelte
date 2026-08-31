@@ -1,10 +1,10 @@
 <script lang="ts">
-  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import Paperclip from "@lucide/svelte/icons/paperclip";
 
   import type { IssueAttachment } from "$lib/api/issues.js";
   import * as Tabs from "$lib/components/ui/tabs/index.js";
   import { Textarea } from "$lib/components/ui/textarea/index.js";
+  import { Spinner } from "$lib/components/ui/spinner/index.js";
   import { trustedHtml } from "$lib/repository/format.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
 
@@ -45,7 +45,7 @@
       previewHtml = await repository.issues.previewMarkdown(value);
       mode = "preview";
     } catch {
-      // The page-level error explains the failure; the draft stays untouched.
+      // The repository issue state owns mutation error toasts.
     } finally {
       previewPending = false;
     }
@@ -63,7 +63,7 @@
       insertAtCursor(attachmentMarkdown(attachment));
       onattachment?.(attachment);
     } catch {
-      // The page-level error explains the failure; the draft stays untouched.
+      // The repository issue state owns mutation error toasts.
     } finally {
       pendingUploads -= 1;
     }
@@ -120,7 +120,7 @@
           class="h-7 rounded-sm px-2.5 text-xs data-[state=active]:bg-background data-[state=active]:shadow-none"
         >
           {#if previewPending}
-            <LoaderCircle class="size-3 animate-spin" />
+            <Spinner class="size-3" />
           {/if}
           Preview
         </Tabs.Trigger>
@@ -131,7 +131,7 @@
       aria-live="polite"
     >
       {#if pendingUploads > 0}
-        <LoaderCircle class="size-3 animate-spin" />
+        <Spinner class="size-3" />
         Uploading {pendingUploads}
         {pendingUploads === 1 ? "file" : "files"}…
       {:else if attachments}

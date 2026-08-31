@@ -5,8 +5,8 @@
   import ArrowDownToLine from "@lucide/svelte/icons/arrow-down-to-line";
   import Building2 from "@lucide/svelte/icons/building-2";
   import GitBranch from "@lucide/svelte/icons/git-branch";
-  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+  import { toast } from "svelte-sonner";
 
   import { avatarUrl } from "$lib/api/account.js";
   import { organizationAvatarUrl } from "$lib/api/organizations.js";
@@ -76,7 +76,7 @@
   let wasOpen = false;
   let ownerFor: string | null = null;
   let creating = $state(false);
-  let error = $state<string | null>(null);
+  let mirrorLoadError = $state<string | null>(null);
   let namespace = $state("");
   let name = $state("");
   let description = $state("");
@@ -109,7 +109,7 @@
     if (wasOpen) return;
     wasOpen = true;
     mode = "choose";
-    error = null;
+    mirrorLoadError = null;
     namespace ||= viewer ?? "";
     visibility =
       app.authStatus?.user?.default_repository_visibility ?? "private";
@@ -161,14 +161,14 @@
       );
       mirrorIdentities = loaded.flat();
     } catch (caught) {
-      error = message(caught, "Could not load mirror identities.");
+      mirrorLoadError = message(caught, "Could not load mirror identities.");
     } finally {
       mirrorOptionsLoading = false;
     }
   }
 
   function selectMode(next: Exclude<CreateMode, "choose">): void {
-    error = null;
+    mirrorLoadError = null;
     mode = next;
     if (next === "mirror") {
       mirrorIdentityId = "";
@@ -176,7 +176,7 @@
     }
   }
   function backToChoices(): void {
-    error = null;
+    mirrorLoadError = null;
     mode = "choose";
   }
 
@@ -211,7 +211,6 @@
 
   async function createRepository(): Promise<void> {
     creating = true;
-    error = null;
     try {
       const repository = await requestJson(
         "/api/v1/repositories",
@@ -248,7 +247,7 @@
         }),
       );
     } catch (caught) {
-      error = message(caught, "Could not create repository.");
+      toast.error(message(caught, "Could not create repository."));
     } finally {
       creating = false;
     }
@@ -256,7 +255,6 @@
 
   async function createOrganization(): Promise<void> {
     creating = true;
-    error = null;
     try {
       const organization = await requestJson(
         "/api/v1/organizations",
@@ -275,7 +273,7 @@
       organizationDisplayName = "";
       await goto(resolve("/[namespace]", { namespace: organization.slug }));
     } catch (caught) {
-      error = message(caught, "Could not create organization.");
+      toast.error(message(caught, "Could not create organization."));
     } finally {
       creating = false;
     }
@@ -388,11 +386,11 @@
           void createRepository();
         }}
       >
-        {#if error}
+        {#if mirrorLoadError}
           <p
             class="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
           >
-            {error}
+            {mirrorLoadError}
           </p>
         {/if}
         {#if mode === "mirror"}
@@ -596,7 +594,7 @@
         </Field.Field>
         <Dialog.Footer class="sm:justify-between">
           <Button type="button" variant="ghost" onclick={backToChoices}>
-            <ArrowLeft class="size-4" />Back
+            <ArrowLeft data-icon="inline-start" />Back
           </Button>
           <div class="flex justify-end gap-2">
             <Dialog.Close>
@@ -637,13 +635,6 @@
           void createOrganization();
         }}
       >
-        {#if error}
-          <p
-            class="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
-          >
-            {error}
-          </p>
-        {/if}
         <Field.Field>
           <Field.Label for="organization-slug">Short name</Field.Label>
           <Input
@@ -670,7 +661,7 @@
         </Field.Field>
         <Dialog.Footer class="sm:justify-between">
           <Button type="button" variant="ghost" onclick={backToChoices}>
-            <ArrowLeft class="size-4" />Back
+            <ArrowLeft data-icon="inline-start" />Back
           </Button>
           <div class="flex justify-end gap-2">
             <Dialog.Close>

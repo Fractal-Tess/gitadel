@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
+  import { toast } from "svelte-sonner";
   import ImagePlus from "@lucide/svelte/icons/image-plus";
   import ZoomIn from "@lucide/svelte/icons/zoom-in";
   import ZoomOut from "@lucide/svelte/icons/zoom-out";
@@ -211,22 +212,34 @@
     if (!image) return;
     saving = true;
     error = null;
+    let blob: Blob;
     try {
-      const blob = await renderAvatarPng(
+      blob = await renderAvatarPng(
         image,
         cropSize,
         zoom,
         offsetX,
         offsetY,
       );
-      await onsave(blob);
-      saving = false;
-      setOpen(false);
     } catch (caught) {
       error =
         caught instanceof Error
           ? caught.message
           : "The profile picture could not be saved.";
+      saving = false;
+      return;
+    }
+    try {
+      await onsave(blob);
+      saving = false;
+      setOpen(false);
+    } catch (caught) {
+      toast.error(
+        caught instanceof Error
+          ? caught.message
+          : "The profile picture could not be saved.",
+      );
+    } finally {
       saving = false;
     }
   }

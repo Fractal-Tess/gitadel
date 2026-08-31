@@ -9,23 +9,22 @@
   import ContextNav, {
     type ContextNavItem,
   } from "$lib/components/app/context-nav.svelte";
+  import * as Alert from "$lib/components/ui/alert/index.js";
+  import { Button } from "$lib/components/ui/button/index.js";
 
   import OauthApplicationSettings from "$lib/components/settings/oauth-application-settings.svelte";
   import SecuritySettings from "$lib/components/settings/security-settings.svelte";
   import { AccountSettingsState } from "$lib/settings/account-settings-state.svelte.js";
+  import {
+    preloadAccountSettingsView,
+    type AccountSettingsView,
+  } from "$lib/settings/settings-data-cache.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
-
-  type AccountRouteView =
-    | "profile"
-    | "authentication"
-    | "ssh-keys"
-    | "api-tokens"
-    | "oauth-applications";
 
   const app = useAppState();
   const state = new AccountSettingsState(app);
   const requestedView = $derived(page.params.view ?? "profile");
-  const view = $derived<AccountRouteView>(
+  const view = $derived<AccountSettingsView>(
     requestedView === "authentication" ||
       requestedView === "ssh-keys" ||
       requestedView === "api-tokens" ||
@@ -58,13 +57,7 @@
 
   $effect(() => {
     state.syncScope();
-    void state.initialize(
-      view === "profile"
-        ? "account"
-        : view === "oauth-applications"
-          ? "applications"
-          : view,
-    );
+    void state.initialize(view);
   });
 
   const navigation = $derived.by<ContextNavItem[]>(() => [
@@ -81,6 +74,8 @@
       icon: LockKeyhole,
       href: resolve("/-/account/[view]", { view: "authentication" }),
       active: view === "authentication",
+      preload: () =>
+        preloadAccountSettingsView(app.authorizationScope, "authentication"),
     },
     {
       id: "ssh-keys",
@@ -88,6 +83,8 @@
       icon: Terminal,
       href: resolve("/-/account/[view]", { view: "ssh-keys" }),
       active: view === "ssh-keys",
+      preload: () =>
+        preloadAccountSettingsView(app.authorizationScope, "ssh-keys"),
     },
     {
       id: "api-tokens",
@@ -95,6 +92,8 @@
       icon: KeySquare,
       href: resolve("/-/account/[view]", { view: "api-tokens" }),
       active: view === "api-tokens",
+      preload: () =>
+        preloadAccountSettingsView(app.authorizationScope, "api-tokens"),
     },
     {
       id: "oauth-applications",
@@ -102,6 +101,11 @@
       icon: AppWindow,
       href: resolve("/-/account/[view]", { view: "oauth-applications" }),
       active: view === "oauth-applications",
+      preload: () =>
+        preloadAccountSettingsView(
+          app.authorizationScope,
+          "oauth-applications",
+        ),
     },
   ]);
 </script>
@@ -129,6 +133,19 @@
     <p class="py-16 text-center text-sm text-muted-foreground">
       Loading account settings…
     </p>
+  {:else if state.error}
+    <Alert.Root variant="destructive">
+      <Alert.Title>Account settings unavailable</Alert.Title>
+      <Alert.Description>{state.error}</Alert.Description>
+      <Button
+        class="mt-3"
+        size="sm"
+        variant="outline"
+        onclick={() => void state.initialize(view)}
+      >
+        Retry
+      </Button>
+    </Alert.Root>
   {:else if view === "oauth-applications"}
     <OauthApplicationSettings state={state.oauth} showHeader={false} />
   {:else}

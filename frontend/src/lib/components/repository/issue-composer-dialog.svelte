@@ -1,5 +1,4 @@
 <script lang="ts">
-  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import Tag from "@lucide/svelte/icons/tag";
 
   import type { Issue, IssueAttachment } from "$lib/api/issues.js";
@@ -7,6 +6,7 @@
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
+  import { Spinner } from "$lib/components/ui/spinner/index.js";
   import AssigneeCombobox from "$lib/components/repository/assignee-combobox.svelte";
   import IssueLabelDialog from "$lib/components/repository/issue-label-dialog.svelte";
   import MarkdownEditor from "$lib/components/repository/markdown-editor.svelte";
@@ -29,7 +29,6 @@
   let selectedLabelIds = $state<string[]>([]);
   let pendingAttachmentIds = $state<string[]>([]);
   let labelsOpen = $state(false);
-  let failure = $state("");
 
   const canManage = $derived(
     issue?.can_manage ?? repository.repository?.can_manage ?? false,
@@ -43,7 +42,6 @@
     assignee = issue?.assignee?.username ?? "";
     selectedLabelIds = issue ? issue.labels.map((label) => label.id) : [];
     pendingAttachmentIds = [];
-    failure = "";
   });
 
   $effect(() => {
@@ -63,7 +61,6 @@
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
-    failure = "";
     try {
       if (issue) {
         await repository.issues.updateIssue(issue.number, {
@@ -89,9 +86,8 @@
         });
       }
       open = false;
-    } catch (caught) {
-      failure =
-        caught instanceof Error ? caught.message : "The request failed.";
+    } catch {
+      // The repository issue state owns mutation error toasts.
     }
   }
 </script>
@@ -161,9 +157,6 @@
         </div>
       {/if}
 
-      {#if failure}
-        <p class="text-sm text-destructive">{failure}</p>
-      {/if}
 
       <Dialog.Footer class="mt-2 gap-2">
         <Button type="button" variant="ghost" onclick={() => (open = false)}
@@ -171,7 +164,7 @@
         >
         <Button type="submit" disabled={repository.issues.issuePending}>
           {#if repository.issues.issuePending}
-            <LoaderCircle class="size-4 animate-spin" />
+            <Spinner class="size-4 animate-spin" />
           {/if}
           {repository.issues.issuePending
             ? "Saving…"

@@ -1,17 +1,19 @@
 <script lang="ts">
   import CircleAlert from "@lucide/svelte/icons/circle-alert";
   import CircleCheck from "@lucide/svelte/icons/circle-check";
-  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import { Spinner } from "$lib/components/ui/spinner/index.js";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
   import Server from "@lucide/svelte/icons/server";
   import Workflow from "@lucide/svelte/icons/workflow";
   import { onMount } from "svelte";
+  import { toast } from "svelte-sonner";
 
   import type { ActionRunner } from "$lib/api/actions.js";
   import RunnerRegistrationDialog from "$lib/components/actions/runner-registration-dialog.svelte";
   import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
   import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
+  import * as Alert from "$lib/components/ui/alert/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
@@ -88,6 +90,14 @@
     connectionTesting = true;
     connectionTest = null;
     await account.loadActionRunners([namespace.slug]);
+    const loadError = account.actionLoadErrors[namespace.slug];
+    if (loadError) {
+      toast.error(loadError);
+      account.actionLoadErrors[namespace.slug] = null;
+      account.actionsLoadError = null;
+      connectionTesting = false;
+      return;
+    }
     const runner = (account.actionRunners[card.target.slug] ?? []).find(
       (candidate) => candidate.id === card.runner.id,
     );
@@ -130,11 +140,12 @@
 
   async function removeRunner() {
     if (!pendingRemoval) return;
-    await account.removeActionRunner(
-      pendingRemoval.target.slug,
-      pendingRemoval.runner.id,
-    );
-    if (!account.actionErrors[pendingRemoval.target.slug]) {
+    if (
+      await account.removeActionRunner(
+        pendingRemoval.target.slug,
+        pendingRemoval.runner.id,
+      )
+    ) {
       removeDialogOpen = false;
       pendingRemoval = null;
       configuring = null;
@@ -178,15 +189,18 @@
 
   {#if account.actionsLoading && Object.keys(account.actionRunners).length === 0}
     <p class="flex items-center gap-2 text-sm text-muted-foreground">
-      <LoaderCircle class="size-4 animate-spin" />Loading runners…
+      <Spinner class="size-4" />Loading runners…
     </p>
   {:else}
     {#if account.actionsLoadError}
-      <div
-        class="flex flex-wrap items-center justify-between gap-3 rounded-md border border-destructive/30 bg-destructive/5 p-3"
-        role="alert"
+      <Alert.Root
+        class="flex flex-wrap items-center justify-between gap-3"
+        variant="destructive"
       >
-        <p class="text-sm text-destructive">{account.actionsLoadError}</p>
+        <div>
+          <Alert.Title>Runners unavailable</Alert.Title>
+          <Alert.Description>{account.actionsLoadError}</Alert.Description>
+        </div>
         <Button
           type="button"
           size="sm"
@@ -194,7 +208,7 @@
           onclick={() => void account.loadActionRunners([namespace.slug])}
           >Retry</Button
         >
-      </div>
+      </Alert.Root>
     {/if}
 
     <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
@@ -220,7 +234,7 @@
             !card.runner.incompatibility}
           detailLabel={`v${card.runner.version}`}
           busy={account.actionsWorking[card.target.slug]}
-          error={account.actionErrors[card.target.slug]}
+          error={account.actionLoadErrors[card.target.slug]}
           onconfigure={() => openConfigure(card)}
           onremove={() => requestRemove(card)}
         />
@@ -273,14 +287,6 @@
           define the same labels.
         </Field.Description>
       </Field.Field>
-      {#if account.actionErrors[namespace.slug]}
-        <p
-          class="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
-          role="alert"
-        >
-          {account.actionErrors[namespace.slug]}
-        </p>
-      {/if}
       <Dialog.Footer>
         <Button
           type="button"
@@ -391,9 +397,9 @@
               onclick={() => void testConnection()}
             >
               {#if connectionTesting}
-                <LoaderCircle class="size-4 animate-spin" />Testing…
+                <Spinner class="size-4" data-icon="inline-start" />Testing…
               {:else}
-                <RefreshCw class="size-4" />Test connection
+                <RefreshCw class="size-4" data-icon="inline-start" />Test connection
               {/if}
             </Button>
           </div>

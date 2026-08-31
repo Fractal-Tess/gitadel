@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import { toast } from "svelte-sonner";
+  import { Spinner } from "$lib/components/ui/spinner/index.js";
 
   import {
     ApiFailure,
@@ -23,6 +24,7 @@
     type ConnectionEditorValue,
   } from "$lib/components/integrations/integration-connection-editor.svelte";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
+  import * as Alert from "$lib/components/ui/alert/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import { takeNamespaceIntegrations } from "$lib/namespace-preload.js";
@@ -45,7 +47,6 @@
   let loading = $state(true);
   let loadError = $state<string | null>(null);
   let working = $state<Record<string, boolean>>({});
-  let cardErrors = $state<Record<string, string | null>>({});
 
   let modalOpen = $state(false);
   let editing = $state<Card | null>(null);
@@ -200,7 +201,7 @@
       );
       updateSourceSummary(card, sourceConnection);
     } catch (caught) {
-      sourceError = message(caught, "Could not connect the Dokploy source.");
+      toast.error(message(caught, "Could not connect the Dokploy source."));
     } finally {
       sourceWorking = false;
     }
@@ -222,7 +223,7 @@
       );
       updateSourceSummary(card, sourceConnection);
     } catch (caught) {
-      sourceError = message(caught, "Could not create the Dokploy source.");
+      toast.error(message(caught, "Could not create the Dokploy source."));
     } finally {
       sourceWorking = false;
     }
@@ -238,7 +239,7 @@
       updateSourceSummary(card, null);
       await loadSource(editing);
     } catch (caught) {
-      sourceError = message(caught, "Could not disconnect the Dokploy source.");
+      toast.error(message(caught, "Could not disconnect the Dokploy source."));
     } finally {
       sourceWorking = false;
     }
@@ -338,7 +339,6 @@
   async function setEnabled(card: Card, enabled: boolean) {
     const id = card.integration.id;
     working[id] = true;
-    cardErrors[id] = null;
     try {
       const updated = await requestJson(
         integrationPath(card.target.slug, id),
@@ -347,9 +347,8 @@
       );
       updateCard(card.target.slug, updated);
     } catch (caught) {
-      cardErrors[id] = message(
-        caught,
-        `Could not update ${card.integration.name}.`,
+      toast.error(
+        message(caught, `Could not update ${card.integration.name}.`),
       );
     } finally {
       working[id] = false;
@@ -375,7 +374,6 @@
     if (!card) return;
     const id = card.integration.id;
     working[id] = true;
-    cardErrors[id] = null;
     try {
       await requestEmpty(integrationPath(card.target.slug, id), {
         method: "DELETE",
@@ -386,10 +384,10 @@
       removeDialogOpen = false;
       pendingRemoveCard = null;
     } catch (caught) {
-      cardErrors[id] = message(
-        caught,
-        `Could not remove ${card.integration.name}.`,
+      toast.error(
+        message(caught, `Could not remove ${card.integration.name}.`),
       );
+      removeDialogOpen = false;
     } finally {
       working[id] = false;
     }
@@ -409,14 +407,13 @@
 
   {#if loading}
     <p class="flex items-center gap-2 text-sm text-muted-foreground">
-      <LoaderCircle class="size-4 animate-spin" />Loading integrations…
+      <Spinner class="size-4" />Loading integrations…
     </p>
   {:else if loadError}
-    <p
-      class="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
-    >
-      {loadError}
-    </p>
+    <Alert.Root variant="destructive">
+      <Alert.Title>Integrations unavailable</Alert.Title>
+      <Alert.Description>{loadError}</Alert.Description>
+    </Alert.Root>
   {:else}
     <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
       <IntegrationAddCard
@@ -452,7 +449,6 @@
               card.integration.source?.ready === true)}
           detailLabel={card.integration.source?.name ?? card.target.slug}
           busy={working[card.integration.id]}
-          error={cardErrors[card.integration.id]}
           onenabledchange={(enabled) => void setEnabled(card, enabled)}
           onconfigure={() => openConfigure(card)}
           onremove={() => requestRemove(card)}

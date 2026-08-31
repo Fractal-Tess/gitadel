@@ -1,13 +1,14 @@
 <script lang="ts">
-  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import Plus from "@lucide/svelte/icons/plus";
   import Tag from "@lucide/svelte/icons/tag";
   import Trash2 from "@lucide/svelte/icons/trash-2";
 
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
+  import { Checkbox } from "$lib/components/ui/checkbox/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
+  import { Spinner } from "$lib/components/ui/spinner/index.js";
   import LabelChip from "$lib/components/repository/label-chip.svelte";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
 
@@ -28,7 +29,6 @@
   let name = $state("");
   let color = $state("#3b82f6");
   let description = $state("");
-  let failure = $state("");
   let deleteDialogOpen = $state(false);
   let pendingDeleteLabel = $state<{ id: string; name: string } | null>(null);
 
@@ -54,7 +54,6 @@
 
   async function submitLabel(event: SubmitEvent) {
     event.preventDefault();
-    failure = "";
     creating = true;
     try {
       await repository.issues.createIssueLabel({
@@ -64,11 +63,8 @@
       });
       name = "";
       description = "";
-    } catch (caught) {
-      failure =
-        caught instanceof Error
-          ? caught.message
-          : "Could not create the label.";
+    } catch {
+      // The repository issue state owns mutation error toasts.
     } finally {
       creating = false;
     }
@@ -106,11 +102,9 @@
         {#each repository.issues.issueLabels as label (label.id)}
           <li class="flex items-center gap-3 p-2.5">
             {#if selecting}
-              <input
-                type="checkbox"
-                class="accent-primary size-4"
+              <Checkbox
                 checked={selected.includes(label.id)}
-                onchange={() => toggle(label.id)}
+                onCheckedChange={() => toggle(label.id)}
                 aria-label={`Toggle ${label.name}`}
               />
             {/if}
@@ -188,9 +182,6 @@
           maxlength={255}
           placeholder="Description (optional)"
         />
-        {#if failure}
-          <p class="text-sm text-destructive">{failure}</p>
-        {/if}
         <Button
           type="submit"
           size="sm"
@@ -199,7 +190,7 @@
           disabled={creating || repository.issues.labelPending}
         >
           {#if creating || repository.issues.labelPending}
-            <LoaderCircle class="size-3.5 animate-spin" />
+            <Spinner class="size-3.5 animate-spin" />
           {:else}
             <Plus class="size-3.5" />
           {/if}

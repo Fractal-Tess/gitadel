@@ -2,9 +2,9 @@
   import { onMount } from "svelte";
   import Clock3 from "@lucide/svelte/icons/clock-3";
   import KeyRound from "@lucide/svelte/icons/key-round";
-  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
   import { toast } from "svelte-sonner";
+  import { Spinner } from "$lib/components/ui/spinner/index.js";
 
   import {
     ApiFailure,
@@ -19,6 +19,7 @@
     type RepositoryMirror,
   } from "$lib/api/mirrors.js";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
+  import * as Alert from "$lib/components/ui/alert/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import * as Select from "$lib/components/ui/select/index.js";
@@ -32,7 +33,6 @@
   let saving = $state(false);
   let syncing = $state(false);
   let error = $state<string | null>(null);
-  let conversionError = $state<string | null>(null);
   let convertDialogOpen = $state(false);
   let converting = $state(false);
   let schedule = $state("");
@@ -104,7 +104,6 @@
   async function save(): Promise<void> {
     if (!mirror) return;
     saving = true;
-    error = null;
     try {
       const next = await requestJson(endpoint, repositoryMirrorSchema, {
         method: "PATCH",
@@ -116,7 +115,7 @@
       applyMirror(next);
       toast.success("Mirror settings saved.");
     } catch (caught) {
-      error = message(caught);
+      toast.error(message(caught));
     } finally {
       saving = false;
     }
@@ -124,7 +123,6 @@
 
   async function syncNow(): Promise<void> {
     syncing = true;
-    error = null;
     try {
       const next = await requestJson(
         `${endpoint}/sync`,
@@ -135,7 +133,7 @@
       toast.success("Mirror synchronization started.");
       scheduleRefresh();
     } catch (caught) {
-      error = message(caught);
+      toast.error(message(caught));
       syncing = false;
     }
   }
@@ -143,7 +141,6 @@
   async function convertToStandard(): Promise<void> {
     if (!mirror) return;
     converting = true;
-    conversionError = null;
     try {
       await requestEmpty(endpoint, { method: "DELETE" });
       repository.repository = repository.repository
@@ -155,7 +152,7 @@
       toast.success("Mirror converted to a standard repository.");
       repository.navigate("overview");
     } catch (caught) {
-      conversionError = message(caught);
+      toast.error(message(caught));
     } finally {
       converting = false;
     }
@@ -212,12 +209,10 @@
     {:else if mirror}
       <div class="grid max-w-2xl gap-4">
         {#if error}
-          <p
-            class="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
-            role="alert"
-          >
-            {error}
-          </p>
+          <Alert.Root variant="destructive">
+            <Alert.Title>Mirror status unavailable</Alert.Title>
+            <Alert.Description>{error}</Alert.Description>
+          </Alert.Root>
         {/if}
         <div class="rounded-lg border bg-background/60 p-4">
           <p
@@ -278,9 +273,10 @@
         </div>
       </div>
     {:else}
-      <p class="text-sm text-destructive">
-        {error ?? "Mirror status unavailable."}
-      </p>
+      <Alert.Root variant="destructive">
+        <Alert.Title>Mirror status unavailable</Alert.Title>
+        <Alert.Description>{error ?? "Mirror status unavailable."}</Alert.Description>
+      </Alert.Root>
     {/if}
   </section>
 
@@ -419,11 +415,6 @@
               Synchronization stops. Refs and imported content remain, and
               pushes become writable.
             </p>
-            {#if conversionError}
-              <p class="mt-3 text-sm text-destructive" role="alert">
-                {conversionError}
-              </p>
-            {/if}
             <AlertDialog.Root bind:open={convertDialogOpen}>
               <Button
                 type="button"
@@ -458,9 +449,7 @@
                       void convertToStandard();
                     }}
                   >
-                    {#if converting}<LoaderCircle
-                        class="size-4 animate-spin"
-                      />Converting…{:else}Convert repository{/if}
+                    {#if converting}<Spinner class="size-4 animate-spin" />Converting…{:else}Convert repository{/if}
                   </AlertDialog.Action>
                 </AlertDialog.Footer>
               </AlertDialog.Content>

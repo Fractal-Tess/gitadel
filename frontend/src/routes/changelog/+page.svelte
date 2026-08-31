@@ -5,6 +5,7 @@
   import { ApiFailure, requestJson } from "$lib/api/transport.js";
   import { changelogSchema } from "$lib/api/instance.js";
   import { trustedHtml } from "$lib/repository/format.js";
+  import * as Alert from "$lib/components/ui/alert/index.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
   const app = useAppState();
@@ -63,11 +64,10 @@
       Loading changelog…
     </p>
   {:else if error}
-    <p
-      class="rounded-md border border-destructive/30 bg-destructive/5 p-4 text-sm"
-    >
-      {error}
-    </p>
+    <Alert.Root variant="destructive">
+      <Alert.Title>Changelog unavailable</Alert.Title>
+      <Alert.Description>{error}</Alert.Description>
+    </Alert.Root>
   {:else}
     <div
       class="prose max-w-none prose-code:before:content-none prose-code:after:content-none dark:prose-invert"

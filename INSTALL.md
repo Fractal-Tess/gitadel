@@ -122,6 +122,72 @@ GITADEL__SSH__BIND=0.0.0.0:2222
 
 Common command-line options also have aliases including `GITADEL_CONFIG`, `GITADEL_BIND`, `GITADEL_PUBLIC_URL`, and `GITADEL_DATABASE_URL`. Run `gitadel --help` for the complete list and defaults.
 
+### Local HTTPS for passkeys
+
+Passkeys require a secure browser origin. Gitadel can terminate HTTPS directly
+when a PEM certificate chain and private key are configured:
+
+```toml
+[server]
+bind = "0.0.0.0:3030"
+public_url = "https://kiwi.netbird.cloud:3030"
+
+[server.tls]
+certificate = "data/tls/gitadel.pem"
+private_key = "data/tls/gitadel-key.pem"
+```
+
+The development shell includes `mkcert` and the NSS `certutil` tool. Generate a
+certificate for the names used by your browsers:
+
+```bash
+mkdir -p data/tls
+mkcert -cert-file data/tls/gitadel.pem \
+  -key-file data/tls/gitadel-key.pem \
+  kiwi.netbird.cloud localhost 127.0.0.1 ::1
+```
+
+`mkcert -install` configures trust automatically on supported systems. On
+NixOS, import the generated CA into Chromium's user NSS database instead:
+
+```bash
+certutil -A -d "sql:$HOME/.pki/nssdb" -t "C,," \
+  -n "mkcert development CA" -i "$(mkcert -CAROOT)/rootCA.pem"
+```
+
+Restart the browser after changing its trust database. Every other device that
+opens the NetBird URL must also trust `$(mkcert -CAROOT)/rootCA.pem`; never
+copy `rootCA-key.pem` or the Gitadel private key to another device.
+
+## Git LFS storage
+
+Git repositories, issue attachments, and release assets remain under the configured local storage roots. Administrators define tested filesystem and S3-compatible destinations under **Administration → Storage**. User-defined storage targets are also available as backup destinations; Gitadel does not create a default backup provider. Filesystem backups use a sibling `<storage-name>-backups` directory so an archive never contains itself; S3 backups use a `backups` child of the target prefix.
+
+**Administration → Git LFS** reports the current object count and logical bytes used. Exactly one target is active. Changing it runs an offline, restartable copy-and-verify migration with live byte progress that reconnects through maintenance mode. Gitadel verifies destination size and SHA-256 content, selects the destination in one database transaction, and restarts normal service. Source data is retained.
+
+The same workflow is available from the CLI while Gitadel is stopped:
+
+```bash
+gitadel lfs target add-filesystem --name archive --path /mnt/archive/gitadel-lfs
+gitadel lfs target list
+gitadel lfs migrate <target-id>
+```
+
+For S3-compatible storage, pass the endpoint, bucket, region, and prefix as options. Supply credentials through the environment so they do not enter shell history:
+
+```bash
+export GITADEL_LFS_S3_ACCESS_KEY=access-key
+export GITADEL_LFS_S3_SECRET_KEY=secret-key
+gitadel lfs target add-s3 \
+  --name object-storage \
+  --endpoint https://s3.example.com \
+  --bucket gitadel \
+  --region us-east-1 \
+  --prefix lfs
+```
+
+The target must be empty or contain Gitadel's matching ownership marker. S3 committed-object metadata is verified before reads, listings, migration cutover, and backup creation. Restores always materialize LFS data into the running instance's configured local `lfs_root`; restored database-backed targets remain inactive until an administrator migrates to one explicitly.
+
 ## Backups
 
 CLI backups are offline so the storage lock can guarantee one consistent snapshot. Stop the service before creating one:

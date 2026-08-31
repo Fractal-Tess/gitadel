@@ -11,6 +11,7 @@
   import Upload from "@lucide/svelte/icons/upload";
 
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
+  import * as Alert from "$lib/components/ui/alert/index.js";
   import { Badge } from "$lib/components/ui/badge/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
@@ -50,7 +51,7 @@
       deleteDialogOpen = false;
       pendingDelete = null;
     } catch {
-      // The page-level error explains the failure.
+      // The repository release state owns mutation error toasts.
     }
   }
 
@@ -61,7 +62,7 @@
       await repository.releases.uploadReleaseAssets(releaseId, selected);
       assetFiles = { ...assetFiles, [releaseId]: [] };
     } catch {
-      // The page-level error explains the failure.
+      // The repository release state owns mutation error toasts.
     }
   }
 
@@ -92,8 +93,8 @@
       </p>
     </div>
     {#if repository.repository?.can_manage}
-      <Button class="gap-2" onclick={beginCreate}>
-        <Plus class="size-4" />New release
+      <Button onclick={beginCreate}>
+        <Plus data-icon="inline-start" />New release
       </Button>
     {/if}
   </header>
@@ -103,14 +104,15 @@
       Loading releases…
     </p>
   {:else if repository.releases.releasesLoadFailed && !repository.releases.releasesLoaded}
-    <div class="py-16 text-center text-sm text-muted-foreground">
-      <p>Releases could not be loaded.</p>
+    <Alert.Root variant="destructive">
+      <Alert.Title>Releases unavailable</Alert.Title>
+      <Alert.Description>Releases could not be loaded.</Alert.Description>
       <Button
         variant="link"
         class="mt-2"
         onclick={() => void repository.releases.refreshReleases()}>Try again</Button
       >
-    </div>
+    </Alert.Root>
   {:else if repository.releases.releases.length}
     <div class="divide-y">
       {#each repository.releases.releases as release (release.id)}
@@ -288,8 +290,8 @@
         assets.
       </p>
       {#if repository.repository?.can_manage}
-        <Button class="mt-5 gap-2" onclick={beginCreate}>
-          <Plus class="size-4" />Publish the first release
+        <Button class="mt-5" onclick={beginCreate}>
+          <Plus data-icon="inline-start" />Publish the first release
         </Button>
       {/if}
     </div>

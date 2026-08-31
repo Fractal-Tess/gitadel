@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, io::ErrorKind, path::Component};
+use std::{collections::BTreeMap, path::Component};
 
 use axum::{
     Json, Router,
@@ -9,23 +9,19 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use http_body_util::BodyExt as _;
+use futures_util::TryStreamExt as _;
 use sea_orm::{
     ActiveModelTrait as _, ColumnTrait as _, Condition, EntityTrait as _, QueryFilter as _,
-    QueryOrder as _, QuerySelect as _, Set,
+    QueryOrder as _, QuerySelect as _, Set, sea_query::OnConflict,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
-use tokio::{
-    fs::{self, OpenOptions},
-    io::AsyncWriteExt as _,
-};
-use tokio_util::io::ReaderStream;
+use tokio_util::io::{ReaderStream, StreamReader};
 use uuid::Uuid;
 
 use super::{LfsPermission, Permission, RepositoryState, git_http::GitHttpState};
 use crate::{
-    entity::{lfs_lock, repository, user},
+    blob_store::{BlobDigest, DigestMismatch},
+    entity::{lfs_lock, lfs_object, repository, user},
     identity::{ApiError, SCOPE_REPOSITORY_READ, SCOPE_WRITE},
 };
 
@@ -219,10 +215,13 @@ async fn batch(
             });
             continue;
         }
-        let object_path = state.lfs_object_path(&repository, &object.oid);
-        let exists = fs::try_exists(&object_path)
+        let object_key = state.lfs_object_key(&repository, &object.oid)?;
+        let exists = state
+            .lfs_store()
+            .stat(&object_key)
             .await
-            .map_err(ApiError::internal)?;
+            .map_err(ApiError::internal)?
+            .is_some();
         let mut actions = BTreeMap::new();
         let error = match permission {
             LfsPermission::Read if exists => {
@@ -288,22 +287,26 @@ async fn download(
         LfsPermission::Read,
     )
     .await?;
-    let path = state.lfs_object_path(&repository, &oid);
-    let file = fs::File::open(&path)
+    let key = state.lfs_object_key(&repository, &oid)?;
+    let metadata = state
+        .lfs_store()
+        .stat(&key)
         .await
-        .map_err(|error| match error.kind() {
-            ErrorKind::NotFound => ApiError::not_found(),
-            _ => ApiError::internal(error),
-        })?;
-    let size = file.metadata().await.map_err(ApiError::internal)?.len();
-    let mut response = Response::new(Body::from_stream(ReaderStream::new(file)));
+        .map_err(ApiError::internal)?
+        .ok_or_else(ApiError::not_found)?;
+    let reader = state
+        .lfs_store()
+        .read(&key)
+        .await
+        .map_err(ApiError::internal)?;
+    let mut response = Response::new(Body::from_stream(ReaderStream::new(reader)));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
     );
     response.headers_mut().insert(
         header::CONTENT_LENGTH,
-        HeaderValue::from_str(&size.to_string()).map_err(ApiError::internal)?,
+        HeaderValue::from_str(&metadata.size.to_string()).map_err(ApiError::internal)?,
     );
     Ok(response)
 }
@@ -312,7 +315,7 @@ async fn upload(
     State(state): State<GitHttpState>,
     Path((namespace, repository_segment, oid)): Path<(String, String, String)>,
     headers: HeaderMap,
-    mut body: Body,
+    body: Body,
 ) -> Result<StatusCode, ApiError> {
     if !valid_oid(&oid) {
         return Err(ApiError::bad_request(
@@ -327,51 +330,64 @@ async fn upload(
         LfsPermission::Write,
     )
     .await?;
-    let path = state.lfs_object_path(&repository, &oid);
-    if fs::try_exists(&path).await.map_err(ApiError::internal)? {
+    let key = state.lfs_object_key(&repository, &oid)?;
+    if let Some(metadata) = state
+        .lfs_store()
+        .stat(&key)
+        .await
+        .map_err(ApiError::internal)?
+    {
+        upsert_lfs_object(&state, &repository, &oid, metadata.size).await?;
+        state.invalidate_repository_size(repository.id).await;
         return Ok(StatusCode::OK);
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| ApiError::internal("LFS object path has no parent"))?;
-    fs::create_dir_all(parent)
+    let expected = oid.parse::<BlobDigest>().map_err(ApiError::internal)?;
+    let stream = body.into_data_stream().map_err(std::io::Error::other);
+    let reader = StreamReader::new(stream);
+    let outcome = state
+        .lfs_store()
+        .put_verified(&key, expected, Box::pin(reader))
         .await
-        .map_err(ApiError::internal)?;
-    let temporary = parent.join(format!(".{}.upload", Uuid::new_v4().simple()));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .await
-        .map_err(ApiError::internal)?;
-    let mut digest = Sha256::new();
-    let result = async {
-        while let Some(frame) = body.frame().await {
-            let frame = frame.map_err(ApiError::internal)?;
-            if let Ok(data) = frame.into_data() {
-                digest.update(&data);
-                file.write_all(&data).await.map_err(ApiError::internal)?;
+        .map_err(|error| {
+            if error
+                .chain()
+                .any(|cause| cause.downcast_ref::<DigestMismatch>().is_some())
+            {
+                ApiError::bad_request("The uploaded LFS object does not match its identifier.")
+            } else {
+                ApiError::internal(error)
             }
-        }
-        file.sync_all().await.map_err(ApiError::internal)?;
-        let actual_oid = format!("{:x}", digest.finalize());
-        if actual_oid != oid {
-            return Err(ApiError::bad_request(
-                "The uploaded LFS object does not match its identifier.",
-            ));
-        }
-        fs::rename(&temporary, &path)
-            .await
-            .map_err(ApiError::internal)?;
-        Ok(())
-    }
-    .await;
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary).await;
-    }
-    result?;
+        })?;
+    upsert_lfs_object(&state, &repository, &oid, outcome.size).await?;
     state.invalidate_repository_size(repository.id).await;
     Ok(StatusCode::OK)
+}
+
+async fn upsert_lfs_object(
+    state: &GitHttpState,
+    repository: &repository::Model,
+    oid: &str,
+    size: u64,
+) -> Result<(), ApiError> {
+    lfs_object::Entity::insert(lfs_object::ActiveModel {
+        repository_id: Set(repository.id),
+        oid: Set(oid.to_owned()),
+        size: Set(i64::try_from(size).map_err(ApiError::internal)?),
+        storage_target_id: Set(state.lfs_target_id()),
+        created_at: Set(chrono::Utc::now()),
+    })
+    .on_conflict(
+        OnConflict::columns([lfs_object::Column::RepositoryId, lfs_object::Column::Oid])
+            .update_columns([
+                lfs_object::Column::Size,
+                lfs_object::Column::StorageTargetId,
+            ])
+            .to_owned(),
+    )
+    .exec(state.identity().database())
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(())
 }
 
 async fn authorized_repository(

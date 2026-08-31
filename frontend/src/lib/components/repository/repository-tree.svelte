@@ -1,10 +1,10 @@
 <script lang="ts">
   import ChevronRight from "@lucide/svelte/icons/chevron-right";
   import GitBranch from "@lucide/svelte/icons/git-branch";
-  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import MaterialFileIcon from "$lib/components/repository/material-file-icon.svelte";
 
   import * as Select from "$lib/components/ui/select/index.js";
+  import { Spinner } from "$lib/components/ui/spinner/index.js";
   import { formatSize } from "$lib/repository/format.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
   import type { Tree } from "$lib/api/repositories.js";
@@ -97,7 +97,7 @@
               class="flex items-center gap-2 py-2 text-xs text-muted-foreground"
               style={`padding-left:${2.6 + depth * 1.1}rem`}
             >
-              <LoaderCircle class="size-3 animate-spin" />Loading directory…
+              <Spinner class="size-3 animate-spin" />Loading directory…
             </div>
           {/if}
         {/if}

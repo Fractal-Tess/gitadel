@@ -14,6 +14,8 @@
   import X from "@lucide/svelte/icons/x";
   import RepositoryActivityChart from "$lib/components/repository/repository-activity-chart.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
+  import * as Alert from "$lib/components/ui/alert/index.js";
+  import * as Empty from "$lib/components/ui/empty/index.js";
 
   import { ApiFailure, requestEmpty } from "$lib/api/transport.js";
   import type { RepositoryOverviewItem } from "$lib/api/repositories.js";
@@ -69,7 +71,6 @@
   let activeLoadMore: Promise<boolean> | null = null;
   let loading = $state(!initialExplore);
   let error = $state<string | null>(null);
-  let favoriteError = $state<string | null>(null);
   let favoritePending = $state.raw<string[]>([]);
   let copied = $state<string | null>(null);
 
@@ -221,31 +222,35 @@
     target: CloneTarget,
   ): Promise<void> {
     const url = cloneUrl(repository, target);
-    // A self-hosted instance is often reached over plain HTTP, where
-    // navigator.clipboard is undefined, so fall back to a selection copy.
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(url);
-    } else {
-      const carrier = document.createElement("textarea");
-      carrier.value = url;
-      carrier.setAttribute("readonly", "");
-      carrier.style.position = "fixed";
-      carrier.style.opacity = "0";
-      document.body.append(carrier);
-      carrier.select();
-      document.execCommand("copy");
-      carrier.remove();
+    try {
+      // A self-hosted instance is often reached over plain HTTP, where
+      // navigator.clipboard is undefined, so fall back to a selection copy.
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(url);
+      } else {
+        const carrier = document.createElement("textarea");
+        carrier.value = url;
+        carrier.setAttribute("readonly", "");
+        carrier.style.position = "fixed";
+        carrier.style.opacity = "0";
+        document.body.append(carrier);
+        carrier.select();
+        document.execCommand("copy");
+        carrier.remove();
+      }
+
+      toast.success(`${target.toUpperCase()} clone URL copied`, {
+        description: url,
+      });
+
+      const token = `${repository.id}:${target}`;
+      copied = token;
+      window.setTimeout(() => {
+        if (copied === token) copied = null;
+      }, 1600);
+    } catch {
+      toast.error("The clone URL could not be copied.");
     }
-
-    toast.success(`${target.toUpperCase()} clone URL copied`, {
-      description: url,
-    });
-
-    const token = `${repository.id}:${target}`;
-    copied = token;
-    window.setTimeout(() => {
-      if (copied === token) copied = null;
-    }, 1600);
   }
 
   async function toggleFavorite(
@@ -256,7 +261,6 @@
       return;
     }
     const favorited = !repository.favorited;
-    favoriteError = null;
     favoritePending = [...favoritePending, repository.id];
     try {
       await requestEmpty(
@@ -268,7 +272,7 @@
         item.id === repository.id ? { ...item, favorited } : item,
       );
     } catch (caught) {
-      favoriteError = message(caught);
+      toast.error(message(caught));
     } finally {
       favoritePending = favoritePending.filter((id) => id !== repository.id);
     }
@@ -370,8 +374,8 @@
         {hasNextPage ? "loaded" : "total"}
       </p>
       {#if manageHref}
-        <Button variant="outline" size="sm" class="gap-2" href={manageHref}>
-          <Settings2 class="size-4" />Manage
+        <Button variant="outline" size="sm" href={manageHref}>
+          <Settings2 data-icon="inline-start" />Manage
         </Button>
       {/if}
     </div>
@@ -390,13 +394,6 @@
     </div>
   {/if}
 
-  {#if favoriteError}
-    <p
-      class="mb-3 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
-    >
-      {favoriteError}
-    </p>
-  {/if}
 
   <div>
     {#if loading}
@@ -411,11 +408,10 @@
         {/each}
       </div>
     {:else if error}
-      <div
-        class="rounded-md border border-destructive/30 bg-destructive/5 p-5 text-sm text-destructive"
-      >
-        {error}
-      </div>
+      <Alert.Root variant="destructive">
+        <Alert.Title>Repositories unavailable</Alert.Title>
+        <Alert.Description>{error}</Alert.Description>
+      </Alert.Root>
     {:else}
       <div class="overflow-hidden rounded-md border bg-card/35">
         <ul class="divide-y">
@@ -579,23 +575,28 @@
               </div>
             </li>
           {:else}
-            <li class="grid place-items-center px-6 py-16 text-center">
-              <GitBranch
-                class="size-7 text-muted-foreground/60"
-                strokeWidth={1.4}
-              />
-              <p class="mt-3 text-sm font-medium">
-                {search ? "No matching repositories" : "No repositories yet"}
-              </p>
-              <p class="mt-1 text-xs text-muted-foreground">
-                {search
-                  ? "Try a different search."
-                  : namespace
-                    ? "No repositories are visible in this namespace."
-                    : app.authStatus?.authenticated
-                      ? "Use New above, then push your first commit over SSH."
-                      : "Sign in to create a repository."}
-              </p>
+            <li>
+              <Empty.Root class="border-0 py-16">
+                <Empty.Header>
+                  <Empty.Media variant="icon">
+                    <GitBranch />
+                  </Empty.Media>
+                  <Empty.Title>
+                    {search
+                      ? "No matching repositories"
+                      : "No repositories yet"}
+                  </Empty.Title>
+                  <Empty.Description>
+                    {search
+                      ? "Try a different search."
+                      : namespace
+                        ? "No repositories are visible in this namespace."
+                        : app.authStatus?.authenticated
+                          ? "Use New above, then push your first commit over SSH."
+                          : "Sign in to create a repository."}
+                  </Empty.Description>
+                </Empty.Header>
+              </Empty.Root>
             </li>
           {/each}
         </ul>
@@ -608,14 +609,16 @@
         Loading more repositories…
       </p>
     {:else if loadMoreError}
-      <div class="py-4 text-center">
-        <button
-          class="text-xs text-destructive hover:underline"
-          onclick={() => void loadMoreRepositories()}
+      <Alert.Root variant="destructive">
+        <Alert.Title>More repositories unavailable</Alert.Title>
+        <Alert.Description>{loadMoreError}</Alert.Description>
+        <Button
+          type="button"
+          size="sm"
+          variant="link"
+          onclick={() => void loadMoreRepositories()}>Retry</Button
         >
-          {loadMoreError} Retry
-        </button>
-      </div>
+      </Alert.Root>
     {/if}
   </div>
 </section>

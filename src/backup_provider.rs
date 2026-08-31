@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::HashSet, path::PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
+    blob_store::targets::StorageTargetConfiguration,
     config::{S3Settings, validate_s3_settings},
-    entity::backup_provider,
+    entity::{backup_provider, backup_provider_exclusion, lfs_storage_target},
 };
 
 pub const RUNTIME_S3_PROVIDER_ID: Uuid = Uuid::nil();
@@ -49,12 +50,19 @@ impl BackupProviderConfig {
         }
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackupProviderSource {
+    Stored,
+    RuntimeConfig,
+    StorageTarget,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackupProvider {
     pub id: Uuid,
     pub name: String,
     pub config: BackupProviderConfig,
+    pub source: BackupProviderSource,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -84,6 +92,28 @@ pub async fn list(
     }
     Ok(providers)
 }
+pub async fn list_with_storage(
+    database: &DatabaseConnection,
+    _fallback_s3: Option<&S3Settings>,
+    _fallback_path: &std::path::Path,
+) -> Result<Vec<BackupProvider>> {
+    let excluded = backup_provider_exclusion::Entity::find()
+        .all(database)
+        .await?
+        .into_iter()
+        .map(|exclusion| exclusion.provider_id)
+        .collect::<HashSet<_>>();
+    let mut providers = storage_providers(database, &excluded).await?;
+    for provider in list(database, None).await? {
+        if !providers
+            .iter()
+            .any(|candidate| candidate.id == provider.id)
+        {
+            providers.push(provider);
+        }
+    }
+    Ok(providers)
+}
 
 pub async fn load(
     database: &DatabaseConnection,
@@ -103,6 +133,24 @@ pub async fn load(
         return Ok(Some(runtime_s3_provider(settings)));
     }
     Ok(None)
+}
+pub async fn load_with_storage(
+    database: &DatabaseConnection,
+    _fallback_s3: Option<&S3Settings>,
+    _fallback_path: &std::path::Path,
+    id: Uuid,
+) -> Result<Option<BackupProvider>> {
+    if backup_provider_exclusion::Entity::find_by_id(id)
+        .one(database)
+        .await?
+        .is_none()
+        && let Some(target) = lfs_storage_target::Entity::find_by_id(id)
+            .one(database)
+            .await?
+    {
+        return storage_target_provider(target).map(Some);
+    }
+    load(database, None, id).await
 }
 
 pub async fn save(database: &DatabaseConnection, provider: &BackupProvider) -> Result<()> {
@@ -145,6 +193,16 @@ pub async fn delete(database: &DatabaseConnection, id: Uuid) -> Result<bool> {
         > 0)
 }
 
+pub async fn exclude_storage_target(database: &DatabaseConnection, id: Uuid) -> Result<()> {
+    backup_provider_exclusion::ActiveModel {
+        provider_id: Set(id),
+        created_at: Set(Utc::now()),
+    }
+    .insert(database)
+    .await?;
+    Ok(())
+}
+
 pub fn validate(provider: &BackupProvider) -> Result<()> {
     let name = provider.name.trim();
     ensure!(!name.is_empty(), "backup provider name must not be empty");
@@ -177,6 +235,7 @@ fn from_model(model: backup_provider::Model) -> Result<BackupProvider> {
         config,
         created_at: model.created_at,
         updated_at: model.updated_at,
+        source: BackupProviderSource::Stored,
     };
     validate(&provider)?;
     Ok(provider)
@@ -189,8 +248,65 @@ fn runtime_s3_provider(settings: &S3Settings) -> BackupProvider {
         name: "S3 backups".to_owned(),
         config: BackupProviderConfig::S3(settings.clone()),
         created_at: now,
+        source: BackupProviderSource::RuntimeConfig,
         updated_at: now,
     }
+}
+
+async fn storage_providers(
+    database: &DatabaseConnection,
+    excluded: &HashSet<Uuid>,
+) -> Result<Vec<BackupProvider>> {
+    let mut providers = Vec::new();
+    for target in lfs_storage_target::Entity::find().all(database).await? {
+        if !excluded.contains(&target.id) {
+            providers.push(storage_target_provider(target)?);
+        }
+    }
+    Ok(providers)
+}
+
+fn absolute_path(path: &std::path::Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    Ok(std::env::current_dir()
+        .context("could not resolve the configured storage path")?
+        .join(path))
+}
+
+fn filesystem_backup_path(path: &std::path::Path) -> Result<PathBuf> {
+    let path = absolute_path(path)?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("gitadel-storage");
+    Ok(path.with_file_name(format!("{name}-backups")))
+}
+
+fn storage_target_provider(target: lfs_storage_target::Model) -> Result<BackupProvider> {
+    let configuration = serde_json::from_str::<StorageTargetConfiguration>(&target.configuration)
+        .context("stored LFS target configuration is invalid")?;
+    let config = match configuration {
+        StorageTargetConfiguration::Filesystem { path } => {
+            BackupProviderConfig::Filesystem(FilesystemSettings {
+                path: filesystem_backup_path(&path)?,
+            })
+        }
+        StorageTargetConfiguration::S3 { mut s3 } => {
+            s3.prefix = format!("{}/backups", s3.prefix.trim_end_matches('/'));
+            BackupProviderConfig::S3(s3)
+        }
+    };
+    Ok(BackupProvider {
+        id: target.id,
+        name: target.name,
+        config,
+        created_at: target.created_at,
+        updated_at: target.updated_at,
+        source: BackupProviderSource::StorageTarget,
+    })
 }
 
 #[cfg(test)]
@@ -238,6 +354,7 @@ mod tests {
             config: BackupProviderConfig::Filesystem(FilesystemSettings {
                 path: directory.path().join("backups"),
             }),
+            source: BackupProviderSource::Stored,
             created_at: now,
             updated_at: now,
         };
@@ -260,6 +377,7 @@ mod tests {
                 prefix: "secondary".to_owned(),
                 ..runtime_s3.clone()
             }),
+            source: BackupProviderSource::Stored,
             created_at: now,
             updated_at: now,
         };
@@ -277,6 +395,7 @@ mod tests {
             id: Uuid::new_v4(),
             name: "Converted S3".to_owned(),
             config: BackupProviderConfig::S3(runtime_s3.clone()),
+            source: BackupProviderSource::Stored,
             created_at: now,
             updated_at: now,
         };
@@ -298,6 +417,64 @@ mod tests {
             providers
                 .iter()
                 .any(|provider| provider.id == converted_s3.id)
+        );
+        database.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn storage_targets_are_available_as_backup_providers() -> Result<()> {
+        let directory = TestDirectory::new()?;
+        let mut settings = Settings::default();
+        settings.database.url = format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("gitadel.db").display()
+        );
+        let database = database::connect_and_migrate(&settings.database).await?;
+        let lfs_root = directory.path().join("configured-lfs");
+        assert!(
+            list_with_storage(&database, None, &lfs_root)
+                .await?
+                .is_empty(),
+            "Gitadel must not create a default backup provider"
+        );
+        let target_root = directory.path().join("secondary-lfs");
+        fs::create_dir(&target_root)?;
+        let target = crate::blob_store::targets::create(
+            &database,
+            "Secondary".to_owned(),
+            StorageTargetConfiguration::Filesystem {
+                path: target_root.clone(),
+            },
+        )
+        .await?;
+        let target_backup_root = directory.path().join("secondary-lfs-backups");
+        let providers = list_with_storage(&database, None, &lfs_root).await?;
+        assert!(providers.iter().any(|provider| {
+            provider.id == target.id
+                && provider.source == BackupProviderSource::StorageTarget
+                && matches!(
+                    &provider.config,
+                    BackupProviderConfig::Filesystem(settings)
+                        if settings.path == target_backup_root
+                )
+        }));
+        assert_eq!(
+            load_with_storage(&database, None, &lfs_root, target.id)
+                .await?
+                .map(|provider| provider.name),
+            Some("Secondary".to_owned())
+        );
+        exclude_storage_target(&database, target.id).await?;
+        assert!(
+            list_with_storage(&database, None, &lfs_root)
+                .await?
+                .is_empty()
+        );
+        assert!(
+            load_with_storage(&database, None, &lfs_root, target.id)
+                .await?
+                .is_none()
         );
         database.close().await?;
         Ok(())

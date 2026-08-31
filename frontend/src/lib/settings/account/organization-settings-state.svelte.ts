@@ -28,7 +28,6 @@ export class OrganizationSettingsState {
   memberUsername = $state("");
   memberRole = $state<"owner" | "member">("member");
   working = $state(false);
-  error = $state<string | null>(null);
   membersLoading = $state(false);
   membersLoadError = $state<string | null>(null);
 
@@ -48,9 +47,9 @@ export class OrganizationSettingsState {
     this.scope = scope;
   }
 
-  async createOrganization(): Promise<void> {
+  async createOrganization(): Promise<boolean> {
     const scope = this.scope;
-    await this.run(scope, async () => {
+    return this.run(scope, async () => {
       const organization = await requestJson(
         "/api/v1/organizations",
         organizationSchema,
@@ -94,11 +93,11 @@ export class OrganizationSettingsState {
     }
   }
 
-  async addMember(): Promise<void> {
+  async addMember(): Promise<boolean> {
     const scope = this.scope;
     const organization = this.selectedOrganization;
-    if (!organization) return;
-    await this.run(scope, async () => {
+    if (!organization) return false;
+    return this.run(scope, async () => {
       const member = await requestJson(
         `/api/v1/organizations/${organization.slug}/members`,
         memberSchema,
@@ -117,11 +116,11 @@ export class OrganizationSettingsState {
     });
   }
 
-  async removeMember(username: string): Promise<void> {
+  async removeMember(username: string): Promise<boolean> {
     const scope = this.scope;
     const organization = this.selectedOrganization;
-    if (!organization) return;
-    await this.run(scope, async () => {
+    if (!organization) return false;
+    return this.run(scope, async () => {
       await requestEmpty(
         `/api/v1/organizations/${organization.slug}/members/${username}`,
         { method: "DELETE" },
@@ -137,18 +136,19 @@ export class OrganizationSettingsState {
   private async run(
     scope: AuthorizationCacheScope,
     task: () => Promise<void>,
-  ): Promise<void> {
+  ): Promise<boolean> {
     this.working = true;
-    this.error = null;
     try {
       await task();
+      return true;
     } catch (caught) {
-      if (!this.current(scope)) return;
-      this.error =
+      if (!this.current(scope)) return false;
+      const message =
         caught instanceof ApiFailure || caught instanceof Error
           ? caught.message
           : "The request failed.";
-      toast.error(this.error);
+      toast.error(message);
+      return false;
     } finally {
       this.working = false;
     }

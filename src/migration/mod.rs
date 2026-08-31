@@ -41,6 +41,10 @@ mod m20260829_000040_unified_repository_identities;
 mod m20260829_000041_repository_identity_uuid_storage;
 mod m20260829_000042_organization_profiles;
 mod m20260829_000043_token_mirror_identities;
+mod m20260830_000044_lfs_storage;
+mod m20260830_000045_backup_provider_exclusions;
+mod m20260830_000046_allow_local_lfs_migration;
+mod m20260831_000047_authentication_methods;
 
 use sea_orm_migration::prelude::*;
 
@@ -93,6 +97,10 @@ impl MigratorTrait for Migrator {
             Box::new(m20260829_000041_repository_identity_uuid_storage::Migration),
             Box::new(m20260829_000042_organization_profiles::Migration),
             Box::new(m20260829_000043_token_mirror_identities::Migration),
+            Box::new(m20260830_000044_lfs_storage::Migration),
+            Box::new(m20260830_000045_backup_provider_exclusions::Migration),
+            Box::new(m20260830_000046_allow_local_lfs_migration::Migration),
+            Box::new(m20260831_000047_authentication_methods::Migration),
         ]
     }
 }

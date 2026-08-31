@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { authenticationConfigurationSchema } from "$lib/api/sso.js";
 
 export const themePreferenceSchema = z.enum(["system", "light", "dark"]);
 export type ThemePreference = z.infer<typeof themePreferenceSchema>;
@@ -16,6 +17,7 @@ export const authStatusSchema = z.object({
   setup_required: z.boolean(),
   authenticated: z.boolean(),
   user: userSchema.nullable(),
+  authentication: authenticationConfigurationSchema,
 });
 
 export const authResponseSchema = z.object({ user: userSchema });

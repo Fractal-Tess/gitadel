@@ -10,7 +10,6 @@
   import * as DropdownMenu from "$lib/components/ui/dropdown-menu/index.js";
   import { avatarUrl } from "$lib/api/account.js";
   import { requestEmpty } from "$lib/api/transport.js";
-  import { preloadAccountSettings } from "$lib/navigation-cache.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
   const app = useAppState();
@@ -41,10 +40,7 @@
 
 {#if app.authStatus?.authenticated}
   <DropdownMenu.Root>
-    <DropdownMenu.Trigger
-      onpointerenter={() => preloadAccountSettings(app.authorizationScope)}
-      onfocus={() => preloadAccountSettings(app.authorizationScope)}
-    >
+    <DropdownMenu.Trigger>
       {#snippet child({ props })}
         <Button
           {...props}

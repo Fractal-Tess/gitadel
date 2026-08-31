@@ -59,7 +59,7 @@ export class RepositorySettingsState {
       this.invalidatePreload();
       this.topics = saved.topics;
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
       throw caught;
     }
   }
@@ -88,7 +88,7 @@ export class RepositorySettingsState {
       this.invalidatePreload();
       this.setRepository({ ...repository, favorited });
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
     } finally {
       this.favoritePending = false;
     }
@@ -124,10 +124,15 @@ export class RepositorySettingsState {
       if (
         values.default_branch &&
         current?.default_branch !== values.default_branch
-      )
-        await this.onDefaultBranchChanged();
+      ) {
+        try {
+          await this.onDefaultBranchChanged();
+        } catch (caught) {
+          this.setError(errorMessage(caught));
+        }
+      }
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
       throw caught;
     } finally {
       this.repositoryControlPending = false;
@@ -169,7 +174,7 @@ export class RepositorySettingsState {
         });
       toast.success(notice);
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
       throw caught;
     } finally {
       this.lifecyclePending = false;

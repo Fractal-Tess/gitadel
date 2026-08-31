@@ -9,7 +9,6 @@
   import CloudUpload from "@lucide/svelte/icons/cloud-upload";
   import Download from "@lucide/svelte/icons/download";
   import HardDrive from "@lucide/svelte/icons/hard-drive";
-  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
   import ShieldCheck from "@lucide/svelte/icons/shield-check";
   import Tag from "@lucide/svelte/icons/tag";
@@ -21,10 +20,13 @@
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Badge } from "$lib/components/ui/badge/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
+  import * as Card from "$lib/components/ui/card/index.js";
+  import { Checkbox } from "$lib/components/ui/checkbox/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
   import * as Select from "$lib/components/ui/select/index.js";
+  import { Spinner } from "$lib/components/ui/spinner/index.js";
   import BackupProviderEditor, {
     type BackupProviderEditorValue,
   } from "$lib/components/settings/backup-provider-editor.svelte";
@@ -36,6 +38,7 @@
     requestEmpty,
     requestJson,
   } from "$lib/api/transport.js";
+  import { toast } from "svelte-sonner";
   import {
     backupProgressSchema,
     backupProviderSchema,
@@ -67,6 +70,7 @@
     { value: "0 2 * * 0", label: "Every Sunday at 02:00 UTC" },
     { value: CUSTOM_SCHEDULE, label: "Custom cron" },
   ];
+  class BackupProgressFailure extends Error {}
 
   let providerCatalog = $state.raw<BackupProviderCatalogItem[]>([]);
   let providers = $state.raw<BackupProvider[]>([]);
@@ -84,6 +88,8 @@
   let progressFailure = $state<string | null>(null);
   let progressSource: EventSource | null = null;
   let providerEditorOpen = $state(false);
+  let createDialogOpen = $state(false);
+  let createProviderId = $state<string | undefined>(undefined);
   let editingProvider = $state.raw<BackupProvider | null>(null);
   let editorRevision = $state(0);
   let providerRemoveDialogOpen = $state(false);
@@ -124,7 +130,6 @@
   let createSafetyBackup = $state(true);
   let confirmReplacement = $state(false);
   let working = $state(false);
-  let notice = $state<string | null>(null);
   let error = $state<string | null>(null);
 
   onMount(() => {
@@ -147,12 +152,16 @@
           : selected
             ? await fetchSnapshots(selected.id)
             : [];
-      if (app.authorizationScope !== scope) return;
+      if (app.authorizationScope !== scope) {
+        void initialize();
+        return;
+      }
+      providerCatalog = loaded.providerCatalog;
       providers = providersValue;
       selectedProviderId = selected?.id ?? null;
       applyProvider(selected);
       snapshots = snapshotsValue;
-    });
+    }, "inline");
   }
 
   function applyProvider(provider: BackupProvider | null) {
@@ -202,6 +211,12 @@
     providerEditorOpen = true;
   }
 
+  function openCreateBackup() {
+    createProviderId = selectedProviderId ?? providers[0]?.id ?? null;
+    backupName = "";
+    createDialogOpen = true;
+  }
+
   async function testProvider(value: BackupProviderEditorValue) {
     return requestJson(
       "/api/v1/admin/backup/providers/test",
@@ -232,10 +247,10 @@
     applyProvider(saved);
     providerEditorOpen = false;
     snapshots = [];
-    await run(async () => {
+    const snapshotsLoaded = await run(async () => {
       snapshots = await fetchSnapshots(saved.id);
-    });
-    notice = `${saved.name} saved.`;
+    }, "inline");
+    if (snapshotsLoaded) toast.success(`${saved.name} saved.`);
   }
 
   async function selectProvider(provider: BackupProvider) {
@@ -244,7 +259,7 @@
     applyProvider(provider);
     await run(async () => {
       snapshots = await fetchSnapshots(provider.id);
-    });
+    }, "inline");
   }
 
   function requestProviderRemove(provider: BackupProvider) {
@@ -265,7 +280,7 @@
       providerRemoveDialogOpen = false;
       pendingProviderRemove = null;
       snapshots = [];
-      notice = `${provider.name} removed.`;
+      toast.success(`${provider.name} removed.`);
       snapshots = selected ? await fetchSnapshots(selected.id) : [];
     });
   }
@@ -290,9 +305,11 @@
         );
         selectedProviderId = loaded.id;
         applyProvider(loaded);
-        notice = loaded.schedule
-          ? "Automatic backup schedule saved."
-          : "Automatic backups disabled.";
+        toast.success(
+          loaded.schedule
+            ? "Automatic backup schedule saved."
+            : "Automatic backups disabled.",
+        );
       });
     } finally {
       savingSchedule = false;
@@ -302,13 +319,18 @@
   async function refreshSnapshots() {
     await run(async () => {
       snapshots = await fetchSnapshots();
-      notice = "Backup list refreshed.";
+      toast.success("Backup list refreshed.");
     });
   }
 
   async function createBackup() {
-    const provider = settings;
+    const provider =
+      providers.find((candidate) => candidate.id === createProviderId) ?? null;
     if (!provider) return;
+    selectedProviderId = provider.id;
+    applyProvider(provider);
+    preflight = null;
+    snapshots = [];
     creating = true;
     try {
       await run(async () => {
@@ -321,7 +343,8 @@
           },
         );
         clearBackupSettingsCache();
-        notice = response.message;
+        toast.success(response.message);
+        createDialogOpen = false;
         backupProgress = {
           operation_id: response.operation_id,
           key: response.key,
@@ -335,7 +358,7 @@
         await waitForBackup(response.key, provider.id);
         backupName = "";
         backupProgress = null;
-        notice = "Backup created and added to snapshots.";
+        toast.success("Backup created and added to snapshots.");
       });
     } finally {
       creating = false;
@@ -374,7 +397,7 @@
     const deadline = Date.now() + 10 * 60 * 1_000;
     await new Promise((resolve) => window.setTimeout(resolve, 1_500));
     while (Date.now() < deadline) {
-      if (progressFailure) throw new Error(progressFailure);
+      if (progressFailure) throw new BackupProgressFailure(progressFailure);
       try {
         const updated = await fetchSnapshots(providerId);
         if (updated.some((snapshot) => snapshot.key === key)) {
@@ -417,7 +440,7 @@
           (candidate) => candidate.key !== snapshot.key,
         );
         if (preflight?.key === snapshot.key) preflight = null;
-        notice = "Backup deleted.";
+        toast.success("Backup deleted.");
         deleted = true;
       });
       if (deleted) {
@@ -444,7 +467,7 @@
       password = "";
       createSafetyBackup = true;
       confirmReplacement = false;
-      notice = "Backup copied and verified. Review the restore details below.";
+      toast.success("Backup copied and verified. Review the restore details below.");
     });
   }
 
@@ -465,7 +488,7 @@
           }),
         },
       );
-      notice = response.message;
+      toast.success(response.message);
       void waitForRestart();
     });
   }
@@ -486,17 +509,26 @@
     }
   }
 
-  async function run(task: () => Promise<void>) {
+  async function run(
+    task: () => Promise<void>,
+    failureTarget: "inline" | "toast" = "toast",
+  ): Promise<boolean> {
     working = true;
     error = null;
-    notice = null;
     try {
       await task();
+      return true;
     } catch (caught) {
-      error =
+      const message =
         caught instanceof ApiFailure || caught instanceof Error
           ? caught.message
           : "The request failed.";
+      if (caught instanceof BackupProgressFailure || failureTarget === "inline") {
+        error = message;
+      } else {
+        toast.error(message);
+      }
+      return false;
     } finally {
       working = false;
     }
@@ -563,35 +595,26 @@
   }
 </script>
 
-<section class="space-y-6" aria-labelledby="backups-heading">
-  <header>
-    <h2 id="backups-heading" class="text-lg font-semibold tracking-tight">
-      Backups
-    </h2>
-    <p class="mt-1.5 max-w-2xl text-sm leading-6 text-muted-foreground">
-      Add backup providers, then create and schedule complete instance
-      snapshots.
-    </p>
-  </header>
-
-  {#if notice}
-    <p
-      class="rounded-md border border-emerald-500/25 bg-emerald-500/8 p-3 text-sm text-emerald-300"
-    >
-      {notice}
-    </p>
+<section class="flex flex-col gap-6" aria-label="Backups">
+  {#if providers.length > 0}
+    <div class="flex justify-end">
+      <Button type="button" onclick={openCreateBackup} disabled={working}>
+        <CloudUpload data-icon="inline-start" /> Create backup
+      </Button>
+    </div>
   {/if}
+
   {#if error}
-    <p
-      class="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
-    >
-      {error}
-    </p>
+    <Alert.Root variant="destructive">
+      <TriangleAlert />
+      <Alert.Title>Backup operation failed</Alert.Title>
+      <Alert.Description>{error}</Alert.Description>
+    </Alert.Root>
   {/if}
 
   {#if working && providers.length === 0}
     <p class="flex items-center gap-2 text-sm text-muted-foreground">
-      <LoaderCircle class="size-4 animate-spin" />Loading backup providers…
+      <Spinner />Loading backup providers…
     </p>
   {:else}
     <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
@@ -612,8 +635,9 @@
           subtitle={provider.provider === "filesystem"
             ? (provider.path ?? "Filesystem")
             : (provider.bucket ?? "S3")}
-          description={catalogProvider?.description ??
-            "Configured backup destination."}
+          description={provider.managed_by_storage
+            ? "Storage target managed from Administration → Storage."
+            : (catalogProvider?.description ?? "Configured backup destination.")}
           enabled
           statusLabel={provider.schedule ? "Scheduled" : "Ready"}
           statusHealthy
@@ -648,132 +672,136 @@
         </p>
       </div>
       <div class="flex gap-2">
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onclick={() => openConfigureProvider(settings)}
-        >
-          Configure
-        </Button>
-        {#if !settings.managed_by_config}
+        {#if !settings.managed_by_storage}
           <Button
             type="button"
-            variant="ghost"
+            variant="outline"
             size="sm"
-            class="text-muted-foreground hover:text-destructive"
-            onclick={() => requestProviderRemove(settings)}
+            onclick={() => openConfigureProvider(settings)}
           >
-            Remove
+            Configure
           </Button>
         {/if}
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          class="text-muted-foreground hover:text-destructive"
+          onclick={() => requestProviderRemove(settings)}
+        >
+          Remove
+        </Button>
       </div>
     </div>
   {/if}
 
   {#if settings}
-    <section class="overflow-hidden rounded-xl border bg-card/40 shadow-sm">
-      <header class="flex items-center gap-3 border-b px-5 py-4">
-        <CalendarClock class="size-4 text-muted-foreground" />
-        <div>
-          <h3 class="text-sm font-semibold">Automatic backups</h3>
-          <p class="mt-0.5 text-xs text-muted-foreground">
-            Create complete snapshots with {settings.name} on a predefined interval
-            or UTC cron schedule.
-          </p>
+    <Card.Root>
+      <Card.Header class="border-b">
+        <div class="flex items-center gap-3">
+          <CalendarClock class="size-4 text-muted-foreground" />
+          <div>
+            <Card.Title>Automatic backups</Card.Title>
+            <Card.Description>
+              Create complete snapshots with {settings.name} on a predefined
+              interval or UTC cron schedule.
+            </Card.Description>
+          </div>
         </div>
-      </header>
-      <form
-        onsubmit={(event) => {
-          event.preventDefault();
-          void saveSchedule();
-        }}
-      >
-        <Field.Group class="p-5">
-          <Field.Field>
-            <Field.Label for="automatic-backup-schedule">Schedule</Field.Label>
-            <Select.Root type="single" bind:value={scheduleMode}>
-              <Select.Trigger id="automatic-backup-schedule" class="w-full">
-                {SCHEDULE_OPTIONS.find(
-                  (option) => option.value === scheduleMode,
-                )?.label ?? "Choose a schedule"}
-              </Select.Trigger>
-              <Select.Content>
-                <Select.Group>
-                  <Select.Label>Frequency</Select.Label>
-                  {#each SCHEDULE_OPTIONS as option (option.value)}
-                    <Select.Item value={option.value} label={option.label}>
-                      {option.label}
-                    </Select.Item>
-                  {/each}
-                </Select.Group>
-              </Select.Content>
-            </Select.Root>
-            <Field.Description>
-              Scheduled backups use this provider and briefly restart Gitadel.
-            </Field.Description>
-          </Field.Field>
-
-          {#if scheduleMode === CUSTOM_SCHEDULE}
-            <Field.Field data-invalid={!cronExplanation.valid}>
-              <Field.Label for="automatic-backup-cron"
-                >Cron expression</Field.Label
-              >
-              <Input
-                id="automatic-backup-cron"
-                bind:value={customCron}
-                class="font-mono"
-                aria-invalid={!cronExplanation.valid}
-                autocomplete="off"
-                spellcheck="false"
-                placeholder="0 2 * * *"
-              />
+      </Card.Header>
+      <Card.Content>
+        <form
+          onsubmit={(event) => {
+            event.preventDefault();
+            void saveSchedule();
+          }}
+        >
+          <Field.Group>
+            <Field.Field>
+              <Field.Label for="automatic-backup-schedule">Schedule</Field.Label>
+              <Select.Root type="single" bind:value={scheduleMode}>
+                <Select.Trigger id="automatic-backup-schedule" class="w-full">
+                  {SCHEDULE_OPTIONS.find(
+                    (option) => option.value === scheduleMode,
+                  )?.label ?? "Choose a schedule"}
+                </Select.Trigger>
+                <Select.Content>
+                  <Select.Group>
+                    <Select.Label>Frequency</Select.Label>
+                    {#each SCHEDULE_OPTIONS as option (option.value)}
+                      <Select.Item value={option.value} label={option.label}>
+                        {option.label}
+                      </Select.Item>
+                    {/each}
+                  </Select.Group>
+                </Select.Content>
+              </Select.Root>
               <Field.Description>
-                Five-field cron uses minute, hour, day of month, month, and day
-                of week. Six- and seven-field expressions may include seconds
-                and year.
+                Scheduled backups use this provider and briefly restart Gitadel.
               </Field.Description>
             </Field.Field>
-            <Alert.Root
-              variant={cronExplanation.valid ? "default" : "destructive"}
-            >
-              <CalendarClock />
-              <Alert.Title>
-                {cronExplanation.valid ? "Cron translation" : "Invalid cron"}
-              </Alert.Title>
-              <Alert.Description
-                >{cronExplanation.description}</Alert.Description
-              >
-            </Alert.Root>
-          {/if}
 
-          <div class="flex flex-wrap items-end justify-between gap-3">
-            <dl class="text-sm">
-              <dt class="text-xs text-muted-foreground">
-                Next automatic backup
-              </dt>
-              <dd class="mt-1 font-medium">
-                {#if scheduleDirty}
-                  Save the schedule to calculate the next run.
-                {:else if settings.next_backup_at}
-                  {formatDate(settings.next_backup_at)}
+            {#if scheduleMode === CUSTOM_SCHEDULE}
+              <Field.Field data-invalid={!cronExplanation.valid}>
+                <Field.Label for="automatic-backup-cron"
+                  >Cron expression</Field.Label
+                >
+                <Input
+                  id="automatic-backup-cron"
+                  bind:value={customCron}
+                  class="font-mono"
+                  aria-invalid={!cronExplanation.valid}
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="0 2 * * *"
+                />
+                <Field.Description>
+                  Five-field cron uses minute, hour, day of month, month, and day
+                  of week. Six- and seven-field expressions may include seconds
+                  and year.
+                </Field.Description>
+              </Field.Field>
+              <Alert.Root
+                variant={cronExplanation.valid ? "default" : "destructive"}
+              >
+                <CalendarClock />
+                <Alert.Title>
+                  {cronExplanation.valid ? "Cron translation" : "Invalid cron"}
+                </Alert.Title>
+                <Alert.Description
+                  >{cronExplanation.description}</Alert.Description
+                >
+              </Alert.Root>
+            {/if}
+
+            <div class="flex flex-wrap items-end justify-between gap-3">
+              <dl class="text-sm">
+                <dt class="text-xs text-muted-foreground">
+                  Next automatic backup
+                </dt>
+                <dd class="mt-1 font-medium">
+                  {#if scheduleDirty}
+                    Save the schedule to calculate the next run.
+                  {:else if settings.next_backup_at}
+                    {formatDate(settings.next_backup_at)}
+                  {:else}
+                    Not scheduled
+                  {/if}
+                </dd>
+              </dl>
+              <Button type="submit" disabled={working || !canSaveSchedule}>
+                {#if savingSchedule}
+                  <Spinner data-icon="inline-start" class="animate-spin" />
+                  Saving…
                 {:else}
-                  Not scheduled
+                  Save schedule
                 {/if}
-              </dd>
-            </dl>
-            <Button type="submit" disabled={working || !canSaveSchedule}>
-              {#if savingSchedule}
-                <LoaderCircle data-icon="inline-start" class="animate-spin" />
-                Saving…
-              {:else}
-                Save schedule
-              {/if}
-            </Button>
-          </div>
-        </Field.Group>
-      </form>
-    </section>
+              </Button>
+            </div>
+          </Field.Group>
+        </form>
+      </Card.Content>
+    </Card.Root>
 
     <section class="overflow-hidden rounded-xl border bg-card/40 shadow-sm">
       <header
@@ -799,35 +827,6 @@
           <RefreshCw class="size-3.5" /> Refresh
         </Button>
       </header>
-      <form
-        class="grid gap-3 border-b px-5 py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end"
-        onsubmit={(event) => {
-          event.preventDefault();
-          void createBackup();
-        }}
-      >
-        <label class="grid gap-1.5 text-sm font-medium">
-          Backup name <span class="text-xs font-normal text-muted-foreground"
-            >(optional)</span
-          >
-          <input
-            class="rounded-md border bg-background px-3 py-2 outline-none focus:border-ring focus:ring-2 focus:ring-ring/20"
-            bind:value={backupName}
-            maxlength="80"
-            pattern="[A-Za-z0-9 _.-]+"
-            placeholder="Before platform upgrade"
-          />
-        </label>
-        <Button type="submit" disabled={working}>
-          {#if creating}
-            <LoaderCircle class="size-3.5 animate-spin" />
-            Creating backup…
-          {:else}
-            <CloudUpload class="size-3.5" />
-            Create backup
-          {/if}
-        </Button>
-      </form>
 
       {#if creating && backupProgress}
         <div
@@ -839,8 +838,8 @@
             {#if backupProgress.phase === "completed"}
               <CheckCircle2 class="mt-0.5 size-4 shrink-0 text-emerald-400" />
             {:else}
-              <LoaderCircle
-                class="mt-0.5 size-4 shrink-0 animate-spin text-primary"
+              <Spinner
+                class="mt-0.5 size-4 shrink-0 text-primary"
               />
             {/if}
             <div class="min-w-0 flex-1">
@@ -1007,17 +1006,20 @@
           </p>
         {/if}
 
-        <label class="flex items-start gap-3 rounded-lg border p-4 text-sm">
-          <input
-            class="mt-0.5 size-4 accent-primary"
-            type="checkbox"
+        <label
+          for="restore-safety-backup"
+          class="flex items-start gap-3 rounded-lg border p-4 text-sm"
+        >
+          <Checkbox
+            id="restore-safety-backup"
+            class="mt-0.5"
             bind:checked={createSafetyBackup}
           />
           <span>
-            <span class="flex items-center gap-2 font-medium"
-              ><ShieldCheck class="size-4 text-emerald-400" /> Back up the current
-              instance first</span
-            >
+            <span class="flex items-center gap-2 font-medium">
+              <ShieldCheck class="size-4 text-emerald-400" />
+              Back up the current instance first
+            </span>
             <span
               class="mt-1 block text-xs leading-relaxed text-muted-foreground"
             >
@@ -1035,25 +1037,30 @@
           </p>
         {/if}
 
-        <label class="grid gap-1.5 text-sm font-medium">
-          Administrator password
-          <input
-            class="rounded-md border bg-background px-3 py-2 outline-none focus:border-ring focus:ring-2 focus:ring-ring/20"
+        <Field.Field>
+          <Field.Label for="restore-admin-password">
+            Administrator password
+          </Field.Label>
+          <Input
+            id="restore-admin-password"
             bind:value={password}
             type="password"
             autocomplete="current-password"
             required
           />
-        </label>
-        <label class="flex items-start gap-3 text-sm">
-          <input
-            class="mt-0.5 size-4 accent-destructive"
-            type="checkbox"
+        </Field.Field>
+        <label
+          for="confirm-restore-replacement"
+          class="flex items-start gap-3 text-sm"
+        >
+          <Checkbox
+            id="confirm-restore-replacement"
+            class="mt-0.5"
             bind:checked={confirmReplacement}
           />
-          <span
-            >I understand that all current instance data will be replaced.</span
-          >
+          <span>
+            I understand that all current instance data will be replaced.
+          </span>
         </label>
         <div class="flex justify-end gap-2">
           <Button
@@ -1075,6 +1082,68 @@
     </section>
   {/if}
 </section>
+
+<Dialog.Root bind:open={createDialogOpen}>
+  <Dialog.Content class="ring-foreground/20 sm:max-w-md">
+    <Dialog.Header>
+      <Dialog.Title>Create backup</Dialog.Title>
+      <Dialog.Description>
+        Choose the destination first, then optionally name this snapshot.
+      </Dialog.Description>
+    </Dialog.Header>
+    <form
+      class="grid gap-4"
+      onsubmit={(event) => {
+        event.preventDefault();
+        void createBackup();
+      }}
+    >
+      <Field.Field>
+        <Field.Label for="backup-provider">Storage provider</Field.Label>
+        <Select.Root type="single" bind:value={createProviderId}>
+          <Select.Trigger id="backup-provider" class="w-full">
+            {providers.find((provider) => provider.id === createProviderId)?.name ??
+              "Choose a storage provider"}
+          </Select.Trigger>
+          <Select.Content>
+            <Select.Group>
+              <Select.Label>Backup destinations</Select.Label>
+              {#each providers as provider (provider.id)}
+                <Select.Item value={provider.id} label={provider.name}>
+                  {provider.name}
+                </Select.Item>
+              {/each}
+            </Select.Group>
+          </Select.Content>
+        </Select.Root>
+      </Field.Field>
+      <Field.Field>
+        <Field.Label for="backup-name">
+          Backup name <span class="font-normal text-muted-foreground">(optional)</span>
+        </Field.Label>
+        <Input
+          id="backup-name"
+          bind:value={backupName}
+          maxlength={80}
+          pattern="[A-Za-z0-9 _.-]+"
+          placeholder="Before platform upgrade"
+        />
+      </Field.Field>
+      <Dialog.Footer>
+        <Button type="button" variant="ghost" onclick={() => (createDialogOpen = false)} disabled={creating}>
+          Cancel
+        </Button>
+        <Button type="submit" disabled={creating || !createProviderId}>
+          {#if creating}
+            <Spinner class="size-4" data-icon="inline-start" /> Creating backup…
+          {:else}
+            <CloudUpload class="size-4" data-icon="inline-start" /> Create backup
+          {/if}
+        </Button>
+      </Dialog.Footer>
+    </form>
+  </Dialog.Content>
+</Dialog.Root>
 
 <Dialog.Root bind:open={providerEditorOpen}>
   <Dialog.Content class="ring-foreground/20 sm:max-w-lg">
@@ -1126,15 +1195,20 @@
 </AlertDialog.Root>
 
 <AlertDialog.Root bind:open={deleteDialogOpen}>
-  <AlertDialog.Content>
+  <AlertDialog.Content class="min-w-0 overflow-hidden sm:max-w-md">
     <AlertDialog.Header>
-      <AlertDialog.Title>
+      <AlertDialog.Title class="break-words">
         Delete {pendingDelete?.name ?? "this backup"}?
       </AlertDialog.Title>
-      <AlertDialog.Description>
-        This permanently removes {pendingDelete
-          ? fileName(pendingDelete.key)
-          : "the snapshot"}
+      <AlertDialog.Description class="min-w-0 text-left">
+        This permanently removes
+        {#if pendingDelete}
+          <span class="break-all font-mono text-foreground">
+            {fileName(pendingDelete.key)}
+          </span>
+        {:else}
+          the snapshot
+        {/if}
         from {settings?.name ?? "the selected provider"}. It cannot be restored
         after deletion.
       </AlertDialog.Description>
@@ -1147,7 +1221,7 @@
         onclick={() => void deleteSnapshot()}
       >
         {#if deleting}
-          <LoaderCircle class="size-3.5 animate-spin" /> Deleting…
+          <Spinner class="size-3.5" data-icon="inline-start" /> Deleting…
         {:else}
           Delete backup
         {/if}

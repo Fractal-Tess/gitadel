@@ -136,6 +136,8 @@
               pkgs.bun
               pkgs.curl
               pkgs.jq
+              pkgs.mkcert
+              pkgs.nssTools
               pkgs.just
               pkgs.openssh
               pkgs.process-compose

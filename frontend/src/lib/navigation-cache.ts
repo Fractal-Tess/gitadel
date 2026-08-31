@@ -1,7 +1,5 @@
 import { z } from "zod";
 
-import { auditEventSchema } from "$lib/api/instance.js";
-import { oauthApplicationSchema, passkeySchema, sshKeySchema, tokenSchema } from "$lib/api/account.js";
 import { organizationSchema, type Organization } from "$lib/api/organizations.js";
 import { repositoryOverviewSchema, repositorySchema } from "$lib/api/repositories.js";
 import { requestJson } from "$lib/api/transport.js";
@@ -199,63 +197,6 @@ export function refreshOrganizations(scope: AuthorizationCacheScope) {
   return loadOrganizations(scope);
 }
 
-const accountSettingsCache = new Map<
-  string,
-  CacheEntry<Awaited<ReturnType<typeof fetchAccountSettings>>>
->();
-
-async function fetchAccountSettings(scope: AuthorizationCacheScope) {
-  const [passkeys, sshKeys, tokens, oauthApplications, organizations] =
-    await Promise.all([
-      requestJson("/api/v1/me/passkeys", z.array(passkeySchema)),
-      requestJson("/api/v1/me/ssh-keys", z.array(sshKeySchema)),
-      requestJson("/api/v1/me/tokens", z.array(tokenSchema)),
-      requestJson(
-        "/api/v1/me/oauth-applications",
-        z.array(oauthApplicationSchema),
-      ),
-      loadOrganizations(scope),
-    ]);
-
-  return { passkeys, sshKeys, tokens, oauthApplications, organizations };
-}
-
-export type AccountSettingsData = Awaited<ReturnType<typeof fetchAccountSettings>>;
-
-export function loadAccountSettings(scope: AuthorizationCacheScope) {
-  return cached(accountSettingsCache, scopedKey(scope, "account"), () =>
-    fetchAccountSettings(scope),
-  ).promise;
-}
-
-export function peekAccountSettings(scope: AuthorizationCacheScope) {
-  return peek(accountSettingsCache, scopedKey(scope, "account"));
-}
-
-export function preloadAccountSettings(scope: AuthorizationCacheScope): void {
-  void loadAccountSettings(scope).catch(() => undefined);
-}
-
-export function updateAccountSettings(
-  scope: AuthorizationCacheScope,
-  value: AccountSettingsData,
-) {
-  accountSettingsCache.set(scopedKey(scope, "account"), {
-    expiresAt: Date.now() + cacheLifetime,
-    promise: Promise.resolve(value),
-    value,
-  });
-  organizationCache.set(scopedKey(scope, "organizations"), {
-    expiresAt: Date.now() + cacheLifetime,
-    promise: Promise.resolve(value.organizations),
-    value: value.organizations,
-  });
-}
-
-export function clearAccountSettings(scope: AuthorizationCacheScope) {
-  accountSettingsCache.delete(scopedKey(scope, "account"));
-  organizationCache.delete(scopedKey(scope, "organizations"));
-}
 
 export function updateOrganizations(
   scope: AuthorizationCacheScope,
@@ -269,44 +210,12 @@ export function updateOrganizations(
     promise: Promise.resolve(value),
     value,
   });
-  const accountKey = scopedKey(scope, "account");
-  const account = accountSettingsCache.get(accountKey)?.value;
-  if (account) {
-    accountSettingsCache.set(accountKey, {
-      expiresAt: Date.now() + cacheLifetime,
-      promise: Promise.resolve({ ...account, organizations: value }),
-      value: { ...account, organizations: value },
-    });
-  }
 }
 
-const adminActivityCache = new Map<
-  string,
-  CacheEntry<Awaited<ReturnType<typeof fetchAdminActivity>>>
->();
-
-function fetchAdminActivity() {
-  return requestJson("/api/v1/audit?limit=100", z.array(auditEventSchema));
-}
-
-export function loadAdminActivity(scope: AuthorizationCacheScope) {
-  return cached(adminActivityCache, scopedKey(scope, "activity"), fetchAdminActivity).promise;
-}
-
-export function refreshAdminActivity(scope: AuthorizationCacheScope) {
-  adminActivityCache.delete(scopedKey(scope, "activity"));
-  return loadAdminActivity(scope);
-}
-
-export function preloadAdminActivity(scope: AuthorizationCacheScope) {
-  void loadAdminActivity(scope).catch(() => undefined);
-}
 
 export function clearNavigationCaches(): void {
   exploreCache.clear();
   exploreRefreshes.clear();
   repositoryIndexCache.clear();
   organizationCache.clear();
-  accountSettingsCache.clear();
-  adminActivityCache.clear();
 }

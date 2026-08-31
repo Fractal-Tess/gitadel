@@ -16,6 +16,7 @@
   import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
+  import * as Card from "$lib/components/ui/card/index.js";
   import { Calendar } from "$lib/components/ui/calendar/index.js";
   import { Checkbox } from "$lib/components/ui/checkbox/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
@@ -25,6 +26,7 @@
   import * as Select from "$lib/components/ui/select/index.js";
   import { Textarea } from "$lib/components/ui/textarea/index.js";
   import type { CredentialsSettingsState } from "$lib/settings/account/credentials-settings-state.svelte.js";
+  import { useAppState } from "$lib/state/app-state.svelte.js";
   import type {
     PasswordSettingsState,
     ProfileSettingsState,
@@ -47,11 +49,18 @@
     credentials: CredentialsSettingsState;
     view: "account" | "authentication" | "ssh-keys" | "api-tokens";
   } = $props();
+  const app = useAppState();
   const timestampFormatter = new Intl.DateTimeFormat(undefined, {
     dateStyle: "medium",
     timeStyle: "short",
   });
-  let passkeysAvailable = $state(true);
+  let browserSupportsPasskeys = $state(true);
+  const passkeysEnabled = $derived(
+    app.authStatus?.authentication.passkey_enabled ?? true,
+  );
+  const passkeysAvailable = $derived(
+    browserSupportsPasskeys && passkeysEnabled,
+  );
   let tokenExpiryOpen = $state(false);
   let sshKeyDialogOpen = $state(false);
   let apiTokenDialogOpen = $state(false);
@@ -60,7 +69,7 @@
   let pendingDeletion = $state<DeletionTarget | null>(null);
 
   onMount(() => {
-    passkeysAvailable =
+    browserSupportsPasskeys =
       globalThis.isSecureContext &&
       typeof navigator.credentials?.create === "function" &&
       typeof PublicKeyCredential !== "undefined";
@@ -78,19 +87,17 @@
   }
 
   async function addSshKey() {
-    await credentials.addSshKey();
-    if (!credentials.error) sshKeyDialogOpen = false;
+    if (await credentials.addSshKey()) sshKeyDialogOpen = false;
   }
 
   async function createApiToken() {
     credentials.createdToken = null;
-    await credentials.createApiToken();
-    if (!credentials.error && credentials.createdToken) {
+    if (await credentials.createApiToken() && credentials.createdToken) {
       apiTokenDialogOpen = false;
       tokenRevealOpen = true;
     }
-  }
 
+  }
   async function copyText(
     value: string,
     label: string,
@@ -142,14 +149,13 @@
     const target = pendingDeletion;
     if (!target) return;
 
-    if (target.kind === "passkey") {
-      await credentials.removePasskey(target.id);
-    } else if (target.kind === "ssh-key") {
-      await credentials.removeSshKey(target.id);
-    } else {
-      await credentials.revokeToken(target.id);
-    }
-    if (!credentials.error) {
+    const success =
+      target.kind === "passkey"
+        ? await credentials.removePasskey(target.id)
+        : target.kind === "ssh-key"
+          ? await credentials.removeSshKey(target.id)
+          : await credentials.revokeToken(target.id);
+    if (success) {
       deleteDialogOpen = false;
       pendingDeletion = null;
     }
@@ -166,181 +172,197 @@
   }
 </script>
 
-<div
+<Card.Root
   class={view === "ssh-keys" || view === "api-tokens"
-    ? ""
-    : "divide-y divide-border overflow-hidden rounded-xl bg-card/20 ring-1 ring-foreground/15"}
+    ? "contents"
+    : "gap-0 py-0 [--card-spacing:--spacing(5)] divide-y divide-border md:[--card-spacing:--spacing(6)]"}
 >
   {#if view === "account"}
     <AccountAvatarSettings />
 
     <section
-      class="grid gap-5 p-5 md:grid-cols-[minmax(12rem,0.72fr)_minmax(0,1.5fr)] md:gap-10 md:p-6"
+      class="grid gap-5 py-(--card-spacing) md:grid-cols-[minmax(12rem,0.72fr)_minmax(0,1.5fr)] md:gap-10"
       aria-labelledby="username-heading"
     >
-      <header class="flex items-start gap-3">
+      <Card.Header class="flex flex-row items-start gap-3">
         <UserRound class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
         <div>
-          <h2 id="username-heading" class="font-semibold">Username</h2>
-          <p class="mt-1 max-w-xs text-sm leading-5 text-muted-foreground">
+          <Card.Title id="username-heading" role="heading" aria-level={2}>
+            Username
+          </Card.Title>
+          <Card.Description class="mt-1 max-w-xs leading-5">
             Your sign-in name and personal repository namespace.
-          </p>
+          </Card.Description>
         </div>
-      </header>
+      </Card.Header>
 
-      <form
-        class="grid max-w-2xl gap-4"
-        onsubmit={(event) => {
-          event.preventDefault();
-          void profile.updateUsername();
-        }}
-      >
-        <Field.Field>
-          <Field.Label for="account-username">Username</Field.Label>
-          <Input
-            id="account-username"
-            autocomplete="username"
-            bind:value={profile.username}
-            maxlength={39}
-            disabled={profile.working}
-            required
-          />
-          <Field.Description>
-            Press Enter to save. Repository URLs change with your username, so
-            update existing Git remotes afterward.
-          </Field.Description>
-        </Field.Field>
-      </form>
+      <Card.Content>
+        <form
+          class="grid max-w-2xl gap-4"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void profile.updateUsername();
+          }}
+        >
+          <Field.Field>
+            <Field.Label for="account-username">Username</Field.Label>
+            <Input
+              id="account-username"
+              autocomplete="username"
+              bind:value={profile.username}
+              maxlength={39}
+              disabled={profile.working}
+              required
+            />
+            <Field.Description>
+              Press Enter to save. Repository URLs change with your username, so
+              update existing Git remotes afterward.
+            </Field.Description>
+          </Field.Field>
+        </form>
+      </Card.Content>
     </section>
 
     <section
-      class="grid gap-5 p-5 md:grid-cols-[minmax(12rem,0.72fr)_minmax(0,1.5fr)] md:gap-10 md:p-6"
+      class="grid gap-5 py-(--card-spacing) md:grid-cols-[minmax(12rem,0.72fr)_minmax(0,1.5fr)] md:gap-10"
       aria-labelledby="repository-defaults-heading"
     >
-      <header class="flex items-start gap-3">
+      <Card.Header class="flex flex-row items-start gap-3">
         <BookOpen class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
         <div>
-          <h2 id="repository-defaults-heading" class="font-semibold">
-            Repository defaults
-          </h2>
-          <p class="mt-1 max-w-xs text-sm leading-5 text-muted-foreground">
-            Choose the initial visibility for repositories you create.
-          </p>
-        </div>
-      </header>
-
-      <Field.Field class="max-w-2xl">
-        <Field.Label for="account-default-repository-visibility">
-          Default visibility
-        </Field.Label>
-        <Select.Root
-          type="single"
-          value={profile.defaultRepositoryVisibility}
-          onValueChange={(value) => {
-            if (value === "public" || value === "private") {
-              void profile.updateRepositoryVisibility(value);
-            }
-          }}
-        >
-          <Select.Trigger
-            id="account-default-repository-visibility"
-            class="w-full"
-            disabled={profile.working}
+          <Card.Title
+            id="repository-defaults-heading"
+            role="heading"
+            aria-level={2}
           >
-            {profile.defaultRepositoryVisibility === "private"
-              ? "Private"
-              : "Public"}
-          </Select.Trigger>
-          <Select.Content>
-            <Select.Item value="private">Private</Select.Item>
-            <Select.Item value="public">Public</Select.Item>
-          </Select.Content>
-        </Select.Root>
-        <Field.Description>
-          You can choose a different visibility when creating a repository.
-        </Field.Description>
-      </Field.Field>
+            Repository defaults
+          </Card.Title>
+          <Card.Description class="mt-1 max-w-xs leading-5">
+            Choose the initial visibility for repositories you create.
+          </Card.Description>
+        </div>
+      </Card.Header>
+
+      <Card.Content>
+        <Field.Field class="max-w-2xl">
+          <Field.Label for="account-default-repository-visibility">
+            Default visibility
+          </Field.Label>
+          <Select.Root
+            type="single"
+            value={profile.defaultRepositoryVisibility}
+            onValueChange={(value) => {
+              if (value === "public" || value === "private") {
+                void profile.updateRepositoryVisibility(value);
+              }
+            }}
+          >
+            <Select.Trigger
+              id="account-default-repository-visibility"
+              class="w-full"
+              disabled={profile.working}
+            >
+              {profile.defaultRepositoryVisibility === "private"
+                ? "Private"
+                : "Public"}
+            </Select.Trigger>
+            <Select.Content>
+              <Select.Item value="private">Private</Select.Item>
+              <Select.Item value="public">Public</Select.Item>
+            </Select.Content>
+          </Select.Root>
+          <Field.Description>
+            You can choose a different visibility when creating a repository.
+          </Field.Description>
+        </Field.Field>
+      </Card.Content>
     </section>
   {/if}
 
   {#if view === "authentication"}
     <section
-      class="grid gap-5 p-5 md:grid-cols-[minmax(12rem,0.72fr)_minmax(0,1.5fr)] md:gap-10 md:p-6"
+      class="grid gap-5 py-(--card-spacing) md:grid-cols-[minmax(12rem,0.72fr)_minmax(0,1.5fr)] md:gap-10"
       aria-labelledby="password-heading"
     >
-      <header class="flex items-start gap-3">
+      <Card.Header class="flex flex-row items-start gap-3">
         <LockKeyhole class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
         <div>
-          <h2 id="password-heading" class="font-semibold">Password</h2>
-          <p class="mt-1 max-w-xs text-sm leading-5 text-muted-foreground">
+          <Card.Title id="password-heading" role="heading" aria-level={2}>
+            Password
+          </Card.Title>
+          <Card.Description class="mt-1 max-w-xs leading-5">
             Use at least 12 characters. Other browser sessions will be signed
             out.
-          </p>
+          </Card.Description>
         </div>
-      </header>
+      </Card.Header>
 
-      <form
-        class="grid max-w-2xl gap-4"
-        onsubmit={(event) => {
-          event.preventDefault();
-          void password.updatePassword();
-        }}
-      >
-        <Field.Field>
-          <Field.Label for="password-current">Current password</Field.Label>
-          <Input
-            id="password-current"
-            type="password"
-            autocomplete="current-password"
-            bind:value={password.currentPassword}
-            required
-          />
-        </Field.Field>
-        <div class="grid gap-4 sm:grid-cols-2">
+      <Card.Content>
+        <form
+          class="grid max-w-2xl gap-4"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void password.updatePassword();
+          }}
+        >
           <Field.Field>
-            <Field.Label for="password-new">New password</Field.Label>
+            <Field.Label for="password-current">Current password</Field.Label>
             <Input
-              id="password-new"
+              id="password-current"
               type="password"
-              autocomplete="new-password"
-              bind:value={password.newPassword}
-              minlength={12}
+              autocomplete="current-password"
+              bind:value={password.currentPassword}
               required
             />
           </Field.Field>
-          <Field.Field>
-            <Field.Label for="password-confirm">Confirm password</Field.Label>
-            <Input
-              id="password-confirm"
-              type="password"
-              autocomplete="new-password"
-              bind:value={password.confirmPassword}
-              minlength={12}
-              required
-            />
-          </Field.Field>
-        </div>
-        <Button class="w-fit" type="submit" disabled={password.working}>
-          Update password
-        </Button>
-      </form>
+          <div class="grid gap-4 sm:grid-cols-2">
+            <Field.Field>
+              <Field.Label for="password-new">New password</Field.Label>
+              <Input
+                id="password-new"
+                type="password"
+                autocomplete="new-password"
+                bind:value={password.newPassword}
+                minlength={12}
+                required
+              />
+            </Field.Field>
+            <Field.Field>
+              <Field.Label for="password-confirm">Confirm password</Field.Label>
+              <Input
+                id="password-confirm"
+                type="password"
+                autocomplete="new-password"
+                bind:value={password.confirmPassword}
+                minlength={12}
+                required
+              />
+            </Field.Field>
+          </div>
+          <Button class="w-fit" type="submit" disabled={password.working}>
+            Update password
+          </Button>
+        </form>
+      </Card.Content>
     </section>
 
     <section
-      class="grid gap-5 p-5 md:grid-cols-[minmax(12rem,0.72fr)_minmax(0,1.5fr)] md:gap-10 md:p-6"
+      class="grid gap-5 py-(--card-spacing) md:grid-cols-[minmax(12rem,0.72fr)_minmax(0,1.5fr)] md:gap-10"
       aria-labelledby="passkeys-heading"
     >
-      <header class="flex items-start gap-3">
+      <Card.Header class="flex flex-row items-start gap-3">
         <KeyRound class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
         <div>
-          <h2 id="passkeys-heading" class="font-semibold">Passkeys</h2>
-          <p class="mt-1 max-w-xs text-sm leading-5 text-muted-foreground">
+          <Card.Title id="passkeys-heading" role="heading" aria-level={2}>
+            Passkeys
+          </Card.Title>
+          <Card.Description class="mt-1 max-w-xs leading-5">
             Use your device or security key instead of a password.
-          </p>
+          </Card.Description>
         </div>
-      </header>
+      </Card.Header>
 
-      <div class="grid max-w-2xl gap-5">
+      <Card.Content class="grid max-w-2xl gap-5">
         <ul class="grid gap-2">
           {#each credentials.passkeys as passkey (passkey.id)}
             <li
@@ -365,7 +387,13 @@
           {/each}
         </ul>
 
-        {#if !passkeysAvailable}
+        {#if !passkeysEnabled}
+          <p
+            class="rounded-lg border bg-muted/30 p-3 text-xs text-muted-foreground"
+          >
+            Passkey registration is disabled by the administrator.
+          </p>
+        {:else if !browserSupportsPasskeys}
           <p
             class="rounded-lg border border-amber-400/35 bg-amber-400/5 p-3 text-xs text-amber-200"
           >
@@ -397,7 +425,7 @@
             Add passkey
           </Button>
         </form>
-      </div>
+      </Card.Content>
     </section>
   {/if}
 
@@ -811,8 +839,8 @@
             later.
           </p>
           <Dialog.Footer>
-            <Button class="gap-2" variant="outline" onclick={copyCreatedToken}>
-              <Clipboard class="size-4" />Copy token
+            <Button variant="outline" onclick={copyCreatedToken}>
+              <Clipboard data-icon="inline-start" />Copy token
             </Button>
             <Button onclick={() => setTokenRevealOpen(false)}>Done</Button>
           </Dialog.Footer>
@@ -851,4 +879,4 @@
       </AlertDialog.Footer>
     </AlertDialog.Content>
   </AlertDialog.Root>
-</div>
+</Card.Root>

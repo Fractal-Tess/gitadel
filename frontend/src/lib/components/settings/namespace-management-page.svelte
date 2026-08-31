@@ -10,6 +10,7 @@
   import MemberCombobox from "$lib/components/settings/member-combobox.svelte";
   import OrganizationProfileSettings from "$lib/components/settings/organization-profile-settings.svelte";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
+  import * as Alert from "$lib/components/ui/alert/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import * as Select from "$lib/components/ui/select/index.js";
@@ -84,13 +85,11 @@
   function openAddMember(): void {
     organizationState.memberUsername = "";
     organizationState.memberRole = "member";
-    organizationState.error = null;
     addMemberDialogOpen = true;
   }
 
   async function addMember(): Promise<void> {
-    await organizationState.addMember();
-    if (!organizationState.error) addMemberDialogOpen = false;
+    if (await organizationState.addMember()) addMemberDialogOpen = false;
   }
 
   function requestRemoveMember(username: string): void {
@@ -100,12 +99,12 @@
 
   async function removeMember(): Promise<void> {
     if (!pendingMember) return;
-    await organizationState.removeMember(pendingMember);
-    if (!organizationState.error) {
+    if (await organizationState.removeMember(pendingMember)) {
       removeDialogOpen = false;
       pendingMember = null;
     }
   }
+
 </script>
 
 <svelte:head>
@@ -192,12 +191,10 @@
                 ></span>
               </article>
             {:else if organizationState.membersLoadError}
-              <p
-                class="rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive sm:col-span-2"
-                role="alert"
-              >
-                {organizationState.membersLoadError}
-              </p>
+              <Alert.Root class="sm:col-span-2" variant="destructive">
+                <Alert.Title>Members unavailable</Alert.Title>
+                <Alert.Description>{organizationState.membersLoadError}</Alert.Description>
+              </Alert.Root>
             {:else}
               {#each organizationState.members as member (member.username)}
                 <article
@@ -280,14 +277,6 @@
           void addMember();
         }}
       >
-        {#if organizationState.error}
-          <p
-            class="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
-            role="alert"
-          >
-            {organizationState.error}
-          </p>
-        {/if}
         <div class="grid gap-1.5 text-sm font-medium">
           <span>Username</span>
           <MemberCombobox

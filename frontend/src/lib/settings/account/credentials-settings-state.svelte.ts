@@ -25,11 +25,11 @@ import type { AuthorizationCacheScope } from "$lib/cache-scope.js";
 import { createCredential, creationOptions } from "$lib/webauthn.js";
 
 type ScopeGuard = (scope: AuthorizationCacheScope) => boolean;
-type Changed = (value: {
-  passkeys: PasskeySummary[];
-  sshKeys: SshKey[];
-  tokens: ApiToken[];
-}) => void;
+type CredentialChange =
+  | { dataset: "passkeys"; value: PasskeySummary[] }
+  | { dataset: "ssh-keys"; value: SshKey[] }
+  | { dataset: "api-tokens"; value: ApiToken[] };
+type Changed = (change: CredentialChange) => void;
 
 export class CredentialsSettingsState {
   passkeys = $state.raw<PasskeySummary[]>([]);
@@ -45,7 +45,6 @@ export class CredentialsSettingsState {
   tokenExpiresOn = $state<CalendarDate | undefined>();
   createdToken = $state<string | null>(null);
   working = $state(false);
-  error = $state<string | null>(null);
   private scope: AuthorizationCacheScope;
   constructor(
     initial: {
@@ -67,9 +66,9 @@ export class CredentialsSettingsState {
     this.scope = scope;
   }
 
-  async addPasskey(): Promise<void> {
+  async addPasskey(): Promise<boolean> {
     const scope = this.scope;
-    await this.run(scope, async () => {
+    return this.run(scope, async () => {
       const challenge = await requestJson(
         "/api/v1/me/passkeys/register/start",
         webauthnCreationSchema,
@@ -88,25 +87,25 @@ export class CredentialsSettingsState {
       );
       if (!this.current(scope)) return;
       this.passkeys = passkeys;
-      this.changed(this.snapshot());
+      this.changed({ dataset: "passkeys", value: this.passkeys });
       toast.success("Passkey added");
     });
   }
 
-  async removePasskey(id: string): Promise<void> {
+  async removePasskey(id: string): Promise<boolean> {
     const scope = this.scope;
-    await this.run(scope, async () => {
+    return this.run(scope, async () => {
       await requestEmpty(`/api/v1/me/passkeys/${id}`, { method: "DELETE" });
       if (!this.current(scope)) return;
       this.passkeys = this.passkeys.filter((passkey) => passkey.id !== id);
-      this.changed(this.snapshot());
+      this.changed({ dataset: "passkeys", value: this.passkeys });
       toast.success("Passkey removed");
     });
   }
 
-  async addSshKey(): Promise<void> {
+  async addSshKey(): Promise<boolean> {
     const scope = this.scope;
-    await this.run(scope, async () => {
+    return this.run(scope, async () => {
       const key = await requestJson("/api/v1/me/ssh-keys", sshKeySchema, {
         method: "POST",
         body: jsonBody({
@@ -118,25 +117,25 @@ export class CredentialsSettingsState {
       this.sshKeys = [...this.sshKeys, key];
       this.sshKeyName = "";
       this.sshPublicKey = "";
-      this.changed(this.snapshot());
+      this.changed({ dataset: "ssh-keys", value: this.sshKeys });
       toast.success("SSH key added");
     });
   }
 
-  async removeSshKey(id: string): Promise<void> {
+  async removeSshKey(id: string): Promise<boolean> {
     const scope = this.scope;
-    await this.run(scope, async () => {
+    return this.run(scope, async () => {
       await requestEmpty(`/api/v1/me/ssh-keys/${id}`, { method: "DELETE" });
       if (!this.current(scope)) return;
       this.sshKeys = this.sshKeys.filter((key) => key.id !== id);
-      this.changed(this.snapshot());
+      this.changed({ dataset: "ssh-keys", value: this.sshKeys });
       toast.success("SSH key removed");
     });
   }
 
-  async createApiToken(): Promise<void> {
+  async createApiToken(): Promise<boolean> {
     const scope = this.scope;
-    await this.run(scope, async () => {
+    return this.run(scope, async () => {
       const scopes = [
         this.tokenRead && "read",
         this.tokenWrite && "write",
@@ -164,44 +163,38 @@ export class CredentialsSettingsState {
       this.tokenRead = true;
       this.tokenWrite = false;
       this.tokenSshKeys = false;
-      this.changed(this.snapshot());
+      this.changed({ dataset: "api-tokens", value: this.tokens });
       toast.success("API token created");
     });
   }
 
-  async revokeToken(id: string): Promise<void> {
+  async revokeToken(id: string): Promise<boolean> {
     const scope = this.scope;
-    await this.run(scope, async () => {
+    return this.run(scope, async () => {
       await requestEmpty(`/api/v1/me/tokens/${id}`, { method: "DELETE" });
       if (!this.current(scope)) return;
       this.tokens = this.tokens.filter((token) => token.id !== id);
-      this.changed(this.snapshot());
+      this.changed({ dataset: "api-tokens", value: this.tokens });
       toast.success("API token revoked");
     });
   }
 
-  private snapshot() {
-    return {
-      passkeys: this.passkeys,
-      sshKeys: this.sshKeys,
-      tokens: this.tokens,
-    };
-  }
   private async run(
     scope: AuthorizationCacheScope,
     task: () => Promise<void>,
-  ): Promise<void> {
+  ): Promise<boolean> {
     this.working = true;
-    this.error = null;
     try {
       await task();
+      return true;
     } catch (caught) {
-      if (!this.current(scope)) return;
-      this.error =
+      if (!this.current(scope)) return false;
+      const message =
         caught instanceof ApiFailure || caught instanceof Error
           ? caught.message
           : "The request failed.";
-      toast.error(this.error);
+      toast.error(message);
+      return false;
     } finally {
       this.working = false;
     }

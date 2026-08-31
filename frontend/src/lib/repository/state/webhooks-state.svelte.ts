@@ -100,7 +100,7 @@ export class RepositoryWebhooksState {
       toast.success("Webhook created. A ping delivery has been queued.");
       this.defer(() => this.refreshWebhooks());
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
     } finally {
       this.webhookCreating = false;
     }
@@ -128,7 +128,7 @@ export class RepositoryWebhooksState {
       );
       toast.success("Webhook updated. Send a ping to verify the endpoint.");
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
       throw caught;
     } finally {
       this.webhookUpdatingId = null;
@@ -148,7 +148,7 @@ export class RepositoryWebhooksState {
       );
       toast.success(active ? "Webhook enabled." : "Webhook disabled.");
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
     } finally {
       this.webhookUpdatingId = null;
     }
@@ -163,7 +163,7 @@ export class RepositoryWebhooksState {
       toast.success("Ping delivery queued.");
       this.defer(() => this.refreshWebhookActivity(id));
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
     } finally {
       this.webhookPingingId = null;
     }
@@ -191,7 +191,7 @@ export class RepositoryWebhooksState {
       toast.success("Redelivery queued.");
       this.defer(() => this.refreshWebhookActivity(hookId));
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
     } finally {
       this.redeliveringDeliveryId = null;
     }
@@ -209,7 +209,7 @@ export class RepositoryWebhooksState {
       this.webhookDeliveries = deliveries;
       toast.success("Webhook deleted.");
     } catch (caught) {
-      this.setError(errorMessage(caught));
+      toast.error(errorMessage(caught));
     } finally {
       this.webhookDeletingId = null;
     }

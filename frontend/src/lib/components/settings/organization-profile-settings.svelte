@@ -22,6 +22,7 @@
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import * as Avatar from "$lib/components/ui/avatar/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
+  import * as Card from "$lib/components/ui/card/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
@@ -30,7 +31,6 @@
   let displayName = $state(untrack(() => organization.display_name));
   let slug = $state(untrack(() => organization.slug));
   let savingProfile = $state(false);
-  let profileError = $state<string | null>(null);
   let editorOpen = $state(false);
   let removeOpen = $state(false);
   let removing = $state(false);
@@ -47,7 +47,6 @@
   async function saveProfile(): Promise<void> {
     const currentSlug = organization.slug;
     savingProfile = true;
-    profileError = null;
     try {
       const updated = await requestJson(
         `/api/v1/organizations/${encodeURIComponent(currentSlug)}`,
@@ -67,9 +66,8 @@
         );
       }
     } catch (caught) {
-      profileError = message(
-        caught,
-        "The organization profile could not be updated.",
+      toast.error(
+        message(caught, "The organization profile could not be updated."),
       );
     } finally {
       savingProfile = false;
@@ -121,20 +119,31 @@
     </p>
   </header>
 
-  <div class="overflow-hidden rounded-xl border bg-card/40 shadow-sm">
+  <Card.Root
+    class="gap-0 py-0 [--card-spacing:--spacing(5)] md:[--card-spacing:--spacing(6)]"
+  >
     <section
-      class="grid gap-5 p-5 md:grid-cols-[minmax(12rem,0.72fr)_minmax(0,1.5fr)] md:gap-10 md:p-6"
+      class="grid gap-5 py-(--card-spacing) md:grid-cols-[minmax(12rem,0.72fr)_minmax(0,1.5fr)] md:gap-10"
+      aria-labelledby="organization-picture-heading"
     >
-      <header class="flex items-start gap-3">
+      <Card.Header class="flex flex-row items-start gap-3">
         <Camera class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
         <div>
-          <h3 class="font-semibold">Profile picture</h3>
-          <p class="mt-1 max-w-xs text-sm leading-5 text-muted-foreground">
+          <Card.Title
+            id="organization-picture-heading"
+            role="heading"
+            aria-level={3}
+          >
+            Profile picture
+          </Card.Title>
+          <Card.Description class="mt-1 max-w-xs leading-5">
             Shown in navigation and organization pages.
-          </p>
+          </Card.Description>
         </div>
-      </header>
-      <div class="flex max-w-2xl flex-col gap-4 sm:flex-row sm:items-center">
+      </Card.Header>
+      <Card.Content
+        class="flex max-w-2xl flex-col gap-4 sm:flex-row sm:items-center"
+      >
         <Avatar.Root class="size-24 ring-1 ring-foreground/15">
           {#if imageUrl}<Avatar.Image src={imageUrl} alt="" />{/if}
           <Avatar.Fallback class="text-xl font-medium uppercase">
@@ -160,56 +169,57 @@
             JPG, PNG, or WebP up to 10 MB. Reposition and zoom before saving.
           </p>
         </div>
-      </div>
+      </Card.Content>
     </section>
 
     <section
-      class="grid gap-5 border-t p-5 md:grid-cols-[minmax(12rem,0.72fr)_minmax(0,1.5fr)] md:gap-10 md:p-6"
+      class="grid gap-5 border-t py-(--card-spacing) md:grid-cols-[minmax(12rem,0.72fr)_minmax(0,1.5fr)] md:gap-10"
+      aria-labelledby="organization-identity-heading"
     >
-      <header class="flex items-start gap-3">
+      <Card.Header class="flex flex-row items-start gap-3">
         <Building2 class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
         <div>
-          <h3 class="font-semibold">Organization identity</h3>
-          <p class="mt-1 max-w-xs text-sm leading-5 text-muted-foreground">
+          <Card.Title
+            id="organization-identity-heading"
+            role="heading"
+            aria-level={3}
+          >
+            Organization identity
+          </Card.Title>
+          <Card.Description class="mt-1 max-w-xs leading-5">
             Set the readable name and the slug used in repository URLs.
-          </p>
+          </Card.Description>
         </div>
-      </header>
-      <form
-        class="grid max-w-xl gap-3"
-        onsubmit={(event) => {
-          event.preventDefault();
-          void saveProfile();
-        }}
-      >
-        {#if profileError}
-          <p
-            class="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
-            role="alert"
-          >
-            {profileError}
-          </p>
-        {/if}
-        <label class="grid gap-1.5 text-sm font-medium">
-          Organization name
-          <Input bind:value={displayName} maxlength={80} required />
-        </label>
-        <label class="grid gap-1.5 text-sm font-medium">
-          Organization slug
-          <Input bind:value={slug} maxlength={39} required />
-          <span class="text-xs font-normal text-muted-foreground">
-            Changing the slug updates repository, clone, runner, integration,
-            and mirror credential paths.
-          </span>
-        </label>
-        <div>
-          <Button type="submit" disabled={savingProfile}
-            >{savingProfile ? "Saving…" : "Save changes"}</Button
-          >
-        </div>
-      </form>
+      </Card.Header>
+      <Card.Content>
+        <form
+          class="grid max-w-xl gap-3"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void saveProfile();
+          }}
+        >
+          <label class="grid gap-1.5 text-sm font-medium">
+            Organization name
+            <Input bind:value={displayName} maxlength={80} required />
+          </label>
+          <label class="grid gap-1.5 text-sm font-medium">
+            Organization slug
+            <Input bind:value={slug} maxlength={39} required />
+            <span class="text-xs font-normal text-muted-foreground">
+              Changing the slug updates repository, clone, runner, integration,
+              and mirror credential paths.
+            </span>
+          </label>
+          <div>
+            <Button type="submit" disabled={savingProfile}
+              >{savingProfile ? "Saving…" : "Save changes"}</Button
+            >
+          </div>
+        </form>
+      </Card.Content>
     </section>
-  </div>
+  </Card.Root>
 </section>
 
 <AvatarCropDialog bind:open={editorOpen} onsave={saveAvatar} />

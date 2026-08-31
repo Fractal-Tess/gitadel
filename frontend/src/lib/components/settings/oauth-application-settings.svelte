@@ -53,8 +53,7 @@
   }
 
   async function createApplication() {
-    await account.createOauthApplication();
-    if (!account.error) createDialogOpen = false;
+    if (await account.createOauthApplication()) createDialogOpen = false;
   }
 
   function requestRevoke(id: string, name: string) {
@@ -64,8 +63,7 @@
 
   async function revokeApplication() {
     if (!pendingApplication) return;
-    await account.deleteOauthApplication(pendingApplication.id);
-    if (!account.error) {
+    if (await account.deleteOauthApplication(pendingApplication.id)) {
       revokeDialogOpen = false;
       pendingApplication = null;
     }

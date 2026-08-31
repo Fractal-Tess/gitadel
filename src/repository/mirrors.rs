@@ -18,7 +18,6 @@ use sea_orm::{
     TransactionTrait, sea_query::Query,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 use tokio::{
     fs,
     io::{AsyncReadExt as _, AsyncWriteExt as _},
@@ -31,6 +30,7 @@ use uuid::Uuid;
 
 use super::{Permission, RepositoryState, github_mirror};
 use crate::{
+    blob_store::{BlobDigest, ObjectPrefix, lfs_object_key},
     entity::{
         issue_comment, namespace_mirror_identity, repository, repository_issue, repository_mirror,
         repository_topic,
@@ -282,40 +282,46 @@ pub(super) async fn initialize_import(
     })?;
 
     let staging = state.lfs_import_staging_path();
-    let lfs_path = state.lfs_root_path(storage_key);
     let lfs_result = fetch_and_promote_lfs(
         state,
+        storage_key,
         path,
-        &lfs_path,
         &staging,
         &remote_url,
         &authentication,
     )
     .await;
     if let Err(error) = lfs_result {
-        cleanup_lfs_path(&lfs_path).await;
+        cleanup_imported_lfs(state, storage_key).await;
         return Err(error);
     }
 
-    let object_format = git_output(path, &["rev-parse", "--show-object-format"])
-        .await
-        .map_err(ApiError::internal)?;
-    if object_format != "sha1" && object_format != "sha256" {
-        return Err(ApiError::internal(format!(
-            "Git returned unsupported object format {object_format}"
-        )));
-    }
-    let default_branch = match git_output(path, &["symbolic-ref", "--short", "HEAD"]).await {
-        Ok(branch) if !branch.is_empty() => branch,
-        _ => {
-            set_symbolic_head(path, "main").await?;
-            "main".to_owned()
+    let initialized = async {
+        let object_format = git_output(path, &["rev-parse", "--show-object-format"])
+            .await
+            .map_err(ApiError::internal)?;
+        if object_format != "sha1" && object_format != "sha256" {
+            return Err(ApiError::internal(format!(
+                "Git returned unsupported object format {object_format}"
+            )));
         }
-    };
-    Ok(MirrorInitialization {
-        object_format,
-        default_branch,
-    })
+        let default_branch = match git_output(path, &["symbolic-ref", "--short", "HEAD"]).await {
+            Ok(branch) if !branch.is_empty() => branch,
+            _ => {
+                set_symbolic_head(path, "main").await?;
+                "main".to_owned()
+            }
+        };
+        Ok(MirrorInitialization {
+            object_format,
+            default_branch,
+        })
+    }
+    .await;
+    if initialized.is_err() {
+        cleanup_imported_lfs(state, storage_key).await;
+    }
+    initialized
 }
 
 pub(super) async fn insert(
@@ -943,8 +949,8 @@ fn import_lfs_endpoint(remote_url: &str) -> Result<String, ApiError> {
 
 async fn fetch_and_promote_lfs(
     state: &RepositoryState,
+    storage_key: Uuid,
     repository_path: &Path,
-    lfs_path: &Path,
     staging: &Path,
     remote_url: &str,
     authentication: &GitAuthentication,
@@ -974,14 +980,18 @@ async fn fetch_and_promote_lfs(
         run_git(&mut command).await.map_err(|error| {
             ApiError::bad_request(format!("Could not import Git LFS objects: {error}"))
         })?;
-        promote_lfs_objects(staging, lfs_path).await
+        promote_lfs_objects(state, storage_key, staging).await
     }
     .await;
     cleanup_lfs_path(staging).await;
     result
 }
 
-async fn promote_lfs_objects(staging: &Path, destination: &Path) -> Result<(), ApiError> {
+async fn promote_lfs_objects(
+    state: &RepositoryState,
+    storage_key: Uuid,
+    staging: &Path,
+) -> Result<(), ApiError> {
     let objects = staging.join("objects");
     if !fs::try_exists(&objects).await.map_err(ApiError::internal)? {
         return Ok(());
@@ -1069,55 +1079,18 @@ async fn promote_lfs_objects(staging: &Path, destination: &Path) -> Result<(), A
                 }
 
                 let source = object.path();
-                let target = destination.join(first_name).join(second_name).join(oid);
-                let parent = target
-                    .parent()
-                    .ok_or_else(|| ApiError::internal("Git LFS object path has no parent"))?;
-                fs::create_dir_all(parent)
+                let expected = oid.parse::<BlobDigest>().map_err(ApiError::internal)?;
+                let key = lfs_object_key(storage_key, oid).map_err(ApiError::internal)?;
+                let file = fs::File::open(&source).await.map_err(ApiError::internal)?;
+                state
+                    .lfs_store()
+                    .put_verified(&key, expected, Box::pin(file))
                     .await
                     .map_err(ApiError::internal)?;
-                if sha256_file(&source).await? != oid {
-                    return Err(ApiError::internal(
-                        "A fetched Git LFS object does not match its identifier",
-                    ));
-                }
-                if fs::try_exists(&target).await.map_err(ApiError::internal)? {
-                    if sha256_file(&target).await? != oid {
-                        return Err(ApiError::internal(
-                            "An existing Git LFS object does not match its identifier",
-                        ));
-                    }
-                    fs::remove_file(source).await.map_err(ApiError::internal)?;
-                } else {
-                    fs::rename(source, target)
-                        .await
-                        .map_err(ApiError::internal)?;
-                }
             }
         }
     }
     Ok(())
-}
-
-async fn sha256_file(path: &Path) -> Result<String, ApiError> {
-    let mut file = fs::File::open(path).await.map_err(ApiError::internal)?;
-    let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 128 * 1024];
-    loop {
-        let read = file.read(&mut buffer).await.map_err(ApiError::internal)?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    let digest = digest.finalize();
-    let mut oid = String::with_capacity(64);
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    for byte in digest {
-        oid.push(HEX[(byte >> 4) as usize] as char);
-        oid.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    Ok(oid)
 }
 
 fn is_hex_component(value: &str) -> bool {
@@ -1132,6 +1105,28 @@ fn is_lfs_oid(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+async fn cleanup_imported_lfs(state: &RepositoryState, storage_key: Uuid) {
+    let prefix = match ObjectPrefix::new(storage_key.to_string()) {
+        Ok(prefix) => prefix,
+        Err(error) => {
+            tracing::error!(%error, "could not construct imported LFS cleanup prefix");
+            return;
+        }
+    };
+    let objects = match state.lfs_store().list(&prefix).await {
+        Ok(objects) => objects,
+        Err(error) => {
+            tracing::error!(%error, "could not list imported LFS objects for cleanup");
+            return;
+        }
+    };
+    for object in objects {
+        if let Err(error) = state.lfs_store().delete(&object.key).await {
+            tracing::error!(%error, key = %object.key, "could not clean up imported LFS object");
+        }
+    }
 }
 
 async fn cleanup_lfs_path(path: &Path) {
@@ -1675,15 +1670,13 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     use tokio::{
-        fs,
         io::{AsyncReadExt as _, AsyncWriteExt as _},
         net::TcpStream,
     };
-    use uuid::Uuid;
 
     use super::{
-        HttpsTarget, RemoteTransport, import_lfs_endpoint, is_public_ip, promote_lfs_objects,
-        resolve_https_remote, same_origin, start_https_proxy, validate_direct_import_identity,
+        HttpsTarget, RemoteTransport, import_lfs_endpoint, is_public_ip, resolve_https_remote,
+        same_origin, start_https_proxy, validate_direct_import_identity,
         validate_import_remote_url, validate_remote_url,
     };
 
@@ -1791,23 +1784,6 @@ mod tests {
             result.unwrap(),
             "https://source.example/team/source.git/info/lfs"
         );
-    }
-
-    #[tokio::test]
-    async fn promote_lfs_objects_uses_gitadel_object_layout() {
-        let root = std::env::temp_dir().join(format!("gitadel-lfs-promote-{}", Uuid::new_v4()));
-        let oid = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        let source = root.join("staging/objects/e3/b0");
-        let destination = root.join("lfs/repository");
-        fs::create_dir_all(&source).await.unwrap();
-        fs::write(source.join(oid), &[] as &[u8]).await.unwrap();
-
-        promote_lfs_objects(&root.join("staging"), &destination)
-            .await
-            .unwrap();
-
-        assert!(destination.join("e3/b0").join(oid).try_exists().unwrap());
-        fs::remove_dir_all(root).await.unwrap();
     }
 
     #[test]

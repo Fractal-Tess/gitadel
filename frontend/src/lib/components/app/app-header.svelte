@@ -55,6 +55,7 @@
     "oauth-applications": "OAuth applications",
     appearance: "Appearance",
     access: "Access",
+    storage: "Storage",
     backups: "Backups",
     activity: "Activity",
     members: "Members",
@@ -250,12 +251,12 @@
 
   {#if app.authStatus?.authenticated}
     <Button
-      class="shrink-0 gap-2"
+      class="shrink-0"
       aria-label="Create or import repositories and organizations"
       title="Create or import repositories and organizations"
       onclick={() => (shell.createOpen = true)}
     >
-      <Plus class="size-4" />
+      <Plus data-icon="inline-start" />
       <span class="hidden sm:inline">New</span>
     </Button>
     <ThemeSwitcher />
