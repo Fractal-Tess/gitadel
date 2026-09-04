@@ -16,7 +16,7 @@
 <section
   class="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-b px-4 py-2"
 >
-  {#if state.view !== "overview" && state.view !== "settings"}
+  {#if state.view !== "settings"}
     <Select.Root
       type="single"
       value={state.revision}

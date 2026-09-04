@@ -50,6 +50,7 @@
     normalizedPath: string;
     normalizedDescription: string;
     updatedAt: number;
+    normalizedTopics: string[];
   };
 
   const indexedRepositories = $derived(
@@ -61,6 +62,7 @@
         normalizedName: repository.name.toLowerCase(),
         normalizedPath: path.toLowerCase(),
         normalizedDescription: (repository.description ?? "").toLowerCase(),
+        normalizedTopics: repository.topics.map((topic) => topic.toLowerCase()),
         updatedAt: Date.parse(repository.updated_at),
       };
     }),
@@ -111,6 +113,25 @@
     }
     return false;
   }
+  type SearchQuery = {
+    needle: string;
+    topics: string[];
+  };
+
+  function parseSearchQuery(value: string): SearchQuery {
+    const terms: string[] = [];
+    const topics: string[] = [];
+    for (const token of value.trim().toLowerCase().split(/\s+/)) {
+      if (token.startsWith("topic:") && token.length > "topic:".length) {
+        topics.push(token.slice("topic:".length));
+      } else if (token) {
+        terms.push(token);
+      }
+    }
+    return { needle: terms.join(" "), topics };
+  }
+
+  const parsedQuery = $derived(parseSearchQuery(query));
 
   /**
    * Ranks a repository against the query. Repository names outrank namespaces,
@@ -128,9 +149,12 @@
   }
 
   const results = $derived.by(() => {
-    const needle = query.trim().toLowerCase();
+    const { needle, topics } = parsedQuery;
+    const topicMatches = indexedRepositories.filter((repository) =>
+      topics.every((topic) => repository.normalizedTopics.includes(topic)),
+    );
 
-    if (!needle) {
+    if (!needle && topics.length === 0) {
       const byPath = new Map(
         indexedRepositories.map((repository) => [
           repository.path,
@@ -141,7 +165,7 @@
         .map((path) => byPath.get(path))
         .filter((repository) => repository !== undefined);
       const recentIds = new Set(recent.map((repository) => repository.id));
-      const matches = indexedRepositories
+      const matches = topicMatches
         .filter((entry) => !recentIds.has(entry.repository.id))
         .sort(
           (left, right) =>
@@ -153,16 +177,16 @@
       return {
         recent,
         matches: matches.slice(0, resultLimit),
-        matched: repositories.length,
+        matched: topicMatches.length,
       };
     }
 
     const recency = new Map(
       recentPaths.map((path, index) => [path, recentPaths.length - index]),
     );
-    const ranked = indexedRepositories
+    const ranked = topicMatches
       .map((repository) => {
-        const base = score(repository, needle);
+        const base = needle ? score(repository, needle) : 1;
         return {
           repository,
           rank:
@@ -190,9 +214,11 @@
   });
 
   function matches(action: PaletteAction): boolean {
-    const needle = query.trim().toLowerCase();
-    if (!needle) return true;
-    return `${action.label} ${action.keywords}`.toLowerCase().includes(needle);
+    if (parsedQuery.topics.length > 0) return false;
+    if (!parsedQuery.needle) return true;
+    return `${action.label} ${action.keywords}`
+      .toLowerCase()
+      .includes(parsedQuery.needle);
   }
 
   const navigationActions = $derived.by(() => {
@@ -448,14 +474,14 @@
   <div class="-mx-1 -mt-1 flex items-center gap-2.5 border-b px-3.5">
     <span
       aria-hidden="true"
-      class="font-mono text-base leading-none text-activity-3"
+      class="font-mono text-base leading-none text-foreground/80"
     >
       /
     </span>
     <CommandPrimitive.Input
       bind:value={query}
       class="h-12 min-w-0 flex-1 bg-transparent font-mono text-sm text-foreground outline-none placeholder:font-sans placeholder:text-muted-foreground"
-      placeholder="Jump to a repository or run a command"
+      placeholder="Search repositories or try topic:name"
     />
     <Kbd.Root
       class="shrink-0 border border-border/60 bg-transparent px-1.5 font-mono text-[10px]"
@@ -478,7 +504,7 @@
         </p>
         <p class="mx-auto mt-1.5 max-w-xs text-xs text-muted-foreground">
           {query.trim()
-            ? "Try a namespace, a repository name, or part of a description."
+            ? "Try a namespace, repository name, description, or topic:name."
             : "Create a repository and it will show up here."}
         </p>
       </div>

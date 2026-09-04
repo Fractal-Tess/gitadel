@@ -127,6 +127,7 @@ pub struct RefsResponse {
 pub struct TreeResponse {
     revision: String,
     commit_oid: String,
+    commit_timestamp: i64,
     commit_count: Option<usize>,
     path: String,
     entries: Vec<TreeEntryResponse>,
@@ -474,6 +475,10 @@ pub async fn tree(
     let count_path = path.clone();
     let (mut response, commit_oid) = read_git(path, move |git| {
         let commit_oid = git.peel_to_commit_oid(git.rev_parse(&revision)?)?;
+        let commit_timestamp = git
+            .read_commit(&commit_oid)?
+            .committer_signature()
+            .map_or(0, |signature| signature.time.seconds);
         let resolved = git.resolve_path(&revision, &requested_path)?;
         if resolved.object_type != GitObjectType::Tree {
             return Err(GitError::InvalidPath(requested_path));
@@ -524,6 +529,7 @@ pub async fn tree(
             TreeResponse {
                 revision,
                 commit_oid: commit_oid.to_hex(),
+                commit_timestamp,
                 commit_count: None,
                 path: requested_path,
                 entries,

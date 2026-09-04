@@ -6,6 +6,7 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ### Added
 
+- Added `topic:name` filtering to the global repository search, backed by the topics already stored for each accessible repository.
 - Added Gitadel Actions backed by separately deployed namespace-owned Forgejo Runner v13.0.0 pools. Push workflows get durable DAG scheduling, exact-label assignment, short-lived repository credentials, bounded paginated logs, cancellation and runner-loss handling, commit summaries, run/job views, Forgejo v4 artifact upload and download, and same-repository release publishing. Personal and organization owners manage one-time runner registrations under **Settings → Actions**; each runner can serve every repository in that namespace. The first release supports static push and tag workflows and intentionally defers pull requests, schedules, dispatch, reruns, matrices, reusable workflows, cache, OIDC, and user-managed Actions secrets or variables.
 - Added provider-based instance backups. Administrators can add tested filesystem and S3-compatible destinations under **Settings → Backups**, choose the destination first when creating a snapshot, assign an independent schedule to each provider, and remove any backup setup. Gitadel does not create a default provider. Archives include the database, repositories, issue and release assets, LFS data, SSH host key, and effective configuration under an integrity-checked manifest. S3 backups use multipart upload, verified object sizes, and direct restore. Gitadel pauses normal services for maintenance, streams progress to the open page, creates a safety backup before restore by default, rolls back failed replacement attempts, and restarts automatically.
 - Added token-authenticated Git Smart HTTP push and clone support on the web origin. Private clones require an API token with `read`; pushes require `write`.
@@ -46,6 +47,8 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 - Made webhook delivery history open on the five most recent deliveries, with a "Show more" button for the rest of the recorded history.
 - Moved repository confirmations — pings, redeliveries, webhook and release changes, settings saves, issue updates — into toasts instead of a banner above the repository view.
 - Made Dokploy setup a tested, staged flow. New connections must pass a credential check before they are saved, then continue to repository-source setup without closing the dialog. The connection also stores the Gitadel URL that Dokploy containers can reach and applies it to Gitadel-managed Gitea providers.
+- Moved the repository branch selector into the repository toolbar. The file-tree header now shows the selected branch, commit ID, and relative commit age, links the exact timestamp on hover, and opens that branch's timestamped commit history.
+- Updated the global search prompt glyph to use the active theme's foreground color instead of the accent color.
 
 ### Fixed
 

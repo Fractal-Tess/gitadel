@@ -3,13 +3,35 @@
   import GitBranch from "@lucide/svelte/icons/git-branch";
   import MaterialFileIcon from "$lib/components/repository/material-file-icon.svelte";
 
-  import * as Select from "$lib/components/ui/select/index.js";
   import { Spinner } from "$lib/components/ui/spinner/index.js";
-  import { formatSize } from "$lib/repository/format.js";
+  import { formatDate, formatSize } from "$lib/repository/format.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
   import type { Tree } from "$lib/api/repositories.js";
 
   let { state }: { state: RepositoryPageState } = $props();
+
+  const relativeTime = new Intl.RelativeTimeFormat(undefined, {
+    numeric: "always",
+    style: "long",
+  });
+
+  function formatCommitAge(timestamp: number): string {
+    const seconds = timestamp - Date.now() / 1000;
+    const absoluteSeconds = Math.abs(seconds);
+    const units: [Intl.RelativeTimeFormatUnit, number][] = [
+      ["year", 365 * 24 * 60 * 60],
+      ["month", 30 * 24 * 60 * 60],
+      ["week", 7 * 24 * 60 * 60],
+      ["day", 24 * 60 * 60],
+      ["hour", 60 * 60],
+      ["minute", 60],
+      ["second", 1],
+    ];
+    const [unit, secondsPerUnit] =
+      units.find(([, threshold]) => absoluteSeconds >= threshold) ??
+      (["second", 1] as const);
+    return relativeTime.format(Math.round(seconds / secondsPerUnit), unit);
+  }
 </script>
 
 <!-- The right-hand divider is drawn by the pane resizer on wide layouts, so
@@ -18,32 +40,29 @@
   class="flex min-w-0 flex-col border-b xl:h-full xl:min-h-0 xl:border-b-0"
 >
   {#if state.browser.repositoryTree}
-    <Select.Root
-      type="single"
-      value={state.revision}
-      onValueChange={(value) => {
-        if (value && value !== state.revision) state.changeRevision(value);
-      }}
+    {@const tree = state.browser.repositoryTree}
+    <button
+      type="button"
+      class="group flex h-12 w-full shrink-0 items-center gap-3 border-b px-4 text-left font-medium hover:bg-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+      aria-label={`View commit history for ${tree.revision}, updated ${formatCommitAge(tree.commit_timestamp)}`}
+      onclick={() => state.navigate("history")}
     >
-      <Select.Trigger
-        class="w-full shrink-0 rounded-none border-0 border-b px-4 font-medium shadow-none focus-visible:ring-2 data-[size=default]:h-12"
-        aria-label="Switch branch"
-      >
-        <span class="flex min-w-0 flex-1 items-center gap-2 text-sm">
-          <GitBranch class="size-4 text-muted-foreground" />
-          <span class="truncate">{state.browser.repositoryTree.revision}</span>
-        </span>
-        <code class="shrink-0 text-xs font-normal text-muted-foreground">
-          {state.browser.repositoryTree.commit_oid.slice(0, 8)}
-        </code>
-      </Select.Trigger>
-      <Select.Content align="start">
-        {#each state.browser.refs?.branches ?? [] as branch (branch.name)}
-          <Select.Item value={branch.name}>{branch.name}</Select.Item>
-        {/each}
-      </Select.Content>
-    </Select.Root>
-    <!-- The branch picker stays pinned so it keeps forming the divider that runs
+      <span class="flex min-w-0 flex-1 items-center gap-2 text-sm">
+        <GitBranch class="size-4 shrink-0 text-muted-foreground" />
+        <span class="truncate">{tree.revision}</span>
+      </span>
+      <span class="flex shrink-0 items-center gap-1.5 text-xs font-normal text-muted-foreground">
+        <code>{tree.commit_oid.slice(0, 8)}</code>
+        <span aria-hidden="true">·</span>
+        <time
+          datetime={new Date(tree.commit_timestamp * 1000).toISOString()}
+          title={formatDate(tree.commit_timestamp)}
+        >
+          {formatCommitAge(tree.commit_timestamp)}
+        </time>
+      </span>
+    </button>
+    <!-- The history link stays pinned so it keeps forming the divider that runs
          under the app header while the entries scroll beneath it. -->
     <div class="min-h-0 flex-1 xl:overflow-y-auto xl:overscroll-contain">
       {@render entries(state.browser.repositoryTree, 0)}

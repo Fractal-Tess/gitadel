@@ -6,6 +6,7 @@ export const repositorySchema = z.object({
   name: z.string(),
   description: z.string().nullable(),
   visibility: z.enum(["public", "private"]),
+  topics: z.array(z.string()).default([]),
   object_format: z.enum(["sha1", "sha256"]),
   mirrored: z.boolean(),
   default_branch: z.string(),
@@ -80,6 +81,7 @@ export const treeEntrySchema = z.object({
 export const treeSchema = z.object({
   revision: z.string(),
   commit_oid: z.string(),
+  commit_timestamp: z.number(),
   commit_count: z.number().int().nonnegative().nullable(),
   path: z.string(),
   entries: z.array(treeEntrySchema),

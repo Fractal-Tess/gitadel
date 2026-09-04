@@ -221,7 +221,7 @@
   >
     <span
       aria-hidden="true"
-      class="font-mono text-sm leading-none text-activity-3/70 group-hover:text-activity-3"
+      class="font-mono text-sm leading-none text-foreground/80 group-hover:text-foreground"
     >
       /
     </span>

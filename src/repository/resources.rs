@@ -27,7 +27,7 @@ use crate::{
     blob_store::{ObjectPrefix, targets},
     entity::{
         lfs_object, namespace, organization_member, repository, repository_alias,
-        repository_collaborator, repository_favorite, user,
+        repository_collaborator, repository_favorite, repository_topic, topic, user,
     },
     identity::{ApiError, SCOPE_READ, SCOPE_WRITE, validate_slug},
 };
@@ -40,6 +40,7 @@ pub struct RepositoryResponse {
     description: Option<String>,
     website_url: Option<String>,
     visibility: String,
+    topics: Vec<String>,
     object_format: String,
     mirrored: bool,
     default_branch: String,
@@ -72,6 +73,7 @@ impl RepositoryResponse {
             description: repository.description,
             website_url: repository.website_url,
             visibility: repository.visibility,
+            topics: Vec::new(),
             object_format: repository.object_format,
             mirrored: repository.mirrored,
             default_branch: repository.default_branch,
@@ -91,16 +93,57 @@ pub async fn list_repositories(
     jar: CookieJar,
 ) -> Result<Json<Vec<RepositoryResponse>>, ApiError> {
     let accessible = accessible_repositories(&state, &headers, &jar).await?;
+    let repository_ids = accessible
+        .repositories
+        .iter()
+        .map(|repository| repository.id)
+        .collect::<Vec<_>>();
+    let mut topics =
+        repository_topics_by_repository(state.identity().database(), &repository_ids).await?;
     let response = accessible
         .repositories
         .into_iter()
         .map(|repository| {
             let favorited = accessible.favorite_ids.contains(&repository.id);
             let can_manage = accessible.manageable_ids.contains(&repository.id);
-            RepositoryResponse::new(repository, &state, favorited, can_manage)
+            let mut response = RepositoryResponse::new(repository, &state, favorited, can_manage);
+            response.topics = topics.remove(&response.id).unwrap_or_default();
+            response
         })
         .collect();
     Ok(Json(response))
+}
+
+async fn repository_topics_by_repository(
+    database: &sea_orm::DatabaseConnection,
+    repository_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<String>>, ApiError> {
+    if repository_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let links = repository_topic::Entity::find()
+        .filter(repository_topic::Column::RepositoryId.is_in(repository_ids.iter().copied()))
+        .all(database);
+    let topics = topic::Entity::find().all(database);
+    let (links, topics) = tokio::try_join!(links, topics)?;
+    let topic_names = topics
+        .into_iter()
+        .map(|topic| (topic.id, topic.name))
+        .collect::<HashMap<_, _>>();
+    let mut by_repository = HashMap::<Uuid, Vec<String>>::new();
+    for link in links {
+        if let Some(name) = topic_names.get(&link.topic_id) {
+            by_repository
+                .entry(link.repository_id)
+                .or_default()
+                .push(name.clone());
+        }
+    }
+    for topics in by_repository.values_mut() {
+        topics.sort_unstable();
+    }
+    Ok(by_repository)
 }
 
 pub(super) async fn accessible_repositories(
