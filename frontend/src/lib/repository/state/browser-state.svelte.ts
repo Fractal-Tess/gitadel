@@ -122,7 +122,7 @@ export class RepositoryBrowserState {
       }
       const [tree] = await Promise.all([
         requestJson(
-          `${repositoryApi(this)}?${new URLSearchParams({ rev: revision })}`,
+          `${repositoryApi(this, "/tree")}?${new URLSearchParams({ rev: revision })}`,
           treeSchema,
           init,
         ),

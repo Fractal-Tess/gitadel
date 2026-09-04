@@ -24,6 +24,7 @@ use sley::{
 use ssh_key::{HashAlg, PublicKey, SshSig};
 use tokei::{Config as TokeiConfig, LanguageType};
 use tokio::{process::Command, task::JoinSet};
+use tokio_util::io::ReaderStream;
 
 use super::{
     Permission, RepositoryState,
@@ -46,6 +47,40 @@ pub struct BrowseQuery {
     rev: Option<String>,
     #[serde(default)]
     path: String,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+pub enum SourceArchiveFormat {
+    #[serde(rename = "zip")]
+    Zip,
+    #[serde(rename = "tar.gz")]
+    TarGz,
+}
+
+impl SourceArchiveFormat {
+    fn git_name(self) -> &'static str {
+        match self {
+            Self::Zip => "zip",
+            Self::TarGz => "tar.gz",
+        }
+    }
+
+    fn extension(self) -> &'static str {
+        self.git_name()
+    }
+
+    fn content_type(self) -> &'static str {
+        match self {
+            Self::Zip => "application/zip",
+            Self::TarGz => "application/gzip",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SourceArchiveQuery {
+    rev: Option<String>,
+    format: SourceArchiveFormat,
 }
 
 #[derive(Deserialize)]
@@ -181,7 +216,7 @@ pub struct DiffResponse {
     truncated: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LanguageStatResponse {
     language: String,
     files: usize,
@@ -234,10 +269,10 @@ struct ActivityDayResponse {
     count: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Deserialize, Serialize)]
 pub(super) struct GitOverview {
     branch_count: usize,
-    head: Option<(String, ObjectId)>,
+    head: Option<String>,
     activity: BTreeMap<NaiveDate, usize>,
 }
 
@@ -252,14 +287,21 @@ async fn repository_overview_item(
     let git_overview = read_repository_overview(state, &repository, start_date, end_date).await?;
     let activity = activity_response(start_date, end_date, git_overview.activity);
     let stats = match git_overview.head {
-        Some((commit_oid, tree_oid)) => {
-            let cache_key = format!("{}:{commit_oid}", repository.storage_key);
-            if let Some(cached) = state.cached_stats(&cache_key).await {
+        Some(commit_oid) => {
+            if let Some(cached) = state.cached_stats(repository.id, &commit_oid).await? {
                 cached
             } else {
                 let path = state.repository_path(&repository);
-                let computed = read_git(path, move |git| compute_stats(git, tree_oid)).await?;
-                state.cache_stats(cache_key, computed.clone()).await;
+                let revision = commit_oid.clone();
+                let computed = read_git(path, move |git| {
+                    let commit_oid = git.peel_to_commit_oid(git.rev_parse(&revision)?)?;
+                    let tree_oid = git.read_commit(&commit_oid)?.tree;
+                    compute_stats(git, tree_oid)
+                })
+                .await?;
+                state
+                    .cache_stats(repository.id, &commit_oid, &computed)
+                    .await?;
                 computed
             }
         }
@@ -383,7 +425,7 @@ pub async fn refs(
     jar: CookieJar,
 ) -> Result<Json<RefsResponse>, ApiError> {
     let repository = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
-    let size_bytes = state.repository_size(&repository).await;
+    let size_bytes = state.repository_size(&repository).await?;
     let path = state.repository_path(&repository);
     let response = read_git(path, move |git| {
         let mut branches = git
@@ -492,15 +534,20 @@ pub async fn tree(
     .await?;
 
     if include_commit_count {
-        let cache_key = format!("{}:{}", repository.storage_key, commit_oid.to_hex());
-        if let Some(count) = state.cached_commit_count(&cache_key).await {
+        let commit_key = commit_oid.to_hex();
+        if let Some(count) = state
+            .cached_commit_count(repository.id, &commit_key)
+            .await?
+        {
             response.commit_count = Some(count);
         } else {
+            let refresh_key = format!("{}:{commit_key}", repository.id);
             let mut refreshing = state.commit_count_refreshing.lock().await;
-            if refreshing.insert(cache_key.clone()) {
+            if refreshing.insert(refresh_key.clone()) {
                 drop(refreshing);
                 let task_state = state.clone();
                 let state = state.clone();
+                let repository_id = repository.id;
                 task_state.spawn_task(async move {
                     let result = async {
                         let _permit = state
@@ -508,7 +555,11 @@ pub async fn tree(
                             .acquire()
                             .await
                             .map_err(ApiError::internal)?;
-                        if state.cached_commit_count(&cache_key).await.is_none() {
+                        if state
+                            .cached_commit_count(repository_id, &commit_key)
+                            .await?
+                            .is_none()
+                        {
                             let count = read_git(count_path, move |git| {
                                 let mut count = 0;
                                 git.rev_graph().stream_reachable_commits(
@@ -522,7 +573,9 @@ pub async fn tree(
                                 Ok(count)
                             })
                             .await?;
-                            state.cache_commit_count(cache_key.clone(), count).await;
+                            state
+                                .cache_commit_count(repository_id, &commit_key, count)
+                                .await?;
                         }
                         Ok::<_, ApiError>(())
                     }
@@ -534,7 +587,7 @@ pub async fn tree(
                         .commit_count_refreshing
                         .lock()
                         .await
-                        .remove(&cache_key);
+                        .remove(&refresh_key);
                 });
             }
         }
@@ -621,6 +674,84 @@ pub async fn raw(
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_str(&content_type).map_err(ApiError::internal)?,
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-cache"),
+    );
+    Ok(response)
+}
+
+pub async fn source_archive(
+    State(state): State<RepositoryState>,
+    AxumPath((namespace, name)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Query(query): Query<SourceArchiveQuery>,
+) -> Result<Response, ApiError> {
+    let repository = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
+    let revision = query
+        .rev
+        .unwrap_or_else(|| repository.default_branch.clone());
+    let repository_path = state.repository_path(&repository);
+    let commit_oid = read_git(repository_path.clone(), move |git| {
+        git.peel_to_commit_oid(git.rev_parse(&revision)?)
+            .map(|oid| oid.to_hex())
+    })
+    .await?;
+    let short_oid = &commit_oid[..commit_oid.len().min(8)];
+    let archive_name = format!(
+        "{}-{short_oid}.{}",
+        repository.name,
+        query.format.extension()
+    );
+    let prefix = format!("{}-{short_oid}/", repository.name);
+
+    let mut child = Command::new("git")
+        .arg("--git-dir")
+        .arg(repository_path)
+        .arg("archive")
+        .arg(format!("--format={}", query.format.git_name()))
+        .arg(format!("--prefix={prefix}"))
+        .arg(&commit_oid)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(ApiError::internal)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ApiError::internal("git archive stdout was not captured"))?;
+    let display_path = format!("{namespace}/{name}");
+    state.clone().spawn_task(async move {
+        match tokio::time::timeout(std::time::Duration::from_secs(10 * 60), child.wait()).await {
+            Ok(Ok(status)) if status.success() => {}
+            Ok(Ok(status)) => {
+                tracing::error!(
+                    repository = %display_path,
+                    ?status,
+                    "git archive failed"
+                );
+            }
+            Ok(Err(error)) => {
+                tracing::error!(%error, repository = %display_path, "git archive wait failed");
+            }
+            Err(_) => {
+                tracing::warn!(repository = %display_path, "git archive exceeded time limit");
+            }
+        }
+    });
+
+    let mut response = Response::new(Body::from_stream(ReaderStream::new(stdout)));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(query.format.content_type()),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{archive_name}\""))
+            .map_err(ApiError::internal)?,
     );
     response.headers_mut().insert(
         header::CACHE_CONTROL,
@@ -782,12 +913,13 @@ pub async fn stats(
         Ok((commit_oid.to_hex(), commit.tree))
     })
     .await?;
-    let cache_key = format!("{}:{commit_oid}", repository.storage_key);
-    if let Some(cached) = state.cached_stats(&cache_key).await {
+    if let Some(cached) = state.cached_stats(repository.id, &commit_oid).await? {
         return Ok(Json(cached));
     }
     let computed = read_git(path, move |git| compute_stats(git, tree_oid)).await?;
-    state.cache_stats(cache_key, computed.clone()).await;
+    state
+        .cache_stats(repository.id, &commit_oid, &computed)
+        .await?;
     Ok(Json(computed))
 }
 
@@ -801,7 +933,7 @@ async fn read_repository_overview(
         "{}:{}:{}:{start_date}:{end_date}",
         repository.storage_key, repository.updated_at, repository.default_branch
     );
-    if let Some(cached) = state.cached_overview(&cache_key).await {
+    if let Some(cached) = state.cached_overview(repository.id, &cache_key).await? {
         return Ok(cached);
     }
 
@@ -823,9 +955,7 @@ async fn read_repository_overview(
             roots.push(commit_oid);
         }
         let head = if let Some(index) = default_index {
-            let commit_oid = &roots[index];
-            let commit = git.read_commit(commit_oid)?;
-            Some((commit_oid.to_hex(), commit.tree))
+            Some(roots[index].to_hex())
         } else {
             None
         };
@@ -858,8 +988,77 @@ async fn read_repository_overview(
         })
     })
     .await?;
-    state.cache_overview(cache_key, overview.clone()).await;
+    state
+        .cache_overview(repository.id, &cache_key, &overview)
+        .await?;
     Ok(overview)
+}
+
+pub(super) async fn warm_repository_analysis(
+    state: &RepositoryState,
+    repository: &repository::Model,
+) -> Result<(), ApiError> {
+    let _permit = state
+        .analysis_slots
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(ApiError::internal)?;
+    let end_date = Utc::now().date_naive();
+    let start_date = activity_start_date(end_date, DEFAULT_REPOSITORY_ACTIVITY_DAYS)?;
+    let overview = read_repository_overview(state, repository, start_date, end_date).await?;
+    let Some(commit_oid) = overview.head else {
+        return Ok(());
+    };
+    let need_stats = state
+        .cached_stats(repository.id, &commit_oid)
+        .await?
+        .is_none();
+    let need_commit_count = state
+        .cached_commit_count(repository.id, &commit_oid)
+        .await?
+        .is_none();
+    if !need_stats && !need_commit_count {
+        return Ok(());
+    }
+
+    let path = state.repository_path(repository);
+    let revision = commit_oid.clone();
+    let (stats, commit_count) = read_git(path, move |git| {
+        let oid = git.peel_to_commit_oid(git.rev_parse(&revision)?)?;
+        let stats = if need_stats {
+            Some(compute_stats(git, git.read_commit(&oid)?.tree)?)
+        } else {
+            None
+        };
+        let commit_count = if need_commit_count {
+            let mut count = 0;
+            git.rev_graph().stream_reachable_commits(
+                [oid],
+                ReachableCommitOptions::new(),
+                |_| {
+                    count += 1;
+                    Ok(StreamControl::Continue)
+                },
+            )?;
+            Some(count)
+        } else {
+            None
+        };
+        Ok((stats, commit_count))
+    })
+    .await?;
+    if let Some(stats) = stats {
+        state
+            .cache_stats(repository.id, &commit_oid, &stats)
+            .await?;
+    }
+    if let Some(commit_count) = commit_count {
+        state
+            .cache_commit_count(repository.id, &commit_oid, commit_count)
+            .await?;
+    }
+    Ok(())
 }
 
 async fn readable_repository(

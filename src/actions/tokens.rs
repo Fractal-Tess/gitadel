@@ -97,8 +97,8 @@ pub(crate) fn digest_matches(value: &str, stored: &str) -> bool {
 
 pub(crate) async fn issue_registration<C: ConnectionTrait>(
     database: &C,
-    namespace: String,
-    created_by: Uuid,
+    namespace: Option<String>,
+    created_by: Option<Uuid>,
     runner_name: String,
     labels: Vec<String>,
 ) -> Result<String, sea_orm::DbErr> {
@@ -112,7 +112,7 @@ pub(crate) async fn issue_registration<C: ConnectionTrait>(
         approved_labels: Set(serde_json::to_string(&labels).expect("labels serialize")),
         expires_at: Set(now + Duration::minutes(10)),
         used_at: Set(None),
-        created_by: Set(Some(created_by)),
+        created_by: Set(created_by),
         created_at: Set(now),
     }
     .insert(database)
@@ -150,7 +150,6 @@ pub(crate) async fn issue_job<C: ConnectionTrait>(
     job_id: i64,
     repository_id: Uuid,
     lease_generation: i64,
-    expires_at: chrono::DateTime<Utc>,
 ) -> Result<String, sea_orm::DbErr> {
     action_job_token::Entity::update_many()
         .col_expr(action_job_token::Column::RevokedAt, Utc::now().into())
@@ -165,7 +164,7 @@ pub(crate) async fn issue_job<C: ConnectionTrait>(
         .ok_or_else(|| sea_orm::DbErr::RecordNotFound("action job".to_owned()))?
         .run_id;
     let now = Utc::now();
-    let expires_at = expires_at.min(now + Duration::hours(6));
+    let expires_at = now + Duration::hours(6);
     let token_id = Uuid::new_v4();
     let raw = job_token(run_id, job_id, token_id, expires_at)
         .map_err(|error| sea_orm::DbErr::Custom(error.to_string()))?;
@@ -256,6 +255,16 @@ pub(crate) async fn authenticate_job_bearer<C: ConnectionTrait>(
     authenticate_job(database, raw).await
 }
 
+pub(crate) async fn authenticate_job_api_token<C: ConnectionTrait>(
+    database: &C,
+    headers: &HeaderMap,
+) -> Result<Option<AuthenticatedJob>, sea_orm::DbErr> {
+    let Some(raw) = api_token(headers) else {
+        return Ok(None);
+    };
+    authenticate_job(database, raw).await
+}
+
 pub(crate) async fn authorize_job<C: ConnectionTrait>(
     database: &C,
     raw: &str,
@@ -271,6 +280,14 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let (scheme, token) = value.split_once(' ')?;
     (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty()).then_some(token)
+}
+
+fn api_token(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    ((scheme.eq_ignore_ascii_case("bearer") || scheme.eq_ignore_ascii_case("token"))
+        && !token.is_empty())
+    .then_some(token)
 }
 
 pub(crate) async fn revoke_job<C: ConnectionTrait>(
@@ -316,5 +333,14 @@ mod tests {
         let raw = runner_token();
         assert!(digest_matches(&raw, &digest(&raw)));
         assert!(!digest_matches(&runner_token(), &digest(&raw)));
+    }
+
+    #[test]
+    fn release_api_accepts_bearer_and_forgejo_token_schemes() {
+        for value in ["Bearer secret", "token secret", "TOKEN secret"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::AUTHORIZATION, value.parse().unwrap());
+            assert_eq!(api_token(&headers), Some("secret"));
+        }
     }
 }

@@ -45,6 +45,7 @@
     "repository.collaborator.remove": "Repository collaborator removed",
     "repository.create": "Repository created",
     "repository.push": "Repository pushed",
+    "repository.integrity.check": "Repository integrity checked",
     "ssh_key.create": "SSH key created",
     "ssh_key.delete": "SSH key removed",
   };

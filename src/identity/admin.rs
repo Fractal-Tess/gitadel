@@ -13,7 +13,10 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use chrono::{DateTime, Utc};
 use futures_util::stream;
-use sea_orm::{ActiveModelTrait, ConnectionTrait, EntityTrait, Set, Statement, TransactionTrait};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set,
+    Statement, TransactionTrait,
+};
 use serde::{Deserialize, Serialize};
 use tokio_util::io::ReaderStream;
 use url::Url;
@@ -78,6 +81,99 @@ impl From<instance::Model> for InstanceSettingsResponse {
 pub struct UpdateInstanceSettingsRequest {
     site_name: String,
     site_description: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct IntegritySettingsResponse {
+    enabled: bool,
+    schedule: String,
+    last_checked_at: Option<DateTime<Utc>>,
+    last_result: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateIntegritySettingsRequest {
+    enabled: bool,
+    schedule: String,
+}
+
+async fn integrity_settings_response(
+    state: &IdentityState,
+) -> Result<IntegritySettingsResponse, ApiError> {
+    let settings = instance::Entity::find_by_id(1)
+        .one(state.database())
+        .await?
+        .ok_or_else(|| ApiError::internal("instance settings row is missing"))?;
+    let last_check = audit_event::Entity::find()
+        .filter(audit_event::Column::Action.eq("repository.integrity.check"))
+        .order_by_desc(audit_event::Column::Id)
+        .one(state.database())
+        .await?;
+
+    Ok(IntegritySettingsResponse {
+        enabled: settings.integrity_checks_enabled,
+        schedule: settings.integrity_check_schedule,
+        last_checked_at: last_check.as_ref().map(|event| event.created_at),
+        last_result: last_check.and_then(|event| event.target),
+    })
+}
+
+pub async fn get_integrity_settings(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Json<IntegritySettingsResponse>, ApiError> {
+    require_admin(&state, &headers, &jar, SCOPE_READ).await?;
+    Ok(Json(integrity_settings_response(&state).await?))
+}
+
+pub async fn update_integrity_settings(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(request): Json<UpdateIntegritySettingsRequest>,
+) -> Result<Json<IntegritySettingsResponse>, ApiError> {
+    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
+    let schedule = request.schedule.trim();
+    if schedule.is_empty() || schedule.len() > 128 {
+        return Err(ApiError::bad_request(
+            "Schedule must contain between 1 and 128 characters.",
+        ));
+    }
+    crate::schedule::next_occurrence(schedule, Utc::now())
+        .map_err(|error| ApiError::bad_request(format!("Invalid UTC cron schedule: {error}")))?;
+
+    let settings = instance::Entity::find_by_id(1)
+        .one(state.database())
+        .await?
+        .ok_or_else(|| ApiError::internal("instance settings row is missing"))?;
+    let now = Utc::now();
+    let mut active: instance::ActiveModel = settings.into();
+    active.integrity_checks_enabled = Set(request.enabled);
+    active.integrity_check_schedule = Set(schedule.to_owned());
+    active.updated_at = Set(now);
+    active.update(state.database()).await?;
+
+    audit_event::ActiveModel {
+        id: sea_orm::ActiveValue::NotSet,
+        actor_user_id: Set(Some(actor.user.id)),
+        action: Set("instance.integrity.update".to_owned()),
+        target: Set(Some(format!(
+            "{}; {schedule}",
+            if request.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        ))),
+        remote_address: Set(None),
+        created_at: Set(now),
+    }
+    .insert(state.database())
+    .await?;
+
+    state.notify_integrity_settings_changed();
+    Ok(Json(integrity_settings_response(&state).await?))
 }
 
 pub async fn public_instance_settings(
@@ -1329,7 +1425,7 @@ async fn touch_instance<C: ConnectionTrait>(
     Ok(())
 }
 
-pub(super) async fn require_admin(
+pub(crate) async fn require_admin(
     state: &IdentityState,
     headers: &HeaderMap,
     jar: &CookieJar,

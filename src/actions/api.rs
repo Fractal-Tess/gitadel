@@ -20,11 +20,11 @@ use uuid::Uuid;
 
 use crate::{
     entity::{action_artifact, action_job, action_job_log, action_run, action_runner, repository},
-    identity::{ApiError, SCOPE_READ, SCOPE_WRITE},
+    identity::{ApiError, AuthenticatedUser, SCOPE_READ, SCOPE_WRITE},
     repository::Permission,
 };
 
-use super::{ActionsState, REQUIRED_RUNNER_VERSION, artifacts, runs, tokens};
+use super::{ActionsState, REQUIRED_RUNNER_VERSION, artifacts, runners, runs, tokens};
 
 const MAX_LOG_QUERY_ROWS: u64 = 64;
 
@@ -58,14 +58,26 @@ pub(crate) fn router() -> Router<ActionsState> {
             "/repositories/{namespace}/{name}/actions/runs/{run_id}/artifacts/{artifact_id}",
             get(download_run_artifact),
         )
-        .route("/namespaces/{namespace}/actions/runners", get(list_runners))
+        .route(
+            "/namespaces/{namespace}/actions/runners",
+            get(list_namespace_runners),
+        )
         .route(
             "/namespaces/{namespace}/actions/runner-registration-tokens",
-            post(issue_registration),
+            post(issue_namespace_registration),
         )
         .route(
             "/namespaces/{namespace}/actions/runners/{runner_id}",
-            delete(remove_runner),
+            delete(remove_namespace_runner),
+        )
+        .route("/admin/actions/runners", get(list_system_runners))
+        .route(
+            "/admin/actions/runner-registration-tokens",
+            post(issue_system_registration),
+        )
+        .route(
+            "/admin/actions/runners/{runner_id}",
+            delete(remove_system_runner),
         )
 }
 
@@ -427,19 +439,77 @@ struct RunnersResponse {
     runners: Vec<RunnerResponse>,
 }
 
-async fn list_runners(
+#[derive(Clone)]
+enum RunnerScope {
+    Namespace(String),
+    System,
+}
+
+impl RunnerScope {
+    fn namespace(&self) -> Option<&str> {
+        match self {
+            Self::Namespace(namespace) => Some(namespace),
+            Self::System => None,
+        }
+    }
+
+    fn audit_target(&self) -> &str {
+        self.namespace().unwrap_or("system")
+    }
+}
+
+async fn authorize_runner_scope(
+    state: &ActionsState,
+    scope: &RunnerScope,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+    permission: i32,
+) -> Result<AuthenticatedUser, ApiError> {
+    let identity = state.repository().identity();
+    match scope {
+        RunnerScope::Namespace(namespace) => {
+            let actor = identity.authenticate(headers, jar, permission).await?;
+            crate::identity::authorize_namespace(identity, &actor, namespace).await?;
+            Ok(actor)
+        }
+        RunnerScope::System => {
+            crate::identity::require_admin(identity, headers, jar, permission).await
+        }
+    }
+}
+
+async fn list_namespace_runners(
     State(state): State<ActionsState>,
     Path(namespace): Path<String>,
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<RunnersResponse>, ApiError> {
-    let identity = state.repository().identity();
-    let actor = identity.authenticate(&headers, &jar, SCOPE_READ).await?;
-    crate::identity::authorize_namespace(identity, &actor, &namespace).await?;
-    let runners = action_runner::Entity::find()
-        .filter(action_runner::Column::Namespace.eq(&namespace))
-        .filter(action_runner::Column::DeletedAt.is_null())
-        .all(identity.database())
+    list_runners_for_scope(state, RunnerScope::Namespace(namespace), headers, jar).await
+}
+
+async fn list_system_runners(
+    State(state): State<ActionsState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Json<RunnersResponse>, ApiError> {
+    list_runners_for_scope(state, RunnerScope::System, headers, jar).await
+}
+
+async fn list_runners_for_scope(
+    state: ActionsState,
+    scope: RunnerScope,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Json<RunnersResponse>, ApiError> {
+    authorize_runner_scope(&state, &scope, &headers, &jar, SCOPE_READ).await?;
+    let mut query =
+        action_runner::Entity::find().filter(action_runner::Column::DeletedAt.is_null());
+    query = match scope.namespace() {
+        Some(namespace) => query.filter(action_runner::Column::Namespace.eq(namespace)),
+        None => query.filter(action_runner::Column::Namespace.is_null()),
+    };
+    let runners = query
+        .all(state.repository().identity().database())
         .await?
         .into_iter()
         .map(|runner| runner_response(&state, runner))
@@ -480,42 +550,53 @@ struct RegistrationResponse {
     labels: Vec<String>,
 }
 
-async fn issue_registration(
+async fn issue_namespace_registration(
     State(state): State<ActionsState>,
     Path(namespace): Path<String>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(request): Json<RegistrationRequest>,
 ) -> Result<Json<RegistrationResponse>, ApiError> {
+    issue_registration_for_scope(
+        state,
+        RunnerScope::Namespace(namespace),
+        headers,
+        jar,
+        request,
+    )
+    .await
+}
+
+async fn issue_system_registration(
+    State(state): State<ActionsState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(request): Json<RegistrationRequest>,
+) -> Result<Json<RegistrationResponse>, ApiError> {
+    issue_registration_for_scope(state, RunnerScope::System, headers, jar, request).await
+}
+
+async fn issue_registration_for_scope(
+    state: ActionsState,
+    scope: RunnerScope,
+    headers: HeaderMap,
+    jar: CookieJar,
+    request: RegistrationRequest,
+) -> Result<Json<RegistrationResponse>, ApiError> {
     let identity = state.repository().identity();
-    let actor = identity.authenticate(&headers, &jar, SCOPE_WRITE).await?;
-    crate::identity::authorize_namespace(identity, &actor, &namespace).await?;
+    let actor = authorize_runner_scope(&state, &scope, &headers, &jar, SCOPE_WRITE).await?;
     if actor.via_api_token {
         return Err(ApiError::forbidden(
             "Runner registration requires an interactive session.",
         ));
     }
-    if request.name.trim().is_empty()
-        || request.name.len() > 100
-        || request.labels.is_empty()
-        || request.labels.len() > 16
-        || request.labels.iter().any(|label| {
-            label.is_empty()
-                || label.len() > 100
-                || !label
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-        })
-    {
-        return Err(ApiError::bad_request(
-            "Provide a runner name and 1 to 16 plain label names.",
-        ));
-    }
-    let runner_name = request.name.trim().to_owned();
+    let runner_name = runners::validate_registration(&request.name, &request.labels)
+        .map_err(ApiError::bad_request)?;
+    let audit_target = scope.audit_target().to_owned();
     let raw = tokens::issue_registration(
         identity.database(),
-        namespace.clone(),
-        actor.user.id,
+        scope.namespace().map(str::to_owned),
+        Some(actor.user.id),
         runner_name.clone(),
         request.labels.clone(),
     )
@@ -524,7 +605,7 @@ async fn issue_registration(
         .audit(
             Some(actor.user.id),
             "actions.runner.registration.issue",
-            Some(namespace),
+            Some(audit_target),
         )
         .await?;
     Ok(Json(RegistrationResponse {
@@ -537,23 +618,52 @@ async fn issue_registration(
     }))
 }
 
-async fn remove_runner(
+async fn remove_namespace_runner(
     State(state): State<ActionsState>,
     Path((namespace, runner_id)): Path<(String, i64)>,
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<RunnerResponse>, ApiError> {
+    remove_runner_for_scope(
+        state,
+        RunnerScope::Namespace(namespace),
+        runner_id,
+        headers,
+        jar,
+    )
+    .await
+}
+
+async fn remove_system_runner(
+    State(state): State<ActionsState>,
+    Path(runner_id): Path<i64>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Json<RunnerResponse>, ApiError> {
+    remove_runner_for_scope(state, RunnerScope::System, runner_id, headers, jar).await
+}
+
+async fn remove_runner_for_scope(
+    state: ActionsState,
+    scope: RunnerScope,
+    runner_id: i64,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Json<RunnerResponse>, ApiError> {
     let identity = state.repository().identity();
-    let actor = identity.authenticate(&headers, &jar, SCOPE_WRITE).await?;
-    crate::identity::authorize_namespace(identity, &actor, &namespace).await?;
+    let actor = authorize_runner_scope(&state, &scope, &headers, &jar, SCOPE_WRITE).await?;
     if actor.via_api_token {
         return Err(ApiError::forbidden(
             "Runner removal requires an interactive session.",
         ));
     }
-    let runner = action_runner::Entity::find_by_id(runner_id)
-        .filter(action_runner::Column::Namespace.eq(&namespace))
-        .filter(action_runner::Column::DeletedAt.is_null())
+    let mut query = action_runner::Entity::find_by_id(runner_id)
+        .filter(action_runner::Column::DeletedAt.is_null());
+    query = match scope.namespace() {
+        Some(namespace) => query.filter(action_runner::Column::Namespace.eq(namespace)),
+        None => query.filter(action_runner::Column::Namespace.is_null()),
+    };
+    let runner = query
         .one(identity.database())
         .await?
         .ok_or_else(ApiError::not_found)?;
@@ -574,7 +684,7 @@ async fn remove_runner(
         .audit(
             Some(actor.user.id),
             "actions.runner.remove",
-            Some(format!("{namespace}:{runner_id}")),
+            Some(format!("{}:{runner_id}", scope.audit_target())),
         )
         .await?;
     Ok(Json(runner_response(&state, runner)))

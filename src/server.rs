@@ -93,9 +93,13 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
         .await
         .context("could not recover interrupted repository imports")?;
     let actions_state = ActionsState::new(repository_state.clone(), settings.actions.clone());
+    actions::bootstrap_system_runner(&actions_state)
+        .await
+        .context("could not prepare the configured system runner")?;
     let git_http_state = GitHttpState::new(repository_state.clone(), actions_state.clone());
     let api_router = Router::new()
         .route("/", get(api::version))
+        .route("/version", get(api::forgejo_version))
         .route("/changelog", get(api::changelog))
         .merge(identity::router().with_state(identity_state.clone()))
         .merge(repository::router().with_state(repository_state.clone()))
@@ -150,6 +154,9 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
     });
     let mut mirror_scheduler =
         tokio::spawn(repository::serve_mirror_scheduler(repository_state.clone()));
+    let mut integrity_scheduler = tokio::spawn(repository::serve_integrity_scheduler(
+        repository_state.clone(),
+    ));
     let mut backup_scheduler = tokio::spawn(archive::serve_backup_scheduler(identity_state));
     let mut actions_scheduler =
         tokio::spawn(actions::serve_actions_scheduler(actions_state.clone()));
@@ -165,6 +172,7 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
         MirrorScheduler,
         BackupScheduler,
         ActionsScheduler,
+        IntegrityScheduler,
     }
 
     let (outcome, completed) = tokio::select! {
@@ -172,6 +180,7 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
             ssh.abort();
             mirror_scheduler.abort();
             backup_scheduler.abort();
+            integrity_scheduler.abort();
             actions_state.cancel();
             actions_scheduler.abort();
             (
@@ -186,6 +195,7 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
             http.abort();
             mirror_scheduler.abort();
             backup_scheduler.abort();
+            integrity_scheduler.abort();
             actions_state.cancel();
             actions_scheduler.abort();
             (
@@ -200,6 +210,7 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
             http.abort();
             ssh.abort();
             backup_scheduler.abort();
+            integrity_scheduler.abort();
             actions_state.cancel();
             actions_scheduler.abort();
             (
@@ -214,6 +225,7 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
             http.abort();
             ssh.abort();
             mirror_scheduler.abort();
+            integrity_scheduler.abort();
             actions_state.cancel();
             actions_scheduler.abort();
             (
@@ -229,6 +241,7 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
             ssh.abort();
             mirror_scheduler.abort();
             backup_scheduler.abort();
+            integrity_scheduler.abort();
             (
                 result
                     .context("Actions scheduler task failed")
@@ -237,11 +250,27 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
                 Some(CompletedService::ActionsScheduler),
             )
         }
+        result = &mut integrity_scheduler => {
+            http.abort();
+            ssh.abort();
+            mirror_scheduler.abort();
+            backup_scheduler.abort();
+            actions_state.cancel();
+            actions_scheduler.abort();
+            (
+                result
+                    .context("integrity scheduler task failed")
+                    .and_then(|result| result)
+                    .map(|()| ServerExit::Shutdown),
+                Some(CompletedService::IntegrityScheduler),
+            )
+        }
         Some(action) = maintenance_receiver.recv() => {
             shutdown.cancel();
             ssh.abort();
             mirror_scheduler.abort();
             backup_scheduler.abort();
+            integrity_scheduler.abort();
             actions_state.cancel();
             actions_scheduler.abort();
             let http_completed =
@@ -269,6 +298,9 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
     }
     if completed != Some(CompletedService::ActionsScheduler) {
         let _ = actions_scheduler.await;
+    }
+    if completed != Some(CompletedService::IntegrityScheduler) {
+        let _ = integrity_scheduler.await;
     }
     repository_state.close_tasks();
     repository_state.wait_for_tasks().await;

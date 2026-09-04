@@ -3,6 +3,8 @@
 let
   cfg = config.services.gitadel;
   toml = pkgs.formats.toml { };
+  yaml = pkgs.formats.yaml { };
+  runnerDataDir = "${cfg.dataDir}-runner";
 
   socketAddress = address: port:
     if lib.hasInfix ":" address
@@ -31,6 +33,7 @@ let
     storage = {
       repository_root = "${cfg.dataDir}/repositories";
       lfs_root = "${cfg.dataDir}/lfs";
+      actions_artifact_root = "${cfg.dataDir}/actions-artifacts";
     };
     ssh = {
       bind = socketAddress cfg.ssh.address cfg.ssh.port;
@@ -40,9 +43,65 @@ let
       session_lifetime_hours = cfg.auth.sessionLifetimeHours;
       invitation_lifetime_hours = cfg.auth.invitationLifetimeHours;
     };
+  } // lib.optionalAttrs cfg.runner.enable {
+    actions.system_runner = {
+      inherit (cfg.runner) name labels;
+      registration_token_file = "${runnerDataDir}/registration-token";
+    };
   };
 
   settingsFile = toml.generate "gitadel.toml" (lib.recursiveUpdate generatedSettings cfg.settings);
+
+  runnerConfig = yaml.generate "gitadel-runner.yml" {
+    runner = {
+      file = ".runner";
+      capacity = 1;
+      timeout = "3h";
+      shutdown_timeout = "3h";
+      labels = lib.genAttrs cfg.runner.labels (_: {
+        backend = "docker";
+        backend-options.image = cfg.runner.jobImage;
+      });
+    };
+    cache.enabled = false;
+    container = {
+      privileged = false;
+      valid_volumes = [ ];
+      docker_host = "-";
+      force_pull = true;
+    };
+  };
+
+  runnerStart = pkgs.writeShellScript "gitadel-runner-start" ''
+    set -eu
+    uid="$(${pkgs.coreutils}/bin/id -u ${lib.escapeShellArg cfg.user})"
+    gid="$(${pkgs.coreutils}/bin/id -g ${lib.escapeShellArg cfg.user})"
+    if [ ! -s ${lib.escapeShellArg "${runnerDataDir}/.runner"} ]; then
+      until [ -s ${lib.escapeShellArg "${runnerDataDir}/registration-token"} ]; do
+        sleep 1
+      done
+      ${pkgs.docker}/bin/docker run --rm \
+        --user "$uid:$gid" \
+        --network host \
+        --volume ${lib.escapeShellArg "${runnerDataDir}:/data"} \
+        ${lib.escapeShellArg cfg.runner.image} \
+        forgejo-runner register --no-interactive \
+          --instance ${lib.escapeShellArg cfg.publicUrl} \
+          --token "$(${pkgs.coreutils}/bin/cat ${lib.escapeShellArg "${runnerDataDir}/registration-token"})" \
+          --name ${lib.escapeShellArg cfg.runner.name} \
+          --labels ${lib.escapeShellArg (lib.concatStringsSep "," cfg.runner.labels)}
+      ${pkgs.coreutils}/bin/rm -f ${lib.escapeShellArg "${runnerDataDir}/registration-token"}
+    fi
+    exec ${pkgs.docker}/bin/docker run --rm \
+      --name gitadel-runner \
+      --user "$uid:$gid" \
+      --network host \
+      --env DOCKER_HOST=tcp://127.0.0.1:2375 \
+      --volume ${lib.escapeShellArg "${runnerDataDir}:/data"} \
+      --volume ${lib.escapeShellArg "${runnerConfig}:/data/config.yml:ro"} \
+      ${lib.escapeShellArg cfg.runner.image} \
+      forgejo-runner daemon --config /data/config.yml
+  '';
 
   # Exits non-zero once an account exists, so the unit ignores its failure.
   bootstrapAdmin = pkgs.writeShellScript "gitadel-bootstrap-admin" ''
@@ -140,6 +199,46 @@ in
       };
     };
 
+    runner = {
+      enable = lib.mkEnableOption "an automatically registered system Forgejo Runner";
+
+      name = lib.mkOption {
+        type = lib.types.str;
+        default = "gitadel-system";
+        description = "Name of the system runner shown in Gitadel.";
+      };
+
+      labels = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ "docker" ];
+        description = "Scheduling labels exposed by the system runner.";
+      };
+
+      image = lib.mkOption {
+        type = lib.types.str;
+        default = "data.forgejo.org/forgejo/runner@sha256:7fb853bfe73c229be6349398359c0a7bd01fadfd17c106607b2221150b799ed2";
+        description = "Forgejo Runner v13.0.0 OCI image.";
+      };
+
+      dockerImage = lib.mkOption {
+        type = lib.types.str;
+        default = "docker.io/library/docker@sha256:3ef33f2e220b79ed3ef3b99d81746f06f306cd6340e2cb7331d17ae996e74cb6";
+        description = "Isolated Docker daemon image used for workflow containers.";
+      };
+
+      memoryBytes = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 4 * 1024 * 1024 * 1024;
+        description = "Memory limit for the isolated workflow Docker daemon.";
+      };
+
+      jobImage = lib.mkOption {
+        type = lib.types.str;
+        default = "docker.io/library/node@sha256:8a34c4ab3ea2c5cd194f07e317b2a8f09461d3c8b05c4e34c8ccd56d56024c4d";
+        description = "Default immutable container image for runner labels.";
+      };
+    };
+
     openFirewall = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -200,6 +299,10 @@ in
         assertion = lib.hasPrefix "/" cfg.dataDir;
         message = "services.gitadel.dataDir must be an absolute path";
       }
+      {
+        assertion = !cfg.runner.enable || cfg.runner.labels != [ ];
+        message = "services.gitadel.runner.labels must contain at least one label";
+      }
     ];
 
     users.groups = lib.mkIf (cfg.group == "gitadel") {
@@ -214,8 +317,9 @@ in
       };
     };
 
-    systemd.tmpfiles.rules = lib.optional (stateDirectory == null)
-      "d ${cfg.dataDir} 0750 ${cfg.user} ${cfg.group} -";
+    systemd.tmpfiles.rules =
+      lib.optional (stateDirectory == null) "d ${cfg.dataDir} 0750 ${cfg.user} ${cfg.group} -"
+      ++ lib.optional cfg.runner.enable "d ${runnerDataDir} 0700 ${cfg.user} ${cfg.group} -";
 
     systemd.services.gitadel = {
       description = "Gitadel Git archive server";
@@ -235,7 +339,9 @@ in
         UMask = "0027";
         StateDirectory = lib.mkIf (stateDirectory != null) stateDirectory;
         StateDirectoryMode = lib.mkIf (stateDirectory != null) "0750";
-        ReadWritePaths = lib.mkIf (stateDirectory == null) [ cfg.dataDir ];
+        ReadWritePaths =
+          lib.optional (stateDirectory == null) cfg.dataDir
+          ++ lib.optional cfg.runner.enable runnerDataDir;
         NoNewPrivileges = true;
         PrivateTmp = true;
         ProtectHome = true;
@@ -248,6 +354,48 @@ in
         RestrictNamespaces = true;
         RestrictRealtime = true;
         SystemCallArchitectures = "native";
+      };
+    };
+
+    virtualisation.docker.enable = lib.mkIf cfg.runner.enable true;
+
+    systemd.services.gitadel-runner-docker = lib.mkIf cfg.runner.enable {
+      description = "Isolated Docker daemon for Gitadel Actions";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "docker.service" "network-online.target" ];
+      requires = [ "docker.service" ];
+      serviceConfig = {
+        ExecStartPre = [
+          "-${pkgs.docker}/bin/docker rm -f gitadel-runner-docker"
+          "${pkgs.docker}/bin/docker pull ${cfg.runner.dockerImage}"
+        ];
+        ExecStart = ''
+          ${pkgs.docker}/bin/docker run --rm --name gitadel-runner-docker \
+            --network host --privileged \
+            --memory ${toString cfg.runner.memoryBytes} \
+            --volume gitadel-runner-docker:/var/lib/docker \
+            dockerd -H tcp://127.0.0.1:2375 --tls=false
+        '';
+        ExecStop = "-${pkgs.docker}/bin/docker stop gitadel-runner-docker";
+        Restart = "on-failure";
+        RestartSec = 2;
+      };
+    };
+
+    systemd.services.gitadel-runner = lib.mkIf cfg.runner.enable {
+      description = "Gitadel system Forgejo Runner";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "gitadel.service" "gitadel-runner-docker.service" "network-online.target" ];
+      requires = [ "gitadel.service" "gitadel-runner-docker.service" ];
+      serviceConfig = {
+        ExecStartPre = [
+          "-${pkgs.docker}/bin/docker rm -f gitadel-runner"
+          "${pkgs.docker}/bin/docker pull ${cfg.runner.image}"
+        ];
+        ExecStart = runnerStart;
+        ExecStop = "-${pkgs.docker}/bin/docker stop gitadel-runner";
+        Restart = "on-failure";
+        RestartSec = 2;
       };
     };
 

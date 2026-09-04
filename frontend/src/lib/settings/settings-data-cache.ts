@@ -116,7 +116,14 @@ export type AccountSettingsView =
   | "oauth-applications";
 
 export type AdminSettingsView =
-  "appearance" | "access" | "storage" | "lfs" | "backups" | "activity";
+  | "appearance"
+  | "access"
+  | "runners"
+  | "storage"
+  | "lfs"
+  | "backups"
+  | "maintenance"
+  | "activity";
 
 const passkeys = new SettingsCache<PasskeySummary[]>();
 const sshKeys = new SettingsCache<SshKey[]>();

@@ -11,7 +11,9 @@
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Alert from "$lib/components/ui/alert/index.js";
   import { Textarea } from "$lib/components/ui/textarea/index.js";
+  import * as Tooltip from "$lib/components/ui/tooltip/index.js";
   import { languageColor } from "$lib/repository/language-colors.js";
+  import { repositoryApi } from "$lib/repository/state/shared.js";
   import type {
     CopyTarget,
     RepositoryPageState,
@@ -41,7 +43,9 @@
       return;
     }
     try {
-      await repository.settings.updateRepositoryControl({ description: next || null });
+      await repository.settings.updateRepositoryControl({
+        description: next || null,
+      });
       cancelEditingDescription();
     } catch {
       // updateRepositoryControl surfaces the message; keep the draft editable.
@@ -81,6 +85,16 @@
       rounded = Math.ceil((value / unit.threshold) * 10) / 10;
     }
     return `${compactDecimal.format(rounded)}${unit.suffix}`;
+  }
+
+  function sourceArchiveUrl(format: "zip" | "tar.gz"): string {
+    const current = repository.repository;
+    if (!current) return "";
+    const endpoint = repositoryApi(current, "/source");
+    return `${endpoint}?${new URLSearchParams({
+      rev: repository.revision,
+      format,
+    })}`;
   }
 
   function formatReleaseDate(value: string) {
@@ -125,39 +139,64 @@
           </span>
         {/if}
       </div>
-      <div class="mt-3 space-y-2">
+      <div class="mt-3 flex flex-col gap-2">
         {#each cloneKinds as kind (kind.id)}
-          <div>
-            <p class="mb-1 text-[10px] font-medium text-muted-foreground">
-              {kind.label}
-            </p>
-            <!-- The whole row is the copy target: the icon is only an
-                 affordance, so nothing here may be a nested interactive. -->
-            <button
-              type="button"
-              class="flex w-full items-center overflow-hidden rounded-md border bg-background text-left hover:border-input hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-              onclick={() => void repository.copyCloneUrl(kind.id)}
-              aria-label={`Copy ${kind.label} clone URL`}
+          <!-- The whole row is the copy target: the icon is only an
+               affordance, so nothing here may be a nested interactive. -->
+          <button
+            type="button"
+            class="flex w-full cursor-pointer items-center overflow-hidden rounded-md border bg-background text-left hover:border-input hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            onclick={() => void repository.copyCloneUrl(kind.id)}
+            aria-label={`Copy ${kind.label} clone URL`}
+          >
+            <span
+              class="grid w-11 shrink-0 place-items-center self-stretch border-r text-[10px] font-medium text-muted-foreground"
             >
-              <code
-                class="min-w-0 flex-1 truncate px-3 py-2 text-xs text-muted-foreground"
-              >
-                {kind.id === "http"
-                  ? repository.httpCloneUrl
-                  : repository.repository?.ssh_clone_url}
-              </code>
-              <span
-                class="grid w-7 shrink-0 place-items-center self-stretch border-l text-muted-foreground"
-              >
-                {#if repository.copied === kind.id}
-                  <Check class="size-3.5 text-emerald-500" />
-                {:else}
-                  <Copy class="size-3.5" />
-                {/if}
-              </span>
-            </button>
-          </div>
+              {kind.label}
+            </span>
+            <code
+              class="min-w-0 flex-1 truncate px-2 py-2 text-xs text-muted-foreground"
+            >
+              {kind.id === "http"
+                ? repository.httpCloneUrl
+                : repository.repository?.ssh_clone_url}
+            </code>
+            <span
+              class="grid w-7 shrink-0 place-items-center self-stretch border-l text-muted-foreground"
+            >
+              {#if repository.copied === kind.id}
+                <Check class="size-3.5 text-emerald-500" />
+              {:else}
+                <Copy class="size-3.5" />
+              {/if}
+            </span>
+          </button>
         {/each}
+        {#if repository.repository}
+          <div
+            class="flex w-full items-stretch overflow-hidden rounded-md border bg-background text-xs"
+          >
+            <span
+              class="grid w-11 shrink-0 place-items-center border-r text-[10px] font-medium text-muted-foreground"
+            >
+              Source
+            </span>
+            <a
+              data-sveltekit-reload
+              class="flex flex-1 cursor-pointer items-center justify-center px-2 py-2 font-medium hover:bg-muted/40"
+              href={sourceArchiveUrl("zip")}
+            >
+              ZIP
+            </a>
+            <a
+              data-sveltekit-reload
+              class="flex flex-1 cursor-pointer items-center justify-center border-l px-2 py-2 font-medium hover:bg-muted/40"
+              href={sourceArchiveUrl("tar.gz")}
+            >
+              TAR.GZ
+            </a>
+          </div>
+        {/if}
       </div>
     </section>
 
@@ -208,7 +247,9 @@
               size="sm"
               disabled={repository.settings.repositoryControlPending}
             >
-              {repository.settings.repositoryControlPending ? "Saving…" : "Save"}
+              {repository.settings.repositoryControlPending
+                ? "Saving…"
+                : "Save"}
             </Button>
           </div>
         </form>
@@ -224,7 +265,7 @@
 
       <RepositoryTopics state={repository} />
 
-      <dl class="mt-5 space-y-3 border-t pt-4 text-xs">
+      <dl class="mt-5 flex flex-col gap-3 border-t pt-4 text-xs">
         <div class="flex justify-between gap-4">
           <dt class="text-muted-foreground">Repository size</dt>
           <dd class="tabular-nums">
@@ -232,88 +273,84 @@
           </dd>
         </div>
         <div class="flex justify-between gap-4">
-          <dt class="text-muted-foreground">Object format</dt>
-          <dd>{repository.repository?.object_format.toUpperCase()}</dd>
-        </div>
-        <div class="flex justify-between gap-4">
           <dt class="text-muted-foreground">Commits</dt>
           <dd>
             {repository.browser.commitCount?.toLocaleString() ?? "—"}
           </dd>
         </div>
-        <div class="flex justify-between gap-4">
-          <dt class="text-muted-foreground">Branches</dt>
-          <dd>{repository.browser.refs?.branches.length ?? 0}</dd>
-        </div>
-        <div class="flex justify-between gap-4">
-          <dt class="text-muted-foreground">Tags</dt>
-          <dd>{repository.browser.refs?.tags.length ?? 0}</dd>
-        </div>
+        {#if (repository.browser.refs?.branches.length ?? 0) > 1}
+          <div class="flex justify-between gap-4">
+            <dt class="text-muted-foreground">Branches</dt>
+            <dd>{repository.browser.refs?.branches.length}</dd>
+          </div>
+        {/if}
+        {#if (repository.browser.refs?.tags.length ?? 0) > 0}
+          <div class="flex justify-between gap-4">
+            <dt class="text-muted-foreground">Tags</dt>
+            <dd>{repository.browser.refs?.tags.length}</dd>
+          </div>
+        {/if}
       </dl>
     </section>
 
-    <section class="p-4">
-      <div class="flex items-center justify-between gap-3">
-        <h2
-          class="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground"
-        >
-          <Package class="size-3.5" />Releases
-        </h2>
-        {#if repository.releases.releases.length}
+    {#if repository.releases.releasesLoading || repository.releases.releasesLoadFailed || repository.releases.releases.length}
+      <section class="p-4">
+        <div class="flex items-center justify-between gap-3">
+          <h2
+            class="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+          >
+            <Package class="size-3.5" />Releases
+          </h2>
+          {#if repository.releases.releases.length}
+            <button
+              type="button"
+              class="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+              onclick={() => repository.navigate("releases")}
+            >
+              {repository.releases.releases.length} total<ArrowRight
+                class="size-3"
+              />
+            </button>
+          {/if}
+        </div>
+        {#if repository.releases.releases[0]}
+          {@const latest =
+            repository.releases.releases.find((release) => release.latest) ??
+            repository.releases.releases[0]}
           <button
             type="button"
-            class="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+            class="mt-3 block w-full text-left"
             onclick={() => repository.navigate("releases")}
           >
-            {repository.releases.releases.length} total<ArrowRight class="size-3" />
+            <span class="block truncate text-sm font-medium hover:underline"
+              >{latest.title}</span
+            >
+            <span
+              class="mt-1 flex items-center justify-between gap-3 text-xs text-muted-foreground"
+            >
+              <code class="truncate">{latest.target_revision}</code>
+              <span class="shrink-0"
+                >{formatReleaseDate(latest.published_at)}</span
+              >
+            </span>
           </button>
+        {:else if repository.releases.releasesLoading}
+          <p class="mt-3 text-xs text-muted-foreground">Loading releases…</p>
+        {:else if repository.releases.releasesLoadFailed}
+          <Alert.Root class="mt-3 p-2 text-xs" variant="destructive">
+            <Alert.Title>Releases unavailable</Alert.Title>
+            <Alert.Description>
+              <Button
+                variant="link"
+                class="h-auto p-0 text-xs"
+                onclick={() => void repository.releases.refreshReleases()}
+                >Releases unavailable. Try again.</Button
+              >
+            </Alert.Description>
+          </Alert.Root>
         {/if}
-      </div>
-      {#if repository.releases.releases[0]}
-        {@const latest =
-          repository.releases.releases.find((release) => release.latest) ??
-          repository.releases.releases[0]}
-        <button
-          type="button"
-          class="mt-3 block w-full text-left"
-          onclick={() => repository.navigate("releases")}
-        >
-          <span class="block truncate text-sm font-medium hover:underline"
-            >{latest.title}</span
-          >
-          <span
-            class="mt-1 flex items-center justify-between gap-3 text-xs text-muted-foreground"
-          >
-            <code class="truncate">{latest.target_revision}</code>
-            <span class="shrink-0"
-              >{formatReleaseDate(latest.published_at)}</span
-            >
-          </span>
-        </button>
-      {:else if repository.releases.releasesLoading}
-        <p class="mt-3 text-xs text-muted-foreground">Loading releases…</p>
-      {:else if repository.releases.releasesLoadFailed}
-        <Alert.Root class="mt-3 p-2 text-xs" variant="destructive">
-          <Alert.Title>Releases unavailable</Alert.Title>
-          <Alert.Description>
-            <Button
-              variant="link"
-              class="h-auto p-0 text-xs"
-              onclick={() => void repository.releases.refreshReleases()}
-              >Releases unavailable. Try again.</Button
-            >
-          </Alert.Description>
-        </Alert.Root>
-      {:else}
-        <button
-          type="button"
-          class="mt-3 text-left text-xs text-muted-foreground hover:text-foreground"
-          onclick={() => repository.navigate("releases")}
-        >
-          No releases published.
-        </button>
-      {/if}
-    </section>
+      </section>
+    {/if}
 
     <section class="p-4">
       <div class="flex items-center justify-between gap-3">
@@ -338,31 +375,60 @@
             ></span>
           {/each}
         </div>
-        <ul class="mt-4 space-y-3">
+        <ul class="mt-4 flex flex-col gap-1">
           {#each repository.browser.stats as item (item.language)}
             <li>
-              <div class="flex items-center justify-between gap-3 text-xs">
-                <span class="flex min-w-0 items-center gap-2 font-medium">
-                  <span
-                    class="size-2 shrink-0 rounded-full"
-                    style:background={languageColor(item.language)}
-                  ></span>
-                  <span class="truncate">{item.language}</span>
-                </span>
-                <span
-                  class="shrink-0 tabular-nums"
-                  title={`${(item.code + item.comments).toLocaleString()} non-blank lines`}
+              <Tooltip.Root>
+                <Tooltip.Trigger
+                  class="flex w-full cursor-help items-center justify-between gap-3 rounded-md px-2 py-1.5 text-xs hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                  aria-label={`${item.language} statistics`}
                 >
-                  {compactCount(item.code + item.comments)}
-                </span>
-              </div>
-              <div
-                class="mt-1 flex flex-wrap gap-x-2 pl-4 text-[10px] text-muted-foreground"
-              >
-                <span>{item.files} file{item.files === 1 ? "" : "s"}</span>
-                <span>{compactCount(item.code)} code</span>
-                <span>{compactCount(item.comments)} comments</span>
-              </div>
+                  <span class="flex min-w-0 items-center gap-2 font-medium">
+                    <span
+                      class="size-2 shrink-0 rounded-full"
+                      style:background={languageColor(item.language)}
+                    ></span>
+                    <span class="truncate">{item.language}</span>
+                  </span>
+                  <span class="shrink-0 tabular-nums">
+                    {compactCount(item.code + item.comments)}
+                  </span>
+                </Tooltip.Trigger>
+                <Tooltip.Content
+                  side="left"
+                  align="center"
+                  sideOffset={8}
+                  class="block w-48"
+                >
+                  <p class="font-medium">{item.language}</p>
+                  <dl class="mt-1.5 grid grid-cols-[1fr_auto] gap-x-4 gap-y-1">
+                    <dt>Files</dt>
+                    <dd class="text-right tabular-nums">
+                      {item.files.toLocaleString()}
+                    </dd>
+                    <dt>Code</dt>
+                    <dd class="text-right tabular-nums">
+                      {item.code.toLocaleString()}
+                    </dd>
+                    <dt>Comments</dt>
+                    <dd class="text-right tabular-nums">
+                      {item.comments.toLocaleString()}
+                    </dd>
+                    <dt>Blank</dt>
+                    <dd class="text-right tabular-nums">
+                      {item.blanks.toLocaleString()}
+                    </dd>
+                    <dt>Total</dt>
+                    <dd class="text-right tabular-nums">
+                      {(
+                        item.code +
+                        item.comments +
+                        item.blanks
+                      ).toLocaleString()}
+                    </dd>
+                  </dl>
+                </Tooltip.Content>
+              </Tooltip.Root>
             </li>
           {/each}
         </ul>

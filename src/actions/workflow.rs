@@ -70,7 +70,8 @@ pub(crate) async fn ingest_push(
     {
         return Ok(());
     }
-    let plans = discover(state, repository, after.to_owned()).await?;
+    let after = workflow_commit_oid(state, repository, reference, after).await?;
+    let plans = discover(state, repository, after.clone()).await?;
     let actor = user::Entity::find_by_id(actor_id)
         .one(state.repository().identity().database())
         .await?
@@ -79,7 +80,8 @@ pub(crate) async fn ingest_push(
         match discovered {
             Ok(plan) => {
                 if matches_push(&plan.root, reference, &changed_paths).unwrap_or(false) {
-                    enqueue_plan(state, repository, &actor, reference, before, after, plan).await?;
+                    enqueue_plan(state, repository, &actor, reference, before, &after, plan)
+                        .await?;
                 }
             }
             Err(diagnostic) => {
@@ -89,7 +91,7 @@ pub(crate) async fn ingest_push(
                     Some(actor_id),
                     reference,
                     before,
-                    after,
+                    &after,
                     diagnostic,
                 )
                 .await?;
@@ -97,6 +99,24 @@ pub(crate) async fn ingest_push(
         }
     }
     Ok(())
+}
+
+async fn workflow_commit_oid(
+    state: &ActionsState,
+    repository: &repository::Model,
+    reference: &str,
+    after: &str,
+) -> Result<String, ApiError> {
+    if !reference.starts_with("refs/tags/") {
+        return Ok(after.to_owned());
+    }
+    let path = state.repository().repository_path(repository);
+    let after = after.to_owned();
+    read_git(path, move |git| {
+        let oid = git.peel_to_commit_oid(git.rev_parse(&after)?)?;
+        Ok(oid.to_hex())
+    })
+    .await
 }
 
 async fn discover(

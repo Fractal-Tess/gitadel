@@ -82,6 +82,7 @@ export class RepositoryPageState {
   actionPage = $state(1);
   loading = $state(true);
   emptyRepository = $state(false);
+  notFound = $state(false);
   error = $state<string | null>(null);
   copied = $state<CopyTarget | null>(null);
   #app: AppState;
@@ -185,6 +186,7 @@ export class RepositoryPageState {
   async initialize(): Promise<void> {
     const sequence = ++this.#repositoryRequestSequence;
     this.loading = true;
+    this.notFound = false;
     this.error = null;
     try {
       const { repository, refs, authStatus, organizations, topics } =
@@ -220,8 +222,11 @@ export class RepositoryPageState {
         repository.can_manage,
       );
     } catch (caught) {
-      if (sequence === this.#repositoryRequestSequence)
-        this.setError(errorMessage(caught));
+      if (sequence === this.#repositoryRequestSequence) {
+        if (caught instanceof ApiFailure && caught.status === 404)
+          this.notFound = true;
+        else this.setError(errorMessage(caught));
+      }
     } finally {
       if (sequence === this.#repositoryRequestSequence) this.loading = false;
     }

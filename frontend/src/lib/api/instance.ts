@@ -6,6 +6,13 @@ export const instanceSettingsSchema = z.object({
   updated_at: z.string(),
 });
 
+export const integritySettingsSchema = z.object({
+  enabled: z.boolean(),
+  schedule: z.string(),
+  last_checked_at: z.string().nullable(),
+  last_result: z.string().nullable(),
+});
+
 export const changelogSchema = z.object({
   application_version: z.string(),
   rendered_html: z.string(),
@@ -26,6 +33,7 @@ export const auditEventSchema = z.object({
 });
 
 export type InstanceSettings = z.infer<typeof instanceSettingsSchema>;
+export type IntegritySettings = z.infer<typeof integritySettingsSchema>;
 export type Changelog = z.infer<typeof changelogSchema>;
 
 export type AuditEvent = z.infer<typeof auditEventSchema>;

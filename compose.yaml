@@ -1,15 +1,89 @@
 services:
+  runner-data-init:
+    image: alpine:3.22
+    user: "0:0"
+    volumes:
+      - runner-data:/runner
+    command: ["sh", "-c", "chown -R 10001:10001 /runner && chmod 700 /runner"]
+    restart: "no"
+
   gitadel:
     build:
       context: .
+    depends_on:
+      runner-data-init:
+        condition: service_completed_successfully
     restart: unless-stopped
     environment:
-      GITADEL_PUBLIC_URL: ${GITADEL_PUBLIC_URL:-http://localhost:3000}
+      GITADEL_PUBLIC_URL: ${GITADEL_PUBLIC_URL:?Set GITADEL_PUBLIC_URL to the externally reachable Gitadel URL}
     ports:
       - "${GITADEL_HTTP_PORT:-3000}:3000"
       - "${GITADEL_SSH_PORT:-2222}:2222"
     volumes:
       - gitadel-data:/data
+      - runner-data:/runner
+      - ./deploy/forgejo-runner/gitadel.toml:/etc/gitadel.toml:ro
+    command:
+      - --config
+      - /etc/gitadel.toml
+      - --bind
+      - 0.0.0.0:3000
+      - --database-url
+      - sqlite:///data/gitadel.db?mode=rwc
+      - --repository-root
+      - /data/repositories
+      - --lfs-root
+      - /data/lfs
+      - --ssh-bind
+      - 0.0.0.0:2222
+      - --ssh-host-key
+      - /data/ssh-host-ed25519
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:3000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  runner-docker:
+    image: docker.io/library/docker@sha256:3ef33f2e220b79ed3ef3b99d81746f06f306cd6340e2cb7331d17ae996e74cb6
+    privileged: true
+    command: ["dockerd", "-H", "tcp://0.0.0.0:2375", "--tls=false"]
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    volumes:
+      - runner-docker:/var/lib/docker
+    restart: unless-stopped
+
+  runner:
+    image: data.forgejo.org/forgejo/runner@sha256:7fb853bfe73c229be6349398359c0a7bd01fadfd17c106607b2221150b799ed2
+    user: "10001:10001"
+    depends_on:
+      gitadel:
+        condition: service_healthy
+      runner-docker:
+        condition: service_started
+    environment:
+      DOCKER_HOST: tcp://runner-docker:2375
+      GITADEL_RUNNER_INSTANCE_URL: ${GITADEL_PUBLIC_URL}
+    volumes:
+      - runner-data:/data
+      - ./deploy/forgejo-runner/config.yml:/data/config.yml:ro
+    entrypoint: ["/usr/bin/dumb-init", "--", "/bin/sh", "-ec"]
+    command:
+      - |
+        if [ ! -s /data/.runner ]; then
+          until [ -s /data/registration-token ]; do sleep 1; done
+          forgejo-runner register --no-interactive \
+            --instance "$${GITADEL_RUNNER_INSTANCE_URL}" \
+            --token "$$(cat /data/registration-token)" \
+            --name gitadel-system \
+            --labels docker
+          rm -f /data/registration-token
+        fi
+        exec forgejo-runner daemon --config /data/config.yml
+    restart: unless-stopped
 
 volumes:
   gitadel-data:
+  runner-data:
+  runner-docker:

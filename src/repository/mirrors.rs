@@ -774,6 +774,7 @@ async fn synchronize_inner(
     transaction.commit().await?;
     state.invalidate_repository_size(repository.id).await;
     sync_result.map_err(|error| ApiError::bad_request(format!("Mirror sync failed: {error}")))?;
+    state.queue_repository_analysis(repository.id).await;
     Ok(mirror)
 }
 

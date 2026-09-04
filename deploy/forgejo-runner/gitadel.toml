@@ -1,0 +1,4 @@
+[actions.system_runner]
+name = "gitadel-system"
+labels = ["docker"]
+registration_token_file = "/runner/registration-token"

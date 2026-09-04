@@ -3,6 +3,7 @@
   import { resolve } from "$app/paths";
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
 
+  import NotFound7 from "$lib/components/blocks/not-found-7.svelte";
   import RepositoryCommit from "$lib/components/repository/repository-commit.svelte";
   import RepositoryActions from "$lib/components/repository/repository-actions.svelte";
   import RepositoryHistory from "$lib/components/repository/repository-history.svelte";
@@ -71,7 +72,9 @@
   <title>
     {state.repository
       ? `${state.repository.namespace}/${state.repository.name}`
-      : "Repository"} · Gitadel
+      : state.notFound
+        ? "404"
+        : "Repository"} · Gitadel
   </title>
   <meta
     name="description"
@@ -87,11 +90,13 @@
   <div class="mx-auto max-w-xl px-5 py-16 text-center">
     <p class="text-sm text-muted-foreground">Opening repository…</p>
   </div>
+{:else if state.notFound}
+  <NotFound7
+    title="Repository off the scope."
+    description="This repository does not exist, or you do not have permission to view it. Search the repositories, or head back to base."
+  />
 {:else if state.error && !state.repository}
-  <Alert.Root
-    class="mx-auto mt-16 max-w-lg text-center"
-    variant="destructive"
-  >
+  <Alert.Root class="mx-auto mt-16 max-w-lg text-center" variant="destructive">
     <Alert.Title>Repository unavailable</Alert.Title>
     <Alert.Description>{state.error}</Alert.Description>
     <Button class="mt-5" variant="link" href={resolve("/")}>

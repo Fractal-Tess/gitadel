@@ -182,7 +182,9 @@
   >
     <AppHeader />
     <div class="flex min-h-0 w-full flex-1">
-      <AppRail />
+      {#if !shell.railHidden}
+        <AppRail />
+      {/if}
       <main
         class="min-h-0 flex-1 overflow-y-auto overscroll-contain"
         data-scroll-region

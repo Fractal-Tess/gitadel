@@ -316,6 +316,26 @@ fn token_response(row: api_token::Model) -> TokenResponse {
 }
 
 #[derive(Serialize)]
+pub struct NamespaceResponse {
+    slug: String,
+    kind: String,
+}
+
+pub async fn get_namespace(
+    State(state): State<IdentityState>,
+    Path(slug): Path<String>,
+) -> Result<Json<NamespaceResponse>, ApiError> {
+    let namespace = namespace::Entity::find_by_id(slug)
+        .one(state.database())
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    Ok(Json(NamespaceResponse {
+        slug: namespace.slug,
+        kind: namespace.kind,
+    }))
+}
+
+#[derive(Serialize)]
 pub struct OrganizationResponse {
     id: Uuid,
     slug: String,
@@ -975,7 +995,7 @@ mod tests {
         action_runner::ActiveModel {
             id: NotSet,
             uuid: Set(Uuid::new_v4().to_string()),
-            namespace: Set("old-team".to_owned()),
+            namespace: Set(Some("old-team".to_owned())),
             name: Set("runner".to_owned()),
             token_hash: Set("runner-token".to_owned()),
             approved_labels: Set("[]".to_owned()),
@@ -1043,12 +1063,19 @@ mod tests {
                 repository_namespace.as_str(),
                 integration_namespace.as_str(),
                 identity_namespace.as_str(),
-                runner_namespace.as_str(),
+                runner_namespace.as_deref(),
                 old_namespace.is_none(),
                 new_namespace.is_some(),
             ),
             (
-                "new-team", "New team", "new-team", "new-team", "new-team", "new-team", true, true,
+                "new-team",
+                "New team",
+                "new-team",
+                "new-team",
+                "new-team",
+                Some("new-team"),
+                true,
+                true,
             )
         );
     }

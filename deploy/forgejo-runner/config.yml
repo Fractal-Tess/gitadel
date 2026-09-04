@@ -1,0 +1,26 @@
+log:
+  level: info
+  job_level: info
+
+runner:
+  file: .runner
+  capacity: 1
+  timeout: 3h
+  shutdown_timeout: 3h
+  fetch_timeout: 30s
+  fetch_interval: 2s
+  report_interval: 1s
+  labels:
+    docker:
+      backend: docker
+      backend-options:
+        image: docker.io/library/node@sha256:8a34c4ab3ea2c5cd194f07e317b2a8f09461d3c8b05c4e34c8ccd56d56024c4d
+
+cache:
+  enabled: false
+
+container:
+  privileged: false
+  valid_volumes: []
+  docker_host: "-"
+  force_pull: true

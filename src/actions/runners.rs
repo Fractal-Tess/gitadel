@@ -36,6 +36,25 @@ fn canonical_runner_version(version: &str) -> Option<&'static str> {
     .then_some(REQUIRED_RUNNER_VERSION)
 }
 
+pub(crate) fn validate_registration(name: &str, labels: &[String]) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty()
+        || name.len() > 100
+        || labels.is_empty()
+        || labels.len() > 16
+        || labels.iter().any(|label| {
+            label.is_empty()
+                || label.len() > 100
+                || !label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        })
+    {
+        return Err("Provide a runner name and 1 to 16 plain label names.".to_owned());
+    }
+    Ok(name.to_owned())
+}
+
 pub(crate) async fn register(
     database: &DatabaseConnection,
     name: &str,
@@ -66,18 +85,19 @@ pub(crate) async fn register(
             "runner name and labels must exactly match the issued grant".to_owned(),
         ));
     }
-    if action_runner::Entity::find()
-        .filter(action_runner::Column::Namespace.eq(&grant.namespace))
+    let mut duplicate = action_runner::Entity::find()
         .filter(action_runner::Column::Name.eq(name))
         .filter(action_runner::Column::DeletedAt.is_null())
-        .filter(action_runner::Column::DisabledAt.is_null())
-        .one(&transaction)
-        .await?
-        .is_some()
-    {
-        return Err(RunnerError::Conflict(
-            "this namespace already has an active runner with that name".to_owned(),
-        ));
+        .filter(action_runner::Column::DisabledAt.is_null());
+    duplicate = match grant.namespace.as_deref() {
+        Some(namespace) => duplicate.filter(action_runner::Column::Namespace.eq(namespace)),
+        None => duplicate.filter(action_runner::Column::Namespace.is_null()),
+    };
+    if duplicate.one(&transaction).await?.is_some() {
+        let scope = grant.namespace.as_deref().unwrap_or("the system");
+        return Err(RunnerError::Conflict(format!(
+            "{scope} already has an active runner with that name"
+        )));
     }
     let raw_token = tokens::runner_token();
     let row = action_runner::ActiveModel {
@@ -172,9 +192,6 @@ pub(crate) async fn claim(
             transaction.commit().await?;
             return Ok(None);
         };
-        let deadline = job
-            .lease_deadline
-            .ok_or_else(|| RunnerError::Conflict("assigned job has no active lease".to_owned()))?;
         let run = action_run::Entity::find_by_id(job.run_id)
             .one(&transaction)
             .await?
@@ -184,7 +201,6 @@ pub(crate) async fn claim(
             job.id,
             run.repository_id,
             job.lease_generation,
-            deadline,
         )
         .await?;
         transaction.commit().await?;
@@ -197,31 +213,41 @@ pub(crate) async fn claim(
     let approved: Vec<String> = serde_json::from_str(&runner.approved_labels).map_err(|_| {
         RunnerError::InvalidRegistration("stored runner labels are invalid".to_owned())
     })?;
-    let repository_ids = repository::Entity::find()
-        .filter(repository::Column::Namespace.eq(&runner.namespace))
-        .all(&transaction)
-        .await?
-        .into_iter()
-        .map(|repository| repository.id)
-        .collect::<Vec<_>>();
-    if repository_ids.is_empty() {
+    let repository_ids = if let Some(namespace) = runner.namespace.as_deref() {
+        repository::Entity::find()
+            .filter(repository::Column::Namespace.eq(namespace))
+            .filter(repository::Column::DeletedAt.is_null())
+            .all(&transaction)
+            .await?
+            .into_iter()
+            .map(|repository| repository.id)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if runner.namespace.is_some() && repository_ids.is_empty() {
         transaction.commit().await?;
         return Ok(None);
     }
-    let run_ids = action_run::Entity::find()
-        .filter(action_run::Column::RepositoryId.is_in(repository_ids))
-        .all(&transaction)
-        .await?
-        .into_iter()
-        .map(|run| run.id)
-        .collect::<Vec<_>>();
-    if run_ids.is_empty() {
+    let run_ids = if runner.namespace.is_some() {
+        action_run::Entity::find()
+            .filter(action_run::Column::RepositoryId.is_in(repository_ids))
+            .all(&transaction)
+            .await?
+            .into_iter()
+            .map(|run| run.id)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if runner.namespace.is_some() && run_ids.is_empty() {
         transaction.commit().await?;
         return Ok(None);
     }
-    let mut select = action_job::Entity::find()
-        .filter(action_job::Column::Status.eq("queued"))
-        .filter(action_job::Column::RunId.is_in(run_ids));
+    let mut select = action_job::Entity::find().filter(action_job::Column::Status.eq("queued"));
+    if runner.namespace.is_some() {
+        select = select.filter(action_job::Column::RunId.is_in(run_ids));
+    }
     if let Some(handle) = handle {
         select = select.filter(action_job::Column::Id.eq(handle));
     }
@@ -259,14 +285,8 @@ pub(crate) async fn claim(
         .one(&transaction)
         .await?
         .ok_or_else(|| RunnerError::Conflict("assigned run is missing".to_owned()))?;
-    let checkout_token = tokens::issue_job(
-        &transaction,
-        job.id,
-        run.repository_id,
-        generation,
-        deadline,
-    )
-    .await?;
+    let checkout_token =
+        tokens::issue_job(&transaction, job.id, run.repository_id, generation).await?;
     action_runner_fetch::ActiveModel {
         runner_id: Set(runner.id),
         request_key: Set(request_key.to_string()),
@@ -287,6 +307,7 @@ pub(crate) async fn claim(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entity::action_job_token;
     use sea_orm::{ActiveModelTrait, ConnectOptions, Database};
     use sea_orm_migration::MigratorTrait;
 
@@ -446,7 +467,7 @@ mod tests {
         let runner = action_runner::ActiveModel {
             id: Default::default(),
             uuid: Set(Uuid::new_v4().to_string()),
-            namespace: Set("alice".to_owned()),
+            namespace: Set(Some("alice".to_owned())),
             name: Set("alice-runner".to_owned()),
             token_hash: Set(tokens::digest("runner-token")),
             approved_labels: Set("[\"docker\"]".to_owned()),
@@ -478,5 +499,47 @@ mod tests {
                 .status,
             "queued"
         );
+    }
+
+    #[tokio::test]
+    async fn system_runner_claims_the_oldest_job_across_namespaces() {
+        let database = database().await;
+        let alice = owner(&database, "alice").await;
+        let bob = owner(&database, "bob").await;
+        let now = Utc::now();
+        let (bob_run, _) = queued_job(&database, "bob", bob, now - Duration::seconds(1)).await;
+        let (_alice_run, _) = queued_job(&database, "alice", alice, now).await;
+        let runner = action_runner::ActiveModel {
+            id: Default::default(),
+            uuid: Set(Uuid::new_v4().to_string()),
+            namespace: Set(None),
+            name: Set("system-runner".to_owned()),
+            token_hash: Set(tokens::digest("system-runner-token")),
+            approved_labels: Set("[\"docker\"]".to_owned()),
+            version: Set(REQUIRED_RUNNER_VERSION.to_owned()),
+            ephemeral: Set(false),
+            disabled_at: Set(None),
+            deleted_at: Set(None),
+            last_seen_at: Set(Some(now)),
+            created_by: Set(Some(alice)),
+            created_at: Set(now),
+        }
+        .insert(&database)
+        .await
+        .unwrap();
+
+        let claimed = claim(&database, &runner, Uuid::new_v4(), None, 300)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(claimed.job.run_id, bob_run);
+        let token = action_job_token::Entity::find()
+            .filter(action_job_token::Column::JobId.eq(claimed.job.id))
+            .one(&database)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(token.expires_at > now + Duration::hours(5));
     }
 }

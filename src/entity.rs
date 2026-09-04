@@ -13,6 +13,8 @@ pub mod instance {
         pub site_description: Option<String>,
         pub password_login_enabled: bool,
         pub passkey_login_enabled: bool,
+        pub integrity_checks_enabled: bool,
+        pub integrity_check_schedule: String,
         pub updated_at: DateTimeUtc,
     }
 
@@ -703,6 +705,29 @@ pub mod repository {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod repository_cache_entry {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "repository_cache_entries")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub repository_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub kind: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub cache_key: String,
+        pub payload_json: String,
+        pub expires_at: DateTimeUtc,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod repository_mirror {
     use super::*;
 
@@ -1178,7 +1203,7 @@ pub mod action_runner {
         #[sea_orm(primary_key)]
         pub id: i64,
         pub uuid: String,
-        pub namespace: String,
+        pub namespace: Option<String>,
         pub name: String,
         pub token_hash: String,
         pub approved_labels: String,
@@ -1273,7 +1298,7 @@ pub mod action_runner_registration_token {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: Uuid,
         pub token_hash: String,
-        pub namespace: String,
+        pub namespace: Option<String>,
         pub runner_name: String,
         pub approved_labels: String,
         pub expires_at: DateTimeUtc,

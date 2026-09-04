@@ -122,6 +122,25 @@ GITADEL__SSH__BIND=0.0.0.0:2222
 
 Common command-line options also have aliases including `GITADEL_CONFIG`, `GITADEL_BIND`, `GITADEL_PUBLIC_URL`, and `GITADEL_DATABASE_URL`. Run `gitadel --help` for the complete list and defaults.
 
+### Git over HTTP
+
+Gitadel serves the Smart HTTP protocol on the same origin as the web interface. Use the HTTPS clone URL shown on a repository page:
+
+```bash
+git clone https://git.example.com/owner/repository.git
+git push origin main
+```
+
+For a private clone or any push, enter your Gitadel username and an API token when Git asks for a password. A clone needs the token's `read` scope; pushing needs `write` as well. Create tokens under **Account settings → Access**. Do not put a token directly in a remote URL because Git stores that URL in `.git/config`.
+
+Plain HTTP also works, but sends the credential without application-layer encryption. Keep it on an encrypted private network such as NetBird; use HTTPS anywhere else.
+
+### Repository integrity checks
+
+Gitadel checks every active repository once a day at 03:00 UTC by default. Each pass runs `git fsck --strict`, verifies LFS objects against their SHA-256 object IDs, checks release and issue-attachment files, and rejects database records that point outside their storage roots. The result appears in the administrator activity log. A failed check is also written to the server log with the affected repository and error.
+
+Administrators can enable or disable the job and edit its UTC cron expression under **Administration → Maintenance**. Five-, six-, and seven-field cron expressions are accepted. The page also shows the timestamp and result of the last completed pass.
+
 ### Local HTTPS for passkeys
 
 Passkeys require a secure browser origin. Gitadel can terminate HTTPS directly

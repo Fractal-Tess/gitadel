@@ -5,6 +5,7 @@ mod github_mirror;
 mod import_metadata;
 mod imports;
 mod integrations;
+mod integrity;
 mod issues;
 mod lfs;
 mod mirror_scheduler;
@@ -17,6 +18,7 @@ mod webhooks;
 pub(crate) use browser::{read_git, render_markdown};
 
 pub(crate) use git_http::GitHttpState;
+pub(crate) use integrity::serve_integrity_scheduler;
 pub(crate) use mirror_scheduler::serve_mirror_scheduler;
 pub(crate) fn outbound_http_client() -> Result<reqwest::Client, reqwest::Error> {
     webhooks::webhook_client()
@@ -39,7 +41,8 @@ use axum::{
     routing::{delete, get},
 };
 use axum_extra::extract::cookie::CookieJar;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::{ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, sea_query::OnConflict};
+use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
     fs,
     sync::{Mutex, RwLock, Semaphore},
@@ -52,7 +55,8 @@ use crate::{
     blob_store::{BlobStore, ObjectKey, ObjectPrefix, lfs_object_key, targets},
     config::StorageSettings,
     entity::{
-        namespace, organization_member, repository, repository_alias, repository_collaborator, user,
+        namespace, organization_member, repository, repository_alias, repository_cache_entry,
+        repository_collaborator, user,
     },
     identity::{ApiError, AuthenticatedUser, IdentityState},
 };
@@ -63,12 +67,9 @@ pub struct RepositoryState {
     repository_root: Arc<PathBuf>,
     actions_artifact_root: Arc<PathBuf>,
     analysis_slots: Arc<Semaphore>,
-    overview_cache: Arc<RwLock<HashMap<String, browser::GitOverview>>>,
-    stats_cache: Arc<RwLock<HashMap<String, Vec<browser::LanguageStatResponse>>>>,
-    commit_count_cache: Arc<RwLock<HashMap<String, usize>>>,
+    analysis_refreshing: Arc<Mutex<HashMap<Uuid, bool>>>,
     commit_count_refreshing: Arc<Mutex<HashSet<String>>>,
     commit_count_slots: Arc<Semaphore>,
-    size_cache: Arc<RwLock<HashMap<Uuid, CachedRepositorySize>>>,
     size_generations: Arc<RwLock<HashMap<Uuid, u64>>>,
     size_refreshing: Arc<Mutex<HashSet<Uuid>>>,
     size_measurement_slots: Arc<Semaphore>,
@@ -106,18 +107,21 @@ struct LfsAuthorization {
     expires_at: Instant,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, serde::Deserialize)]
 struct CachedRepositorySize {
     bytes: u64,
-    measured_at: Instant,
 }
 
-const ANALYSIS_CACHE_CAPACITY: usize = 4_096;
 const ANALYSIS_CONCURRENCY: usize = 4;
-const COMMIT_COUNT_CACHE_CAPACITY: usize = 4_096;
 const COMMIT_COUNT_CONCURRENCY: usize = 2;
+const ANALYSIS_CACHE_LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const OVERVIEW_CACHE_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 const REPOSITORY_SIZE_CACHE_LIFETIME: Duration = Duration::from_secs(5 * 60);
 const REPOSITORY_SIZE_MEASUREMENT_CONCURRENCY: usize = 2;
+const CACHE_KIND_OVERVIEW: &str = "overview";
+const CACHE_KIND_STATS: &str = "language_stats";
+const CACHE_KIND_COMMIT_COUNT: &str = "commit_count";
+const CACHE_KIND_SIZE: &str = "size";
 const MIRROR_SYNC_CONCURRENCY: usize = 2;
 
 impl RepositoryState {
@@ -138,12 +142,9 @@ impl RepositoryState {
             repository_root: Arc::new(settings.repository_root),
             actions_artifact_root: Arc::new(settings.actions_artifact_root),
             analysis_slots: Arc::new(Semaphore::new(ANALYSIS_CONCURRENCY)),
-            overview_cache: Arc::new(RwLock::new(HashMap::new())),
-            stats_cache: Arc::new(RwLock::new(HashMap::new())),
-            commit_count_cache: Arc::new(RwLock::new(HashMap::new())),
+            analysis_refreshing: Arc::new(Mutex::new(HashMap::new())),
             commit_count_refreshing: Arc::new(Mutex::new(HashSet::new())),
             commit_count_slots: Arc::new(Semaphore::new(COMMIT_COUNT_CONCURRENCY)),
-            size_cache: Arc::new(RwLock::new(HashMap::new())),
             size_generations: Arc::new(RwLock::new(HashMap::new())),
             size_refreshing: Arc::new(Mutex::new(HashSet::new())),
             size_measurement_slots: Arc::new(Semaphore::new(
@@ -311,50 +312,219 @@ impl RepositoryState {
             .then_some(authorization.user_id)
     }
 
-    async fn cached_overview(&self, key: &str) -> Option<browser::GitOverview> {
-        self.overview_cache.read().await.get(key).cloned()
-    }
-
-    async fn cache_overview(&self, key: String, overview: browser::GitOverview) {
-        let mut cache = self.overview_cache.write().await;
-        if cache.len() >= ANALYSIS_CACHE_CAPACITY {
-            cache.clear();
+    async fn cached_value<T>(
+        &self,
+        repository_id: Uuid,
+        kind: &str,
+        cache_key: &str,
+    ) -> Result<Option<T>, ApiError>
+    where
+        T: DeserializeOwned,
+    {
+        let id = (repository_id, kind.to_owned(), cache_key.to_owned());
+        let Some(entry) = repository_cache_entry::Entity::find_by_id(id.clone())
+            .one(self.identity.database())
+            .await?
+        else {
+            return Ok(None);
+        };
+        if entry.expires_at <= chrono::Utc::now() {
+            repository_cache_entry::Entity::delete_by_id(id)
+                .exec(self.identity.database())
+                .await?;
+            return Ok(None);
         }
-        cache.insert(key, overview);
-    }
-
-    async fn cached_stats(&self, key: &str) -> Option<Vec<browser::LanguageStatResponse>> {
-        self.stats_cache.read().await.get(key).cloned()
-    }
-
-    async fn cache_stats(&self, key: String, stats: Vec<browser::LanguageStatResponse>) {
-        let mut cache = self.stats_cache.write().await;
-        if cache.len() >= ANALYSIS_CACHE_CAPACITY {
-            cache.clear();
+        match serde_json::from_str(&entry.payload_json) {
+            Ok(value) => Ok(Some(value)),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    %repository_id,
+                    cache_kind = kind,
+                    "discarding invalid repository cache entry"
+                );
+                repository_cache_entry::Entity::delete_by_id(id)
+                    .exec(self.identity.database())
+                    .await?;
+                Ok(None)
+            }
         }
-        cache.insert(key, stats);
     }
 
-    async fn cached_commit_count(&self, key: &str) -> Option<usize> {
-        self.commit_count_cache.read().await.get(key).copied()
+    async fn cache_value<T>(
+        &self,
+        repository_id: Uuid,
+        kind: &str,
+        cache_key: &str,
+        value: &T,
+        lifetime: Duration,
+    ) -> Result<(), ApiError>
+    where
+        T: Serialize + ?Sized,
+    {
+        let now = chrono::Utc::now();
+        let expires_at = now + chrono::Duration::from_std(lifetime).map_err(ApiError::internal)?;
+        let entry = repository_cache_entry::ActiveModel {
+            repository_id: Set(repository_id),
+            kind: Set(kind.to_owned()),
+            cache_key: Set(cache_key.to_owned()),
+            payload_json: Set(serde_json::to_string(value).map_err(ApiError::internal)?),
+            expires_at: Set(expires_at),
+            created_at: Set(now),
+        };
+        repository_cache_entry::Entity::insert(entry)
+            .on_conflict(
+                OnConflict::columns([
+                    repository_cache_entry::Column::RepositoryId,
+                    repository_cache_entry::Column::Kind,
+                    repository_cache_entry::Column::CacheKey,
+                ])
+                .update_columns([
+                    repository_cache_entry::Column::PayloadJson,
+                    repository_cache_entry::Column::ExpiresAt,
+                    repository_cache_entry::Column::CreatedAt,
+                ])
+                .to_owned(),
+            )
+            .exec(self.identity.database())
+            .await?;
+        repository_cache_entry::Entity::delete_many()
+            .filter(repository_cache_entry::Column::ExpiresAt.lte(now))
+            .exec(self.identity.database())
+            .await?;
+        Ok(())
     }
 
-    async fn cache_commit_count(&self, key: String, count: usize) {
-        let mut cache = self.commit_count_cache.write().await;
-        if cache.len() >= COMMIT_COUNT_CACHE_CAPACITY {
-            cache.clear();
+    async fn cached_overview(
+        &self,
+        repository_id: Uuid,
+        key: &str,
+    ) -> Result<Option<browser::GitOverview>, ApiError> {
+        self.cached_value(repository_id, CACHE_KIND_OVERVIEW, key)
+            .await
+    }
+
+    async fn cache_overview(
+        &self,
+        repository_id: Uuid,
+        key: &str,
+        overview: &browser::GitOverview,
+    ) -> Result<(), ApiError> {
+        self.cache_value(
+            repository_id,
+            CACHE_KIND_OVERVIEW,
+            key,
+            overview,
+            OVERVIEW_CACHE_LIFETIME,
+        )
+        .await
+    }
+
+    async fn cached_stats(
+        &self,
+        repository_id: Uuid,
+        key: &str,
+    ) -> Result<Option<Vec<browser::LanguageStatResponse>>, ApiError> {
+        self.cached_value(repository_id, CACHE_KIND_STATS, key)
+            .await
+    }
+
+    async fn cache_stats(
+        &self,
+        repository_id: Uuid,
+        key: &str,
+        stats: &[browser::LanguageStatResponse],
+    ) -> Result<(), ApiError> {
+        self.cache_value(
+            repository_id,
+            CACHE_KIND_STATS,
+            key,
+            stats,
+            ANALYSIS_CACHE_LIFETIME,
+        )
+        .await
+    }
+
+    async fn cached_commit_count(
+        &self,
+        repository_id: Uuid,
+        key: &str,
+    ) -> Result<Option<usize>, ApiError> {
+        self.cached_value(repository_id, CACHE_KIND_COMMIT_COUNT, key)
+            .await
+    }
+
+    async fn cache_commit_count(
+        &self,
+        repository_id: Uuid,
+        key: &str,
+        count: usize,
+    ) -> Result<(), ApiError> {
+        self.cache_value(
+            repository_id,
+            CACHE_KIND_COMMIT_COUNT,
+            key,
+            &count,
+            ANALYSIS_CACHE_LIFETIME,
+        )
+        .await
+    }
+
+    pub(super) async fn queue_repository_analysis(&self, repository_id: Uuid) {
+        let mut refreshing = self.analysis_refreshing.lock().await;
+        if let Some(dirty) = refreshing.get_mut(&repository_id) {
+            *dirty = true;
+            return;
         }
-        cache.insert(key, count);
+        refreshing.insert(repository_id, false);
+        drop(refreshing);
+
+        let task_state = self.clone();
+        let state = self.clone();
+        task_state.spawn_task(async move {
+            loop {
+                let result = async {
+                    let repository = repository::Entity::find_by_id(repository_id)
+                        .one(state.identity.database())
+                        .await?
+                        .filter(|repository| repository.deleted_at.is_none());
+                    if let Some(repository) = repository {
+                        browser::warm_repository_analysis(&state, &repository).await?;
+                    }
+                    Ok::<_, ApiError>(())
+                }
+                .await;
+                if let Err(error) = result {
+                    tracing::warn!(
+                        %error,
+                        %repository_id,
+                        "could not precompute repository analysis"
+                    );
+                }
+
+                let mut refreshing = state.analysis_refreshing.lock().await;
+                if refreshing.get(&repository_id) == Some(&true) {
+                    refreshing.insert(repository_id, false);
+                    drop(refreshing);
+                    continue;
+                }
+                refreshing.remove(&repository_id);
+                break;
+            }
+        });
     }
 
-    async fn repository_size(&self, repository: &repository::Model) -> Option<u64> {
-        let cached = self.size_cache.read().await.get(&repository.id).copied();
-        let should_refresh = cached
-            .is_none_or(|entry| entry.measured_at.elapsed() >= REPOSITORY_SIZE_CACHE_LIFETIME);
-        if should_refresh {
+    async fn repository_size(
+        &self,
+        repository: &repository::Model,
+    ) -> Result<Option<u64>, ApiError> {
+        let cached = self
+            .cached_value::<CachedRepositorySize>(repository.id, CACHE_KIND_SIZE, "current")
+            .await?;
+        if cached.is_none() {
             self.queue_repository_size_refresh(repository.clone()).await;
         }
-        cached.map(|entry| entry.bytes)
+        Ok(cached.map(|entry| entry.bytes))
     }
 
     async fn queue_repository_size_refresh(&self, repository: repository::Model) {
@@ -417,13 +587,14 @@ impl RepositoryState {
             .copied()
             .unwrap_or_default();
         if current_generation == generation {
-            self.size_cache.write().await.insert(
+            self.cache_value(
                 repository.id,
-                CachedRepositorySize {
-                    bytes,
-                    measured_at: Instant::now(),
-                },
-            );
+                CACHE_KIND_SIZE,
+                "current",
+                &CachedRepositorySize { bytes },
+                REPOSITORY_SIZE_CACHE_LIFETIME,
+            )
+            .await?;
             let generation_after_insert = self
                 .size_generations
                 .read()
@@ -432,7 +603,13 @@ impl RepositoryState {
                 .copied()
                 .unwrap_or_default();
             if generation_after_insert != generation {
-                self.size_cache.write().await.remove(&repository.id);
+                repository_cache_entry::Entity::delete_by_id((
+                    repository.id,
+                    CACHE_KIND_SIZE.to_owned(),
+                    "current".to_owned(),
+                ))
+                .exec(self.identity.database())
+                .await?;
             }
         }
         Ok(())
@@ -443,7 +620,16 @@ impl RepositoryState {
         let generation = generations.entry(repository_id).or_default();
         *generation = generation.wrapping_add(1);
         drop(generations);
-        self.size_cache.write().await.remove(&repository_id);
+        if let Err(error) = repository_cache_entry::Entity::delete_by_id((
+            repository_id,
+            CACHE_KIND_SIZE.to_owned(),
+            "current".to_owned(),
+        ))
+        .exec(self.identity.database())
+        .await
+        {
+            tracing::warn!(%error, %repository_id, "could not invalidate repository size cache");
+        }
     }
 
     pub async fn find(&self, namespace: &str, name: &str) -> Result<repository::Model, ApiError> {
@@ -690,6 +876,31 @@ pub fn router() -> Router<RepositoryState> {
             get(releases::download_asset).delete(releases::delete_asset),
         )
         .route(
+            "/repos/{namespace}/{name}/git/refs/tags/{tag}",
+            get(releases::forgejo_get_tag),
+        )
+        .route(
+            "/repos/{namespace}/{name}/tags/{tag}",
+            get(releases::forgejo_get_tag),
+        )
+        .route(
+            "/repos/{namespace}/{name}/releases",
+            axum::routing::post(releases::forgejo_create_release),
+        )
+        .route(
+            "/repos/{namespace}/{name}/releases/tags/{tag}",
+            get(releases::forgejo_get_release_by_tag),
+        )
+        .route(
+            "/repos/{namespace}/{name}/releases/{id}",
+            axum::routing::patch(releases::forgejo_update_release),
+        )
+        .route(
+            "/repos/{namespace}/{name}/releases/{id}/assets",
+            axum::routing::post(releases::forgejo_upload_asset)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route(
             "/repositories/{namespace}/{name}/issues",
             get(issues::list_issues).post(issues::create_issue),
         )
@@ -739,6 +950,10 @@ pub fn router() -> Router<RepositoryState> {
         .route("/repositories/{namespace}/{name}/tree", get(browser::tree))
         .route("/repositories/{namespace}/{name}/blob", get(browser::blob))
         .route("/repositories/{namespace}/{name}/raw", get(browser::raw))
+        .route(
+            "/repositories/{namespace}/{name}/source",
+            get(browser::source_archive),
+        )
         .route(
             "/repositories/{namespace}/{name}/history",
             get(browser::history),
@@ -819,6 +1034,7 @@ pub fn router() -> Router<RepositoryState> {
             "/repos/{namespace}/{name}/hooks/{id}/deliveries/{delivery_id}/attempts",
             axum::routing::post(webhooks::redeliver_webhook_delivery),
         )
+        .route("/user", get(releases::forgejo_current_user))
         .route("/user/repos", get(gitea::list_user_repositories))
         .route(
             "/repos/{namespace}/{name}/branches",

@@ -5,7 +5,6 @@
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
   import Server from "@lucide/svelte/icons/server";
   import Workflow from "@lucide/svelte/icons/workflow";
-  import { onMount } from "svelte";
   import { toast } from "svelte-sonner";
 
   import type { ActionRunner } from "$lib/api/actions.js";
@@ -18,24 +17,26 @@
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
-  import type { ActionsSettingsState } from "$lib/settings/account/actions-settings-state.svelte.js";
+  import type {
+    ActionRunnerScope,
+    ActionsSettingsState,
+  } from "$lib/settings/account/actions-settings-state.svelte.js";
 
-  type Target = { slug: string; label: string };
-  type RunnerCard = { target: Target; runner: ActionRunner };
+  type RunnerCard = { target: ActionRunnerScope; runner: ActionRunner };
   type PendingRemoval = RunnerCard;
   type ConnectionTest = { healthy: boolean; message: string };
 
   let {
     state: account,
-    namespace,
+    scope,
   }: {
     state: ActionsSettingsState;
-    namespace: Target;
+    scope: ActionRunnerScope;
   } = $props();
 
   const cards = $derived<RunnerCard[]>(
-    (account.actionRunners[namespace.slug] ?? []).map((runner) => ({
-      target: namespace,
+    (account.actionRunners[scope.key] ?? []).map((runner) => ({
+      target: scope,
       runner,
     })),
   );
@@ -55,9 +56,10 @@
   let connectionTest = $state<ConnectionTest | null>(null);
   let removeDialogOpen = $state(false);
   let pendingRemoval = $state<PendingRemoval | null>(null);
-
-  onMount(() => {
-    void account.loadActionRunners([namespace.slug]);
+  $effect(() => {
+    const loadKey = `${account.scope.viewer ?? "anonymous"}:${account.scope.epoch}:${scope.key}`;
+    void loadKey;
+    void account.loadActionRunners([scope]);
   });
 
   function openCreate() {
@@ -70,11 +72,7 @@
   async function register() {
     const name = runnerName.trim();
     if (!name || createLabels.length === 0) return;
-    await account.issueActionRunner(
-      namespace.slug,
-      runnerName.trim(),
-      createLabels,
-    );
+    await account.issueActionRunner(scope, runnerName.trim(), createLabels);
     if (account.actionRegistration) createDialogOpen = false;
   }
 
@@ -89,16 +87,16 @@
     if (!card || connectionTesting) return;
     connectionTesting = true;
     connectionTest = null;
-    await account.loadActionRunners([namespace.slug]);
-    const loadError = account.actionLoadErrors[namespace.slug];
+    await account.loadActionRunners([scope]);
+    const loadError = account.actionLoadErrors[scope.key];
     if (loadError) {
       toast.error(loadError);
-      account.actionLoadErrors[namespace.slug] = null;
+      account.actionLoadErrors[scope.key] = null;
       account.actionsLoadError = null;
       connectionTesting = false;
       return;
     }
-    const runner = (account.actionRunners[card.target.slug] ?? []).find(
+    const runner = (account.actionRunners[card.target.key] ?? []).find(
       (candidate) => candidate.id === card.runner.id,
     );
     if (!runner) {
@@ -142,7 +140,7 @@
     if (!pendingRemoval) return;
     if (
       await account.removeActionRunner(
-        pendingRemoval.target.slug,
+        pendingRemoval.target,
         pendingRemoval.runner.id,
       )
     ) {
@@ -182,8 +180,8 @@
       Runners
     </h2>
     <p class="mt-1.5 max-w-2xl text-sm leading-6 text-muted-foreground">
-      Register runners for {namespace.label}. Repositories in this namespace can
-      use any runner listed here.
+      Register runners for {scope.label}. Repositories in this scope can use
+      every runner listed here without per-repository setup.
     </p>
   </header>
 
@@ -205,7 +203,7 @@
           type="button"
           size="sm"
           variant="outline"
-          onclick={() => void account.loadActionRunners([namespace.slug])}
+          onclick={() => void account.loadActionRunners([scope])}
           >Retry</Button
         >
       </Alert.Root>
@@ -214,7 +212,7 @@
     <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
       <IntegrationAddCard
         title="Add runner"
-        description={`Register a Forgejo Runner for ${namespace.label}.`}
+        description={`Register a Forgejo Runner for ${scope.label}.`}
         onclick={openCreate}
       />
       {#each cards as card (card.runner.id)}
@@ -233,8 +231,8 @@
           statusHealthy={card.runner.status === "online" &&
             !card.runner.incompatibility}
           detailLabel={`v${card.runner.version}`}
-          busy={account.actionsWorking[card.target.slug]}
-          error={account.actionLoadErrors[card.target.slug]}
+          busy={account.actionsWorking[card.target.key]}
+          error={account.actionLoadErrors[card.target.key]}
           onconfigure={() => openConfigure(card)}
           onremove={() => requestRemove(card)}
         />
@@ -248,7 +246,7 @@
     <Dialog.Header>
       <Dialog.Title>Add runner</Dialog.Title>
       <Dialog.Description>
-        Create a one-time registration token for {namespace.label}.
+        Create a one-time registration token for {scope.label}.
       </Dialog.Description>
     </Dialog.Header>
     <form
@@ -259,10 +257,10 @@
       }}
     >
       <div class="rounded-md border bg-card/20 p-3 text-sm">
-        <span class="text-muted-foreground">Owner</span>
-        <span class="ml-3 font-medium">{namespace.label}</span>
+        <span class="text-muted-foreground">Scope</span>
+        <span class="ml-3 font-medium">{scope.label}</span>
         <span class="ml-2 font-mono text-xs text-muted-foreground">
-          {namespace.slug}
+          {scope.namespace ?? "system"}
         </span>
       </div>
       <Field.Field>
@@ -295,12 +293,12 @@
         >
         <Button
           type="submit"
-          disabled={account.actionsWorking[namespace.slug] ||
+          disabled={account.actionsWorking[scope.key] ||
             !runnerName.trim() ||
             createLabels.length === 0 ||
             createLabels.length > 16}
         >
-          {account.actionsWorking[namespace.slug]
+          {account.actionsWorking[scope.key]
             ? "Creating token…"
             : "Create registration token"}
         </Button>
@@ -328,7 +326,7 @@
             <dd>
               <span class="font-medium">{configuring.target.label}</span>
               <span class="ml-2 font-mono text-xs text-muted-foreground">
-                {configuring.target.slug}
+                {configuring.target.namespace ?? "system"}
               </span>
             </dd>
           </div>
@@ -380,7 +378,7 @@
             type="button"
             variant="ghost"
             class="text-muted-foreground hover:text-destructive"
-            disabled={account.actionsWorking[configuring.target.slug]}
+            disabled={account.actionsWorking[configuring.target.key]}
             onclick={() => requestRemove(configuring!)}>Remove runner</Button
           >
           <div class="flex gap-2">
@@ -422,8 +420,9 @@
       </AlertDialog.Title>
       <AlertDialog.Description>
         It will stop receiving jobs from the
-        {pendingRemoval?.target.slug ?? "selected"} namespace. Running jobs may be
-        cancelled.
+        {pendingRemoval?.target.namespace === null
+          ? "system runner pool"
+          : `${pendingRemoval?.target.label ?? "selected"} namespace`}. Running jobs may be
       </AlertDialog.Description>
     </AlertDialog.Header>
     <AlertDialog.Footer>
@@ -431,7 +430,7 @@
       <AlertDialog.Action
         variant="destructive"
         disabled={pendingRemoval
-          ? account.actionsWorking[pendingRemoval.target.slug]
+          ? account.actionsWorking[pendingRemoval.target.key]
           : false}
         onclick={() => void removeRunner()}>Remove runner</AlertDialog.Action
       >

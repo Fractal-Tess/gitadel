@@ -45,6 +45,9 @@ mod m20260830_000044_lfs_storage;
 mod m20260830_000045_backup_provider_exclusions;
 mod m20260830_000046_allow_local_lfs_migration;
 mod m20260831_000047_authentication_methods;
+mod m20260903_000048_repository_analysis_cache;
+mod m20260903_000049_system_action_runners;
+mod m20260904_000050_integrity_settings;
 
 use sea_orm_migration::prelude::*;
 
@@ -101,6 +104,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20260830_000045_backup_provider_exclusions::Migration),
             Box::new(m20260830_000046_allow_local_lfs_migration::Migration),
             Box::new(m20260831_000047_authentication_methods::Migration),
+            Box::new(m20260903_000048_repository_analysis_cache::Migration),
+            Box::new(m20260903_000049_system_action_runners::Migration),
+            Box::new(m20260904_000050_integrity_settings::Migration),
         ]
     }
 }

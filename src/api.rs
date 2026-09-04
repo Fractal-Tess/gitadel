@@ -26,6 +26,20 @@ pub async fn version() -> impl IntoResponse {
 }
 
 #[derive(Serialize)]
+pub struct ForgejoVersionResponse {
+    pub version: &'static str,
+}
+
+/// Legacy Forgejo clients gate otherwise-compatible API calls on a Gitea-style version.
+const FORGEJO_COMPAT_VERSION: &str = "1.22.0";
+
+pub async fn forgejo_version() -> impl IntoResponse {
+    Json(ForgejoVersionResponse {
+        version: FORGEJO_COMPAT_VERSION,
+    })
+}
+
+#[derive(Serialize)]
 pub struct ChangelogResponse {
     pub application_version: &'static str,
     pub rendered_html: &'static str,

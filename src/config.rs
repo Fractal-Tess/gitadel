@@ -276,6 +276,12 @@ pub struct BackupSettings {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SystemRunnerBootstrapSettings {
+    pub name: String,
+    pub labels: Vec<String>,
+    pub registration_token_file: PathBuf,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ActionsSettings {
     pub allowed_action_origins: Vec<String>,
@@ -294,6 +300,8 @@ pub struct ActionsSettings {
     pub max_artifact_name_bytes: usize,
     pub artifact_grant_lifetime_seconds: i64,
     pub lfs_read: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_runner: Option<SystemRunnerBootstrapSettings>,
 }
 
 impl Default for ActionsSettings {
@@ -315,6 +323,7 @@ impl Default for ActionsSettings {
             max_artifact_name_bytes: 255,
             artifact_grant_lifetime_seconds: 3_600,
             lfs_read: true,
+            system_runner: None,
         }
     }
 }

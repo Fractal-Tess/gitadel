@@ -570,6 +570,7 @@ pub(super) async fn create_imported_repository(
         cleanup_repository_storage(&path, &lfs_path).await;
         return Err(error.into());
     }
+    state.queue_repository_analysis(repository.id).await;
     Ok(repository)
 }
 
@@ -596,6 +597,7 @@ pub(super) async fn record_push(
         )
         .await?;
     transaction.commit().await?;
+    state.queue_repository_analysis(repository_id).await;
     Ok(())
 }
 
@@ -667,6 +669,7 @@ pub async fn update_repository_control(
             "Provide at least one repository control change.",
         ));
     }
+    let default_branch_changed = request.default_branch.is_some();
 
     let description = request.description.map(normalize_description).transpose()?;
     let visibility = request.visibility.map(validate_visibility).transpose()?;
@@ -743,6 +746,9 @@ pub async fn update_repository_control(
         )
         .await?;
     transaction.commit().await?;
+    if default_branch_changed {
+        state.queue_repository_analysis(updated.id).await;
+    }
     Ok(Json(RepositoryResponse::new(updated, &state, false, true)))
 }
 

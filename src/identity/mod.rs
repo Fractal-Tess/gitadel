@@ -7,6 +7,7 @@ mod oauth;
 mod resources;
 mod sso;
 
+pub(crate) use admin::require_admin;
 pub(crate) use integrations::{authorize_namespace, validate_name as validate_integration_name};
 pub(crate) use mirror_identities::{
     load_secret as load_mirror_identity_secret, mark_identity_used as mark_repository_identity_used,
@@ -37,7 +38,7 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::Duration as TimeDuration;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, watch};
 use url::Url;
 use uuid::Uuid;
 use webauthn_rs::{
@@ -76,6 +77,7 @@ pub struct IdentityState {
     maintenance_pending: Arc<Mutex<bool>>,
     validated_backups: Arc<Mutex<HashMap<Uuid, ValidatedBackup>>>,
     tested_backup_providers: Arc<Mutex<HashMap<Uuid, TestedBackupProvider>>>,
+    integrity_settings_version: watch::Sender<u64>,
 }
 
 pub(crate) struct ValidatedBackup {
@@ -271,11 +273,21 @@ impl IdentityState {
             maintenance_pending: Arc::new(Mutex::new(false)),
             validated_backups: Arc::new(Mutex::new(HashMap::new())),
             tested_backup_providers: Arc::new(Mutex::new(HashMap::new())),
+            integrity_settings_version: watch::channel(0).0,
         })
     }
 
     pub fn database(&self) -> &DatabaseConnection {
         &self.database
+    }
+
+    pub(crate) fn subscribe_integrity_settings(&self) -> watch::Receiver<u64> {
+        self.integrity_settings_version.subscribe()
+    }
+
+    pub(crate) fn notify_integrity_settings_changed(&self) {
+        self.integrity_settings_version
+            .send_modify(|version| *version = version.wrapping_add(1));
     }
 
     pub fn public_url(&self) -> &Url {
@@ -865,6 +877,7 @@ pub fn router() -> Router<IdentityState> {
             get(resources::list_organizations).post(resources::create_organization),
         )
         .route("/organizations/{slug}", put(resources::update_organization))
+        .route("/namespaces/{slug}", get(resources::get_namespace))
         .route(
             "/organizations/{slug}/avatar",
             get(avatar::public_organization_avatar)
@@ -888,6 +901,10 @@ pub fn router() -> Router<IdentityState> {
         .route(
             "/admin/instance",
             get(admin::get_instance_settings).put(admin::update_instance_settings),
+        )
+        .route(
+            "/admin/integrity",
+            get(admin::get_integrity_settings).put(admin::update_integrity_settings),
         )
         .route(
             "/admin/instance/favicon/{theme}",

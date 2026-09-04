@@ -38,10 +38,7 @@
       );
       return () => window.cancelIdleCallback(idle);
     }
-    const timer = window.setTimeout(
-      () => preloadRepositoryIndex(scope),
-      1_000,
-    );
+    const timer = window.setTimeout(() => preloadRepositoryIndex(scope), 1_000);
     return () => window.clearTimeout(timer);
   });
 
@@ -157,15 +154,17 @@
 <header
   class="flex h-16 shrink-0 items-center gap-3 border-b bg-background px-4 sm:px-5"
 >
-  <Button
-    variant="ghost"
-    size="icon"
-    class="shrink-0 text-muted-foreground hover:text-foreground md:hidden"
-    aria-label="Open navigation"
-    onclick={() => sidebar.setOpenMobile(true)}
-  >
-    <PanelLeft class="size-4" />
-  </Button>
+  {#if !shell.railHidden}
+    <Button
+      variant="ghost"
+      size="icon"
+      class="shrink-0 text-muted-foreground hover:text-foreground md:hidden"
+      aria-label="Open navigation"
+      onclick={() => sidebar.setOpenMobile(true)}
+    >
+      <PanelLeft class="size-4" />
+    </Button>
+  {/if}
 
   <nav
     class="flex min-w-0 flex-1 items-center gap-2 text-sm"

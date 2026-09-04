@@ -19,6 +19,7 @@ export class ShellState {
   railOpen = $state(false);
   paletteOpen = $state(false);
   createOpen = $state(false);
+  railHidden = $state(false);
   activeRepository = $state.raw<ActiveRepositoryNavigation | null>(null);
 
   constructor() {
@@ -33,6 +34,10 @@ export class ShellState {
 
   setActiveRepository(repository: ActiveRepositoryNavigation | null): void {
     this.activeRepository = repository;
+  }
+
+  setRailHidden(hidden: boolean): void {
+    this.railHidden = hidden;
   }
 }
 

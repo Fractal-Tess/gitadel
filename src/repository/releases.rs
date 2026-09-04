@@ -1,15 +1,15 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, pin::Pin};
 
 use axum::{
     Json,
-    body::Body,
-    extract::{Path as AxumPath, Query, State},
+    body::{Body, Bytes},
+    extract::{Multipart, Path as AxumPath, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
 use chrono::Utc;
-use futures_util::TryStreamExt as _;
+use futures_util::{Stream, StreamExt as _, TryStreamExt as _};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, ExprTrait, QueryFilter, QueryOrder, Set,
     TransactionTrait,
@@ -90,6 +90,95 @@ pub struct UploadAssetQuery {
     name: String,
 }
 
+#[derive(Deserialize)]
+pub struct ForgejoCreateReleaseRequest {
+    tag_name: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    prerelease: bool,
+}
+
+#[derive(Deserialize)]
+pub struct ForgejoUpdateReleaseRequest {
+    #[serde(default)]
+    draft: Option<bool>,
+    #[serde(default)]
+    hide_archive_links: Option<bool>,
+}
+
+#[derive(Serialize)]
+pub struct ForgejoTagResponse {
+    name: String,
+    commit: ForgejoCommitResponse,
+}
+
+#[derive(Serialize)]
+struct ForgejoCommitResponse {
+    sha: String,
+}
+
+#[derive(Serialize)]
+pub struct ForgejoReleaseResponse {
+    id: i64,
+    tag_name: String,
+    target_commitish: String,
+    name: String,
+    body: String,
+    draft: bool,
+    prerelease: bool,
+    assets: Vec<ForgejoReleaseAssetResponse>,
+}
+
+#[derive(Serialize)]
+struct ForgejoReleaseAssetResponse {
+    id: i64,
+    name: String,
+    size: i64,
+    browser_download_url: String,
+}
+
+#[derive(Serialize)]
+pub struct ForgejoUserResponse {
+    id: i64,
+    login: String,
+    username: String,
+}
+
+pub async fn forgejo_current_user(
+    State(state): State<RepositoryState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Json<ForgejoUserResponse>, ApiError> {
+    let username = if let Some(job) =
+        tokens::authenticate_job_api_token(state.identity().database(), &headers).await?
+    {
+        let actor_id = job
+            .run
+            .actor_id
+            .ok_or_else(|| ApiError::forbidden("The workflow run has no actor."))?;
+        user::Entity::find_by_id(actor_id)
+            .one(state.identity().database())
+            .await?
+            .ok_or_else(ApiError::unauthorized)?
+            .username
+    } else {
+        state
+            .identity()
+            .authenticate(&headers, &jar, SCOPE_READ)
+            .await?
+            .user
+            .username
+    };
+    Ok(Json(ForgejoUserResponse {
+        id: 1,
+        login: username.clone(),
+        username,
+    }))
+}
+
 pub async fn list_releases(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -132,33 +221,8 @@ pub async fn create_release(
     jar: CookieJar,
     Json(request): Json<CreateReleaseRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let repository = state.find(&namespace, &name).await?;
-    let actor_id = if let Some(job) =
-        tokens::authenticate_job_bearer(state.identity().database(), &headers).await?
-    {
-        if job.repository.id != repository.id {
-            return Err(ApiError::forbidden(
-                "The Actions token belongs to another repository.",
-            ));
-        }
-        job.run
-            .actor_id
-            .ok_or_else(|| ApiError::forbidden("The workflow run has no actor."))?
-    } else {
-        state
-            .authenticated_repository(
-                &headers,
-                &jar,
-                &namespace,
-                &name,
-                Permission::Write,
-                SCOPE_WRITE,
-            )
-            .await?
-            .0
-            .user
-            .id
-    };
+    let (repository, actor_id) =
+        writable_release_repository(&state, &headers, &jar, &namespace, &name).await?;
     let target_revision = validate_target_revision(&request.target_revision)?;
     let title = validate_title(&request.title)?;
     let body = validate_body(request.body)?;
@@ -201,6 +265,155 @@ pub async fn create_release(
     Ok((
         StatusCode::CREATED,
         Json(release_response(&state, &repository, release, latest_id).await?),
+    ))
+}
+
+pub async fn forgejo_get_tag(
+    State(state): State<RepositoryState>,
+    AxumPath((namespace, name, tag)): AxumPath<(String, String, String)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Json<ForgejoTagResponse>, ApiError> {
+    let (repository, _) =
+        writable_release_repository(&state, &headers, &jar, &namespace, &name).await?;
+    let oid = resolve_exact_tag(&state, &repository, &tag).await?;
+    Ok(Json(ForgejoTagResponse {
+        name: tag,
+        commit: ForgejoCommitResponse { sha: oid },
+    }))
+}
+
+pub async fn forgejo_create_release(
+    State(state): State<RepositoryState>,
+    AxumPath((namespace, name)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(request): Json<ForgejoCreateReleaseRequest>,
+) -> Result<(StatusCode, Json<ForgejoReleaseResponse>), ApiError> {
+    let (repository, actor_id) =
+        writable_release_repository(&state, &headers, &jar, &namespace, &name).await?;
+    let target_revision = validate_target_revision(&request.tag_name)?;
+    let title = if request.name.trim().is_empty() {
+        target_revision.clone()
+    } else {
+        validate_title(&request.name)?
+    };
+    let body = validate_body(request.body)?;
+    let target_oid = resolve_target(&state, &repository, &target_revision).await?;
+    let now = Utc::now();
+    let transaction = state.identity().database().begin().await?;
+    let release = repository_release::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        repository_id: Set(repository.id),
+        author_user_id: Set(actor_id),
+        target_revision: Set(target_revision),
+        target_oid: Set(target_oid),
+        title: Set(title),
+        body: Set(body),
+        prerelease: Set(request.prerelease),
+        published_at: Set(now),
+        created_at: Set(now),
+        updated_at: Set(now),
+        external_source: Set(None),
+        external_instance_url: Set(None),
+        external_id: Set(None),
+        external_url: Set(None),
+        external_author: Set(None),
+        external_author_url: Set(None),
+        external_updated_at: Set(None),
+    }
+    .insert(&transaction)
+    .await?;
+    state
+        .identity()
+        .audit_on(
+            &transaction,
+            Some(actor_id),
+            "repository.release.create",
+            Some(format!("{namespace}/{name}/{}", release.id)),
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(forgejo_release_response(&state, &repository, release).await?),
+    ))
+}
+
+pub async fn forgejo_get_release_by_tag(
+    State(state): State<RepositoryState>,
+    AxumPath((namespace, name, tag)): AxumPath<(String, String, String)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Json<ForgejoReleaseResponse>, ApiError> {
+    let (repository, _) =
+        writable_release_repository(&state, &headers, &jar, &namespace, &name).await?;
+    let release = repository_release::Entity::find()
+        .filter(repository_release::Column::RepositoryId.eq(repository.id))
+        .filter(repository_release::Column::TargetRevision.eq(tag))
+        .order_by_desc(repository_release::Column::PublishedAt)
+        .one(state.identity().database())
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    Ok(Json(
+        forgejo_release_response(&state, &repository, release).await?,
+    ))
+}
+
+pub async fn forgejo_update_release(
+    State(state): State<RepositoryState>,
+    AxumPath((namespace, name, id)): AxumPath<(String, String, i64)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(request): Json<ForgejoUpdateReleaseRequest>,
+) -> Result<Json<ForgejoReleaseResponse>, ApiError> {
+    let (repository, _) =
+        writable_release_repository(&state, &headers, &jar, &namespace, &name).await?;
+    let release = find_forgejo_release(&state, repository.id, id).await?;
+    let _ = (request.draft, request.hide_archive_links);
+    Ok(Json(
+        forgejo_release_response(&state, &repository, release).await?,
+    ))
+}
+
+pub async fn forgejo_upload_asset(
+    State(state): State<RepositoryState>,
+    AxumPath((namespace, name, id)): AxumPath<(String, String, i64)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    mut multipart: Multipart,
+) -> Result<impl IntoResponse, ApiError> {
+    let (repository, actor_id) =
+        writable_release_repository(&state, &headers, &jar, &namespace, &name).await?;
+    let field = multipart
+        .next_field()
+        .await
+        .map_err(ApiError::internal)?
+        .filter(|field| field.name() == Some("attachment"))
+        .ok_or_else(|| ApiError::bad_request("Expected an `attachment` file field."))?;
+    let asset_name = field
+        .file_name()
+        .map(str::to_owned)
+        .ok_or_else(|| ApiError::bad_request("The `attachment` field needs a file name."))?;
+    let content_type = field
+        .content_type()
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    let stream = field.map_err(ApiError::internal).boxed();
+    let release = find_forgejo_release(&state, repository.id, id).await?;
+    let asset = store_release_asset(
+        &state,
+        &repository,
+        actor_id,
+        release.id,
+        &asset_name,
+        &content_type,
+        stream,
+    )
+    .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(forgejo_asset_response(&repository, asset)),
     ))
 }
 
@@ -301,37 +514,45 @@ pub async fn upload_asset(
     jar: CookieJar,
     body: Body,
 ) -> Result<impl IntoResponse, ApiError> {
-    let repository = state.find(&namespace, &name).await?;
-    let actor_id = if let Some(job) =
-        tokens::authenticate_job_bearer(state.identity().database(), &headers).await?
-    {
-        if job.repository.id != repository.id {
-            return Err(ApiError::forbidden(
-                "The Actions token belongs to another repository.",
-            ));
-        }
-        job.run
-            .actor_id
-            .ok_or_else(|| ApiError::forbidden("The workflow run has no actor."))?
-    } else {
-        state
-            .authenticated_repository(
-                &headers,
-                &jar,
-                &namespace,
-                &name,
-                Permission::Write,
-                SCOPE_WRITE,
-            )
-            .await?
-            .0
-            .user
-            .id
-    };
-    find_release(&state, repository.id, id).await?;
-    let asset_name = validate_asset_name(&query.name)?;
+    let (repository, actor_id) =
+        writable_release_repository(&state, &headers, &jar, &namespace, &name).await?;
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    let stream = body.into_data_stream().map_err(ApiError::internal).boxed();
+    let asset = store_release_asset(
+        &state,
+        &repository,
+        actor_id,
+        id,
+        &query.name,
+        &content_type,
+        stream,
+    )
+    .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(asset_response(&repository, asset)),
+    ))
+}
+
+type AssetStream<'a> = Pin<Box<dyn Stream<Item = Result<Bytes, ApiError>> + Send + 'a>>;
+
+async fn store_release_asset(
+    state: &RepositoryState,
+    repository: &repository::Model,
+    actor_id: Uuid,
+    release_id: Uuid,
+    name: &str,
+    content_type: &str,
+    mut stream: AssetStream<'_>,
+) -> Result<release_asset::Model, ApiError> {
+    find_release(state, repository.id, release_id).await?;
+    let asset_name = validate_asset_name(name)?;
     if release_asset::Entity::find()
-        .filter(release_asset::Column::ReleaseId.eq(id))
+        .filter(release_asset::Column::ReleaseId.eq(release_id))
         .filter(release_asset::Column::Name.eq(&asset_name))
         .one(state.identity().database())
         .await?
@@ -342,7 +563,7 @@ pub async fn upload_asset(
         ));
     }
     let asset_id = Uuid::new_v4();
-    let directory = release_directory(&state, &repository, id);
+    let directory = release_directory(state, repository, release_id);
     fs::create_dir_all(&directory)
         .await
         .map_err(ApiError::internal)?;
@@ -351,9 +572,8 @@ pub async fn upload_asset(
     let mut output = fs::File::create(&temporary_path)
         .await
         .map_err(ApiError::internal)?;
-    let mut stream = body.into_data_stream();
     let mut size = 0_u64;
-    while let Some(chunk) = stream.try_next().await.map_err(ApiError::internal)? {
+    while let Some(chunk) = stream.try_next().await? {
         size = size.saturating_add(chunk.len() as u64);
         if size > MAX_RELEASE_ASSET_BYTES {
             drop(output);
@@ -368,16 +588,10 @@ pub async fn upload_asset(
         .await
         .map_err(ApiError::internal)?;
 
-    let content_type = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("application/octet-stream")
-        .chars()
-        .take(255)
-        .collect::<String>();
+    let content_type = content_type.chars().take(255).collect::<String>();
     let asset = release_asset::ActiveModel {
         id: Set(asset_id),
-        release_id: Set(id),
+        release_id: Set(release_id),
         name: Set(asset_name),
         content_type: Set(content_type),
         size_bytes: Set(size as i64),
@@ -403,13 +617,13 @@ pub async fn upload_asset(
         .audit(
             Some(actor_id),
             "repository.release.asset.upload",
-            Some(format!("{namespace}/{name}/{id}/{}", asset.id)),
+            Some(format!(
+                "{}/{}/{release_id}/{}",
+                repository.namespace, repository.name, asset.id
+            )),
         )
         .await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(asset_response(&repository, asset)),
-    ))
+    Ok(asset)
 }
 
 pub async fn download_asset(
@@ -701,6 +915,41 @@ pub(super) async fn store_imported_asset(
     Ok(())
 }
 
+async fn writable_release_repository(
+    state: &RepositoryState,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+    namespace: &str,
+    name: &str,
+) -> Result<(repository::Model, Uuid), ApiError> {
+    let repository = state.find(namespace, name).await?;
+    if let Some(job) =
+        tokens::authenticate_job_api_token(state.identity().database(), headers).await?
+    {
+        if job.repository.id != repository.id {
+            return Err(ApiError::forbidden(
+                "The Actions token belongs to another repository.",
+            ));
+        }
+        let actor_id = job
+            .run
+            .actor_id
+            .ok_or_else(|| ApiError::forbidden("The workflow run has no actor."))?;
+        return Ok((repository, actor_id));
+    }
+    let (actor, repository) = state
+        .authenticated_repository(
+            headers,
+            jar,
+            namespace,
+            name,
+            Permission::Write,
+            SCOPE_WRITE,
+        )
+        .await?;
+    Ok((repository, actor.user.id))
+}
+
 async fn readable_repository(
     state: &RepositoryState,
     headers: &HeaderMap,
@@ -729,6 +978,20 @@ async fn find_release(
         .filter(repository_release::Column::RepositoryId.eq(repository_id))
         .one(state.identity().database())
         .await?
+        .ok_or_else(ApiError::not_found)
+}
+
+async fn find_forgejo_release(
+    state: &RepositoryState,
+    repository_id: Uuid,
+    id: i64,
+) -> Result<repository_release::Model, ApiError> {
+    repository_release::Entity::find()
+        .filter(repository_release::Column::RepositoryId.eq(repository_id))
+        .all(state.identity().database())
+        .await?
+        .into_iter()
+        .find(|release| forgejo_numeric_id(release.id) == id)
         .ok_or_else(ApiError::not_found)
 }
 
@@ -811,6 +1074,53 @@ async fn release_response(
                 profile_url: release.external_author_url,
             }),
     })
+}
+
+async fn forgejo_release_response(
+    state: &RepositoryState,
+    repository: &repository::Model,
+    release: repository_release::Model,
+) -> Result<ForgejoReleaseResponse, ApiError> {
+    let assets = release_asset::Entity::find()
+        .filter(release_asset::Column::ReleaseId.eq(release.id))
+        .order_by_asc(release_asset::Column::Name)
+        .all(state.identity().database())
+        .await?
+        .into_iter()
+        .map(|asset| forgejo_asset_response(repository, asset))
+        .collect();
+    Ok(ForgejoReleaseResponse {
+        id: forgejo_numeric_id(release.id),
+        tag_name: release.target_revision,
+        target_commitish: release.target_oid,
+        name: release.title,
+        body: release.body,
+        draft: false,
+        prerelease: release.prerelease,
+        assets,
+    })
+}
+
+fn forgejo_asset_response(
+    repository: &repository::Model,
+    asset: release_asset::Model,
+) -> ForgejoReleaseAssetResponse {
+    ForgejoReleaseAssetResponse {
+        id: forgejo_numeric_id(asset.id),
+        browser_download_url: format!(
+            "/{}/{}/releases/{}/assets/{}/download",
+            repository.namespace, repository.name, asset.release_id, asset.id
+        ),
+        name: asset.name,
+        size: asset.size_bytes,
+    }
+}
+
+fn forgejo_numeric_id(id: Uuid) -> i64 {
+    let bytes = id.as_bytes();
+    let high = u64::from_be_bytes(bytes[..8].try_into().expect("UUID half"));
+    let low = u64::from_be_bytes(bytes[8..].try_into().expect("UUID half"));
+    ((high ^ low) & ((1_u64 << 53) - 1)) as i64
 }
 
 fn asset_response(
@@ -939,5 +1249,56 @@ fn ascii_download_name(value: &str) -> String {
         "download".to_owned()
     } else {
         value
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forgejo_release_request_accepts_action_payload() {
+        let request: ForgejoCreateReleaseRequest = serde_json::from_value(serde_json::json!({
+            "tag_name": "v1.2.3",
+            "target_commitish": "main",
+            "name": "Version 1.2.3",
+            "body": "Release notes",
+            "draft": false,
+            "prerelease": true
+        }))
+        .unwrap();
+
+        assert_eq!(request.tag_name, "v1.2.3");
+        assert_eq!(request.name, "Version 1.2.3");
+        assert_eq!(request.body, "Release notes");
+        assert!(request.prerelease);
+    }
+
+    #[test]
+    fn forgejo_release_response_uses_compatible_field_names() {
+        let id = Uuid::nil();
+        let numeric_id = forgejo_numeric_id(id);
+        let response = serde_json::to_value(ForgejoReleaseResponse {
+            id: numeric_id,
+            tag_name: "v1.2.3".to_owned(),
+            target_commitish: "abc123".to_owned(),
+            name: "Version 1.2.3".to_owned(),
+            body: "Release notes".to_owned(),
+            draft: false,
+            prerelease: false,
+            assets: vec![ForgejoReleaseAssetResponse {
+                id: numeric_id,
+                name: "artifact.tar.gz".to_owned(),
+                size: 42,
+                browser_download_url: "/artifact".to_owned(),
+            }],
+        })
+        .unwrap();
+        assert!(numeric_id <= (1_i64 << 53) - 1);
+
+        assert!(response["id"].is_i64() || response["id"].is_u64());
+        assert_eq!(response["tag_name"], "v1.2.3");
+        assert_eq!(response["target_commitish"], "abc123");
+        assert_eq!(response["assets"][0]["browser_download_url"], "/artifact");
     }
 }

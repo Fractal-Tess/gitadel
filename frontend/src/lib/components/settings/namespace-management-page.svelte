@@ -15,6 +15,7 @@
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import * as Select from "$lib/components/ui/select/index.js";
   import { AccountSettingsState } from "$lib/settings/account-settings-state.svelte.js";
+  import { namespaceRunnerScope } from "$lib/settings/account/actions-settings-state.svelte.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
   type NamespaceView =
@@ -46,6 +47,7 @@
   );
   const label = $derived(personal ? slug : organization?.display_name || slug);
   const namespace = $derived({ slug, label });
+  const runnerScope = $derived(namespaceRunnerScope(slug, label));
   const scopeKey = $derived(
     `${app.authorizationScope.viewer ?? "anonymous"}:${app.authorizationScope.epoch}`,
   );
@@ -250,7 +252,9 @@
           </div>
         </section>
       {:else if view === "runners"}
-        <ActionsSettings state={actionsState} {namespace} />
+        {#key `${scopeKey}:${runnerScope.key}`}
+          <ActionsSettings state={actionsState} scope={runnerScope} />
+        {/key}
       {:else if view === "integrations"}
         <IntegrationsSettings {namespace} />
       {:else if view === "mirror-credentials"}
