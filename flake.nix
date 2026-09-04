@@ -57,7 +57,7 @@
               cp -R node_modules $out/
               runHook postInstall
             '';
-            outputHash = "sha256-g2EWpZND49WmKcCFrvH3XmbgQoH/GJoHg0A6G0eEqbY=";
+            outputHash = "sha256-HCNSaX62NMvNtBxWF6CAg1UunohZBQwEg/MCrka8M9s=";
             outputHashAlgo = "sha256";
             outputHashMode = "recursive";
           };
@@ -89,6 +89,7 @@
           cargoLock.lockFile = ./Cargo.lock;
           doCheck = false;
           nativeBuildInputs = buildDeps pkgs ++ [ pkgs.makeWrapper ];
+          buildInputs = [ pkgs.openssl ];
           preBuild = ''
             rm -rf frontend/build
             cp -R ${frontend} frontend/build

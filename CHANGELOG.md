@@ -4,6 +4,12 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-04
+
+### Fixed
+
+- Corrected the Nix package's frontend dependency hash and OpenSSL build input so the released package builds reproducibly.
+
 ## [0.5.0] - 2026-09-04
 
 ### Added
@@ -171,7 +177,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/Fractal-Tess/gitadel/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.2.0...v0.3.0
