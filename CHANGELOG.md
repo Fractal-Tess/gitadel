@@ -4,6 +4,8 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-04
+
 ### Added
 
 - Added `topic:name` filtering to the global repository search, backed by the topics already stored for each accessible repository.
@@ -169,7 +171,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.1.0...v0.2.0

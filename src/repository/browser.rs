@@ -960,11 +960,7 @@ async fn read_repository_overview(
             }
             roots.push(commit_oid);
         }
-        let head = if let Some(index) = default_index {
-            Some(roots[index].to_hex())
-        } else {
-            None
-        };
+        let head = default_index.map(|index| roots[index].to_hex());
         let mut activity = BTreeMap::new();
         if !roots.is_empty() {
             git.rev_graph().stream_reachable_commits(
