@@ -41,6 +41,7 @@ Add the flake and enable its module:
         {
           services.gitadel = {
             enable = true;
+            autoStart = true;
             publicUrl = "https://git.example.com";
             openFirewall = true;
           };
@@ -51,7 +52,19 @@ Add the flake and enable its module:
 }
 ```
 
-The module runs Gitadel as a hardened systemd service and stores persistent state in `/var/lib/gitadel`. `services.gitadel.package` defaults to the flake build and only needs to be set to override it.
+The module runs Gitadel as a hardened systemd service and stores persistent state in `/var/lib/gitadel`. `services.gitadel.package` defaults to this flake's tested package (currently `0.5.1`) and only needs to be set to override it; the module does not apply a consumer overlay.
+
+`services.gitadel.autoStart` defaults to `true`, so the Gitadel unit and, when enabled, both Gitadel-owned runner units are wanted by `multi-user.target`. Set it to `false` to keep those units and their manual startup dependencies without booting them automatically. This option does not change the lifecycle of the shared host `docker.service`.
+
+```nix
+services.gitadel = {
+  enable = true;
+  autoStart = false;
+  runner.enable = true;
+};
+```
+
+Starting `gitadel-runner` manually still starts `gitadel-runner-docker` and `gitadel` through their existing `requires` edges. The host Docker service remains governed by the NixOS Docker module and any other services that use it.
 
 Ports, storage, and authentication lifetimes have dedicated options. Additional TOML values belong in `settings`, which is merged over the generated configuration:
 
@@ -78,8 +91,15 @@ The service receives `CAP_NET_BIND_SERVICE` automatically when either listener u
 The generated TOML is stored in the world-readable Nix store. Put secrets in a systemd environment file instead:
 
 ```nix
-services.gitadel.environmentFile = "/run/secrets/gitadel.env";
+services.gitadel = {
+  environment = {
+    "GITADEL__SERVER__PUBLIC_URL" = "https://git.example.com";
+  };
+  environmentFile = "/run/secrets/gitadel.env";
+};
 ```
+
+Use `environment` for non-secret runtime variables and `environmentFile` for credentials:
 
 ```ini
 # /run/secrets/gitadel.env
@@ -103,7 +123,7 @@ Bootstrapping becomes a no-op after any account exists, so the option can remain
 
 ### Package and module alternatives
 
-The flake exports `overlays.default` as another way to provide `pkgs.gitadel`. The module can also be imported directly from `nix/module.nix`; it does not set `nixpkgs.overlays`, so it composes with configurations that provide their own `nixpkgs.pkgs`.
+The flake exports `overlays.default` as an optional alternative way to provide `pkgs.gitadel`. The exported NixOS module instead defaults directly to this flake's tested package, so consumer overlays are not required. Import `gitadel.nixosModules.default` in a NixOS configuration; explicit `services.gitadel.package` remains the supported way to select a different build.
 
 ## Configuration
 

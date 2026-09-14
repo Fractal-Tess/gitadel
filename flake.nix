@@ -9,10 +9,18 @@
     };
   };
 
-  outputs = { self, nixpkgs, rust-overlay }:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      rust-overlay,
+    }:
     let
       inherit (nixpkgs) lib;
-      systems = [ "x86_64-linux" "aarch64-linux" ];
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
       forAllSystems = lib.genAttrs systems;
       # Read from the manifest so the flake cannot drift from the crate version.
       version = (lib.importTOML ./Cargo.toml).package.version;
@@ -25,7 +33,8 @@
         pkgs.pkg-config
       ];
 
-      packageFor = pkgs:
+      packageFor =
+        pkgs:
         let
           # Only the manifest and lockfile, so editing frontend sources does not
           # invalidate the fixed-output derivation. Refresh `outputHash` with
@@ -96,7 +105,12 @@
           '';
           postInstall = ''
             wrapProgram $out/bin/gitadel \
-              --prefix PATH : ${lib.makeBinPath [ pkgs.git pkgs.git-lfs ]}
+              --prefix PATH : ${
+                lib.makeBinPath [
+                  pkgs.git
+                  pkgs.git-lfs
+                ]
+              }
           '';
           passthru = { inherit frontend nodeModules; };
           meta = {
@@ -109,21 +123,27 @@
         };
     in
     {
-      packages = forAllSystems (system:
-        let gitadel = packageFor nixpkgs.legacyPackages.${system}; in
+      packages = forAllSystems (
+        system:
+        let
+          gitadel = packageFor nixpkgs.legacyPackages.${system};
+        in
         {
           inherit gitadel;
           default = gitadel;
-        });
+        }
+      );
 
       apps = forAllSystems (system: {
         default = {
           type = "app";
           program = lib.getExe self.packages.${system}.gitadel;
+          meta.description = "Gitadel Git archive server";
         };
       });
 
-      devShells = forAllSystems (system:
+      devShells = forAllSystems (
+        system:
         let
           pkgs = import nixpkgs {
             inherit system;
@@ -147,7 +167,8 @@
               rustToolchain
             ];
           };
-        });
+        }
+      );
 
       formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixpkgs-fmt);
 
@@ -157,11 +178,7 @@
 
       # Deliberately does not set `nixpkgs.overlays`: that conflicts with
       # `nixpkgs.pkgs`, which flake-parts and shared-pkgs setups commonly set.
-      nixosModules.gitadel = { pkgs, ... }: {
-        imports = [ ./nix/module.nix ];
-        services.gitadel.package =
-          lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.gitadel;
-      };
+      nixosModules.gitadel = import ./nix/module.nix { inherit self; };
 
       nixosModules.default = self.nixosModules.gitadel;
     };

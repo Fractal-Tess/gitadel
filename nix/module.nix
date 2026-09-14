@@ -1,28 +1,34 @@
-{ config, lib, pkgs, ... }:
-
+{ self }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 let
   cfg = config.services.gitadel;
+  system = pkgs.stdenv.hostPlatform.system;
   toml = pkgs.formats.toml { };
   yaml = pkgs.formats.yaml { };
   runnerDataDir = "${cfg.dataDir}-runner";
 
-  socketAddress = address: port:
-    if lib.hasInfix ":" address
-    then "[${address}]:${toString port}"
-    else "${address}:${toString port}";
+  socketAddress =
+    address: port:
+    if lib.hasInfix ":" address then "[${address}]:${toString port}" else "${address}:${toString port}";
 
   isPrivileged = port: port > 0 && port < 1024;
 
-  capabilities =
-    lib.optional (isPrivileged cfg.http.port || isPrivileged cfg.ssh.port)
-      "CAP_NET_BIND_SERVICE";
+  capabilities = lib.optional (
+    isPrivileged cfg.http.port || isPrivileged cfg.ssh.port
+  ) "CAP_NET_BIND_SERVICE";
 
   # systemd manages /var/lib/<name> itself, which is both cheaper and more
   # correct than tmpfiles. Fall back to tmpfiles for data directories elsewhere.
   stateDirectory =
-    if lib.hasPrefix "/var/lib/" cfg.dataDir && cfg.dataDir != "/var/lib/"
-    then lib.removePrefix "/var/lib/" cfg.dataDir
-    else null;
+    if lib.hasPrefix "/var/lib/" cfg.dataDir && cfg.dataDir != "/var/lib/" then
+      lib.removePrefix "/var/lib/" cfg.dataDir
+    else
+      null;
 
   generatedSettings = {
     server = {
@@ -43,7 +49,8 @@ let
       session_lifetime_hours = cfg.auth.sessionLifetimeHours;
       invitation_lifetime_hours = cfg.auth.invitationLifetimeHours;
     };
-  } // lib.optionalAttrs cfg.runner.enable {
+  }
+  // lib.optionalAttrs cfg.runner.enable {
     actions.system_runner = {
       inherit (cfg.runner) name labels;
       registration_token_file = "${runnerDataDir}/registration-token";
@@ -114,13 +121,18 @@ in
   options.services.gitadel = {
     enable = lib.mkEnableOption "Gitadel Git archive server";
 
-    package = lib.mkOption {
-      type = lib.types.package;
-      default = pkgs.gitadel;
-      defaultText = lib.literalExpression "pkgs.gitadel";
-      description = "Gitadel package to run.";
+    autoStart = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Start Gitadel and enabled runner units automatically at boot. When false, retain them for manual starts.";
     };
 
+    package = lib.mkOption {
+      type = lib.types.package;
+      default = self.packages.${system}.gitadel;
+      defaultText = lib.literalExpression "inputs.gitadel.packages.${pkgs.system}.gitadel";
+      description = "Gitadel package to run.";
+    };
     user = lib.mkOption {
       type = lib.types.str;
       default = "gitadel";
@@ -245,6 +257,15 @@ in
       description = "Open the configured HTTP and SSH ports in the NixOS firewall.";
     };
 
+    environment = lib.mkOption {
+      type = lib.types.attrsOf lib.types.str;
+      default = { };
+      description = ''
+        Additional non-secret environment variables for Gitadel. Values are
+        written to the Nix store; use environmentFile for credentials.
+      '';
+    };
+
     environmentFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
@@ -263,23 +284,25 @@ in
         Create the first administrator on first start. This is a no-op once any
         account exists, so the credentials can safely stay in the configuration.
       '';
-      type = lib.types.nullOr (lib.types.submodule {
-        options = {
-          username = lib.mkOption {
-            type = lib.types.str;
-            description = "Username of the first administrator.";
-          };
+      type = lib.types.nullOr (
+        lib.types.submodule {
+          options = {
+            username = lib.mkOption {
+              type = lib.types.str;
+              description = "Username of the first administrator.";
+            };
 
-          passwordFile = lib.mkOption {
-            type = lib.types.path;
-            description = ''
-              File containing the initial administrator password. It must be
-              readable by {option}`services.gitadel.user` and cannot live under
-              {file}`/home` or {file}`/root`, which the unit hides.
-            '';
+            passwordFile = lib.mkOption {
+              type = lib.types.path;
+              description = ''
+                File containing the initial administrator password. It must be
+                readable by {option}`services.gitadel.user` and cannot live under
+                {file}`/home` or {file}`/root`, which the unit hides.
+              '';
+            };
           };
-        };
-      });
+        }
+      );
     };
 
     settings = lib.mkOption {
@@ -323,9 +346,10 @@ in
 
     systemd.services.gitadel = {
       description = "Gitadel Git archive server";
-      wantedBy = [ "multi-user.target" ];
+      wantedBy = lib.optional cfg.autoStart "multi-user.target";
       after = [ "network.target" ];
       path = [ pkgs.git ];
+      environment = cfg.environment;
       serviceConfig = {
         Type = "simple";
         User = cfg.user;
@@ -334,14 +358,12 @@ in
         ExecStartPre = lib.optional (cfg.initialAdmin != null) "-${bootstrapAdmin}";
         ExecStart = "${lib.getExe cfg.package} --config ${settingsFile}";
         EnvironmentFile = lib.mkIf (cfg.environmentFile != null) [ cfg.environmentFile ];
-        Restart = "on-failure";
         RestartSec = 2;
         UMask = "0027";
         StateDirectory = lib.mkIf (stateDirectory != null) stateDirectory;
         StateDirectoryMode = lib.mkIf (stateDirectory != null) "0750";
         ReadWritePaths =
-          lib.optional (stateDirectory == null) cfg.dataDir
-          ++ lib.optional cfg.runner.enable runnerDataDir;
+          lib.optional (stateDirectory == null) cfg.dataDir ++ lib.optional cfg.runner.enable runnerDataDir;
         NoNewPrivileges = true;
         PrivateTmp = true;
         ProtectHome = true;
@@ -350,7 +372,11 @@ in
         CapabilityBoundingSet = capabilities;
         LockPersonality = true;
         MemoryDenyWriteExecute = true;
-        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
+        RestrictAddressFamilies = [
+          "AF_INET"
+          "AF_INET6"
+          "AF_UNIX"
+        ];
         RestrictNamespaces = true;
         RestrictRealtime = true;
         SystemCallArchitectures = "native";
@@ -361,9 +387,11 @@ in
 
     systemd.services.gitadel-runner-docker = lib.mkIf cfg.runner.enable {
       description = "Isolated Docker daemon for Gitadel Actions";
-      wantedBy = [ "multi-user.target" ];
-      after = [ "docker.service" "network-online.target" ];
-      requires = [ "docker.service" ];
+      wantedBy = lib.optional cfg.autoStart "multi-user.target";
+      after = [
+        "docker.service"
+        "network-online.target"
+      ];
       serviceConfig = {
         ExecStartPre = [
           "-${pkgs.docker}/bin/docker rm -f gitadel-runner-docker"
@@ -384,9 +412,12 @@ in
 
     systemd.services.gitadel-runner = lib.mkIf cfg.runner.enable {
       description = "Gitadel system Forgejo Runner";
-      wantedBy = [ "multi-user.target" ];
-      after = [ "gitadel.service" "gitadel-runner-docker.service" "network-online.target" ];
-      requires = [ "gitadel.service" "gitadel-runner-docker.service" ];
+      wantedBy = lib.optional cfg.autoStart "multi-user.target";
+      after = [
+        "gitadel.service"
+        "gitadel-runner-docker.service"
+        "network-online.target"
+      ];
       serviceConfig = {
         ExecStartPre = [
           "-${pkgs.docker}/bin/docker rm -f gitadel-runner"

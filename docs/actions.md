@@ -230,6 +230,7 @@ Enable the bundled system runner in the Gitadel module:
 ```nix
 services.gitadel = {
   enable = true;
+  autoStart = true;
   publicUrl = "https://gitadel.example.test";
 
   runner = {
@@ -241,7 +242,7 @@ services.gitadel = {
 };
 ```
 
-NixOS creates `gitadel-runner` and `gitadel-runner-docker`. The former runs the pinned Forgejo Runner image; the latter is a privileged but isolated Docker daemon capped by `runner.memoryBytes`. Gitadel writes a mode-`0600` one-time registration token, the runner consumes and deletes it, and the persisted `.runner` registration is reused on restart.
+NixOS creates `gitadel-runner` and `gitadel-runner-docker`. Both Gitadel-owned units follow `services.gitadel.autoStart`, which defaults to `true`; with `autoStart = false`, they remain available for manual startup and the runner's `requires` edges still start Gitadel and its isolated Docker daemon in the right order. The shared host `docker.service` is managed independently by the NixOS Docker module. The former runs the pinned Forgejo Runner image; the latter is a privileged but isolated Docker daemon capped by `runner.memoryBytes`. Gitadel writes a mode-`0600` one-time registration token, the runner consumes and deletes it, and the persisted `.runner` registration is reused on restart.
 
 Inspect the services with:
 
