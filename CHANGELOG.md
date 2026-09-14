@@ -4,6 +4,10 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+### Changed
+
+- Unified the NixOS service lifecycle around `services.gitadel.enable`, `package`, and `autoStart`. The default package remains the flake's tested `0.5.1` build; `autoStart = false` keeps Gitadel and enabled Gitadel-owned runner units manually startable without boot edges, while preserving the runner's dependency ordering and persisted state. The shared host Docker service remains under independent NixOS control.
+
 ## [0.5.1] - 2026-09-04
 
 ### Fixed
