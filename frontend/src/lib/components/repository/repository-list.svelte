@@ -394,7 +394,6 @@
     </div>
   {/if}
 
-
   <div>
     {#if loading}
       <div
@@ -522,7 +521,10 @@
                   </div>
                 </div>
                 <div class="pb-3 sm:col-start-2 sm:row-start-1 sm:py-3">
-                  <RepositoryActivityChart activity={repository.activity} />
+                  <RepositoryActivityChart
+                    activity={repository.activity}
+                    commitCount={repository.commit_count}
+                  />
                   <p
                     class="mt-0.5 text-right text-[10px] text-muted-foreground"
                   >

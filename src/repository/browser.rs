@@ -245,6 +245,7 @@ struct RepositoryOverviewItemResponse {
     #[serde(flatten)]
     repository: resources::RepositoryResponse,
     branch_count: usize,
+    commit_count: usize,
     total_lines: usize,
     languages: Vec<OverviewLanguageResponse>,
     activity: ActivityResponse,
@@ -287,6 +288,26 @@ async fn repository_overview_item(
 ) -> Result<RepositoryOverviewItemResponse, ApiError> {
     let git_overview = read_repository_overview(state, &repository, start_date, end_date).await?;
     let activity = activity_response(start_date, end_date, git_overview.activity);
+    let commit_count = match git_overview.head.as_deref() {
+        Some(commit_oid) => {
+            if let Some(count) = state.cached_commit_count(repository.id, commit_oid).await? {
+                count
+            } else {
+                let path = state.repository_path(&repository);
+                let revision = commit_oid.to_owned();
+                let count = read_git(path, move |git| {
+                    let oid = git.peel_to_commit_oid(git.rev_parse(&revision)?)?;
+                    count_reachable_commits(git, oid)
+                })
+                .await?;
+                state
+                    .cache_commit_count(repository.id, commit_oid, count)
+                    .await?;
+                count
+            }
+        }
+        None => 0,
+    };
     let stats = match git_overview.head {
         Some(commit_oid) => {
             if let Some(cached) = state.cached_stats(repository.id, &commit_oid).await? {
@@ -332,6 +353,7 @@ async fn repository_overview_item(
 
     Ok(RepositoryOverviewItemResponse {
         activity,
+        commit_count,
         branch_count: git_overview.branch_count,
         total_lines,
         languages,
@@ -567,16 +589,7 @@ pub async fn tree(
                             .is_none()
                         {
                             let count = read_git(count_path, move |git| {
-                                let mut count = 0;
-                                git.rev_graph().stream_reachable_commits(
-                                    [commit_oid],
-                                    ReachableCommitOptions::new(),
-                                    |_| {
-                                        count += 1;
-                                        Ok(StreamControl::Continue)
-                                    },
-                                )?;
-                                Ok(count)
+                                count_reachable_commits(git, commit_oid)
                             })
                             .await?;
                             state
@@ -1034,16 +1047,7 @@ pub(super) async fn warm_repository_analysis(
             None
         };
         let commit_count = if need_commit_count {
-            let mut count = 0;
-            git.rev_graph().stream_reachable_commits(
-                [oid],
-                ReachableCommitOptions::new(),
-                |_| {
-                    count += 1;
-                    Ok(StreamControl::Continue)
-                },
-            )?;
-            Some(count)
+            Some(count_reachable_commits(git, oid)?)
         } else {
             None
         };
@@ -1080,6 +1084,19 @@ async fn readable_repository(
         .authorize(&repository, user_id, Permission::Read)
         .await?;
     Ok(repository)
+}
+
+fn count_reachable_commits(repository: &GitRepository, tip: ObjectId) -> Result<usize, GitError> {
+    let mut count = 0;
+    repository.rev_graph().stream_reachable_commits(
+        [tip],
+        ReachableCommitOptions::new(),
+        |_| {
+            count += 1;
+            Ok(StreamControl::Continue)
+        },
+    )?;
+    Ok(count)
 }
 
 pub(crate) async fn read_git<T, F>(path: PathBuf, operation: F) -> Result<T, ApiError>
@@ -1696,9 +1713,13 @@ const fn default_per_page() -> usize {
 
 #[cfg(test)]
 mod tests {
-    use ssh_key::{HashAlg, LineEnding, PrivateKey, private::Ed25519Keypair};
+    use std::{fs, process::Command};
 
-    use super::{SshCommitSignature, verify_ssh_commit_signature};
+    use sley::Repository as GitRepository;
+    use ssh_key::{HashAlg, LineEnding, PrivateKey, private::Ed25519Keypair};
+    use uuid::Uuid;
+
+    use super::{SshCommitSignature, count_reachable_commits, verify_ssh_commit_signature};
 
     fn signed_commit() -> Vec<u8> {
         let payload = b"tree 0000000000000000000000000000000000000000\nauthor Alice <alice@example.com> 1 +0000\ncommitter Alice <alice@example.com> 1 +0000\n\nSigned commit\n";
@@ -1725,6 +1746,54 @@ mod tests {
         }
         body.extend_from_slice(&payload[header_end + 1..]);
         body
+    }
+    #[test]
+    fn counts_every_commit_reachable_from_default_branch() {
+        let path =
+            std::env::temp_dir().join(format!("gitadel-commit-count-test-{}", Uuid::new_v4()));
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .arg(&path)
+                .status()
+                .expect("run git init")
+                .success()
+        );
+        for (key, value) in [
+            ("user.name", "Gitadel Test"),
+            ("user.email", "gitadel@example.test"),
+        ] {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&path)
+                    .args(["config", key, value])
+                    .status()
+                    .expect("configure git identity")
+                    .success()
+            );
+        }
+        for message in ["first", "second"] {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&path)
+                    .args(["commit", "--quiet", "--allow-empty", "-m", message])
+                    .status()
+                    .expect("create test commit")
+                    .success()
+            );
+        }
+
+        let repository = GitRepository::open(path.join(".git")).expect("open test repository");
+        let tip = repository
+            .peel_to_commit_oid(repository.rev_parse("HEAD").expect("resolve HEAD"))
+            .expect("peel HEAD to a commit");
+        assert_eq!(
+            count_reachable_commits(&repository, tip).expect("count reachable commits"),
+            2
+        );
+        fs::remove_dir_all(path).expect("remove test repository");
     }
 
     #[test]

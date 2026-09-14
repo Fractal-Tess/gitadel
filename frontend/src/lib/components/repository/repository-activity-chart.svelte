@@ -2,7 +2,13 @@
   import type { RepositoryActivity } from "$lib/api/repositories.js";
   import ChartTooltip from "./chart-tooltip.svelte";
 
-  let { activity }: { activity: RepositoryActivity } = $props();
+  let {
+    activity,
+    commitCount,
+  }: {
+    activity: RepositoryActivity;
+    commitCount: number;
+  } = $props();
 
   const DAY_MS = 86_400_000;
   const CHART_HEIGHT = 30;
@@ -115,10 +121,10 @@
     aria-hidden="true"
   >
     <span class="text-lg font-semibold leading-none text-foreground">
-      {activity.total_commits.toLocaleString()}
+      {commitCount.toLocaleString()}
     </span>
     <span class="text-sm text-muted-foreground">
-      commit{activity.total_commits === 1 ? "" : "s"}
+      commit{commitCount === 1 ? "" : "s"}
     </span>
   </div>
 
@@ -181,6 +187,8 @@
 
   <div class="sr-only">
     <p>
+      {commitCount.toLocaleString()}
+      commit{commitCount === 1 ? "" : "s"} on the default branch.
       {activity.total_commits.toLocaleString()}
       commit{activity.total_commits === 1 ? "" : "s"} over {chart.dayCount} days,
       {chart.range}. Peak {chart.peak.toLocaleString()}

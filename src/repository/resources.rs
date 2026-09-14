@@ -14,15 +14,14 @@ use axum_extra::extract::cookie::CookieJar;
 use chrono::{Duration, Utc};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, Set,
-    TransactionTrait,
-    sea_query::{Expr, OnConflict},
+    TransactionTrait, sea_query::OnConflict,
 };
 use serde::{Deserialize, Serialize};
 use sley::{ObjectFormat, Repository as SleyRepository};
 use tokio::{fs, process::Command};
 use uuid::Uuid;
 
-use super::{Permission, RepositoryState, mirrors, validate_repository_name};
+use super::{Permission, RepositoryState, browser::read_git, mirrors, validate_repository_name};
 use crate::{
     blob_store::{ObjectPrefix, targets},
     entity::{
@@ -624,12 +623,22 @@ pub(super) async fn record_push(
     target: String,
 ) -> Result<(), ApiError> {
     state.invalidate_repository_size(repository_id).await;
+    let repository = repository::Entity::find_by_id(repository_id)
+        .one(state.identity().database())
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let replacement_default = replacement_default_branch(state, &repository).await?;
+    if let Some(branch) = replacement_default.as_deref() {
+        set_default_branch(state, &repository, branch).await?;
+    }
+
     let transaction = state.identity().database().begin().await?;
-    repository::Entity::update_many()
-        .col_expr(repository::Column::UpdatedAt, Expr::value(Utc::now()))
-        .filter(repository::Column::Id.eq(repository_id))
-        .exec(&transaction)
-        .await?;
+    let mut active = repository.into_active_model();
+    active.updated_at = Set(Utc::now());
+    if let Some(branch) = replacement_default {
+        active.default_branch = Set(branch);
+    }
+    active.update(&transaction).await?;
     state
         .identity()
         .audit_on(
@@ -1065,6 +1074,52 @@ fn validate_visibility(value: String) -> Result<String, ApiError> {
     }
 }
 
+async fn replacement_default_branch(
+    state: &RepositoryState,
+    repository: &repository::Model,
+) -> Result<Option<String>, ApiError> {
+    let path = state.repository_path(repository);
+    let configured = repository.default_branch.clone();
+    read_git(path, move |git| {
+        select_replacement_default_branch(git, &configured)
+    })
+    .await
+}
+
+fn select_replacement_default_branch(
+    repository: &SleyRepository,
+    configured: &str,
+) -> sley::Result<Option<String>> {
+    let mut branches = Vec::new();
+    for reference in repository
+        .references()
+        .list_refs_with_prefix("refs/heads/")?
+    {
+        let Some(name) = reference.name.strip_prefix("refs/heads/") else {
+            continue;
+        };
+        let oid = repository.peel_to_commit_oid(repository.rev_parse(&reference.name)?)?;
+        let commit_time = repository
+            .read_commit(&oid)?
+            .committer_signature()
+            .map_or(i64::MIN, |signature| signature.time.seconds);
+        branches.push((name.to_owned(), commit_time));
+    }
+
+    if branches.iter().any(|(name, _)| name == configured) {
+        return Ok(None);
+    }
+    for preferred in ["main", "dev"] {
+        if branches.iter().any(|(name, _)| name == preferred) {
+            return Ok(Some(preferred.to_owned()));
+        }
+    }
+    let latest = branches
+        .into_iter()
+        .max_by(|left, right| left.1.cmp(&right.1).then_with(|| right.0.cmp(&left.0)));
+    Ok(latest.map(|(name, _)| name))
+}
+
 async fn set_default_branch(
     state: &RepositoryState,
     repository: &repository::Model,
@@ -1407,5 +1462,86 @@ async fn cleanup_repository_storage(repository_path: &Path, lfs_path: &Path) {
         && error.kind() != std::io::ErrorKind::NotFound
     {
         tracing::error!(%error, path = %lfs_path.display(), "could not clean up Git LFS directory");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::Path, process::Command};
+
+    use sley::Repository as SleyRepository;
+    use uuid::Uuid;
+
+    use super::select_replacement_default_branch;
+
+    fn git(path: &Path, arguments: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(arguments)
+            .env("GIT_AUTHOR_NAME", "Gitadel Test")
+            .env("GIT_AUTHOR_EMAIL", "gitadel@example.test")
+            .env("GIT_COMMITTER_NAME", "Gitadel Test")
+            .env("GIT_COMMITTER_EMAIL", "gitadel@example.test")
+            .output()
+            .expect("run git command");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            arguments.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn commit(path: &Path, message: &str, date: &str) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(["commit", "--quiet", "--allow-empty", "-m", message])
+            .env("GIT_AUTHOR_NAME", "Gitadel Test")
+            .env("GIT_AUTHOR_EMAIL", "gitadel@example.test")
+            .env("GIT_COMMITTER_NAME", "Gitadel Test")
+            .env("GIT_COMMITTER_EMAIL", "gitadel@example.test")
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date)
+            .output()
+            .expect("create test commit");
+        assert!(
+            output.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn selected_branch(path: &Path, configured: &str) -> Option<String> {
+        let repository = SleyRepository::open(path.join(".git")).expect("open test repository");
+        select_replacement_default_branch(&repository, configured)
+            .expect("select replacement default branch")
+    }
+
+    #[test]
+    fn replacement_default_prefers_main_then_dev_then_latest_activity() {
+        let path =
+            std::env::temp_dir().join(format!("gitadel-default-branch-test-{}", Uuid::new_v4()));
+        fs::create_dir(&path).expect("create test repository directory");
+        git(&path, &["init", "--quiet", "--initial-branch=main"]);
+        commit(&path, "main", "2026-01-01T00:00:00Z");
+        git(&path, &["branch", "old"]);
+        git(&path, &["switch", "--quiet", "--create", "dev"]);
+        commit(&path, "dev", "2026-01-02T00:00:00Z");
+        git(&path, &["switch", "--quiet", "--create", "feature"]);
+        commit(&path, "feature", "2026-01-03T00:00:00Z");
+
+        assert_eq!(selected_branch(&path, "feature"), None);
+        assert_eq!(selected_branch(&path, "missing").as_deref(), Some("main"));
+        git(&path, &["branch", "--delete", "--force", "main"]);
+        assert_eq!(selected_branch(&path, "missing").as_deref(), Some("dev"));
+        git(&path, &["branch", "--delete", "--force", "dev"]);
+        assert_eq!(
+            selected_branch(&path, "missing").as_deref(),
+            Some("feature")
+        );
+
+        fs::remove_dir_all(path).expect("remove test repository");
     }
 }

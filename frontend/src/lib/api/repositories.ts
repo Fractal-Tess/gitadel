@@ -40,6 +40,7 @@ export const repositoryActivitySchema = z.object({
 
 export const repositoryOverviewItemSchema = repositorySchema.extend({
   branch_count: z.number().int().nonnegative(),
+  commit_count: z.number().int().nonnegative(),
   total_lines: z.number().int().nonnegative(),
   languages: z.array(
     z.object({
