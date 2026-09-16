@@ -1,5 +1,6 @@
 mod browser;
 mod git_http;
+mod git_service;
 mod gitea;
 mod github_mirror;
 mod icon;
@@ -9,8 +10,10 @@ mod integrations;
 mod integrity;
 mod issues;
 mod lfs;
+mod maintenance;
 mod mirror_scheduler;
 mod mirrors;
+mod native_remote;
 mod releases;
 mod resources;
 mod ssh;
@@ -213,11 +216,6 @@ impl RepositoryState {
 
     pub(super) fn lfs_root_path(&self, storage_key: Uuid) -> PathBuf {
         self.lfs_root.join(storage_key.to_string())
-    }
-
-    pub(super) fn lfs_import_staging_path(&self) -> PathBuf {
-        self.lfs_root
-            .join(format!(".gitadel-import-{}", Uuid::new_v4().simple()))
     }
 
     pub(super) fn lfs_object_key(

@@ -360,9 +360,13 @@ async fn detect_provider(server_url: &str, token: &str) -> Result<(String, Strin
     {
         let api = Url::parse("https://api.github.com")
             .map_err(|error| ApiError::internal(format!("GitHub API URL is invalid: {error}")))?;
-        let client = pinned_public_https_client(&api)
-            .await
-            .map_err(ApiError::bad_request)?;
+        let client = pinned_public_https_client(
+            &api,
+            std::time::Duration::from_secs(20),
+            reqwest::redirect::Policy::none(),
+        )
+        .await
+        .map_err(ApiError::bad_request)?;
         if authenticated_get(
             &client,
             endpoint(&api, "/user")?,
@@ -376,9 +380,13 @@ async fn detect_provider(server_url: &str, token: &str) -> Result<(String, Strin
         return Err(ApiError::bad_request("GitHub rejected this access token."));
     }
 
-    let client = pinned_public_https_client(&origin)
-        .await
-        .map_err(ApiError::bad_request)?;
+    let client = pinned_public_https_client(
+        &origin,
+        std::time::Duration::from_secs(20),
+        reqwest::redirect::Policy::none(),
+    )
+    .await
+    .map_err(ApiError::bad_request)?;
     if plain_get(&client, endpoint(&origin, "/api/forgejo/v1/version")?).await {
         if authenticated_get(
             &client,

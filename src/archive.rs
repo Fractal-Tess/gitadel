@@ -1772,7 +1772,7 @@ fn remove_paths(paths: &[PathBuf]) {
 #[cfg(test)]
 mod tests {
     use chrono::Duration as ChronoDuration;
-    use sea_orm::{ActiveModelTrait as _, EntityTrait as _, Set};
+    use sea_orm::Set;
 
     use super::s3::validate_managed_key as validate_managed_s3_backup_key;
     use super::*;

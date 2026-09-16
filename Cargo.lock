@@ -682,6 +682,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
 name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2321,7 +2327,7 @@ dependencies = [
 
 [[package]]
 name = "gitadel"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "ammonia",
  "anyhow",
@@ -2341,6 +2347,7 @@ dependencies = [
  "futures-util",
  "globset",
  "hmac 0.12.1",
+ "hmac 0.13.0",
  "mime_guess",
  "openidconnect",
  "pbjson",
@@ -2363,9 +2370,24 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yml",
+ "sha1",
  "sha2 0.10.9",
  "shlex",
  "sley",
+ "sley-archive",
+ "sley-config",
+ "sley-core",
+ "sley-diff-merge",
+ "sley-formats",
+ "sley-fsck",
+ "sley-gc",
+ "sley-odb",
+ "sley-protocol",
+ "sley-refs",
+ "sley-remote",
+ "sley-rev",
+ "sley-transport",
+ "sley-worktree",
  "subtle",
  "tar",
  "time",
@@ -2381,6 +2403,19 @@ dependencies = [
  "walkdir",
  "webauthn-rs",
  "zstd",
+]
+
+[[package]]
+name = "gitadel-cli"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "reqwest 0.13.4",
+ "serde_json",
+ "tokio",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -5892,15 +5927,15 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "sley"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a69637e24518830470718dd9a0844ed3fb82d17ccf6ef343ad213b31f98d8320"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
  "sley-config",
  "sley-core",
  "sley-diff-merge",
  "sley-formats",
  "sley-grep",
+ "sley-hooks",
  "sley-index",
  "sley-notes",
  "sley-object",
@@ -5909,25 +5944,40 @@ dependencies = [
  "sley-pretty",
  "sley-protocol",
  "sley-refs",
+ "sley-remote",
  "sley-rev",
  "sley-sequencer",
  "sley-worktree",
 ]
 
 [[package]]
+name = "sley-archive"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "sley-config",
+ "sley-core",
+ "sley-object",
+ "sley-odb",
+ "sley-pathspec",
+ "sley-worktree",
+]
+
+[[package]]
 name = "sley-config"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdb29fa07808aff17da26ca9317238c692e3705203ba1358abb793ff7dbfe4cf"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
  "sley-core",
+ "sley-pathspec",
 ]
 
 [[package]]
 name = "sley-core"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1b7a23573be9596f611c1eed2333ff95a37cfa776f4c05e0ecaa23eea3f99b1"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
  "sha1",
  "unicode-normalization",
@@ -5935,10 +5985,10 @@ dependencies = [
 
 [[package]]
 name = "sley-diff-merge"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3d8fe3d9acb7664fc9493b5ada09a41fa1e614572212f27c8550888f686887c"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
+ "flate2",
  "sley-config",
  "sley-core",
  "sley-formats",
@@ -5947,55 +5997,106 @@ dependencies = [
  "sley-object",
  "sley-odb",
  "sley-pack",
+ "sley-pathspec",
  "sley-refs",
 ]
 
 [[package]]
 name = "sley-formats"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c93fd8fb9695284aa40e84287e54da0f828a64ca09d17616acccd8224dfd0a6d"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
  "flate2",
  "sley-config",
  "sley-core",
- "sley-index",
  "sley-object",
 ]
 
 [[package]]
+name = "sley-fsck"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
+dependencies = [
+ "sley-config",
+ "sley-core",
+ "sley-formats",
+ "sley-index",
+ "sley-object",
+ "sley-odb",
+ "sley-pack",
+ "sley-refs",
+ "sley-submodule",
+]
+
+[[package]]
+name = "sley-gc"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
+dependencies = [
+ "regex",
+ "sley-config",
+ "sley-core",
+ "sley-formats",
+ "sley-index",
+ "sley-object",
+ "sley-odb",
+ "sley-pack",
+ "sley-procinfo",
+ "sley-refs",
+ "sley-rev",
+ "sley-worktree",
+ "tracing",
+]
+
+[[package]]
 name = "sley-grep"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e24f265f9c102f5f7062918ba19f2a36a48d5104ad85f66f2eef3d5b595cadf3"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
  "sley-core",
 ]
 
 [[package]]
+name = "sley-hooks"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
+dependencies = [
+ "sley-config",
+ "sley-core",
+ "sley-odb",
+ "sley-worktree",
+]
+
+[[package]]
 name = "sley-index"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae7861178f068b77a24d5c697590ec471c566e026dd31e10aeef480fdf603b9a"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
  "sley-core",
  "sley-mmap",
 ]
 
 [[package]]
+name = "sley-mail"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
+dependencies = [
+ "encoding_rs",
+ "sley-core",
+]
+
+[[package]]
 name = "sley-mmap"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc5856eebea7335eeb41547fb92e39850d11612537eebd4deb06247d7b799bbe"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
  "memmap2",
 ]
 
 [[package]]
 name = "sley-notes"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "495fd144f53ea61331589cd453e5aa44c8d28ffb0b06bae69d3739b32420a3ed"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
  "sley-config",
  "sley-core",
@@ -6008,18 +6109,17 @@ dependencies = [
 
 [[package]]
 name = "sley-object"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "034ee0151c34099163a4295b53fba4cd90573b30c383714fb9df5f5d36cba205"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
+ "sley-config",
  "sley-core",
 ]
 
 [[package]]
 name = "sley-odb"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ccd3ad79c186016717b989f0765d100f1400b3066946a29b3969f7cba272088"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -6029,22 +6129,21 @@ dependencies = [
  "sley-mmap",
  "sley-object",
  "sley-pack",
+ "smallvec",
 ]
 
 [[package]]
 name = "sley-options"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fbaf233c49401f7431608e849f29114229095a5f1cd066c77b2a153767fed1cf"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
  "sley-core",
 ]
 
 [[package]]
 name = "sley-pack"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cff8bbcfc07d92867352b66004763f6c5b3690e81c7d2a3ba552ceeee0c10209"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -6055,18 +6154,16 @@ dependencies = [
 
 [[package]]
 name = "sley-pathspec"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0730b3a44c5a5f5e3c3f994d22102ed8770f4fa7e5cd92c187bdd42543c95afc"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
  "sley-core",
 ]
 
 [[package]]
 name = "sley-pretty"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7528cd4de1930aea9cfae958d6de79472134bffa9b346a7db30330df9296146d"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
  "encoding_rs",
  "sley-config",
@@ -6080,29 +6177,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "sley-procinfo"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "sley-protocol"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c5e98d5156398816da013e6e8ceafa8bd6c679a4be190ff86f8c7b0bf877415"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
  "sley-core",
 ]
 
 [[package]]
 name = "sley-ref-filter"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c47d290c04c7b4c5bfd79fe2da594365657595be48be38c16856dbf465f88d30"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
+ "sley-config",
  "sley-core",
+ "sley-object",
+ "sley-odb",
+ "sley-protocol",
+ "sley-refs",
+ "sley-rev",
  "sley-strbuf-expand",
+ "sley-worktree",
 ]
 
 [[package]]
 name = "sley-refs"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97991bc6730b44d5b87a7e8d429040d5f4015aa8e0abe0758686497c718841c3"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
  "sley-config",
  "sley-core",
@@ -6110,10 +6219,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "sley-remote"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
+dependencies = [
+ "sley-config",
+ "sley-core",
+ "sley-diff-merge",
+ "sley-formats",
+ "sley-fsck",
+ "sley-index",
+ "sley-object",
+ "sley-odb",
+ "sley-pack",
+ "sley-protocol",
+ "sley-refs",
+ "sley-rev",
+ "sley-transport",
+ "sley-worktree",
+ "tempfile",
+]
+
+[[package]]
 name = "sley-rev"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c0a6f8d110761a7161d484e6de277e5d9aa052629507d79a64aa046712b1d3d"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
  "regex",
  "sley-config",
@@ -6131,42 +6261,61 @@ dependencies = [
 
 [[package]]
 name = "sley-sequencer"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aff5ec70f3912f440cb13013b73b4752b3fc1949a39a7b463da4a40b6b3d71ab"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
+ "sley-config",
  "sley-core",
- "sley-formats",
+ "sley-diff-merge",
+ "sley-index",
+ "sley-mail",
  "sley-object",
  "sley-odb",
+ "sley-pretty",
+ "sley-ref-filter",
  "sley-refs",
+ "sley-rev",
  "sley-worktree",
 ]
 
 [[package]]
 name = "sley-strbuf-expand"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4006c8c689268f3af56cc3c1b5db9fe415e521a624f75ba2ce1222f14bc691f"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
  "sley-core",
 ]
 
 [[package]]
 name = "sley-submodule"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "513c2ab94208e05ab9fdc9f6e111578f0be8f1a4b70a0ab6752ff9fc30a84a28"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
  "sley-config",
  "sley-core",
+ "sley-diff-merge",
+ "sley-object",
+ "sley-odb",
+ "sley-rev",
+]
+
+[[package]]
+name = "sley-transport"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
+dependencies = [
+ "sley-config",
+ "sley-core",
+ "sley-protocol",
+ "tempfile",
+ "ureq",
+ "webpki-root-certs",
 ]
 
 [[package]]
 name = "sley-unpack-trees"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c54f0fe1695727fdf820477cfa9683299927ace2a2cf700e549df20214607da8"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
  "sley-core",
  "sley-index",
@@ -6174,9 +6323,8 @@ dependencies = [
 
 [[package]]
 name = "sley-worktree"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5fb822dc55a3028d5890ce5b28d832d7c68c2b29e07b66bd56303dd5284f864e"
+version = "0.10.0"
+source = "git+https://github.com/Fractal-Tess/sley?rev=ee45763e763c06b35748c8f951a40f4ae450c8fb#ee45763e763c06b35748c8f951a40f4ae450c8fb"
 dependencies = [
  "encoding_rs",
  "same-file",
@@ -6672,6 +6820,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -7206,6 +7355,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "ureq"
+version = "3.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a7ac20be9b7726e0bbdbf974c059676d9acb1cd414961f570a4e8231cacd7fc"
+dependencies = [
+ "base64 0.23.1",
+ "flate2",
+ "log",
+ "percent-encoding",
+ "rustls",
+ "rustls-pki-types",
+ "ureq-proto",
+ "utf8-zero",
+ "webpki-roots",
+]
+
+[[package]]
+name = "ureq-proto"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b0809a01d1ca5a51ca70db32bb2a19157582a526505ef3c19e3b343a59aa5ad"
+dependencies = [
+ "base64 0.23.1",
+ "http",
+ "httparse",
+ "log",
+]
+
+[[package]]
 name = "url"
 version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7217,6 +7395,12 @@ dependencies = [
  "serde",
  "serde_derive",
 ]
+
+[[package]]
+name = "utf8-zero"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8c0a043c9540bae7c578c88f91dda8bd82e59ae27c21baca69c8b191aaf5a6e"
 
 [[package]]
 name = "utf8_iter"

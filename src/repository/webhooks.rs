@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
-    process::Stdio,
     time::{Duration, Instant},
 };
 
@@ -12,7 +11,7 @@ use axum::{
     response::IntoResponse,
 };
 use axum_extra::extract::cookie::CookieJar;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
@@ -21,11 +20,11 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Sha256;
-use tokio::process::Command;
+use sley::{DiffNameStatusOptions, ReferenceTarget};
 use url::Url;
 use uuid::Uuid;
 
-use super::{Permission, RepositoryState};
+use super::{Permission, RepositoryState, browser::read_git};
 use crate::{
     actions::ActionsState,
     entity::{repository, repository_webhook, repository_webhook_delivery, user},
@@ -483,27 +482,25 @@ pub async fn ping_webhook(
 }
 
 pub(super) async fn snapshot_refs(path: &Path) -> Result<RefSnapshot, ApiError> {
-    let output = Command::new("git")
-        .arg("--git-dir")
-        .arg(path)
-        .args([
-            "for-each-ref",
-            "--format=%(refname) %(objectname)",
-            "refs/heads",
-            "refs/tags",
-        ])
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .map_err(ApiError::internal)?;
-    if !output.status.success() {
-        return Err(ApiError::internal(String::from_utf8_lossy(&output.stderr)));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.split_once(' '))
-        .map(|(name, oid)| (name.to_owned(), oid.to_owned()))
-        .collect())
+    let path = path.to_owned();
+    read_git(path, |repository| {
+        let mut snapshot = RefSnapshot::new();
+        for reference in repository
+            .references()
+            .list_refs_with_prefix("refs/heads")?
+        {
+            if let ReferenceTarget::Direct(oid) = reference.target {
+                snapshot.insert(reference.name, oid.to_hex());
+            }
+        }
+        for reference in repository.references().list_refs_with_prefix("refs/tags")? {
+            if let ReferenceTarget::Direct(oid) = reference.target {
+                snapshot.insert(reference.name, oid.to_hex());
+            }
+        }
+        Ok(snapshot)
+    })
+    .await
 }
 
 pub(super) async fn dispatch_push(
@@ -857,99 +854,109 @@ async fn commit_entries(path: &Path, before: &str, after: &str, zero: &str) -> V
     if after == zero {
         return Vec::new();
     }
-    // A new ref has no baseline, so walk back from its tip instead of a range.
-    let range = if before == zero {
-        after.to_owned()
-    } else {
-        format!("{before}..{after}")
-    };
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args([
-            "log",
-            &format!("--max-count={PUSH_COMMIT_LIMIT}"),
-            // STX starts each record so name-status lines stay newline-split.
-            "--format=%x02%H%x1f%s%x1f%an%x1f%ae%x1f%cI",
-            "--name-status",
-            "--no-color",
-            &range,
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await;
-    let output = match output {
-        Ok(output) if output.status.success() => output,
-        Ok(output) => {
-            tracing::warn!(
-                stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-                "listing pushed commits failed"
-            );
-            return Vec::new();
+    let is_new = before == zero;
+    let path = path.to_owned();
+    let before = before.to_owned();
+    let after = after.to_owned();
+    read_git(path, move |repository| {
+        let mut selection = sley_rev::RevisionSelection::new();
+        if is_new {
+            selection.add_spec(&after)?;
+        } else {
+            selection.add_spec(format!("{before}..{after}"))?;
         }
-        Err(error) => {
-            tracing::warn!(%error, "listing pushed commits failed");
-            return Vec::new();
-        }
-    };
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut commits = text
-        .split('\u{2}')
-        .skip(1)
-        .filter_map(parse_commit_record)
-        .collect::<Vec<_>>();
-    // git log is newest first; push payloads list commits oldest first.
-    commits.reverse();
-    commits
-}
-
-fn parse_commit_record(record: &str) -> Option<Value> {
-    let (header, body) = record.split_once('\n').unwrap_or((record, ""));
-    let mut fields = header.split('\u{1f}');
-    let id = fields.next()?;
-    let message = fields.next().unwrap_or_default();
-    let author_name = fields.next().unwrap_or_default();
-    let author_email = fields.next().unwrap_or_default();
-    let timestamp = fields.next().unwrap_or_default();
-
-    let mut added = Vec::new();
-    let mut modified = Vec::new();
-    let mut removed = Vec::new();
-    for line in body.lines().filter(|line| !line.is_empty()) {
-        let mut columns = line.split('\t');
-        let Some(status) = columns.next() else {
-            continue;
-        };
-        let Some(target) = columns.next() else {
-            continue;
-        };
-        // Renames and copies report the source first, then the destination.
-        match status.as_bytes().first() {
-            Some(b'A') => added.push(target.to_owned()),
-            Some(b'D') => removed.push(target.to_owned()),
-            Some(b'R' | b'C') => {
-                removed.push(target.to_owned());
-                if let Some(destination) = columns.next() {
-                    added.push(destination.to_owned());
+        let resolved = selection.resolve(
+            repository.git_dir(),
+            repository.object_format(),
+            repository.object_database(),
+        )?;
+        let mut commits = resolved.selected_commit_oids(
+            repository.git_dir(),
+            repository.object_format(),
+            repository.object_database(),
+            false,
+        )?;
+        commits.truncate(PUSH_COMMIT_LIMIT);
+        commits.reverse();
+        let mut entries = Vec::with_capacity(commits.len());
+        for oid in commits {
+            let commit = repository.read_commit(&oid)?;
+            let options = DiffNameStatusOptions {
+                detect_renames: true,
+                ..DiffNameStatusOptions::default()
+            };
+            let changes = if let Some(parent) = commit.parents.first().copied() {
+                let parent_tree = repository.read_commit(&parent)?.tree;
+                sley_diff_merge::diff_name_status_trees_with_options(
+                    repository.object_database(),
+                    repository.object_format(),
+                    &parent_tree,
+                    &commit.tree,
+                    options,
+                )?
+            } else {
+                sley_diff_merge::diff_name_status_empty_tree_with_options(
+                    repository.object_database(),
+                    repository.object_format(),
+                    &commit.tree,
+                    options,
+                )?
+            };
+            let mut added = Vec::new();
+            let mut modified = Vec::new();
+            let mut removed = Vec::new();
+            for change in changes {
+                let path = String::from_utf8_lossy(change.path.as_bytes()).into_owned();
+                match change.status {
+                    sley_diff_merge::NameStatus::Added => added.push(path),
+                    sley_diff_merge::NameStatus::Deleted => removed.push(path),
+                    sley_diff_merge::NameStatus::Renamed(_)
+                    | sley_diff_merge::NameStatus::Copied(_) => {
+                        if let Some(old_path) = change.old_path {
+                            removed.push(String::from_utf8_lossy(old_path.as_bytes()).into_owned());
+                        }
+                        added.push(path);
+                    }
+                    _ => modified.push(path),
                 }
             }
-            Some(_) => modified.push(target.to_owned()),
-            None => {}
+            let message = String::from_utf8_lossy(&commit.message).trim().to_owned();
+            let author = commit.author_signature();
+            let committer = commit.committer_signature();
+            let timestamp = committer
+                .as_ref()
+                .and_then(|signature| DateTime::<Utc>::from_timestamp(signature.time.seconds, 0))
+                .map_or_else(String::new, |timestamp| timestamp.to_rfc3339());
+            let author_name = author.as_ref().map_or_else(String::new, |signature| {
+                String::from_utf8_lossy(signature.name.as_bytes()).into_owned()
+            });
+            let author_email = author.as_ref().map_or_else(String::new, |signature| {
+                String::from_utf8_lossy(signature.email.as_bytes()).into_owned()
+            });
+            let committer_name = committer.as_ref().map_or_else(String::new, |signature| {
+                String::from_utf8_lossy(signature.name.as_bytes()).into_owned()
+            });
+            let committer_email = committer.as_ref().map_or_else(String::new, |signature| {
+                String::from_utf8_lossy(signature.email.as_bytes()).into_owned()
+            });
+            entries.push(json!({
+                "id": oid.to_hex(),
+                "message": message.lines().next().unwrap_or_default(),
+                "timestamp": timestamp,
+                "author": { "name": author_name, "email": author_email },
+                "committer": { "name": committer_name, "email": committer_email },
+                "added": added,
+                "modified": modified,
+                "removed": removed,
+            }));
         }
-    }
-
-    Some(json!({
-        "id": id,
-        "message": message,
-        "timestamp": timestamp,
-        "author": { "name": author_name, "email": author_email },
-        "committer": { "name": author_name, "email": author_email },
-        "added": added,
-        "modified": modified,
-        "removed": removed,
-    }))
+        Ok(entries)
+    })
+    .await
+    .unwrap_or_else(|error| {
+        tracing::warn!(%error, "listing pushed commits failed");
+        Vec::new()
+    })
 }
 
 fn repository_payload(state: &RepositoryState, repository: &repository::Model) -> Value {

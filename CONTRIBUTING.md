@@ -27,7 +27,7 @@ Run `just --list` for the remaining build and maintenance commands.
 ### Single-port development
 
 Only the backend binds a port and serves the frontend. OAuth callbacks, cookies,
-and passkeys therefore use one origin. In debug builds rust-embed reads
+and passkeys therefore use one origin. In debug builds the server reads
 `frontend/build/` from disk on every request, so frontend rebuilds are live and
 only Rust changes restart the server. The frontend watcher runs a fresh,
 finite production build after each relevant source change. See
@@ -49,7 +49,7 @@ Run formatting, linting, type checking, and the frontend production build before
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --bin gitadel --locked -- -D warnings
+cargo clippy --workspace --all-targets --locked -- -D warnings
 bun run --cwd frontend check
 bun run --cwd frontend build
 ```
@@ -58,11 +58,15 @@ Nix only includes Git-tracked files in flake source inputs. Stage new source fil
 
 ## Production build
 
-Build the embedded SvelteKit frontend and release binary with:
+Build the embedded SvelteKit frontend and both release binaries with:
 
 ```bash
 just release-build
 ```
+
+The outputs are `target/release/gitadel` (server and offline maintenance) and `target/release/gitadel-cli` (token-authenticated remote client). To build only the client, run `cargo build --release --locked -p gitadel-cli`; it does not need a frontend build.
+
+Git, Git LFS, and OpenSSH remain in the development shell for interoperability checks. They are not server runtime dependencies. Native Git operations use the immutable Sley fork revision in `Cargo.toml`; dependency updates must also refresh `Cargo.lock` and the Nix Git-source hash.
 
 The Nix package installs frontend dependencies in a fixed-output derivation. Refresh its hash whenever `frontend/bun.lock` changes:
 
@@ -73,9 +77,10 @@ just frontend-hash
 ## Repository layout
 
 ```text
-src/            Rust server, CLI, identity, repository, SSH, HTTP, and LFS code
+src/            Rust server, offline maintenance, identity, Git, SSH, HTTP, and LFS
+cli/            Token-authenticated remote command-line client
 frontend/       SvelteKit web interface
-nix/            NixOS service module
+nix/            Separate NixOS server and client modules
 scripts/        Release and Nix dependency-hash helpers
 docs/research/  Product and integration research
 ```

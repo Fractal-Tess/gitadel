@@ -1156,7 +1156,7 @@ mod tests {
         };
 
         let result = catalog(
-            &[credential.clone()],
+            std::slice::from_ref(&credential),
             &[source],
             vec![row(first_id, "Web"), row(second_id, "Worker")],
         );

@@ -1,8 +1,8 @@
-use std::{io, ops::Deref, process::Stdio, time::Duration};
+use std::{io, ops::Deref, time::Duration};
 
 use axum::{
     Router,
-    body::{Body, Bytes},
+    body::Body,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
@@ -11,21 +11,19 @@ use axum::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::TryStreamExt as _;
 use serde::Deserialize;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    process::Command,
-};
+use tokio::io::AsyncWriteExt;
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use super::{
     Permission, RepositoryState,
+    git_service::{self, BlockingReader, BlockingWriter, BridgeCancellation},
     resources::record_push,
     webhooks::{dispatch_push, snapshot_refs},
 };
 use crate::{
     actions::ActionsState,
     entity::repository,
-    identity::{SCOPE_REPOSITORY_READ, SCOPE_WRITE},
+    identity::{ApiError, SCOPE_REPOSITORY_READ, SCOPE_WRITE},
 };
 
 #[derive(Clone)]
@@ -87,7 +85,7 @@ async fn info_refs(
                         .await
                     {
                         Ok(repository) => repository,
-                        Err(response) => return response,
+                        Err(error) => return error.into_response(),
                     };
                 ("git-upload-pack", repository)
             }
@@ -97,34 +95,45 @@ async fn info_refs(
                         .await
                     {
                         Ok(authorization) => authorization,
-                        Err(response) => return response,
+                        Err(error) => return error.into_response(),
                     };
+                if repository.archived_at.is_some() {
+                    return StatusCode::FORBIDDEN.into_response();
+                }
                 ("git-receive-pack", repository)
             }
             _ => return StatusCode::FORBIDDEN.into_response(),
         };
     let path = state.repository_path(&repository);
-    let output = match command(service, &headers)
-        .args(["--stateless-rpc", "--advertise-refs"])
-        .arg(&path)
-        .output()
-        .await
-    {
-        Ok(output) if output.status.success() => output.stdout,
-        Ok(output) => {
-            tracing::error!(
-                repository = %repository_path(&repository),
-                stderr = %String::from_utf8_lossy(&output.stderr),
-                "Git service advertisement failed"
-            );
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
+    let format = match git_service::object_format(&repository.object_format) {
+        Ok(format) => format,
         Err(error) => {
-            tracing::error!(%error, %service, "could not start Git service");
+            tracing::error!(%error, "unsupported repository object format");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-
+    let v2 = git_service::protocol_v2(
+        headers
+            .get("git-protocol")
+            .and_then(|value| value.to_str().ok()),
+    );
+    let mut output = Vec::new();
+    if let Err(error) = git_service::write_advertisement(
+        &path,
+        format,
+        service == "git-receive-pack",
+        v2,
+        &mut output,
+    ) {
+        tracing::error!(%error, repository = %repository_path(&repository), "Git service advertisement failed");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    if v2 && service == "git-upload-pack" {
+        return git_response(
+            "application/x-git-upload-pack-advertisement",
+            Body::from(output),
+        );
+    }
     let service_line = format!("# service={service}\n");
     let mut body = Vec::with_capacity(output.len() + service_line.len() + 8);
     body.extend_from_slice(format!("{:04x}", service_line.len() + 4).as_bytes());
@@ -132,10 +141,10 @@ async fn info_refs(
     body.extend_from_slice(b"0000");
     body.extend_from_slice(&output);
     git_response(
-        match service {
-            "git-upload-pack" => "application/x-git-upload-pack-advertisement",
-            "git-receive-pack" => "application/x-git-receive-pack-advertisement",
-            _ => unreachable!("service was validated above"),
+        if service == "git-upload-pack" {
+            "application/x-git-upload-pack-advertisement"
+        } else {
+            "application/x-git-receive-pack-advertisement"
         },
         Body::from(body),
     )
@@ -145,75 +154,67 @@ async fn upload_pack(
     State(state): State<GitHttpState>,
     Path((namespace, repository_segment)): Path<(String, String)>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Response {
     let repository =
         match authorized_repository(&state, &headers, &namespace, &repository_segment).await {
             Ok(repository) => repository,
-            Err(response) => return response,
+            Err(error) => return error.into_response(),
         };
     let path = state.repository_path(&repository);
-    let mut child = match command("git-upload-pack", &headers)
-        .arg("--stateless-rpc")
-        .arg(&path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-    {
-        Ok(child) => child,
+    let format = match git_service::object_format(&repository.object_format) {
+        Ok(format) => format,
         Err(error) => {
-            tracing::error!(%error, "could not start git upload-pack");
+            tracing::error!(%error, "unsupported repository object format");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    let Some(mut stdin) = child.stdin.take() else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-    let Some(stdout) = child.stdout.take() else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-    let stderr = child.stderr.take();
-    tokio::spawn(async move {
-        if let Err(error) = stdin.write_all(&body).await {
-            tracing::debug!(%error, "git upload-pack request body closed early");
+    let v2 = git_service::protocol_v2(
+        headers
+            .get("git-protocol")
+            .and_then(|value| value.to_str().ok()),
+    );
+    let (request_io, response_io) = tokio::io::duplex(64 * 1024);
+    let (response_reader, mut request_writer) = tokio::io::split(request_io);
+    let (request_reader, response_writer) = tokio::io::split(response_io);
+    let request_stream = body.into_data_stream().map_err(io::Error::other);
+    let mut request_stream = StreamReader::new(request_stream);
+    let feeder = tokio::spawn(async move {
+        if let Err(error) = tokio::io::copy(&mut request_stream, &mut request_writer).await {
+            tracing::debug!(%error, "upload-pack request body closed early");
         }
+        let _ = request_writer.shutdown().await;
+    });
+    let cancellation = BridgeCancellation::default();
+    let worker_cancellation = cancellation.clone();
+    let handle = tokio::runtime::Handle::current();
+    let mut worker = tokio::task::spawn_blocking(move || {
+        let mut reader =
+            BlockingReader::new(request_reader, handle.clone(), worker_cancellation.clone());
+        let mut writer = BlockingWriter::new(response_writer, handle, worker_cancellation);
+        git_service::serve_upload_pack(&path, format, v2, true, &mut reader, &mut writer)
     });
     let display_path = repository_path(&repository);
-    let task_state = state.clone();
-    task_state.spawn_task(async move {
-        let stderr_task = tokio::spawn(async move {
-            let mut bytes = Vec::new();
-            if let Some(mut stderr) = stderr {
-                let _ = stderr.read_to_end(&mut bytes).await;
-            }
-            bytes
-        });
-        let result = tokio::time::timeout(Duration::from_secs(30 * 60), child.wait()).await;
-        let stderr = stderr_task.await.unwrap_or_default();
-        match result {
-            Ok(Ok(status)) if status.success() => {}
-            Ok(Ok(status)) => {
-                tracing::error!(
-                    repository = %display_path,
-                    ?status,
-                    stderr = %String::from_utf8_lossy(&stderr),
-                    "git upload-pack failed"
-                );
-            }
-            Ok(Err(error)) => {
-                tracing::error!(%error, repository = %display_path, "git upload-pack wait failed");
-            }
+    state.spawn_task(async move {
+        let result = tokio::time::timeout(Duration::from_secs(30 * 60), &mut worker).await;
+        let result = match result {
             Err(_) => {
-                tracing::warn!(repository = %display_path, "git upload-pack exceeded time limit");
+                cancellation.cancel();
+                feeder.abort();
+                tracing::warn!(repository = %display_path, "native upload-pack exceeded time limit");
+                worker.await
             }
+            Ok(result) => result,
+        };
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, repository = %display_path, "native upload-pack failed"),
+            Err(error) => tracing::warn!(%error, repository = %display_path, "native upload-pack task failed"),
         }
     });
-
     git_response(
         "application/x-git-upload-pack-result",
-        Body::from_stream(ReaderStream::new(stdout)),
+        Body::from_stream(ReaderStream::new(response_reader)),
     )
 }
 
@@ -226,8 +227,11 @@ async fn receive_pack(
     let (repository, actor_user_id) =
         match writable_repository(&state, &headers, &namespace, &repository_segment).await {
             Ok(authorization) => authorization,
-            Err(response) => return response,
+            Err(error) => return error.into_response(),
         };
+    if repository.archived_at.is_some() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let path = state.repository_path(&repository);
     let refs_before = match snapshot_refs(&path).await {
         Ok(refs) => Some(refs),
@@ -236,92 +240,102 @@ async fn receive_pack(
             None
         }
     };
-    let mut child = match command("git-receive-pack", &headers)
-        .arg("--stateless-rpc")
-        .arg(&path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-    {
-        Ok(child) => child,
+    let format = match git_service::object_format(&repository.object_format) {
+        Ok(format) => format,
         Err(error) => {
-            tracing::error!(%error, "could not start git receive-pack");
+            tracing::error!(%error, "unsupported repository object format");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    let Some(mut stdin) = child.stdin.take() else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-    let Some(stdout) = child.stdout.take() else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-    let stderr = child.stderr.take();
+    let (request_io, response_io) = tokio::io::duplex(64 * 1024);
+    let (response_reader, mut request_writer) = tokio::io::split(request_io);
+    let (request_reader, response_writer) = tokio::io::split(response_io);
     let request = body.into_data_stream().map_err(io::Error::other);
-    let mut reader = StreamReader::new(request);
-    tokio::spawn(async move {
-        if let Err(error) = tokio::io::copy(&mut reader, &mut stdin).await {
-            tracing::debug!(%error, "git receive-pack request body closed early");
+    let mut request = StreamReader::new(request);
+    let feeder = tokio::spawn(async move {
+        if let Err(error) = tokio::io::copy(&mut request, &mut request_writer).await {
+            tracing::debug!(%error, "receive-pack request body closed early");
         }
-        let _ = stdin.shutdown().await;
+        let _ = request_writer.shutdown().await;
     });
-
+    let cancellation = BridgeCancellation::default();
+    let worker_cancellation = cancellation.clone();
+    let handle = tokio::runtime::Handle::current();
+    let worker_path = path.clone();
+    let mut worker = tokio::task::spawn_blocking(move || {
+        let mut reader =
+            BlockingReader::new(request_reader, handle.clone(), worker_cancellation.clone());
+        let mut writer = BlockingWriter::new(response_writer, handle, worker_cancellation);
+        git_service::serve_receive_pack(&worker_path, format, &mut reader, &mut writer)
+    });
     let display_path = repository_path(&repository);
     let task_state = state.clone();
     let actions = state.actions_state().clone();
-    task_state.clone().spawn_task(async move {
-        let stderr_task = tokio::spawn(async move {
-            let mut bytes = Vec::new();
-            if let Some(mut stderr) = stderr {
-                let _ = stderr.read_to_end(&mut bytes).await;
+    let audit_repository = repository.clone();
+    let maintenance_path = path.clone();
+    state.spawn_task(async move {
+        let result = tokio::time::timeout(Duration::from_secs(30 * 60), &mut worker).await;
+        let result = match result {
+            Err(_) => {
+                cancellation.cancel();
+                feeder.abort();
+                tracing::warn!(repository = %display_path, "native receive-pack exceeded time limit");
+                // spawn_blocking cannot be aborted. Await it before deciding
+                // whether post-push side effects are required.
+                worker.await
             }
-            bytes
-        });
-        let result = tokio::time::timeout(Duration::from_secs(30 * 60), child.wait()).await;
-        let stderr = stderr_task.await.unwrap_or_default();
-        let successful = matches!(&result, Ok(Ok(status)) if status.success());
-        if successful {
-            if let Err(error) =
-                record_push(&task_state, repository.id, actor_user_id, display_path.clone()).await
-            {
-                tracing::warn!(%error, repository = %display_path, "could not record HTTP push");
-            }
-            if let Some(refs_before) = refs_before
-                && let Err(error) = dispatch_push(
-                    &task_state,
-                    &actions,
-                    &repository,
-                    actor_user_id,
-                    refs_before,
-                )
-                .await
-            {
-                tracing::warn!(%error, repository = %display_path, "could not dispatch HTTP push");
-            }
-            run_git_maintenance(&path, &display_path).await;
-        } else {
-            match result {
-                Ok(Ok(status)) => tracing::error!(
-                    repository = %display_path,
-                    ?status,
-                    stderr = %String::from_utf8_lossy(&stderr),
-                    "git receive-pack failed"
-                ),
-                Ok(Err(error)) => {
-                    tracing::error!(%error, repository = %display_path, "git receive-pack wait failed");
+            Ok(result) => result,
+        };
+        match result {
+            Ok(Ok(outcome)) => {
+                if let Some(error) = outcome.response_error {
+                    tracing::debug!(%error, repository = %display_path, "receive-pack response delivery failed");
                 }
-                Err(_) => {
-                    tracing::warn!(repository = %display_path, "git receive-pack exceeded time limit");
+                if outcome.landed {
+                    if let Err(error) =
+                        record_push(&task_state, audit_repository.id, actor_user_id, display_path.clone()).await
+                    {
+                        tracing::warn!(%error, repository = %display_path, "could not record HTTP push");
+                    }
+                    if let Some(refs_before) = refs_before
+                        && let Err(error) = dispatch_push(
+                            &task_state,
+                            &actions,
+                            &audit_repository,
+                            actor_user_id,
+                            refs_before,
+                        )
+                        .await
+                    {
+                        tracing::warn!(%error, repository = %display_path, "could not dispatch HTTP push");
+                    }
+                    super::maintenance::run(&maintenance_path, &display_path).await;
                 }
             }
+            Ok(Err(error)) => tracing::warn!(%error, repository = %display_path, "native receive-pack failed"),
+            Err(error) => tracing::warn!(%error, repository = %display_path, "native receive-pack task failed"),
         }
     });
-
     git_response(
         "application/x-git-receive-pack-result",
-        Body::from_stream(ReaderStream::new(stdout)),
+        Body::from_stream(ReaderStream::new(response_reader)),
     )
+}
+
+enum AuthorizationError {
+    Status(StatusCode),
+    AuthenticationRequired,
+    Api(ApiError),
+}
+
+impl IntoResponse for AuthorizationError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Status(status) => status.into_response(),
+            Self::AuthenticationRequired => authentication_required(),
+            Self::Api(error) => error.into_response(),
+        }
+    }
 }
 
 async fn authorized_repository(
@@ -329,24 +343,24 @@ async fn authorized_repository(
     headers: &HeaderMap,
     namespace: &str,
     repository_segment: &str,
-) -> Result<repository::Model, Response> {
+) -> Result<repository::Model, AuthorizationError> {
     let Some(name) = repository_segment.strip_suffix(".git") else {
-        return Err(StatusCode::NOT_FOUND.into_response());
+        return Err(AuthorizationError::Status(StatusCode::NOT_FOUND));
     };
     let repository = match state.find(namespace, name).await {
         Ok(repository) => repository,
         Err(_) if headers.get(header::AUTHORIZATION).is_none() => {
-            return Err(authentication_required());
+            return Err(AuthorizationError::AuthenticationRequired);
         }
-        Err(error) => return Err(error.into_response()),
+        Err(error) => return Err(AuthorizationError::Api(error)),
     };
     if repository.visibility == "public" {
         return Ok(repository);
     }
-    let token = token_from_headers(headers).ok_or_else(authentication_required)?;
+    let token = token_from_headers(headers).ok_or(AuthorizationError::AuthenticationRequired)?;
     if crate::actions::tokens::authorize_job(state.identity().database(), &token, repository.id)
         .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())?
+        .map_err(|_| AuthorizationError::Status(StatusCode::SERVICE_UNAVAILABLE))?
         .is_some()
     {
         return Ok(repository);
@@ -355,11 +369,11 @@ async fn authorized_repository(
         .identity()
         .authenticate_token(&token, SCOPE_REPOSITORY_READ)
         .await
-        .map_err(|_| authentication_required())?;
+        .map_err(|_| AuthorizationError::AuthenticationRequired)?;
     state
         .authorize(&repository, Some(actor.user.id), Permission::Read)
         .await
-        .map_err(IntoResponse::into_response)?;
+        .map_err(AuthorizationError::Api)?;
     Ok(repository)
 }
 
@@ -368,24 +382,24 @@ async fn writable_repository(
     headers: &HeaderMap,
     namespace: &str,
     repository_segment: &str,
-) -> Result<(repository::Model, uuid::Uuid), Response> {
+) -> Result<(repository::Model, uuid::Uuid), AuthorizationError> {
     let Some(name) = repository_segment.strip_suffix(".git") else {
-        return Err(StatusCode::NOT_FOUND.into_response());
+        return Err(AuthorizationError::Status(StatusCode::NOT_FOUND));
     };
-    let token = token_from_headers(headers).ok_or_else(authentication_required)?;
+    let token = token_from_headers(headers).ok_or(AuthorizationError::AuthenticationRequired)?;
     let actor = state
         .identity()
         .authenticate_token(&token, SCOPE_WRITE)
         .await
-        .map_err(|_| authentication_required())?;
+        .map_err(|_| AuthorizationError::AuthenticationRequired)?;
     let repository = state
         .find(namespace, name)
         .await
-        .map_err(IntoResponse::into_response)?;
+        .map_err(AuthorizationError::Api)?;
     state
         .authorize(&repository, Some(actor.user.id), Permission::Write)
         .await
-        .map_err(IntoResponse::into_response)?;
+        .map_err(AuthorizationError::Api)?;
     Ok((repository, actor.user.id))
 }
 
@@ -399,40 +413,6 @@ fn token_from_headers(headers: &HeaderMap) -> Option<String> {
     let decoded = String::from_utf8(decoded).ok()?;
     let (_, token) = decoded.split_once(':')?;
     (!token.is_empty()).then(|| token.to_owned())
-}
-
-fn command(program: &str, headers: &HeaderMap) -> Command {
-    let mut command = Command::new(program);
-    if let Some(protocol) = headers
-        .get("git-protocol")
-        .and_then(|value| value.to_str().ok())
-    {
-        command.env("GIT_PROTOCOL", protocol);
-    }
-    command
-}
-
-async fn run_git_maintenance(path: &std::path::Path, repository: &str) {
-    match Command::new("git")
-        .arg("--git-dir")
-        .arg(path)
-        .args(["gc", "--auto", "--quiet"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-    {
-        Ok(output) if output.status.success() => {}
-        Ok(output) => tracing::warn!(
-            %repository,
-            stderr = %String::from_utf8_lossy(&output.stderr),
-            "automatic Git maintenance failed"
-        ),
-        Err(error) => {
-            tracing::warn!(%error, %repository, "could not start automatic Git maintenance");
-        }
-    }
 }
 
 fn git_response(content_type: &'static str, body: Body) -> Response {

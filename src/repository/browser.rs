@@ -1,8 +1,8 @@
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
+    io::{self, Write},
     path::{Path, PathBuf},
-    process::Stdio,
 };
 
 use axum::{
@@ -13,8 +13,10 @@ use axum::{
     response::Response,
 };
 use axum_extra::extract::cookie::CookieJar;
+use bytes::Bytes;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use comrak::{Options, markdown_to_html};
+use futures_util::stream;
 use russh::keys::ssh_key::{HashAlg, PublicKey, SshSig};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 use serde::{Deserialize, Serialize};
@@ -22,9 +24,21 @@ use sley::{
     GitError, GitObjectType, ObjectId, ReachableCommitOptions, ReferenceTarget,
     Repository as GitRepository, StreamControl, TagQueryOptions,
 };
+use sley_archive::{
+    ArchiveConvert, ArchiveExtras, TarArchiveOptions, ZipArchiveOptions, write_tar_gz_archive_full,
+    write_zip_archive_full,
+};
+use sley_diff_merge::porcelain::{
+    DiffRenderOptions, LineStats, SubmoduleDiffFormat, collect_diff_stat_entries,
+    write_diff_patch_entry,
+};
+use sley_diff_merge::render::LineIndicators;
+use sley_diff_merge::{
+    DiffAlgorithm, DiffNameStatusOptions, WsIgnore, diff_name_status_empty_tree_with_options,
+    diff_name_status_trees_with_options,
+};
 use tokei::{Config as TokeiConfig, LanguageType};
-use tokio::{process::Command, task::JoinSet};
-use tokio_util::io::ReaderStream;
+use tokio::{sync::mpsc, task::JoinSet};
 
 use super::{
     Permission, RepositoryState,
@@ -59,15 +73,11 @@ pub enum SourceArchiveFormat {
 }
 
 impl SourceArchiveFormat {
-    fn git_name(self) -> &'static str {
+    fn extension(self) -> &'static str {
         match self {
             Self::Zip => "zip",
             Self::TarGz => "tar.gz",
         }
-    }
-
-    fn extension(self) -> &'static str {
-        self.git_name()
     }
 
     fn content_type(self) -> &'static str {
@@ -774,59 +784,53 @@ pub async fn source_archive(
         .rev
         .unwrap_or_else(|| repository.default_branch.clone());
     let repository_path = state.repository_path(&repository);
-    let commit_oid = read_git(repository_path.clone(), move |git| {
-        git.peel_to_commit_oid(git.rev_parse(&revision)?)
-            .map(|oid| oid.to_hex())
+    let (commit_oid, tree_oid, mtime) = read_git(repository_path.clone(), move |git| {
+        let commit_oid = git.peel_to_commit_oid(git.rev_parse(&revision)?)?;
+        let commit = git.read_commit(&commit_oid)?;
+        let mtime = commit.committer_signature().map_or(0, |signature| {
+            u64::try_from(signature.time.seconds).unwrap_or_default()
+        });
+        Ok((commit_oid, commit.tree, mtime))
     })
     .await?;
-    let short_oid = &commit_oid[..commit_oid.len().min(8)];
+    let commit_hex = commit_oid.to_hex();
+    let short_oid = &commit_hex[..commit_hex.len().min(8)];
     let archive_name = format!(
         "{}-{short_oid}.{}",
         repository.name,
         query.format.extension()
     );
     let prefix = format!("{}-{short_oid}/", repository.name);
-
-    let mut child = Command::new("git")
-        .arg("--git-dir")
-        .arg(repository_path)
-        .arg("archive")
-        .arg(format!("--format={}", query.format.git_name()))
-        .arg(format!("--prefix={prefix}"))
-        .arg(&commit_oid)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(ApiError::internal)?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| ApiError::internal("git archive stdout was not captured"))?;
-    let display_path = format!("{namespace}/{name}");
-    state.clone().spawn_task(async move {
-        match tokio::time::timeout(std::time::Duration::from_secs(10 * 60), child.wait()).await {
-            Ok(Ok(status)) if status.success() => {}
-            Ok(Ok(status)) => {
-                tracing::error!(
-                    repository = %display_path,
-                    ?status,
-                    "git archive failed"
-                );
-            }
-            Ok(Err(error)) => {
-                tracing::error!(%error, repository = %display_path, "git archive wait failed");
-            }
-            Err(_) => {
-                tracing::warn!(repository = %display_path, "git archive exceeded time limit");
-            }
+    let format = query.format;
+    let (sender, receiver) = mpsc::channel(8);
+    let archive_path = repository_path.clone();
+    let worker_sender = sender.clone();
+    state.spawn_task(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            write_archive_stream(
+                &archive_path,
+                format,
+                commit_oid,
+                tree_oid,
+                mtime,
+                prefix,
+                worker_sender,
+            )
+        })
+        .await;
+        if let Err(error) = result {
+            let _ = sender.blocking_send(Err(ApiError::internal(error)));
+        } else if let Ok(Err(error)) = result {
+            let _ = sender.blocking_send(Err(ApiError::internal(error)));
         }
     });
-
-    let mut response = Response::new(Body::from_stream(ReaderStream::new(stdout)));
+    let stream = stream::unfold(receiver, |mut receiver| async {
+        receiver.recv().await.map(|chunk| (chunk, receiver))
+    });
+    let mut response = Response::new(Body::from_stream(stream));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_static(query.format.content_type()),
+        HeaderValue::from_static(format.content_type()),
     );
     response.headers_mut().insert(
         header::CONTENT_DISPOSITION,
@@ -840,6 +844,108 @@ pub async fn source_archive(
     Ok(response)
 }
 
+const ARCHIVE_CHUNK_BYTES: usize = 64 * 1024;
+
+struct ArchiveStreamWriter {
+    sender: mpsc::Sender<Result<Bytes, ApiError>>,
+    buffer: Vec<u8>,
+}
+
+impl ArchiveStreamWriter {
+    fn flush_chunks(&mut self) -> io::Result<()> {
+        while self.buffer.len() >= ARCHIVE_CHUNK_BYTES {
+            let chunk = Bytes::copy_from_slice(&self.buffer[..ARCHIVE_CHUNK_BYTES]);
+            self.buffer.drain(..ARCHIVE_CHUNK_BYTES);
+            self.sender
+                .blocking_send(Ok(chunk))
+                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "archive client closed"))?;
+        }
+        Ok(())
+    }
+}
+
+impl Write for ArchiveStreamWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let available = ARCHIVE_CHUNK_BYTES - self.buffer.len();
+            let amount = available.min(bytes.len() - offset);
+            self.buffer
+                .extend_from_slice(&bytes[offset..offset + amount]);
+            offset += amount;
+            self.flush_chunks()?;
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if !self.buffer.is_empty() {
+            let chunk = Bytes::from(std::mem::take(&mut self.buffer));
+            self.sender
+                .blocking_send(Ok(chunk))
+                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "archive client closed"))?;
+        }
+        Ok(())
+    }
+}
+
+fn write_archive_stream(
+    path: &Path,
+    archive_format: SourceArchiveFormat,
+    commit_oid: ObjectId,
+    tree_oid: ObjectId,
+    mtime: u64,
+    prefix: String,
+    sender: mpsc::Sender<Result<Bytes, ApiError>>,
+) -> sley::Result<()> {
+    let repository = GitRepository::open_exact_bare(path)?;
+    let config = repository.config()?;
+    let converter = ArchiveConvert::from_tree(
+        path,
+        path,
+        &config,
+        repository.object_database(),
+        repository.object_format(),
+        &tree_oid,
+    )?;
+    let mut writer = ArchiveStreamWriter {
+        sender,
+        buffer: Vec::with_capacity(ARCHIVE_CHUNK_BYTES),
+    };
+    match archive_format {
+        SourceArchiveFormat::Zip => write_zip_archive_full(
+            &mut writer,
+            repository.object_database(),
+            repository.object_format(),
+            &tree_oid,
+            ZipArchiveOptions {
+                prefix: prefix.into_bytes(),
+                mtime,
+                commit_id: Some(commit_oid),
+                ..ZipArchiveOptions::default()
+            },
+            &converter,
+            &ArchiveExtras::default(),
+        )?,
+        SourceArchiveFormat::TarGz => write_tar_gz_archive_full(
+            &mut writer,
+            repository.object_database(),
+            repository.object_format(),
+            &tree_oid,
+            TarArchiveOptions {
+                prefix: prefix.into_bytes(),
+                mtime,
+                commit_id: Some(commit_oid),
+                ..TarArchiveOptions::default()
+            },
+            &converter,
+            &ArchiveExtras::default(),
+            6,
+        )?,
+    }
+    writer.flush()?;
+    Ok(())
+}
 pub async fn history(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -877,7 +983,7 @@ pub async fn history(
         )?;
         let has_next = selected.len() > per_page;
         selected.truncate(per_page);
-        let stats = commit_line_stats(&path, tip, end, &selected);
+        let stats = commit_line_stats(git, &selected);
         let tags = tag_decorations(git)?;
         let commits = selected
             .into_iter()
@@ -937,42 +1043,116 @@ pub async fn diff(
     jar: CookieJar,
 ) -> Result<Json<DiffResponse>, ApiError> {
     let repository = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
-    let repository_path = state.repository_path(&repository);
-    let oid = read_git(repository_path.clone(), move |git| {
-        git.peel_to_commit_oid(git.rev_parse(&revision)?)
-            .map(|oid| oid.to_hex())
+    let path = state.repository_path(&repository);
+    let response = read_git(path, move |git| {
+        let oid = git.peel_to_commit_oid(git.rev_parse(&revision)?)?;
+        let commit = git.read_commit(&oid)?;
+        let options = DiffNameStatusOptions {
+            detect_renames: true,
+            ..DiffNameStatusOptions::default()
+        };
+        let entries = if let Some(parent) = commit.parents.first().copied() {
+            let parent_tree = git.read_commit(&parent)?.tree;
+            diff_name_status_trees_with_options(
+                git.object_database(),
+                git.object_format(),
+                &parent_tree,
+                &commit.tree,
+                options,
+            )?
+        } else {
+            diff_name_status_empty_tree_with_options(
+                git.object_database(),
+                git.object_format(),
+                &commit.tree,
+                options,
+            )?
+        };
+        let mut output = LimitedDiffWriter::new(MAX_DIFF_BYTES);
+        let render_options = DiffRenderOptions {
+            db: git.object_database(),
+            lazy_fetch: None,
+            worktree_root: None,
+            use_worktree_new: false,
+            format: git.object_format(),
+            abbrev: 40,
+            src_prefix: "a/",
+            dst_prefix: "b/",
+            context: 3,
+            userdiff: None,
+            funcname: None,
+            colors: None,
+            word_diff: None,
+            line_indicators: LineIndicators::default(),
+            suppress_blank_empty: false,
+            no_index_contents: None,
+            submodule_format: SubmoduleDiffFormat::Short,
+            submodule_dirt: None,
+            ws_error: None,
+            color_moved: None,
+            interhunk: 0,
+            ws_ignore: WsIgnore::default(),
+            diff_algorithm: DiffAlgorithm::Myers,
+            ignore_blank_lines: false,
+            ignore_regexes: &[],
+            line_ranges: None,
+            indent_heuristic: true,
+            binary: false,
+            anchors: &[],
+            allow_textconv: false,
+            big_file_threshold: 512 * 1024 * 1024,
+            submodule_render: None,
+        };
+        for entry in &entries {
+            write_diff_patch_entry(&mut output, entry, render_options)?;
+        }
+        Ok(DiffResponse {
+            patch: String::from_utf8_lossy(output.as_bytes()).into_owned(),
+            truncated: output.truncated(),
+        })
     })
     .await?;
-    let output = Command::new("git")
-        .arg("--git-dir")
-        .arg(repository_path)
-        .args([
-            "show",
-            "--format=",
-            "--no-ext-diff",
-            "--no-color",
-            "--find-renames",
-            "--unified=3",
-            &oid,
-            "--",
-        ])
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .map_err(ApiError::internal)?;
-    if !output.status.success() {
-        return Err(ApiError::internal(String::from_utf8_lossy(&output.stderr)));
+    Ok(Json(response))
+}
+
+struct LimitedDiffWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+    truncated: bool,
+}
+
+impl LimitedDiffWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(limit.min(64 * 1024)),
+            limit,
+            truncated: false,
+        }
     }
-    let truncated = output.stdout.len() > MAX_DIFF_BYTES;
-    let bytes = if truncated {
-        &output.stdout[..MAX_DIFF_BYTES]
-    } else {
-        &output.stdout
-    };
-    Ok(Json(DiffResponse {
-        patch: String::from_utf8_lossy(bytes).into_owned(),
-        truncated,
-    }))
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    fn truncated(&self) -> bool {
+        self.truncated
+    }
+}
+
+impl Write for LimitedDiffWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let remaining = self.limit.saturating_sub(self.bytes.len());
+        let copied = bytes.len().min(remaining);
+        self.bytes.extend_from_slice(&bytes[..copied]);
+        if copied != bytes.len() {
+            self.truncated = true;
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 pub async fn stats(
@@ -1209,98 +1389,49 @@ fn normalize_browse_path(path: &str) -> Result<String, ApiError> {
 }
 
 fn commit_line_stats(
-    path: &Path,
-    tip: ObjectId,
-    limit: usize,
+    repository: &GitRepository,
     wanted: &[ObjectId],
 ) -> BTreeMap<String, (usize, usize)> {
-    let mut stats = BTreeMap::new();
-    let output = std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(path)
-        .args([
-            "log",
-            "--numstat",
-            "--first-parent",
-            "--find-renames",
-            "--format=%H",
-            "-n",
-            &limit.to_string(),
-            &tip.to_hex(),
-        ])
-        .stdin(Stdio::null())
-        .output();
-    if let Ok(output) = output
-        && output.status.success()
-    {
-        let text = String::from_utf8_lossy(&output.stdout);
-        let mut current_oid: Option<String> = None;
-        let mut insertions = 0usize;
-        let mut deletions = 0usize;
-        for line in text.lines() {
-            if is_commit_marker(line) {
-                if let Some(oid) = current_oid.replace(line.to_owned()) {
-                    stats.insert(oid, (insertions, deletions));
-                }
-                insertions = 0;
-                deletions = 0;
-            } else if let Some((added, removed)) = parse_numstat_line(line) {
-                insertions += added;
-                deletions += removed;
-            }
-        }
-        if let Some(oid) = current_oid {
-            stats.insert(oid, (insertions, deletions));
-        }
-    }
-    for oid in wanted {
-        let hex = oid.to_hex();
-        if stats.contains_key(&hex) {
-            continue;
-        }
-        if let Some((insertions, deletions)) = diff_tree_stats(path, *oid) {
-            stats.insert(hex, (insertions, deletions));
-        }
-    }
-    stats
+    wanted
+        .iter()
+        .filter_map(|oid| diff_tree_stats(repository, *oid).map(|stats| (oid.to_hex(), stats)))
+        .collect()
 }
 
-fn is_commit_marker(line: &str) -> bool {
-    line.len() == 40 && line.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn parse_numstat_line(line: &str) -> Option<(usize, usize)> {
-    let mut fields = line.split('\t');
-    let insertions = fields.next()?.parse().ok()?;
-    let deletions = fields.next()?.parse().ok()?;
-    Some((insertions, deletions))
-}
-
-fn diff_tree_stats(path: &Path, oid: ObjectId) -> Option<(usize, usize)> {
-    let output = std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(path)
-        .args([
-            "diff-tree",
-            "--numstat",
-            "--first-parent",
-            "--find-renames",
-            "--root",
-            "-r",
-            &oid.to_hex(),
-        ])
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let mut insertions = 0usize;
-    let mut deletions = 0usize;
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if let Some((added, removed)) = parse_numstat_line(line) {
-            insertions += added;
-            deletions += removed;
+fn diff_tree_stats(repository: &GitRepository, oid: ObjectId) -> Option<(usize, usize)> {
+    let commit = repository.read_commit(&oid).ok()?;
+    let options = DiffNameStatusOptions {
+        detect_renames: true,
+        ..DiffNameStatusOptions::default()
+    };
+    let entries = if let Some(parent) = commit.parents.first().copied() {
+        let parent_tree = repository.read_commit(&parent).ok()?.tree;
+        diff_name_status_trees_with_options(
+            repository.object_database(),
+            repository.object_format(),
+            &parent_tree,
+            &commit.tree,
+            options,
+        )
+        .ok()?
+    } else {
+        diff_name_status_empty_tree_with_options(
+            repository.object_database(),
+            repository.object_format(),
+            &commit.tree,
+            options,
+        )
+        .ok()?
+    };
+    let stats =
+        collect_diff_stat_entries(&entries, repository.object_database(), None, false, None)
+            .ok()?;
+    let mut insertions = 0;
+    let mut deletions = 0;
+    for stat in stats {
+        if let LineStats::Text { inserted, deleted } = stat.stats {
+            insertions += inserted;
+            deletions += deleted;
         }
     }
     Some((insertions, deletions))
@@ -1573,20 +1704,31 @@ async fn attach_release_refs(
     Ok(())
 }
 
-/// Commits reachable from `to` but not `from`, or `None` when git cannot say.
+/// Commits reachable from `to` but not `from`, or `None` when either revision
+/// cannot be resolved.
 async fn commits_between(path: &Path, from: &str, to: &str) -> Option<usize> {
-    let output = Command::new("git")
-        .arg("--git-dir")
-        .arg(path)
-        .args(["rev-list", "--count", &format!("{from}..{to}")])
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+    let path = path.to_owned();
+    let from = from.to_owned();
+    let to = to.to_owned();
+    read_git(path, move |repository| {
+        let mut selection = sley_rev::RevisionSelection::new();
+        selection.add_spec(format!("{from}..{to}"))?;
+        let resolved = selection.resolve(
+            repository.git_dir(),
+            repository.object_format(),
+            repository.object_database(),
+        )?;
+        Ok(resolved
+            .selected_commit_oids(
+                repository.git_dir(),
+                repository.object_format(),
+                repository.object_database(),
+                false,
+            )?
+            .len())
+    })
+    .await
+    .ok()
 }
 
 /// Order ref names so embedded numbers compare numerically: `v0.9.0` sorts

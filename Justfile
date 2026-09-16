@@ -22,18 +22,18 @@ install:
 frontend-build:
     bun run --cwd frontend build
 
-# Build the frontend, then the Rust application.
+# Build the frontend, server, and CLI client.
 build: frontend-build
-    cargo build
+    cargo build --workspace
 
 # Check frontend types and Rust compilation.
 check:
     bun run --cwd frontend check
-    cargo check
+    cargo check --workspace
 
-# Run the backend test suite.
+# Run the Rust workspace test suite.
 test:
-    cargo test
+    cargo test --workspace
 
 # Run the frontend test suite.
 frontend-test:

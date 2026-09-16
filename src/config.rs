@@ -81,11 +81,6 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum GitadelCommand {
-    /// Manage repositories through the Gitadel HTTP API.
-    Repo {
-        #[command(subcommand)]
-        command: RepositoryCommand,
-    },
     /// Create or restore an offline integrity-checked backup.
     Backup {
         #[command(subcommand)]
@@ -176,45 +171,6 @@ pub enum BackupCommand {
         /// Object key printed by `backup create-s3`.
         #[arg(value_name = "KEY")]
         key: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum RepositoryCommand {
-    /// Create an empty repository.
-    Create {
-        /// Repository path in namespace/name form.
-        #[arg(value_name = "NAMESPACE/NAME")]
-        repository: String,
-
-        /// Gitadel HTTP origin.
-        #[arg(
-            long,
-            env = "GITADEL_SERVER",
-            default_value = "http://127.0.0.1:3000",
-            value_name = "URL"
-        )]
-        server: Url,
-
-        /// API token with write scope.
-        #[arg(long, env = "GITADEL_TOKEN", hide_env_values = true)]
-        token: String,
-
-        /// Keep the repository visible only to authorized users.
-        #[arg(long, conflicts_with = "public")]
-        private: bool,
-
-        /// Make the repository publicly readable. This is the default.
-        #[arg(long, conflicts_with = "private")]
-        public: bool,
-
-        /// Short repository description.
-        #[arg(long, value_name = "TEXT")]
-        description: Option<String>,
-
-        /// Git object format.
-        #[arg(long, default_value = "sha1", value_parser = ["sha1", "sha256"])]
-        object_format: String,
     },
 }
 

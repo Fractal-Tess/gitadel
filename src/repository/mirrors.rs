@@ -1,9 +1,4 @@
-use std::{
-    net::SocketAddr,
-    path::{Path, PathBuf},
-    process::Stdio,
-    time::Duration,
-};
+use std::{path::Path, time::Duration};
 
 use axum::{
     Json,
@@ -11,39 +6,30 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use axum_extra::extract::cookie::CookieJar;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set,
     TransactionTrait, sea_query::Query,
 };
 use serde::{Deserialize, Serialize};
-use tokio::{
-    fs,
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::{TcpListener, TcpStream, lookup_host},
-    process::Command,
-    task::JoinHandle,
-};
-use url::{Host, Url};
+use tokio::fs;
+use url::Url;
 use uuid::Uuid;
 
-use super::{Permission, RepositoryState, github_mirror};
+use super::{Permission, RepositoryState, github_mirror, native_remote};
 use crate::{
-    blob_store::{BlobDigest, ObjectPrefix, lfs_object_key},
+    blob_store::ObjectPrefix,
     entity::{
         issue_comment, namespace_mirror_identity, repository, repository_issue, repository_mirror,
         repository_topic,
     },
     identity::{ApiError, SCOPE_WRITE, load_mirror_identity_secret, mark_repository_identity_used},
-    network::is_public_ip,
     schedule,
 };
 
 const MAX_REMOTE_URL_LENGTH: usize = 2_048;
 const MAX_SCHEDULE_LENGTH: usize = 255;
 const MAX_ERROR_LENGTH: usize = 2_048;
-const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const TEMPORARY_FILE_MAX_AGE: Duration = Duration::from_secs(12 * 60);
 const LFS_IMPORT_STAGING_PREFIX: &str = ".gitadel-import-";
 
@@ -176,51 +162,30 @@ pub(super) async fn initialize(
         .acquire()
         .await
         .map_err(|_| ApiError::internal("mirror synchronization is unavailable"))?;
-    let mut command = Command::new("git");
-    command
-        .args(["clone", "--mirror", "--no-local"])
-        .arg(&mirror.remote_url)
-        .arg(path)
-        .stdin(Stdio::null());
-    let _temporary_files = apply_git_environment(
-        state,
-        &mut command,
-        path,
-        &mirror.remote_url,
-        &mirror.authentication,
-        true,
-        None,
-        None,
-    )
-    .await?;
+    let native_auth = native_remote::NativeAuthentication {
+        username: mirror
+            .authentication
+            .basic
+            .as_ref()
+            .map(|value| value.0.clone()),
+        secret: mirror
+            .authentication
+            .basic
+            .as_ref()
+            .map(|value| value.1.clone()),
+        ssh_private_key: mirror.authentication.ssh_private_key.clone(),
+        ssh_known_hosts: None,
+    };
     if let Some(id) = mirror.identity_id {
         mark_repository_identity_used(state.identity(), &mirror.namespace, id, Utc::now()).await?;
     }
-    run_git(&mut command).await.map_err(|error| {
-        ApiError::bad_request(format!("Could not clone the source repository: {error}"))
-    })?;
-
-    let object_format = git_output(path, &["rev-parse", "--show-object-format"])
-        .await
-        .map_err(ApiError::internal)?;
-    if object_format != "sha1" && object_format != "sha256" {
-        return Err(ApiError::internal(format!(
-            "Git returned unsupported object format {object_format}"
-        )));
-    }
-    let default_branch = match git_output(path, &["symbolic-ref", "--short", "HEAD"]).await {
-        Ok(branch) if !branch.is_empty() => branch,
-        _ => {
-            set_symbolic_head(path, "main").await?;
-            "main".to_owned()
-        }
-    };
+    let initialized =
+        native_remote::initialize(state, path, &mirror.remote_url, native_auth).await?;
     Ok(MirrorInitialization {
-        object_format,
-        default_branch,
+        object_format: initialized.object_format,
+        default_branch: initialized.default_branch,
     })
 }
-
 pub(super) async fn initialize_import(
     state: &RepositoryState,
     path: &Path,
@@ -239,16 +204,22 @@ pub(super) async fn initialize_import(
         .acquire()
         .await
         .map_err(|_| ApiError::internal("repository importing is unavailable"))?;
-    let authentication = GitAuthentication {
-        basic: match (&authentication.username, &authentication.secret) {
-            (Some(username), Some(secret)) => Some((username.clone(), secret.clone())),
-            _ => None,
-        },
+    let native_auth = native_remote::NativeAuthentication {
+        username: authentication.username.clone(),
+        secret: authentication.secret.clone(),
         ssh_private_key: authentication.ssh_private_key.clone(),
-        api_token: None,
+        ssh_known_hosts: if transport == RemoteTransport::Ssh
+            && github_mirror::identify(&remote_url).is_some()
+        {
+            Some(github_mirror::known_hosts(state).await?)
+        } else {
+            None
+        },
     };
     match transport {
-        RemoteTransport::Https if authentication.basic.is_none() => {
+        RemoteTransport::Https
+            if authentication.username.is_none() || authentication.secret.is_none() =>
+        {
             return Err(ApiError::bad_request(
                 "HTTPS imports require a token or username and password identity.",
             ));
@@ -260,68 +231,18 @@ pub(super) async fn initialize_import(
         }
         _ => {}
     }
-    let mut command = Command::new("git");
-    command
-        .args(["clone", "--mirror", "--no-local"])
-        .arg(&remote_url)
-        .arg(path)
-        .stdin(Stdio::null());
-    let _temporary_files = apply_git_environment(
-        state,
-        &mut command,
-        path,
-        &remote_url,
-        &authentication,
-        false,
-        None,
-        None,
-    )
-    .await?;
-    run_git(&mut command).await.map_err(|error| {
-        ApiError::bad_request(format!("Could not import the source repository: {error}"))
-    })?;
-
-    let staging = state.lfs_import_staging_path();
-    let lfs_result = fetch_and_promote_lfs(
-        state,
-        storage_key,
-        path,
-        &staging,
-        &remote_url,
-        &authentication,
-    )
-    .await;
-    if let Err(error) = lfs_result {
+    let initialized =
+        native_remote::initialize(state, path, &remote_url, native_auth.clone()).await?;
+    if let Err(error) =
+        native_remote::fetch_lfs(state, storage_key, path, &remote_url, native_auth).await
+    {
         cleanup_imported_lfs(state, storage_key).await;
         return Err(error);
     }
-
-    let initialized = async {
-        let object_format = git_output(path, &["rev-parse", "--show-object-format"])
-            .await
-            .map_err(ApiError::internal)?;
-        if object_format != "sha1" && object_format != "sha256" {
-            return Err(ApiError::internal(format!(
-                "Git returned unsupported object format {object_format}"
-            )));
-        }
-        let default_branch = match git_output(path, &["symbolic-ref", "--short", "HEAD"]).await {
-            Ok(branch) if !branch.is_empty() => branch,
-            _ => {
-                set_symbolic_head(path, "main").await?;
-                "main".to_owned()
-            }
-        };
-        Ok(MirrorInitialization {
-            object_format,
-            default_branch,
-        })
-    }
-    .await;
-    if initialized.is_err() {
-        cleanup_imported_lfs(state, storage_key).await;
-    }
-    initialized
+    Ok(MirrorInitialization {
+        object_format: initialized.object_format,
+        default_branch: initialized.default_branch,
+    })
 }
 
 pub(super) async fn insert(
@@ -676,34 +597,18 @@ async fn synchronize_inner(
         github.is_some(),
     )
     .await?;
-    let mut command = Command::new("git");
-    command
-        .arg("--git-dir")
-        .arg(&path)
-        .args([
-            "fetch",
-            "--prune",
-            "--prune-tags",
-            "origin",
-            "+refs/*:refs/*",
-        ])
-        .stdin(Stdio::null());
-    let _temporary_files = apply_git_environment(
-        state,
-        &mut command,
-        &path,
-        &mirror.remote_url,
-        &authentication,
-        true,
-        None,
-        None,
-    )
-    .await?;
+    let native_auth = native_remote::NativeAuthentication {
+        username: authentication.basic.as_ref().map(|value| value.0.clone()),
+        secret: authentication.basic.as_ref().map(|value| value.1.clone()),
+        ssh_private_key: authentication.ssh_private_key.clone(),
+        ssh_known_hosts: None,
+    };
     if let Some(id) = mirror.identity_id {
         mark_repository_identity_used(state.identity(), &repository.namespace, id, attempted_at)
             .await?;
     }
-    let sync_result = run_git(&mut command).await;
+    let sync_result =
+        native_remote::synchronize(state, &path, &mirror.remote_url, native_auth).await;
     let metadata_result = match (&sync_result, github.as_ref()) {
         (Ok(()), Some(github)) => Some(
             github_mirror::synchronize(
@@ -735,7 +640,7 @@ async fn synchronize_inner(
             active.last_error = Set(None);
         }
         Err(error) => {
-            active.last_error = Set(Some(truncate(error, MAX_ERROR_LENGTH)));
+            active.last_error = Set(Some(truncate(&error.to_string(), MAX_ERROR_LENGTH)));
         }
     }
     if let Some(metadata_result) = &metadata_result {
@@ -932,183 +837,6 @@ pub(super) fn validate_direct_import_identity(
     Ok(remote_url)
 }
 
-fn import_lfs_endpoint(remote_url: &str) -> Result<String, ApiError> {
-    let mut url = Url::parse(remote_url)
-        .map_err(|_| ApiError::internal("import remote URL is not a valid URL"))?;
-    if url.scheme() == "ssh" {
-        url.set_scheme("https")
-            .map_err(|_| ApiError::internal("could not derive the Git LFS endpoint"))?;
-        url.set_username("")
-            .map_err(|_| ApiError::internal("could not derive the Git LFS endpoint"))?;
-    }
-    let path = url.path().trim_end_matches('/');
-    url.set_path(&format!("{path}/info/lfs"));
-    url.set_query(None);
-    url.set_fragment(None);
-    Ok(url.to_string())
-}
-
-async fn fetch_and_promote_lfs(
-    state: &RepositoryState,
-    storage_key: Uuid,
-    repository_path: &Path,
-    staging: &Path,
-    remote_url: &str,
-    authentication: &GitAuthentication,
-) -> Result<(), ApiError> {
-    let result = async {
-        fs::create_dir_all(staging)
-            .await
-            .map_err(ApiError::internal)?;
-        let endpoint = import_lfs_endpoint(remote_url)?;
-        let mut command = Command::new("git");
-        command
-            .arg("--git-dir")
-            .arg(repository_path)
-            .args(["lfs", "fetch", "--all", "origin"])
-            .stdin(Stdio::null());
-        let _temporary_files = apply_git_environment(
-            state,
-            &mut command,
-            repository_path,
-            remote_url,
-            authentication,
-            false,
-            Some(&endpoint),
-            Some(staging),
-        )
-        .await?;
-        run_git(&mut command).await.map_err(|error| {
-            ApiError::bad_request(format!("Could not import Git LFS objects: {error}"))
-        })?;
-        promote_lfs_objects(state, storage_key, staging).await
-    }
-    .await;
-    cleanup_lfs_path(staging).await;
-    result
-}
-
-async fn promote_lfs_objects(
-    state: &RepositoryState,
-    storage_key: Uuid,
-    staging: &Path,
-) -> Result<(), ApiError> {
-    let _operation_guard = state.lfs_operation_guard().await;
-    let objects = staging.join("objects");
-    if !fs::try_exists(&objects).await.map_err(ApiError::internal)? {
-        return Ok(());
-    }
-
-    let mut first_level = fs::read_dir(&objects).await.map_err(ApiError::internal)?;
-    while let Some(first) = first_level.next_entry().await.map_err(ApiError::internal)? {
-        let first_name = first.file_name();
-        let Some(first_name) = first_name.to_str() else {
-            return Err(ApiError::internal(
-                "Git LFS produced an invalid object path",
-            ));
-        };
-        if !is_hex_component(first_name) {
-            return Err(ApiError::internal(
-                "Git LFS produced an invalid object path",
-            ));
-        }
-        if !first
-            .file_type()
-            .await
-            .map_err(ApiError::internal)?
-            .is_dir()
-        {
-            return Err(ApiError::internal(
-                "Git LFS produced an invalid object path",
-            ));
-        }
-
-        let mut second_level = fs::read_dir(first.path())
-            .await
-            .map_err(ApiError::internal)?;
-        while let Some(second) = second_level
-            .next_entry()
-            .await
-            .map_err(ApiError::internal)?
-        {
-            let second_name = second.file_name();
-            let Some(second_name) = second_name.to_str() else {
-                return Err(ApiError::internal(
-                    "Git LFS produced an invalid object path",
-                ));
-            };
-            if !is_hex_component(second_name)
-                || !second
-                    .file_type()
-                    .await
-                    .map_err(ApiError::internal)?
-                    .is_dir()
-            {
-                return Err(ApiError::internal(
-                    "Git LFS produced an invalid object path",
-                ));
-            }
-
-            let mut objects_level = fs::read_dir(second.path())
-                .await
-                .map_err(ApiError::internal)?;
-            while let Some(object) = objects_level
-                .next_entry()
-                .await
-                .map_err(ApiError::internal)?
-            {
-                let oid = object.file_name();
-                let Some(oid) = oid.to_str() else {
-                    return Err(ApiError::internal(
-                        "Git LFS produced an invalid object path",
-                    ));
-                };
-                if !is_lfs_oid(oid)
-                    || !object
-                        .file_type()
-                        .await
-                        .map_err(ApiError::internal)?
-                        .is_file()
-                {
-                    return Err(ApiError::internal(
-                        "Git LFS produced an invalid object path",
-                    ));
-                }
-                if &oid[..2] != first_name || &oid[2..4] != second_name {
-                    return Err(ApiError::internal(
-                        "Git LFS produced an invalid object path",
-                    ));
-                }
-
-                let source = object.path();
-                let expected = oid.parse::<BlobDigest>().map_err(ApiError::internal)?;
-                let key = lfs_object_key(storage_key, oid).map_err(ApiError::internal)?;
-                let file = fs::File::open(&source).await.map_err(ApiError::internal)?;
-                state
-                    .lfs_store()
-                    .put_verified(&key, expected, Box::pin(file))
-                    .await
-                    .map_err(ApiError::internal)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn is_hex_component(value: &str) -> bool {
-    value.len() == 2
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn is_lfs_oid(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
 async fn cleanup_imported_lfs(state: &RepositoryState, storage_key: Uuid) {
     let _operation_guard = state.lfs_operation_guard().await;
     let prefix = match ObjectPrefix::new(storage_key.to_string()) {
@@ -1129,14 +857,6 @@ async fn cleanup_imported_lfs(state: &RepositoryState, storage_key: Uuid) {
         if let Err(error) = state.lfs_store().delete(&object.key).await {
             tracing::error!(%error, key = %object.key, "could not clean up imported LFS object");
         }
-    }
-}
-
-async fn cleanup_lfs_path(path: &Path) {
-    if let Err(error) = fs::remove_dir_all(path).await
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::error!(%error, path = %path.display(), "could not clean up Git LFS directory");
     }
 }
 
@@ -1249,25 +969,6 @@ fn normalize_schedule(
     Ok((Some(schedule), Some(next)))
 }
 
-struct TemporaryGitFiles {
-    paths: Vec<PathBuf>,
-    proxy: Option<JoinHandle<()>>,
-}
-
-impl Drop for TemporaryGitFiles {
-    fn drop(&mut self) {
-        for path in &self.paths {
-            if let Err(error) = std::fs::remove_file(path)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                tracing::warn!(%error, path = %path.display(), "could not remove temporary mirror credential");
-            }
-        }
-        if let Some(proxy) = self.proxy.take() {
-            proxy.abort();
-        }
-    }
-}
 pub(super) async fn cleanup_temporary_files(directory: &Path) -> Result<(), std::io::Error> {
     let mut entries = tokio::fs::read_dir(directory).await?;
     while let Some(entry) = entries.next_entry().await? {
@@ -1311,352 +1012,6 @@ pub(super) async fn cleanup_lfs_staging(directory: &Path) -> Result<(), std::io:
     Ok(())
 }
 
-/// Builds the git config key that scopes `http.extraHeader` to the mirror's
-/// own remote origin (for example `http.https://github.com/.extraHeader`), so
-/// stored credentials are never sent to any other host git may contact.
-/// An explicit non-default port is serialized into the key; without it git's
-/// urlmatch would not apply the header to `https://host:8443/...` remotes.
-fn basic_auth_header_key(remote_url: &str) -> Result<String, ApiError> {
-    let url = Url::parse(remote_url)
-        .map_err(|_| ApiError::internal("mirror remote URL is not a valid URL"))?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| ApiError::internal("mirror remote URL has no host"))?;
-    let origin = match url.port() {
-        Some(port) => format!("{}://{}:{}", url.scheme(), host, port),
-        None => format!("{}://{}", url.scheme(), host),
-    };
-    Ok(format!("http.{origin}/.extraHeader"))
-}
-async fn resolve_https_remote(remote_url: &str) -> Result<Option<HttpsTarget>, ApiError> {
-    if remote_url.starts_with("git@github.com:") {
-        return Ok(None);
-    }
-    let url = Url::parse(remote_url)
-        .map_err(|_| ApiError::internal("mirror remote URL is not a valid URL"))?;
-    if url.scheme() != "https" {
-        return Ok(None);
-    }
-    let host = match url.host() {
-        Some(Host::Domain(host)) => host,
-        _ => {
-            return Err(ApiError::bad_request(
-                "Mirror HTTPS URLs must use a public DNS hostname.",
-            ));
-        }
-    };
-    let normalized_host = host.trim_end_matches('.');
-    if normalized_host.eq_ignore_ascii_case("localhost")
-        || normalized_host.to_ascii_lowercase().ends_with(".localhost")
-    {
-        return Err(ApiError::bad_request(
-            "Mirror HTTPS URLs must use a public DNS hostname.",
-        ));
-    }
-    let port = url.port_or_known_default().unwrap_or(443);
-    let resolved = lookup_host((host, port)).await.map_err(|error| {
-        ApiError::bad_request(format!("Could not resolve mirror host: {error}"))
-    })?;
-    let mut addresses = Vec::new();
-    for address in resolved {
-        if !is_public_ip(address.ip()) {
-            return Err(ApiError::bad_request(
-                "Mirror hosts must not resolve to private or reserved network addresses.",
-            ));
-        }
-        if !addresses.contains(&address) {
-            addresses.push(address);
-        }
-    }
-    if addresses.is_empty() {
-        return Err(ApiError::bad_request(
-            "Mirror host did not resolve to a network address.",
-        ));
-    }
-    Ok(Some(HttpsTarget {
-        host: normalized_host.to_ascii_lowercase(),
-        port,
-        addresses,
-    }))
-}
-
-#[derive(Clone)]
-struct HttpsTarget {
-    host: String,
-    port: u16,
-    addresses: Vec<SocketAddr>,
-}
-
-async fn start_https_proxy(target: HttpsTarget) -> Result<(String, JoinHandle<()>), ApiError> {
-    let listener = TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .map_err(|error| ApiError::internal(format!("could not bind mirror proxy: {error}")))?;
-    let address = listener.local_addr().map_err(|error| {
-        ApiError::internal(format!("could not read mirror proxy address: {error}"))
-    })?;
-    let task = tokio::spawn(async move {
-        loop {
-            let (connection, _) = match listener.accept().await {
-                Ok(accepted) => accepted,
-                Err(error) => {
-                    tracing::warn!(%error, "mirror HTTPS proxy stopped accepting connections");
-                    return;
-                }
-            };
-            let target = target.clone();
-            tokio::spawn(async move {
-                if let Err(error) = proxy_https_connection(connection, target).await {
-                    tracing::debug!(%error, "mirror HTTPS proxy rejected a connection");
-                }
-            });
-        }
-    });
-    Ok((format!("http://{address}"), task))
-}
-
-async fn proxy_https_connection(mut client: TcpStream, target: HttpsTarget) -> Result<(), String> {
-    let request = tokio::time::timeout(Duration::from_secs(10), read_proxy_request(&mut client))
-        .await
-        .map_err(|_| "proxy request timed out".to_owned())??;
-    let request_line = request
-        .split_once("\r\n")
-        .map(|(line, _)| line)
-        .unwrap_or(request.as_str());
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next();
-    let authority = parts.next();
-    let version = parts.next();
-    if method != Some("CONNECT")
-        || !version.is_some_and(|version| version.starts_with("HTTP/"))
-        || parts.next().is_some()
-    {
-        let _ = client
-            .write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")
-            .await;
-        return Err("only HTTPS CONNECT requests are allowed".to_owned());
-    }
-    let (host, port) = authority
-        .and_then(|authority| authority.rsplit_once(':'))
-        .and_then(|(host, port)| port.parse::<u16>().ok().map(|port| (host, port)))
-        .ok_or_else(|| "proxy CONNECT authority is invalid".to_owned())?;
-    if !host
-        .trim_end_matches('.')
-        .eq_ignore_ascii_case(&target.host)
-        || port != target.port
-    {
-        let _ = client
-            .write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")
-            .await;
-        return Err("proxy CONNECT target is not the mirror origin".to_owned());
-    }
-
-    let mut upstream = tokio::time::timeout(Duration::from_secs(10), async {
-        for address in target.addresses {
-            if let Ok(upstream) = TcpStream::connect(address).await {
-                return Some(upstream);
-            }
-        }
-        None
-    })
-    .await
-    .map_err(|_| "proxy upstream connection timed out".to_owned())?
-    .ok_or_else(|| "proxy could not connect to the mirror origin".to_owned())?;
-    client
-        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        .await
-        .map_err(|error| error.to_string())?;
-    tokio::io::copy_bidirectional(&mut client, &mut upstream)
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(())
-}
-
-async fn read_proxy_request(stream: &mut TcpStream) -> Result<String, String> {
-    const MAX_PROXY_REQUEST_LENGTH: usize = 16 * 1024;
-    let mut request = Vec::with_capacity(1024);
-    loop {
-        let mut chunk = [0_u8; 1024];
-        let read = stream
-            .read(&mut chunk)
-            .await
-            .map_err(|error| error.to_string())?;
-        if read == 0 {
-            return Err("proxy client closed before sending a request".to_owned());
-        }
-        request.extend_from_slice(&chunk[..read]);
-        if request.len() > MAX_PROXY_REQUEST_LENGTH {
-            return Err("proxy request headers are too large".to_owned());
-        }
-        if request.windows(4).any(|window| window == b"\r\n\r\n") {
-            return String::from_utf8(request)
-                .map_err(|_| "proxy request headers are not UTF-8".to_owned());
-        }
-    }
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "arguments describe one concrete Git process environment"
-)]
-async fn apply_git_environment(
-    state: &RepositoryState,
-    command: &mut Command,
-    repository_path: &Path,
-    remote_url: &str,
-    authentication: &GitAuthentication,
-    enforce_public_https: bool,
-    lfs_endpoint: Option<&str>,
-    lfs_storage: Option<&Path>,
-) -> Result<TemporaryGitFiles, ApiError> {
-    command.env("GIT_TERMINAL_PROMPT", "0");
-    for variable in [
-        "ALL_PROXY",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "NO_PROXY",
-        "all_proxy",
-        "http_proxy",
-        "https_proxy",
-        "no_proxy",
-    ] {
-        command.env_remove(variable);
-    }
-
-    let mut temporary_files = TemporaryGitFiles {
-        paths: Vec::new(),
-        proxy: None,
-    };
-    let mut git_config = vec![
-        ("credential.helper".to_owned(), String::new()),
-        ("http.followRedirects".to_owned(), "false".to_owned()),
-    ];
-    if enforce_public_https {
-        if let Some(target) = resolve_https_remote(remote_url).await? {
-            let (proxy, task) = start_https_proxy(target).await?;
-            temporary_files.proxy = Some(task);
-            git_config.push(("http.proxy".to_owned(), proxy));
-        } else {
-            git_config.push(("http.proxy".to_owned(), String::new()));
-        }
-    } else {
-        git_config.push(("http.proxy".to_owned(), String::new()));
-    }
-    if let Some(lfs_endpoint) = lfs_endpoint {
-        git_config.push(("lfs.url".to_owned(), lfs_endpoint.to_owned()));
-        git_config.push(("remote.origin.lfsurl".to_owned(), lfs_endpoint.to_owned()));
-        git_config.push(("lfs.basictransfersonly".to_owned(), "true".to_owned()));
-    }
-    if let Some(lfs_storage) = lfs_storage {
-        let lfs_storage = lfs_storage
-            .to_str()
-            .ok_or_else(|| ApiError::internal("Git LFS staging path is not valid UTF-8"))?;
-        git_config.push(("lfs.storage".to_owned(), lfs_storage.to_owned()));
-    }
-    if let Some((username, secret)) = authentication.basic.as_ref() {
-        let credentials = STANDARD.encode(format!("{username}:{secret}"));
-        git_config.push((
-            basic_auth_header_key(remote_url)?,
-            format!("Authorization: Basic {credentials}"),
-        ));
-    }
-    command.env("GIT_CONFIG_COUNT", git_config.len().to_string());
-    for (index, (key, value)) in git_config.into_iter().enumerate() {
-        command.env(format!("GIT_CONFIG_KEY_{index}"), key);
-        command.env(format!("GIT_CONFIG_VALUE_{index}"), value);
-    }
-
-    if let Some(private_key) = authentication.ssh_private_key.as_deref() {
-        let directory = repository_path
-            .parent()
-            .ok_or_else(|| ApiError::internal("mirror repository path has no parent"))?;
-        let nonce = Uuid::new_v4();
-        let key_path = directory.join(format!(".gitadel-mirror-{nonce}.key"));
-        let known_hosts_path = directory.join(format!(".gitadel-mirror-{nonce}.known-hosts"));
-        write_private_file(&key_path, private_key.as_bytes()).await?;
-        temporary_files.paths.push(key_path.clone());
-        let known_hosts = github_mirror::known_hosts(state).await?;
-        write_private_file(&known_hosts_path, known_hosts.as_bytes()).await?;
-        temporary_files.paths.push(known_hosts_path.clone());
-        let key = shlex::try_quote(
-            key_path
-                .to_str()
-                .ok_or_else(|| ApiError::internal("SSH key path is not valid UTF-8"))?,
-        )
-        .map_err(ApiError::internal)?;
-        let known_hosts = shlex::try_quote(
-            known_hosts_path
-                .to_str()
-                .ok_or_else(|| ApiError::internal("known-hosts path is not valid UTF-8"))?,
-        )
-        .map_err(ApiError::internal)?;
-        command.env(
-            "GIT_SSH_COMMAND",
-            format!(
-                "ssh -i {key} -o BatchMode=yes -o IdentitiesOnly=yes -o PasswordAuthentication=no -o StrictHostKeyChecking=yes -o UserKnownHostsFile={known_hosts}"
-            ),
-        );
-    }
-    Ok(temporary_files)
-}
-
-async fn write_private_file(path: &Path, content: &[u8]) -> Result<(), ApiError> {
-    let mut options = tokio::fs::OpenOptions::new();
-    options.write(true).create_new(true).mode(0o600);
-    let mut file = options.open(path).await.map_err(|error| {
-        ApiError::internal(format!("could not create {}: {error}", path.display()))
-    })?;
-    file.write_all(content).await.map_err(|error| {
-        ApiError::internal(format!("could not write {}: {error}", path.display()))
-    })?;
-    file.flush()
-        .await
-        .map_err(|error| ApiError::internal(format!("could not flush {}: {error}", path.display())))
-}
-
-async fn run_git(command: &mut Command) -> Result<(), String> {
-    command.kill_on_drop(true);
-    let output = tokio::time::timeout(GIT_COMMAND_TIMEOUT, command.output())
-        .await
-        .map_err(|_| "Git command timed out after 10 minutes.".to_owned())?
-        .map_err(|error| error.to_string())?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        Err(if message.is_empty() {
-            format!("Git exited with status {}.", output.status)
-        } else {
-            truncate(&message, MAX_ERROR_LENGTH)
-        })
-    }
-}
-
-async fn git_output(path: &std::path::Path, arguments: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("--git-dir")
-        .arg(path)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .map_err(|error| error.to_string())?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
-    }
-}
-
-async fn set_symbolic_head(path: &std::path::Path, branch: &str) -> Result<(), ApiError> {
-    let mut command = Command::new("git");
-    command
-        .arg("--git-dir")
-        .arg(path)
-        .args(["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")])
-        .stdin(Stdio::null());
-    run_git(&mut command).await.map_err(ApiError::internal)
-}
-
 fn truncate(value: &str, maximum: usize) -> String {
     if value.len() <= maximum {
         return value.to_owned();
@@ -1670,17 +1025,12 @@ fn truncate(value: &str, maximum: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::network::is_public_ip;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-    use tokio::{
-        io::{AsyncReadExt as _, AsyncWriteExt as _},
-        net::TcpStream,
-    };
-
     use super::{
-        HttpsTarget, RemoteTransport, import_lfs_endpoint, is_public_ip, resolve_https_remote,
-        same_origin, start_https_proxy, validate_direct_import_identity,
-        validate_import_remote_url, validate_remote_url,
+        RemoteTransport, same_origin, validate_direct_import_identity, validate_import_remote_url,
+        validate_remote_url,
     };
 
     #[test]
@@ -1780,16 +1130,6 @@ mod tests {
     }
 
     #[test]
-    fn import_lfs_endpoint_appends_info_lfs_to_clone_path() {
-        let result = import_lfs_endpoint("https://source.example/team/source.git");
-
-        assert_eq!(
-            result.unwrap(),
-            "https://source.example/team/source.git/info/lfs"
-        );
-    }
-
-    #[test]
     fn public_ip_filter_rejects_internal_and_reserved_networks() {
         for address in [
             IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
@@ -1806,35 +1146,6 @@ mod tests {
         assert!(is_public_ip(IpAddr::V6(
             "2606:50c0:8000::153".parse().unwrap()
         )));
-    }
-
-    #[tokio::test]
-    async fn https_mirror_rejects_ip_literals_before_git_runs() {
-        let result = resolve_https_remote("https://127.0.0.1/repository.git").await;
-
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn https_proxy_rejects_secondary_origins() {
-        let target = HttpsTarget {
-            host: "allowed.example".to_owned(),
-            port: 443,
-            addresses: Vec::new(),
-        };
-        let (proxy, task) = start_https_proxy(target).await.unwrap();
-        let mut client = TcpStream::connect(proxy.strip_prefix("http://").unwrap())
-            .await
-            .unwrap();
-        client
-            .write_all(b"CONNECT internal.example:443 HTTP/1.1\r\n\r\n")
-            .await
-            .unwrap();
-        let mut response = [0_u8; 128];
-        let read = client.read(&mut response).await.unwrap();
-
-        assert!(response[..read].starts_with(b"HTTP/1.1 403 Forbidden"));
-        task.abort();
     }
 
     mod conversion {

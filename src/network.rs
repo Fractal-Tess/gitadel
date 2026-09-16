@@ -23,16 +23,24 @@ pub fn normalize_public_https_origin(value: &str) -> Result<Url, String> {
     Ok(url)
 }
 
-pub async fn pinned_public_https_client(origin: &Url) -> Result<Client, String> {
+pub async fn pinned_public_https_client(
+    origin: &Url,
+    timeout: Duration,
+    redirects: Policy,
+) -> Result<Client, String> {
     let host = match origin.host() {
-        Some(Host::Domain(host)) => host.trim_end_matches('.'),
+        Some(Host::Domain(host)) => host,
         _ => return Err("Git server URL must use a public DNS hostname.".to_owned()),
     };
-    if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
+    let normalized_host = host.trim_end_matches('.');
+    if origin.scheme() != "https"
+        || normalized_host.eq_ignore_ascii_case("localhost")
+        || normalized_host.to_ascii_lowercase().ends_with(".localhost")
+    {
         return Err("Git server URL must use a public DNS hostname.".to_owned());
     }
     let port = origin.port_or_known_default().unwrap_or(443);
-    let addresses = lookup_host((host, port))
+    let addresses = lookup_host((normalized_host, port))
         .await
         .map_err(|error| format!("Could not resolve git server: {error}"))?
         .collect::<Vec<_>>();
@@ -42,9 +50,10 @@ pub async fn pinned_public_https_client(origin: &Url) -> Result<Client, String> 
         );
     }
     Client::builder()
-        .redirect(Policy::none())
-        .timeout(Duration::from_secs(20))
-        .resolve(host, addresses[0])
+        .no_proxy()
+        .redirect(redirects)
+        .timeout(timeout)
+        .resolve_to_addrs(host, &addresses)
         .build()
         .map_err(|error| format!("Could not prepare git server connection: {error}"))
 }

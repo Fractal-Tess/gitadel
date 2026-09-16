@@ -1,9 +1,17 @@
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
-    process::Stdio,
 };
 
+use super::{Permission, RepositoryState, browser::read_git, mirrors, validate_repository_name};
+use crate::{
+    blob_store::{ObjectPrefix, targets},
+    entity::{
+        lfs_object, namespace, organization_member, repository, repository_alias,
+        repository_collaborator, repository_favorite, repository_topic, topic, user,
+    },
+    identity::{ApiError, SCOPE_READ, SCOPE_WRITE, validate_slug},
+};
 use axum::{
     Json,
     extract::{Path as AxumPath, State},
@@ -17,19 +25,9 @@ use sea_orm::{
     TransactionTrait, sea_query::OnConflict,
 };
 use serde::{Deserialize, Serialize};
-use sley::{ObjectFormat, Repository as SleyRepository};
-use tokio::{fs, process::Command};
+use sley::{FullName, ObjectFormat, Repository as SleyRepository};
+use tokio::fs;
 use uuid::Uuid;
-
-use super::{Permission, RepositoryState, browser::read_git, mirrors, validate_repository_name};
-use crate::{
-    blob_store::{ObjectPrefix, targets},
-    entity::{
-        lfs_object, namespace, organization_member, repository, repository_alias,
-        repository_collaborator, repository_favorite, repository_topic, topic, user,
-    },
-    identity::{ApiError, SCOPE_READ, SCOPE_WRITE, validate_slug},
-};
 
 #[derive(Serialize)]
 pub struct RepositoryResponse {
@@ -1122,15 +1120,48 @@ async fn set_default_branch(
     repository: &repository::Model,
     branch: &str,
 ) -> Result<(), ApiError> {
+    if !valid_branch_name(branch) {
+        return Err(ApiError::bad_request(
+            "Default branch is not a valid branch name.",
+        ));
+    }
     let path = state.repository_path(repository);
-    run_git(&path, &["check-ref-format", "--branch", branch])
-        .await
-        .map_err(|_| ApiError::bad_request("Default branch is not a valid branch name."))?;
     let reference = format!("refs/heads/{branch}");
-    run_git(&path, &["show-ref", "--verify", "--quiet", &reference])
-        .await
-        .map_err(|_| ApiError::bad_request("Default branch must already exist."))?;
-    run_git(&path, &["symbolic-ref", "HEAD", &reference]).await
+    let reference_for_read = reference.clone();
+    read_git(path, move |git| {
+        if !git.reference_exists(&reference_for_read)? {
+            return Err(sley::GitError::NotFound(sley::NotFoundKind::Reference {
+                name: reference_for_read,
+            }));
+        }
+        git.set_head_symref(reference, sley::HeadUpdateOptions::new())
+            .map_err(|error| sley::GitError::Transaction(error.to_string()))
+    })
+    .await
+    .map_err(|_| ApiError::bad_request("Default branch must already exist."))
+}
+
+fn valid_branch_name(branch: &str) -> bool {
+    if branch.is_empty()
+        || branch == "HEAD"
+        || branch.starts_with('/')
+        || branch.ends_with('/')
+        || branch.contains("..")
+        || branch.contains("@{")
+        || branch.contains(['\\', ' ', '~', '^', ':', '?', '*', '['])
+    {
+        return false;
+    }
+    if branch.split('/').any(|part| {
+        part.is_empty()
+            || part == "."
+            || part == ".."
+            || part.starts_with('.')
+            || part.ends_with(".lock")
+    }) {
+        return false;
+    }
+    FullName::new(format!("refs/heads/{branch}")).is_ok()
 }
 
 pub async fn favorite_repository(
@@ -1358,32 +1389,14 @@ pub async fn remove_collaborator(
 async fn initialize_repository(path: &Path, object_format: ObjectFormat) -> Result<(), ApiError> {
     let owned_path = path.to_owned();
     tokio::task::spawn_blocking(move || {
-        SleyRepository::init_with_format(&owned_path, object_format, true)
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+        let repository = SleyRepository::init_with_format(&owned_path, object_format, true)
+            .map_err(ApiError::internal)?;
+        repository
+            .set_head_symref("refs/heads/main", sley::HeadUpdateOptions::new())
+            .map_err(|error| ApiError::internal(error.to_string()))
     })
     .await
     .map_err(ApiError::internal)?
-    .map_err(ApiError::internal)?;
-
-    run_git(path, &["symbolic-ref", "HEAD", "refs/heads/main"]).await?;
-    Ok(())
-}
-
-async fn run_git(path: &Path, arguments: &[&str]) -> Result<(), ApiError> {
-    let output = Command::new("git")
-        .arg("--git-dir")
-        .arg(path)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .map_err(ApiError::internal)?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(ApiError::internal(String::from_utf8_lossy(&output.stderr)))
-    }
 }
 
 async fn cleanup_repository(path: &Path) {

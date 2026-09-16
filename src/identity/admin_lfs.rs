@@ -57,12 +57,12 @@ pub async fn list_lfs_repository_usage(
             "The LFS usage page size must be between 1 and {MAX_LIMIT}."
         )));
     }
-    if let (Some(minimum), Some(maximum)) = (query.min_bytes, query.max_bytes) {
-        if minimum > maximum {
-            return Err(ApiError::bad_request(
-                "The minimum LFS usage cannot exceed the maximum.",
-            ));
-        }
+    if let (Some(minimum), Some(maximum)) = (query.min_bytes, query.max_bytes)
+        && minimum > maximum
+    {
+        return Err(ApiError::bad_request(
+            "The minimum LFS usage cannot exceed the maximum.",
+        ));
     }
     let owner_type = query.owner_type.as_deref().unwrap_or("");
     if !owner_type.is_empty() && !matches!(owner_type, "user" | "organization") {

@@ -52,7 +52,7 @@ Add the flake and enable its module:
 }
 ```
 
-The module runs Gitadel as a hardened systemd service and stores persistent state in `/var/lib/gitadel`. `services.gitadel.package` defaults to this flake's tested package (currently `0.5.1`) and only needs to be set to override it; the module does not apply a consumer overlay.
+The module runs Gitadel as a hardened systemd service and stores persistent state in `/var/lib/gitadel`. `services.gitadel.package` defaults to the server package from the pinned flake and only needs to be set to override it; the module does not apply a consumer overlay.
 
 `services.gitadel.autoStart` defaults to `true`, so the Gitadel unit and, when enabled, both Gitadel-owned runner units are wanted by `multi-user.target`. Set it to `false` to keep those units and their manual startup dependencies without booting them automatically. This option does not change the lifecycle of the shared host `docker.service`.
 
@@ -123,7 +123,64 @@ Bootstrapping becomes a no-op after any account exists, so the option can remain
 
 ### Package and module alternatives
 
-The flake exports `overlays.default` as an optional alternative way to provide `pkgs.gitadel`. The exported NixOS module instead defaults directly to this flake's tested package, so consumer overlays are not required. Import `gitadel.nixosModules.default` in a NixOS configuration; explicit `services.gitadel.package` remains the supported way to select a different build.
+The server and remote client have separate packages and modules:
+
+| Purpose | Flake output |
+| --- | --- |
+| Server package and app | `gitadel` (`default` also selects the server) |
+| Remote client package and app | `gitadel-cli` |
+| Server NixOS module | `nixosModules.gitadel` or `nixosModules.default` |
+| Client NixOS module | `nixosModules.gitadel-cli` |
+
+Install the client on a machine without enabling the server:
+
+```nix
+{
+  imports = [ inputs.gitadel.nixosModules.gitadel-cli ];
+  programs.gitadel-cli = {
+    enable = true;
+    serverUrl = "https://git.example.com";
+  };
+}
+```
+
+`serverUrl` sets `GITADEL_SERVER`; do not put an API token in Nix configuration or the Nix store. Override `programs.gitadel-cli.package` or `services.gitadel.package` to select another build.
+
+## Command-line client
+
+`gitadel-cli` talks to a running Gitadel server over HTTP(S). It does not open the server's database or repository directories. Install it with `nix profile install github:Fractal-Tess/gitadel#gitadel-cli`, or build it from source with `cargo build --release -p gitadel-cli`.
+
+Create an API token under **Account settings → Access**. Reads require `read`; repository, organization, and administrator mutations require `write`. Adding or removing your SSH keys requires `ssh_keys`. Administrator commands also require an administrator account. A token does not bypass repository or organization permissions.
+
+```bash
+export GITADEL_SERVER=https://git.example.com
+gitadel-cli --token-file ~/.config/gitadel/token me profile
+gitadel-cli --token-file ~/.config/gitadel/token repo create archivist/old-project --private
+gitadel-cli --token-file ~/.config/gitadel/token repo archive archivist/old-project
+gitadel-cli --token-file ~/.config/gitadel/token admin instance get
+```
+
+The token file contains only the token and should have mode `0600`. `--token-stdin` and `--token-file -` read a token from standard input. An explicit token source overrides `GITADEL_TOKEN`; explicit sources are mutually exclusive. `--token` is also supported, but exposes the value in process arguments.
+
+For CI, provide `GITADEL_SERVER` and a masked `GITADEL_TOKEN` secret through the job environment:
+
+```bash
+gitadel-cli repo list
+gitadel-cli admin instance update --body-file instance-settings.json
+gitadel-cli api user
+```
+
+JSON commands write JSON to stdout and errors to stderr, with a nonzero exit status on failure. `--body-file -` accepts JSON from stdin, but cannot share stdin with a token source. Typed commands cover repositories, organizations, SSH keys, instance and authentication settings, OIDC, storage, backups, and audit records; `gitadel-cli --help` lists them. The `api` command exposes other token-authorized endpoints. Browser-only account-security and restore flows keep their existing authentication requirements.
+
+Backup downloads stream into a private temporary file and replace the requested output only after a complete transfer:
+
+```bash
+gitadel-cli admin backup providers list
+gitadel-cli admin backup download "$PROVIDER_ID" "$BACKUP_KEY" --output backup.tar.zst
+gitadel-cli admin backup progress "$OPERATION_ID"
+```
+
+Progress commands emit JSON Lines, reconnect after an interrupted stream, and exit unsuccessfully when the operation fails. Use HTTPS outside an encrypted private network; bearer tokens grant the account's configured access.
 
 ## Configuration
 
@@ -157,7 +214,7 @@ Plain HTTP also works, but sends the credential without application-layer encryp
 
 ### Repository integrity checks
 
-Gitadel checks every active repository once a day at 03:00 UTC by default. Each pass runs `git fsck --strict`, verifies LFS objects against their SHA-256 object IDs, checks release and issue-attachment files, and rejects database records that point outside their storage roots. The result appears in the administrator activity log. A failed check is also written to the server log with the affected repository and error.
+Gitadel checks every active repository once a day at 03:00 UTC by default. Native checks verify Git objects, references, pack storage, indexes, and commit graphs; verify LFS objects against their SHA-256 IDs; check release and issue-attachment files; and reject database records that point outside their storage roots. The result appears in the administrator activity log. A failed check is also written to the server log with the affected repository and error. No external `git fsck` process is required.
 
 Administrators can enable or disable the job and edit its UTC cron expression under **Administration → Maintenance**. Five-, six-, and seven-field cron expressions are accepted. The page also shows the timestamp and result of the last completed pass.
 
@@ -206,7 +263,7 @@ Git repositories, issue attachments, and release assets remain under the configu
 
 Changing the active target runs in the background without restarting Gitadel. Browsing, Git operations, and LFS downloads remain available. LFS uploads continue during the initial copy, then wait while Gitadel drains in-flight writes, copies the remaining objects, and commits the target change. Migration verifies object size and SHA-256 content. Source data is retained; a failed or interrupted migration leaves the source active and can be retried.
 
-The CLI migration still requires Gitadel to be stopped:
+The server's offline `gitadel lfs` migration commands still require Gitadel to be stopped. They are separate from `gitadel-cli`, which manages the running instance:
 
 ```bash
 gitadel lfs target add-filesystem --name archive --path /mnt/archive/gitadel-lfs
@@ -231,7 +288,7 @@ The target must be empty or contain Gitadel's matching ownership marker. S3 comm
 
 ## Backups
 
-CLI backups are offline so the storage lock can guarantee one consistent snapshot. Stop the service before creating one:
+Offline backups made with the `gitadel` server binary use a storage lock to guarantee one consistent snapshot. Stop the service before creating one:
 
 ```bash
 mkdir -p backups

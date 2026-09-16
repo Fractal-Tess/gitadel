@@ -5,7 +5,6 @@ mod api;
 mod archive;
 mod backup_provider;
 mod blob_store;
-mod client;
 mod config;
 mod database;
 mod entity;
@@ -36,7 +35,6 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     if let Some(command) = cli.command() {
         return match command {
-            config::GitadelCommand::Repo { command } => client::run(command).await,
             config::GitadelCommand::Backup { command } => {
                 let settings = Settings::load(&cli)?;
                 archive::run(command, &settings, cli.config_path()).await

@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap, fs::OpenOptions, io::Write as _, os::unix::fs::OpenOptionsExt as _,
-    path::Path, process::Stdio, sync::Arc, time::Duration,
+    path::Path, sync::Arc, time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -12,17 +12,14 @@ use russh::{
     },
     server::{Auth, ChannelOpenHandle, Msg, Server as _, Session},
 };
-use tokio::{
-    io::AsyncWriteExt as _,
-    net::TcpListener,
-    process::{Child, Command},
-};
+use tokio::net::TcpListener;
 use uuid::Uuid;
 
 use super::{
     LfsPermission, Permission, RepositoryState,
+    git_service::{self, BlockingReader, BlockingWriter, BridgeCancellation},
     resources::{CreateRepositoryOptions, create_owned_repository, record_push},
-    webhooks::{RefSnapshot, dispatch_push, snapshot_refs},
+    webhooks::{dispatch_push, snapshot_refs},
 };
 use crate::{actions::ActionsState, config::SshSettings};
 
@@ -283,56 +280,129 @@ impl russh::server::Handler for SshHandler {
         }
 
         let path = self.state.repository_path(&repository);
-        let program = match service {
-            GitService::UploadPack => "git-upload-pack",
-            GitService::ReceivePack => "git-receive-pack",
+        let format = match git_service::object_format(&repository.object_format) {
+            Ok(format) => format,
+            Err(error) => {
+                tracing::error!(%error, "unsupported repository object format");
+                return reject(channel_id, session, "Could not start Git service.\n");
+            }
         };
-        let push_context = if matches!(service, GitService::ReceivePack) {
-            let refs = match snapshot_refs(&path).await {
+        let protocol_v2 = git_service::protocol_v2(channel_state.git_protocol.as_deref());
+        let receive = matches!(service, GitService::ReceivePack);
+        let refs_before = if receive {
+            match snapshot_refs(&path).await {
                 Ok(refs) => Some(refs),
                 Err(error) => {
                     tracing::warn!(%error, %namespace, %name, "could not snapshot refs before push");
                     None
                 }
-            };
-            Some((
-                self.state.clone(),
-                self.actions.clone(),
-                repository.clone(),
-                actor_user_id,
-                refs,
-            ))
+            }
         } else {
             None
         };
-        let mut command = Command::new(program);
-        command
-            .arg(&path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        if let Some(git_protocol) = channel_state.git_protocol {
-            command.env("GIT_PROTOCOL", git_protocol);
-        }
-        let child = match command.spawn() {
-            Ok(child) => child,
-            Err(error) => {
-                tracing::error!(%error, %program, "could not start Git SSH service");
-                return reject(channel_id, session, "Could not start Git service.\n");
-            }
-        };
-
         session.channel_success(channel_id)?;
-        let maintenance_path = matches!(service, GitService::ReceivePack).then_some(path);
-        bridge_process(
-            child,
-            channel_state.channel,
-            format!("{namespace}/{name}"),
-            maintenance_path,
-            self.state.clone(),
-            push_context,
-        );
+        let channel_id_for_status = channel_id;
+        let session_handle = session.handle();
+        // into_stream closes on drop, before the supervisor can send exit status.
+        let (mut channel_reader, channel_writer) = channel_state.channel.split();
+        let cancellation = BridgeCancellation::default();
+        let worker_cancellation = cancellation.clone();
+        let handle = tokio::runtime::Handle::current();
+        let worker_path = path.clone();
+        let mut worker = tokio::task::spawn_blocking(move || {
+            let mut reader = BlockingReader::new(
+                channel_reader.make_reader(),
+                handle.clone(),
+                worker_cancellation.clone(),
+            );
+            let mut writer =
+                BlockingWriter::new(channel_writer.make_writer(), handle, worker_cancellation);
+            if receive {
+                git_service::write_advertisement(&worker_path, format, true, false, &mut writer)?;
+                git_service::serve_receive_pack(&worker_path, format, &mut reader, &mut writer)
+                    .map(|outcome| (true, outcome.landed, outcome.response_error))
+            } else if protocol_v2 {
+                git_service::serve_upload_pack(
+                    &worker_path,
+                    format,
+                    true,
+                    false,
+                    &mut reader,
+                    &mut writer,
+                )
+                .map(|()| (true, false, None))
+            } else {
+                git_service::write_advertisement(&worker_path, format, false, false, &mut writer)?;
+                git_service::serve_upload_pack(
+                    &worker_path,
+                    format,
+                    false,
+                    false,
+                    &mut reader,
+                    &mut writer,
+                )
+                .map(|()| (true, false, None))
+            }
+        });
+        let repository_name = format!("{namespace}/{name}");
+        let scheduler = self.state.clone();
+        let task_state = self.state.clone();
+        let actions = self.actions.clone();
+        let audit_repository = repository.clone();
+        let maintenance_path = path.clone();
+        scheduler.spawn_task(async move {
+            let result = tokio::time::timeout(Duration::from_secs(30 * 60), &mut worker).await;
+            let result = match result {
+                Err(_) => {
+                    cancellation.cancel();
+                    tracing::warn!(repository = %repository_name, "native Git SSH service exceeded time limit");
+                    worker.await
+                }
+                Ok(result) => result,
+            };
+            let (service_ok, landed, response_error) = match result {
+                Ok(Ok((service_ok, landed, response_error))) => {
+                    (service_ok, landed, response_error)
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, repository = %repository_name, "native Git SSH service failed");
+                    (false, false, None)
+                }
+                Err(error) => {
+                    tracing::warn!(%error, repository = %repository_name, "native Git SSH task failed");
+                    (false, false, None)
+                }
+            };
+            if let Some(error) = response_error {
+                tracing::debug!(%error, repository = %repository_name, "Git SSH response delivery failed");
+            }
+            if receive && landed {
+                if let Err(error) =
+                    record_push(&task_state, audit_repository.id, actor_user_id, repository_name.clone()).await
+                {
+                    tracing::warn!(%error, repository = %repository_name, "could not record repository push");
+                }
+                if let Some(refs_before) = refs_before
+                    && let Err(error) = dispatch_push(
+                        &task_state,
+                        &actions,
+                        &audit_repository,
+                        actor_user_id,
+                        refs_before,
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, repository = %repository_name, "could not queue repository webhooks");
+                }
+                super::maintenance::run(&maintenance_path, &repository_name).await;
+            }
+            let exit_status = if service_ok { 0 } else { 1 };
+            let _ = session_handle
+                .exit_status_request(channel_id_for_status, exit_status)
+                .await;
+            let _ = session_handle.eof(channel_id_for_status).await;
+            let _ = session_handle.close(channel_id_for_status).await;
+        });
         Ok(())
     }
 
@@ -371,131 +441,6 @@ async fn repository_for_git_service(
             }
         }
     }
-}
-fn bridge_process(
-    mut child: Child,
-    mut channel: Channel<Msg>,
-    repository: String,
-    maintenance_path: Option<std::path::PathBuf>,
-    task_state: RepositoryState,
-    push_audit: Option<(
-        RepositoryState,
-        ActionsState,
-        crate::entity::repository::Model,
-        Uuid,
-        Option<RefSnapshot>,
-    )>,
-) {
-    let Some(mut stdin) = child.stdin.take() else {
-        return;
-    };
-    let Some(mut stdout) = child.stdout.take() else {
-        return;
-    };
-    let Some(mut stderr) = child.stderr.take() else {
-        return;
-    };
-
-    task_state.spawn_task(async move {
-        let mut channel_writer = channel.make_writer();
-        let mut stderr_writer = channel.make_writer_ext(Some(1));
-        let mut channel_reader = channel.make_reader();
-        let output = tokio::spawn(async move {
-            let _ = tokio::io::copy(&mut stdout, &mut channel_writer).await;
-        });
-        let errors = tokio::spawn(async move {
-            let _ = tokio::io::copy(&mut stderr, &mut stderr_writer).await;
-        });
-        let mut input = Box::pin(async {
-            let _ = tokio::io::copy(&mut channel_reader, &mut stdin).await;
-            let _ = stdin.shutdown().await;
-        });
-        let mut wait = Box::pin(tokio::time::timeout(
-            Duration::from_secs(30 * 60),
-            child.wait(),
-        ));
-        let first_result = tokio::select! {
-            result = &mut wait => {
-                tracing::debug!(%repository, "Git SSH process exited");
-                Some(result)
-            },
-            () = &mut input => {
-                tracing::debug!(%repository, "Git SSH client input closed");
-                None
-            },
-        };
-        drop(input);
-        drop(stdin);
-        drop(channel_reader);
-        let result = match first_result {
-            Some(result) => result,
-            None => (&mut wait).await,
-        };
-        drop(wait);
-        if result.is_err() {
-            let _ = child.kill().await;
-        }
-        let _ = output.await;
-        tracing::debug!(%repository, "Git SSH process output closed");
-        let successful = matches!(&result, Ok(Ok(status)) if status.success());
-        let _ = errors.await;
-        tracing::debug!(%repository, "Git SSH process error output closed");
-        if successful && let Some((state, actions, model, actor_user_id, refs_before)) = push_audit
-        {
-            if let Err(error) =
-                record_push(&state, model.id, actor_user_id, repository.clone()).await
-            {
-                tracing::warn!(%error, %repository, "could not record repository push");
-            }
-            if let Some(refs_before) = refs_before
-                && let Err(error) =
-                    dispatch_push(&state, &actions, &model, actor_user_id, refs_before).await
-            {
-                tracing::warn!(%error, %repository, "could not queue repository webhooks");
-            }
-        }
-        let exit_status = match result {
-            Ok(Ok(status)) => status
-                .code()
-                .and_then(|code| u32::try_from(code).ok())
-                .unwrap_or(1),
-            Ok(Err(error)) => {
-                tracing::error!(%error, %repository, "Git SSH process wait failed");
-                1
-            }
-            Err(_) => {
-                tracing::warn!(%repository, "Git SSH process exceeded time limit");
-                1
-            }
-        };
-        if successful && let Some(path) = maintenance_path {
-            match Command::new("git")
-                .arg("--git-dir")
-                .arg(path)
-                .args(["gc", "--auto", "--quiet"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .output()
-                .await
-            {
-                Ok(output) if output.status.success() => {}
-                Ok(output) => tracing::warn!(
-                    %repository,
-                    stderr = %String::from_utf8_lossy(&output.stderr),
-                    "automatic Git maintenance failed"
-                ),
-                Err(error) => tracing::warn!(
-                    %error,
-                    %repository,
-                    "could not start automatic Git maintenance"
-                ),
-            }
-        }
-        let _ = channel.exit_status(exit_status).await;
-        let _ = channel.eof().await;
-        let _ = channel.close().await;
-    });
 }
 
 fn parse_command(command: &str) -> Option<SshCommand> {

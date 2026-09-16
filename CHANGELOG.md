@@ -4,21 +4,27 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-16
+
 ### Added
 
 - Added per-repository Git LFS usage in administration, with user and organization ownership, name and owner search, byte-range filters, space and name sorting, and ten-entry pagination.
 - Added separate Git and Git LFS storage sizes to repository sidebars for anyone with repository read access. File trees mark LFS pointers with a badge and show the referenced object size, including in nested directories and historical revisions.
 - Added capacity and usage to each storage target in administration. Filesystem targets show a bar splitting what Gitadel stores from what else shares the volume, alongside the free space remaining; object stores publish no capacity, so those targets report usage alone. Cards load with the LFS total the database already tracks, and a scan walks the destination on request to account for backup archives and anything an earlier migration left behind.
 - Added repository icons. Maintainers upload and crop one in repository settings, and repositories without a manual icon adopt a conventional `icon.png`, `logo.png`, or `favicon.png` committed to the default branch, including under `static/`, `public/`, `assets/`, and `.github/`. Detection reads only the repository itself and never contacts an external host. Repositories with no icon fall back to a monogram.
+- Added a separate `gitadel-cli` binary for token-authenticated repository, organization, SSH key, and administrator management. It supports CI environment credentials, JSON input/output, streamed backup downloads, and reconnecting progress streams.
+- Added independent Nix packages, apps, and NixOS modules for the server and client.
 
 ### Changed
 
 - Removed the unused direct HTTP body utility dependency, consolidated SSH key handling on russh's key implementation, and replaced rust-embed with a generated asset lookup. Release builds still embed the frontend; debug builds read it from disk on each request.
+- Replaced runtime Git, Git LFS, and external SSH processes with in-process Sley, HTTP, and SSH implementations. SeaORM remains the database layer.
+- Preserved detached and unborn HEADs and custom ref namespaces during native imports, and corrected zero-object fetch responses, shallow negotiation, integrity validation, and reflog expiry/locking behavior.
 - Split the repository sidebar's size readout into Git, LFS, and total cells, collapsing to a single figure when a repository stores nothing in LFS.
 - Moved the branch selector into the file tree header, where the branch it scopes is, and reduced the navigation rail to repository views while a repository is open.
 - Kept Gitadel online during administrator-triggered LFS storage migrations. Git operations and LFS downloads remain available; uploads continue during copying and wait only for final cutover. Failed migrations retain the source target.
 
-- Unified the NixOS service lifecycle around `services.gitadel.enable`, `package`, and `autoStart`. The default package remains the flake's tested `0.5.1` build; `autoStart = false` keeps Gitadel and enabled Gitadel-owned runner units manually startable without boot edges, while preserving the runner's dependency ordering and persisted state. The shared host Docker service remains under independent NixOS control.
+- Unified the NixOS service lifecycle around `services.gitadel.enable`, `package`, and `autoStart`. The default package comes from the pinned flake; `autoStart = false` keeps Gitadel and enabled Gitadel-owned runner units manually startable without boot edges, while preserving the runner's dependency ordering and persisted state. The shared host Docker service remains under independent NixOS control.
 
 ## [0.5.1] - 2026-09-04
 
@@ -193,7 +199,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/Fractal-Tess/gitadel/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.3.0...v0.4.0

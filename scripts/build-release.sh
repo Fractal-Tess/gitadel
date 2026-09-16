@@ -8,4 +8,4 @@ bun install --cwd frontend --frozen-lockfile
 # the release binary then embeds a page that loads to a blank body.
 rm -rf frontend/build
 bun run --cwd frontend build
-cargo build --release --locked
+cargo build --release --locked --workspace

@@ -23,12 +23,10 @@
       ];
       forAllSystems = lib.genAttrs systems;
       # Read from the manifest so the flake cannot drift from the crate version.
-      version = (lib.importTOML ./Cargo.toml).package.version;
+      version = (lib.importTOML ./Cargo.toml).workspace.package.version;
 
       buildDeps = pkgs: [
         pkgs.cmake
-        pkgs.git
-        pkgs.git-lfs
         pkgs.perl
         pkgs.pkg-config
       ];
@@ -36,6 +34,27 @@
       packageFor =
         pkgs:
         let
+          rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          rustPlatform = pkgs.makeRustPlatform {
+            cargo = rustToolchain;
+            rustc = rustToolchain;
+          };
+          # The CLI source intentionally excludes the server and frontend trees.
+          clientSource = lib.fileset.toSource {
+            root = ./.;
+            fileset = lib.fileset.unions [
+              ./Cargo.toml
+              ./Cargo.lock
+              ./rust-toolchain.toml
+              ./cli
+            ];
+          };
+          commonRustAttrs = {
+            inherit version;
+            cargoLock.lockFile = ./Cargo.lock;
+            cargoLock.outputHashes."sley-0.10.0" = "sha256-QRlL9xx2eFGdBMw2SurYb5Ve0UuYlzM+190p3+atB3s=";
+            doCheck = false;
+          };
           # Only the manifest and lockfile, so editing frontend sources does not
           # invalidate the fixed-output derivation. Refresh `outputHash` with
           # ./scripts/update-frontend-hash.sh whenever bun.lock changes.
@@ -90,51 +109,87 @@
               runHook postInstall
             '';
           };
+          server = rustPlatform.buildRustPackage (
+            commonRustAttrs
+            // {
+              pname = "gitadel";
+              src = ./.;
+              nativeBuildInputs = buildDeps pkgs;
+              buildInputs = [ pkgs.openssl ];
+              cargoBuildFlags = [
+                "--package"
+                "gitadel"
+                "--bin"
+                "gitadel"
+              ];
+              preBuild = ''
+                rm -rf frontend/build
+                cp -R ${frontend} frontend/build
+              '';
+              passthru = { inherit frontend nodeModules; };
+              meta = {
+                description = "A minimal self-hosted Git server for archival repositories";
+                homepage = "https://github.com/Fractal-Tess/gitadel";
+                license = lib.licenses.mit;
+                mainProgram = "gitadel";
+                platforms = lib.platforms.linux;
+              };
+            }
+          );
+          client = rustPlatform.buildRustPackage (
+            commonRustAttrs
+            // {
+              pname = "gitadel-cli";
+              src = clientSource;
+              cargoBuildFlags = [
+                "--package"
+                "gitadel-cli"
+                "--bin"
+                "gitadel-cli"
+              ];
+              meta = {
+                description = "Token-authenticated Gitadel command-line client";
+                homepage = "https://github.com/Fractal-Tess/gitadel";
+                license = lib.licenses.mit;
+                mainProgram = "gitadel-cli";
+                platforms = lib.platforms.linux;
+              };
+            }
+          );
         in
-        pkgs.rustPlatform.buildRustPackage {
-          pname = "gitadel";
-          inherit version;
-          src = ./.;
-          cargoLock.lockFile = ./Cargo.lock;
-          doCheck = false;
-          nativeBuildInputs = buildDeps pkgs ++ [ pkgs.makeWrapper ];
-          buildInputs = [ pkgs.openssl ];
-          preBuild = ''
-            rm -rf frontend/build
-            cp -R ${frontend} frontend/build
-          '';
-          postInstall = ''
-            wrapProgram $out/bin/gitadel \
-              --prefix PATH : ${
-                lib.makeBinPath [
-                  pkgs.git
-                  pkgs.git-lfs
-                ]
-              }
-          '';
-          passthru = { inherit frontend nodeModules; };
-          meta = {
-            description = "A minimal self-hosted Git server for archival repositories";
-            homepage = "https://github.com/Fractal-Tess/gitadel";
-            license = lib.licenses.mit;
-            mainProgram = "gitadel";
-            platforms = lib.platforms.linux;
-          };
+        {
+          gitadel = server;
+          gitadel-cli = client;
         };
     in
     {
       packages = forAllSystems (
         system:
         let
-          gitadel = packageFor nixpkgs.legacyPackages.${system};
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ rust-overlay.overlays.default ];
+          };
+          packagesFor = packageFor pkgs;
         in
         {
-          inherit gitadel;
-          default = gitadel;
+          gitadel = packagesFor.gitadel;
+          gitadel-cli = packagesFor.gitadel-cli;
+          default = packagesFor.gitadel;
         }
       );
 
       apps = forAllSystems (system: {
+        gitadel = {
+          type = "app";
+          program = lib.getExe self.packages.${system}.gitadel;
+          meta.description = "Gitadel Git archive server";
+        };
+        gitadel-cli = {
+          type = "app";
+          program = lib.getExe self.packages.${system}.gitadel-cli;
+          meta.description = "Token-authenticated Gitadel command-line client";
+        };
         default = {
           type = "app";
           program = lib.getExe self.packages.${system}.gitadel;
@@ -154,6 +209,8 @@
         {
           default = pkgs.mkShell {
             packages = buildDeps pkgs ++ [
+              pkgs.git
+              pkgs.git-lfs
               pkgs.bun
               pkgs.curl
               pkgs.jq
@@ -171,15 +228,12 @@
       );
 
       formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixpkgs-fmt);
-
-      overlays.default = final: _prev: {
-        gitadel = self.packages.${final.stdenv.hostPlatform.system}.gitadel;
-      };
-
       # Deliberately does not set `nixpkgs.overlays`: that conflicts with
       # `nixpkgs.pkgs`, which flake-parts and shared-pkgs setups commonly set.
       nixosModules.gitadel = import ./nix/module.nix { inherit self; };
+      nixosModules.gitadel-cli = import ./nix/client-module.nix { inherit self; };
 
       nixosModules.default = self.nixosModules.gitadel;
+
     };
 }

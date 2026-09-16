@@ -21,6 +21,8 @@ Gitadel keeps the useful parts of a forge without becoming another collaboration
 
 Gitadel deliberately leaves out pull requests, social feeds, and in-browser editing.
 
+Repository operations run in-process through [Sley](https://github.com/Fractal-Tess/sley). The server does not require installed Git, Git LFS, or SSH executables.
+
 ## Quick start
 
 ```bash
@@ -39,6 +41,19 @@ git push archive main
 ```
 
 See [INSTALL.md](INSTALL.md) for Docker, NixOS, configuration, reverse-proxy, and backup instructions.
+
+## Command-line client
+
+`gitadel-cli` manages a running instance with an API token. It is separate from the `gitadel` server and uses the same permissions as the web API.
+
+```bash
+nix profile install github:Fractal-Tess/gitadel#gitadel-cli
+export GITADEL_SERVER=https://git.example.com
+gitadel-cli --token-file ~/.config/gitadel/token repo list
+gitadel-cli --token-file ~/.config/gitadel/token admin instance get
+```
+
+Save a token from **Account settings → Access** as raw text in a mode-`0600` file. See [client setup and CI usage](INSTALL.md#command-line-client).
 
 ## Dokploy
 

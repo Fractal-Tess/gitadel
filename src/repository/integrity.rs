@@ -1,9 +1,8 @@
-use std::{path::Path, process::Stdio, time::Duration};
-
-use anyhow::{Context as _, Result, bail, ensure};
-use chrono::Utc;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-use tokio::{fs, process::Command};
+use std::{
+    path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use super::RepositoryState;
 use crate::{
@@ -12,6 +11,11 @@ use crate::{
     },
     schedule,
 };
+use anyhow::{Context as _, Result, bail, ensure};
+use chrono::Utc;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use sley_core::{AtomicCancel, CancelFlag, ObjectFormat};
+use tokio::{fs, task, time};
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
@@ -96,24 +100,67 @@ async fn check_repository(state: &RepositoryState, repository: &repository::Mode
 }
 
 async fn check_git_repository(path: &Path) -> Result<()> {
-    let output = tokio::time::timeout(
-        CHECK_TIMEOUT,
-        Command::new("git")
-            .arg("--git-dir")
-            .arg(path)
-            .args(["fsck", "--strict", "--no-progress"])
-            .stdin(Stdio::null())
-            .output(),
-    )
-    .await
-    .context("git fsck exceeded its 30-minute limit")?
-    .with_context(|| format!("could not start git fsck for {}", path.display()))?;
-    if !output.status.success() {
-        bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+    let path = path.to_owned();
+    let cancel = Arc::new(AtomicCancel::new());
+    let worker_cancel = Arc::clone(&cancel);
+    let mut worker = task::spawn_blocking(move || -> Result<()> {
+        let format = if path.join("config").is_file() {
+            sley_config::read_repo_config(&path, None)
+                .and_then(|config| config.repository_object_format())
+                .context("could not determine repository object format")?
+        } else {
+            ObjectFormat::Sha1
+        };
+        let report = sley_fsck::check_repository_with_options(
+            &path,
+            format,
+            sley_fsck::RepositoryCheckOptions {
+                cancel: CancelFlag::new(&worker_cancel),
+                deadline: Some(Instant::now() + CHECK_TIMEOUT),
+            },
+        )
+        .with_context(|| format!("could not check repository {}", path.display()))?;
+        if report.is_ok() {
+            return Ok(());
+        }
+        let mut failures = report
+            .reference_findings
+            .errors()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        failures.extend(
+            report
+                .object_report
+                .issues
+                .iter()
+                .filter(|issue| issue.severity == sley_fsck::IssueSeverity::Error)
+                .map(|issue| issue.message.clone()),
+        );
+        failures.extend(report.storage_errors);
+        if failures.is_empty() {
+            failures.push(format!(
+                "native fsck exited with error bits {}",
+                report.object_report.error_bits
+            ));
+        }
+        bail!(
+            "native repository integrity check failed: {}",
+            failures.join("; ")
+        );
+    });
+    match time::timeout(CHECK_TIMEOUT, &mut worker).await {
+        Ok(result) => result.context("native repository integrity worker failed")??,
+        Err(_) => {
+            cancel.cancel();
+            let _ = worker.await;
+            bail!(
+                "native repository integrity check exceeded its 30-minute limit; \
+                 the background check was cancelled"
+            );
+        }
     }
     Ok(())
 }
-
 async fn check_lfs_objects(state: &RepositoryState, repository: &repository::Model) -> Result<()> {
     let objects = lfs_object::Entity::find()
         .filter(lfs_object::Column::RepositoryId.eq(repository.id))
@@ -255,25 +302,21 @@ mod tests {
     #[tokio::test]
     async fn integrity_check_accepts_a_valid_bare_repository() {
         let directory = TestDirectory::new();
-        let status = Command::new("git")
-            .args(["init", "--bare"])
-            .arg(directory.path())
-            .status()
-            .await
-            .unwrap();
-        assert!(status.success());
+        std::fs::create_dir(directory.path().join("objects")).unwrap();
+        std::fs::create_dir(directory.path().join("refs")).unwrap();
+        std::fs::write(directory.path().join("HEAD"), b"ref: refs/heads/main\n").unwrap();
 
         check_git_repository(directory.path()).await.unwrap();
     }
 
     #[tokio::test]
-    async fn integrity_check_rejects_a_missing_repository() {
+    async fn integrity_check_rejects_incomplete_repository_layouts() {
         let directory = TestDirectory::new();
-        let error = check_git_repository(&directory.path().join("missing.git"))
-            .await
-            .unwrap_err();
+        assert!(check_git_repository(directory.path()).await.is_err());
 
-        assert!(!error.to_string().is_empty());
+        std::fs::create_dir(directory.path().join("refs")).unwrap();
+        std::fs::write(directory.path().join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        assert!(check_git_repository(directory.path()).await.is_err());
     }
 
     #[tokio::test]

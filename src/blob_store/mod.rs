@@ -102,7 +102,7 @@ impl FromStr for BlobDigest {
             bail!("blob digest must be a 64-character SHA-256 value");
         }
         let mut digest = [0_u8; 32];
-        for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+        for (index, chunk) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             digest[index] = u8::from_str_radix(std::str::from_utf8(chunk)?, 16)?;
         }
         Ok(Self(digest))

@@ -339,53 +339,13 @@ pub async fn create_direct_import(
         .await?;
     resources::ensure_owned_namespace(&state, actor.user.id, &request.target_namespace).await?;
     let target_name = validate_repository_name(&request.target_name)?;
-    let identity = load_mirror_identity_secret(
-        state.identity(),
+    let (remote_url, authentication) = load_direct_import_identity(
+        &state,
         &request.target_namespace,
         request.identity_id,
+        &request.remote_url,
     )
     .await?;
-    let source_instance_url = match identity.kind.as_str() {
-        "token" => identity.instance_url.as_deref(),
-        "basic" => Some(request.remote_url.as_str()),
-        "ssh" => None,
-        _ => return Err(ApiError::bad_request("The selected identity is invalid.")),
-    };
-    let remote_url = super::mirrors::validate_direct_import_identity(
-        source_instance_url,
-        &request.remote_url,
-        &identity.kind,
-    )?;
-    let authentication = match identity.kind.as_str() {
-        "ssh" => super::mirrors::ImportAuthentication {
-            username: None,
-            secret: None,
-            ssh_private_key: Some(identity.secret),
-        },
-        "basic" => super::mirrors::ImportAuthentication {
-            username: identity.username,
-            secret: Some(identity.secret),
-            ssh_private_key: None,
-        },
-        "token" => super::mirrors::ImportAuthentication {
-            username: Some(
-                match identity.provider.as_deref() {
-                    Some("github") => "x-access-token",
-                    Some("gitlab") => "oauth2",
-                    Some("gitea" | "forgejo") => "git",
-                    _ => {
-                        return Err(ApiError::bad_request(
-                            "The selected token identity has no valid provider.",
-                        ));
-                    }
-                }
-                .to_owned(),
-            ),
-            secret: Some(identity.secret),
-            ssh_private_key: None,
-        },
-        _ => return Err(ApiError::bad_request("The selected identity is invalid.")),
-    };
     let now = Utc::now();
     let import = repository_import::Model {
         id: Uuid::new_v4(),
@@ -488,29 +448,12 @@ pub async fn retry_import(
         .identity()
         .authenticate(&headers, &jar, SCOPE_WRITE)
         .await?;
-    let mut import = repository_import::Entity::find_by_id(id)
+    let import = repository_import::Entity::find_by_id(id)
         .filter(repository_import::Column::CreatedBy.eq(actor.user.id))
         .one(state.identity().database())
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let provider = ForgeProvider::parse(&import.provider)?;
-    let identity_id = import
-        .identity_id
-        .ok_or_else(|| ApiError::bad_request("This import has no reusable identity."))?;
-    let (token, _) =
-        load_import_identity(&state, &import.target_namespace, identity_id, provider).await?;
-    let discovery = discover_remote(
-        &state,
-        &import.provider,
-        Some(import.instance_url.clone()),
-        &token,
-    )
-    .await?;
-    let available: HashMap<_, _> = discovery
-        .repositories
-        .into_iter()
-        .map(|repository| (repository.id.clone(), repository))
-        .collect();
+    resources::ensure_owned_namespace(&state, actor.user.id, &import.target_namespace).await?;
     let failed = repository_import_item::Entity::find()
         .filter(repository_import_item::Column::ImportId.eq(id))
         .filter(repository_import_item::Column::State.is_in(["failed", "credentials_required"]))
@@ -521,49 +464,75 @@ pub async fn retry_import(
             "This import has no failed repositories to retry.",
         ));
     }
+    let identity_id = import
+        .identity_id
+        .ok_or_else(|| ApiError::bad_request("This import has no reusable identity."))?;
+    let (authentication, metadata_token, available) = if import.provider == "direct" {
+        let (remote_url, authentication) = load_direct_import_identity(
+            &state,
+            &import.target_namespace,
+            identity_id,
+            &import.instance_url,
+        )
+        .await?;
+        (
+            authentication,
+            None,
+            HashMap::from([(import.instance_url.clone(), remote_url)]),
+        )
+    } else {
+        let provider = ForgeProvider::parse(&import.provider)?;
+        let (token, _) =
+            load_import_identity(&state, &import.target_namespace, identity_id, provider).await?;
+        let discovery = discover_remote(
+            &state,
+            &import.provider,
+            Some(import.instance_url.clone()),
+            &token,
+        )
+        .await?;
+        let authentication = super::mirrors::ImportAuthentication {
+            username: Some(discovery.provider.clone_username(&discovery.account)),
+            secret: Some(token.clone()),
+            ssh_private_key: None,
+        };
+        let available = discovery
+            .repositories
+            .into_iter()
+            .map(|repository| (repository.id, repository.clone_url))
+            .collect::<HashMap<_, _>>();
+        (authentication, Some(token), available)
+    };
     let now = Utc::now();
     let transaction = state.identity().database().begin().await?;
-    let mut queued = Vec::new();
-    for mut item in failed {
+    let mut queued = Vec::with_capacity(failed.len());
+    for item in failed {
         let source = available.get(&item.source_id).ok_or_else(|| {
             ApiError::bad_request(format!("{} is no longer available.", item.source_full_name))
         })?;
-        item.source_clone_url = source.clone_url.clone();
-        item.state = "queued".to_owned();
-        item.last_error = None;
-        item.updated_at = now;
-        item.clone()
-            .into_active_model()
-            .update(&transaction)
-            .await?;
-        queued.push(item);
+        let mut active = item.into_active_model();
+        active.source_clone_url = Set(source.clone());
+        active.state = Set("queued".to_owned());
+        active.last_error = Set(None);
+        active.updated_at = Set(now);
+        queued.push(active.update(&transaction).await?);
     }
-    import.state = "queued".to_owned();
-    import.updated_at = now;
-    import
-        .clone()
-        .into_active_model()
-        .update(&transaction)
-        .await?;
+    let mut active = import.into_active_model();
+    active.state = Set("queued".to_owned());
+    active.updated_at = Set(now);
+    let import = active.update(&transaction).await?;
     transaction.commit().await?;
 
-    let username = discovery.provider.clone_username(&discovery.account);
     let worker_state = state.clone();
     let worker_import = import.clone();
-    let worker_items = queued.clone();
-    let authentication = super::mirrors::ImportAuthentication {
-        username: Some(username),
-        secret: Some(token.clone()),
-        ssh_private_key: None,
-    };
     let task_state = worker_state.clone();
     task_state.spawn_task(async move {
         run_items(
             worker_state,
             worker_import,
-            worker_items,
+            queued,
             authentication,
-            Some(token),
+            metadata_token,
         )
         .await;
     });
@@ -658,11 +627,10 @@ async fn run_items(
 ) {
     import.state = "running".to_owned();
     import.updated_at = Utc::now();
-    let _ = import
-        .clone()
-        .into_active_model()
-        .update(state.identity().database())
-        .await;
+    let mut active = import.clone().into_active_model();
+    active.reset(repository_import::Column::State);
+    active.reset(repository_import::Column::UpdatedAt);
+    let _ = active.update(state.identity().database()).await;
     for queued_item in items {
         let Ok(Some(mut item)) = repository_import_item::Entity::find_by_id(queued_item.id)
             .one(state.identity().database())
@@ -683,11 +651,12 @@ async fn run_items(
         .to_owned();
         item.last_error = None;
         item.updated_at = Utc::now();
-        let Ok(mut item) = item
-            .into_active_model()
-            .update(state.identity().database())
-            .await
-        else {
+        let mut active = item.into_active_model();
+        active.reset(repository_import_item::Column::Attempts);
+        active.reset(repository_import_item::Column::State);
+        active.reset(repository_import_item::Column::LastError);
+        active.reset(repository_import_item::Column::UpdatedAt);
+        let Ok(mut item) = active.update(state.identity().database()).await else {
             continue;
         };
 
@@ -712,8 +681,7 @@ async fn run_items(
                         name: item.target_name.clone(),
                         description: Some(format!("Imported from {}", item.source_full_name)),
                         source_url: item.source_web_url.clone(),
-                        source_instance_url: (import.provider != "direct")
-                            .then(|| import.instance_url.clone()),
+                        source_instance_url: Some(import.instance_url.clone()),
                         visibility: item.target_visibility.clone(),
                         remote_url: item.source_clone_url.clone(),
                         authentication: authentication.clone(),
@@ -737,12 +705,11 @@ async fn run_items(
                 }
                 item.state = "metadata".to_owned();
                 item.updated_at = Utc::now();
-                match item
-                    .clone()
-                    .into_active_model()
-                    .update(state.identity().database())
-                    .await
-                {
+                let mut active = item.clone().into_active_model();
+                active.reset(repository_import_item::Column::RepositoryId);
+                active.reset(repository_import_item::Column::State);
+                active.reset(repository_import_item::Column::UpdatedAt);
+                match active.update(state.identity().database()).await {
                     Ok(saved) => {
                         item = saved;
                         if import.provider == "direct" {
@@ -812,10 +779,10 @@ async fn run_items(
             tracing::error!(import_id = %import.id, %error, "could not finalize repository import");
             import.state = "completed_with_errors".to_owned();
             import.updated_at = Utc::now();
-            let _ = import
-                .into_active_model()
-                .update(state.identity().database())
-                .await;
+            let mut active = import.into_active_model();
+            active.reset(repository_import::Column::State);
+            active.reset(repository_import::Column::UpdatedAt);
+            let _ = active.update(state.identity().database()).await;
             return;
         }
     };
@@ -832,10 +799,10 @@ async fn run_items(
     }
     .to_owned();
     import.updated_at = Utc::now();
-    let _ = import
-        .into_active_model()
-        .update(state.identity().database())
-        .await;
+    let mut active = import.into_active_model();
+    active.reset(repository_import::Column::State);
+    active.reset(repository_import::Column::UpdatedAt);
+    let _ = active.update(state.identity().database()).await;
 }
 
 async fn discover_remote(
@@ -1185,6 +1152,57 @@ fn import_visibility(source_visibility: &str) -> &'static str {
     } else {
         "private"
     }
+}
+
+async fn load_direct_import_identity(
+    state: &RepositoryState,
+    namespace: &str,
+    identity_id: Uuid,
+    remote_url: &str,
+) -> Result<(String, super::mirrors::ImportAuthentication), ApiError> {
+    let identity = load_mirror_identity_secret(state.identity(), namespace, identity_id).await?;
+    let source_instance_url = match identity.kind.as_str() {
+        "token" => identity.instance_url.as_deref(),
+        "basic" => Some(remote_url),
+        "ssh" => None,
+        _ => return Err(ApiError::bad_request("The selected identity is invalid.")),
+    };
+    let remote_url = super::mirrors::validate_direct_import_identity(
+        source_instance_url,
+        remote_url,
+        &identity.kind,
+    )?;
+    let authentication = match identity.kind.as_str() {
+        "ssh" => super::mirrors::ImportAuthentication {
+            username: None,
+            secret: None,
+            ssh_private_key: Some(identity.secret),
+        },
+        "basic" => super::mirrors::ImportAuthentication {
+            username: identity.username,
+            secret: Some(identity.secret),
+            ssh_private_key: None,
+        },
+        "token" => super::mirrors::ImportAuthentication {
+            username: Some(
+                match identity.provider.as_deref() {
+                    Some("github") => "x-access-token",
+                    Some("gitlab") => "oauth2",
+                    Some("gitea" | "forgejo") => "git",
+                    _ => {
+                        return Err(ApiError::bad_request(
+                            "The selected token identity has no valid provider.",
+                        ));
+                    }
+                }
+                .to_owned(),
+            ),
+            secret: Some(identity.secret),
+            ssh_private_key: None,
+        },
+        _ => return Err(ApiError::bad_request("The selected identity is invalid.")),
+    };
+    Ok((remote_url, authentication))
 }
 
 async fn load_import_identity(

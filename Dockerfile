@@ -5,13 +5,15 @@ RUN bun install --frozen-lockfile
 COPY frontend/ ./
 RUN bun run build
 
-FROM rust:1.97.1-slim-trixie AS backend
+FROM rust:1.98.0-slim-trixie AS backend
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends build-essential cmake perl pkg-config \
+    && apt-get install --yes --no-install-recommends build-essential cmake libssl-dev perl pkg-config \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src/ ./src/
+COPY cli/ ./cli/
+COPY proto/ ./proto/
 COPY --from=frontend /build/frontend/build ./frontend/build/
 COPY --from=frontend /build/frontend/static ./frontend/static/
 RUN cargo build --release --locked \
@@ -19,7 +21,7 @@ RUN cargo build --release --locked \
 
 FROM debian:trixie-slim AS runtime
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates curl git git-lfs \
+    && apt-get install --yes --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 --shell /usr/sbin/nologin gitadel \
     && install --directory --owner gitadel --group gitadel /data

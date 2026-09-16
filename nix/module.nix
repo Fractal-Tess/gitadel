@@ -348,7 +348,6 @@ in
       description = "Gitadel Git archive server";
       wantedBy = lib.optional cfg.autoStart "multi-user.target";
       after = [ "network.target" ];
-      path = [ pkgs.git ];
       environment = cfg.environment;
       serviceConfig = {
         Type = "simple";
