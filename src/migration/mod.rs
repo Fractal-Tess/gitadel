@@ -48,6 +48,7 @@ mod m20260831_000047_authentication_methods;
 mod m20260903_000048_repository_analysis_cache;
 mod m20260903_000049_system_action_runners;
 mod m20260904_000050_integrity_settings;
+mod m20260915_000051_repository_icons;
 
 use sea_orm_migration::prelude::*;
 
@@ -107,6 +108,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260903_000048_repository_analysis_cache::Migration),
             Box::new(m20260903_000049_system_action_runners::Migration),
             Box::new(m20260904_000050_integrity_settings::Migration),
+            Box::new(m20260915_000051_repository_icons::Migration),
         ]
     }
 }

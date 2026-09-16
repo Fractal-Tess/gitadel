@@ -391,6 +391,8 @@ mod tests {
             created_by: Set(owner_id),
             archived_at: Set(None),
             deleted_at: Set(None),
+            icon_updated_at: Set(None),
+            icon_source: Set(None),
             created_at: Set(created_at),
             updated_at: Set(created_at),
         }

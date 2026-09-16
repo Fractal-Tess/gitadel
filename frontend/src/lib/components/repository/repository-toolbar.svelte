@@ -16,7 +16,9 @@
 <section
   class="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-b px-4 py-2"
 >
-  {#if state.view !== "settings"}
+  <!-- The code view heads its own file tree with the branch picker, so the
+       toolbar only carries it for the views that have no tree column. -->
+  {#if state.view !== "settings" && state.view !== "overview"}
     <Select.Root
       type="single"
       value={state.revision}

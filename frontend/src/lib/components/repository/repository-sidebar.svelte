@@ -21,6 +21,20 @@
 
   let { state: repository }: { state: RepositoryPageState } = $props();
 
+  let gitBytes = $derived(
+    repository.browser.refs?.size_bytes != null &&
+      repository.browser.refs.lfs_size_bytes != null
+      ? repository.browser.refs.size_bytes -
+          repository.browser.refs.lfs_size_bytes
+      : null,
+  );
+
+  // LFS only earns its own cell once something is actually stored there;
+  // otherwise the repository size is a single number and splitting it three
+  // ways would just repeat it.
+  let lfsBytes = $derived(repository.browser.refs?.lfs_size_bytes ?? null);
+  let hasLfs = $derived((lfsBytes ?? 0) > 0);
+
   let editingDescription = $state(false);
   let descriptionDraft = $state("");
   let descriptionField = $state<HTMLTextAreaElement | null>(null);
@@ -265,13 +279,60 @@
 
       <RepositoryTopics state={repository} />
 
-      <dl class="mt-5 flex flex-col gap-3 border-t pt-4 text-xs">
-        <div class="flex justify-between gap-4">
-          <dt class="text-muted-foreground">Repository size</dt>
-          <dd class="tabular-nums">
+      {#if hasLfs}
+        <dl
+          class="mt-5 grid grid-cols-3 divide-x overflow-hidden rounded-md border text-center"
+        >
+          <div class="px-2 py-2.5">
+            <dt
+              class="text-[10px] font-medium uppercase tracking-wide text-muted-foreground"
+              title="Packed git objects, excluding LFS."
+            >
+              Git
+            </dt>
+            <dd class="mt-1 text-xs tabular-nums">
+              {formatRepositorySize(gitBytes)}
+            </dd>
+          </div>
+          <div class="px-2 py-2.5">
+            <dt
+              class="text-[10px] font-medium uppercase tracking-wide text-muted-foreground"
+              title="All LFS objects stored for this repository, across branches and history."
+            >
+              LFS
+            </dt>
+            <dd class="mt-1 text-xs tabular-nums">
+              {formatRepositorySize(lfsBytes)}
+            </dd>
+          </div>
+          <div class="px-2 py-2.5">
+            <dt
+              class="text-[10px] font-medium uppercase tracking-wide text-muted-foreground"
+              title="Git objects and LFS objects combined."
+            >
+              Total
+            </dt>
+            <dd class="mt-1 text-xs font-medium tabular-nums">
+              {formatRepositorySize(repository.browser.refs?.size_bytes)}
+            </dd>
+          </div>
+        </dl>
+      {:else}
+        <dl
+          class="mt-5 flex items-baseline justify-between gap-4 rounded-md border px-3 py-2.5"
+        >
+          <dt
+            class="text-[10px] font-medium uppercase tracking-wide text-muted-foreground"
+          >
+            Size
+          </dt>
+          <dd class="text-xs tabular-nums">
             {formatRepositorySize(repository.browser.refs?.size_bytes)}
           </dd>
-        </div>
+        </dl>
+      {/if}
+
+      <dl class="mt-4 flex flex-col gap-3 text-xs">
         <div class="flex justify-between gap-4">
           <dt class="text-muted-foreground">Commits</dt>
           <dd>

@@ -2,6 +2,7 @@ mod browser;
 mod git_http;
 mod gitea;
 mod github_mirror;
+mod icon;
 mod import_metadata;
 mod imports;
 mod integrations;
@@ -856,6 +857,15 @@ pub fn router() -> Router<RepositoryState> {
             get(topics::list_topics).put(topics::replace_topics),
         )
         .route("/topics", get(topics::suggest_topics))
+        .route(
+            "/repositories/{namespace}/{name}/icon",
+            get(icon::public_icon)
+                .put(icon::update_icon)
+                .delete(icon::delete_icon)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    icon::MAX_ICON_REQUEST_BYTES,
+                )),
+        )
         .route("/repositories/{namespace}/{name}/refs", get(browser::refs))
         .route(
             "/repositories/{namespace}/{name}/mirror",

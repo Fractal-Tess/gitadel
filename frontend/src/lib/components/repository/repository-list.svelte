@@ -13,6 +13,7 @@
   import Settings2 from "@lucide/svelte/icons/settings-2";
   import X from "@lucide/svelte/icons/x";
   import RepositoryActivityChart from "$lib/components/repository/repository-activity-chart.svelte";
+  import RepositoryIcon from "$lib/components/repository/repository-icon.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Alert from "$lib/components/ui/alert/index.js";
   import * as Empty from "$lib/components/ui/empty/index.js";
@@ -449,75 +450,87 @@
                     scope,
                   )}
               >
-                <div class="min-w-0 py-3">
-                  <div class="flex items-center gap-2">
-                    <h2 class="min-w-0 truncate text-sm font-semibold">
-                      <span class="text-muted-foreground"
-                        >{repository.namespace}/</span
-                      >{repository.name}
-                    </h2>
-                    {#if repository.mirrored}
-                      <span
-                        class="inline-flex items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-sky-600 dark:text-sky-400"
-                      >
-                        <RefreshCw class="size-2.5" />Mirror
+                <div class="flex min-w-0 items-start gap-3 py-3">
+                  <RepositoryIcon
+                    namespace={repository.namespace}
+                    name={repository.name}
+                    iconUpdatedAt={repository.icon_updated_at}
+                    class="mt-0.5 size-9"
+                  />
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-center gap-2">
+                      <h2 class="min-w-0 truncate text-sm font-semibold">
+                        <span class="text-muted-foreground"
+                          >{repository.namespace}/</span
+                        >{repository.name}
+                      </h2>
+                      {#if repository.mirrored}
+                        <span
+                          class="inline-flex items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-sky-600 dark:text-sky-400"
+                        >
+                          <RefreshCw class="size-2.5" />Mirror
+                        </span>
+                      {/if}
+                      {#if repository.visibility === "private"}
+                        <span
+                          class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+                          ><LockKeyhole class="size-2.5" /> Private</span
+                        >
+                      {/if}
+                      {#if repository.archived_at}
+                        <span
+                          class="rounded border px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+                          >Archived</span
+                        >
+                      {/if}
+                    </div>
+                    <p class="mt-1 truncate text-sm text-muted-foreground">
+                      {repository.description ?? "No description provided."}
+                    </p>
+                    <div
+                      class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground"
+                    >
+                      <span class="inline-flex items-center gap-1.5">
+                        <GitBranch class="size-3.5" />
+                        {repository.branch_count} branch{repository.branch_count ===
+                        1
+                          ? ""
+                          : "es"}
                       </span>
-                    {/if}
-                    {#if repository.visibility === "private"}
-                      <span
-                        class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
-                        ><LockKeyhole class="size-2.5" /> Private</span
-                      >
-                    {/if}
-                    {#if repository.archived_at}
-                      <span
-                        class="rounded border px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
-                        >Archived</span
-                      >
-                    {/if}
-                  </div>
-                  <p class="mt-1 truncate text-sm text-muted-foreground">
-                    {repository.description ?? "No description provided."}
-                  </p>
-                  <div
-                    class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground"
-                  >
-                    <span class="inline-flex items-center gap-1.5">
-                      <GitBranch class="size-3.5" />
-                      {repository.branch_count} branch{repository.branch_count ===
-                      1
-                        ? ""
-                        : "es"}
-                    </span>
-                    <span class="inline-flex items-center gap-1.5">
-                      <Braces class="size-3.5" />
-                      {lineCount(repository.total_lines)} lines
-                    </span>
-                    {#if repository.languages.length}
-                      <span
-                        class="flex h-1.5 w-16 overflow-hidden rounded-full bg-muted"
-                        aria-hidden="true"
-                      >
+                      <span class="inline-flex items-center gap-1.5">
+                        <Braces class="size-3.5" />
+                        {lineCount(repository.total_lines)} lines
+                      </span>
+                      {#if repository.languages.length}
+                        <span
+                          class="flex h-1.5 w-16 overflow-hidden rounded-full bg-muted"
+                          aria-hidden="true"
+                        >
+                          {#each repository.languages as language (language.language)}
+                            <span
+                              style:width={`${repository.total_lines ? (language.lines / repository.total_lines) * 100 : 0}%`}
+                              style:background={languageColor(
+                                language.language,
+                              )}
+                            ></span>
+                          {/each}
+                        </span>
                         {#each repository.languages as language (language.language)}
                           <span
-                            style:width={`${repository.total_lines ? (language.lines / repository.total_lines) * 100 : 0}%`}
-                            style:background={languageColor(language.language)}
-                          ></span>
+                            class="inline-flex items-center gap-1"
+                            title={`${lineCount(language.lines)} lines`}
+                          >
+                            <span
+                              class="size-1.5 rounded-full"
+                              style:background={languageColor(
+                                language.language,
+                              )}
+                            ></span>
+                            {language.language}
+                          </span>
                         {/each}
-                      </span>
-                      {#each repository.languages as language (language.language)}
-                        <span
-                          class="inline-flex items-center gap-1"
-                          title={`${lineCount(language.lines)} lines`}
-                        >
-                          <span
-                            class="size-1.5 rounded-full"
-                            style:background={languageColor(language.language)}
-                          ></span>
-                          {language.language}
-                        </span>
-                      {/each}
-                    {/if}
+                      {/if}
+                    </div>
                   </div>
                 </div>
                 <div class="pb-3 sm:col-start-2 sm:row-start-1 sm:py-3">

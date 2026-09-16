@@ -11,6 +11,8 @@ export const repositorySchema = z.object({
   mirrored: z.boolean(),
   default_branch: z.string(),
   archived_at: z.string().nullable(),
+  icon_updated_at: z.string().nullable(),
+  icon_source: z.enum(["manual", "detected"]).nullable(),
   created_at: z.string(),
   updated_at: z.string(),
   favorited: z.boolean(),
@@ -160,6 +162,20 @@ export const languageStatSchema = z.object({
 });
 
 export type Repository = z.infer<typeof repositorySchema>;
+
+// Cache busting is keyed on the timestamp so a replaced icon shows up without
+// the endpoint having to forbid caching outright.
+export function repositoryIconUrl(
+  namespace: string,
+  name: string,
+  updatedAt: string | null,
+): string | null {
+  return updatedAt
+    ? `/api/v1/repositories/${encodeURIComponent(namespace)}/${encodeURIComponent(
+        name,
+      )}/icon?v=${encodeURIComponent(updatedAt)}`
+    : null;
+}
 
 export type RepositoryOverviewItem = z.infer<
   typeof repositoryOverviewItemSchema

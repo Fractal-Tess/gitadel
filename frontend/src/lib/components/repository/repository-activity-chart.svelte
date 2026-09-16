@@ -147,11 +147,11 @@
         class="stroke-border/70"
         vector-effect="non-scaling-stroke"
       />
-      <path d={chart.area} class="fill-activity-3/12" />
+      <path d={chart.area} class="fill-foreground/10" />
       <path
         d={chart.path}
         fill="none"
-        class="stroke-activity-4"
+        class="stroke-foreground"
         stroke-width="1.75"
         stroke-linecap="round"
         stroke-linejoin="round"
@@ -169,7 +169,7 @@
         aria-hidden="true"
       ></span>
       <span
-        class="pointer-events-none absolute size-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-activity-4 ring-2 ring-background"
+        class="pointer-events-none absolute size-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-foreground ring-2 ring-background"
         style:left={`${reading.x}%`}
         style:top={`${(reading.y / CHART_HEIGHT) * 100}%`}
         aria-hidden="true"

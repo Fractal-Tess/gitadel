@@ -8,9 +8,12 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 - Added per-repository Git LFS usage in administration, with user and organization ownership, name and owner search, byte-range filters, space and name sorting, and ten-entry pagination.
 - Added separate Git and Git LFS storage sizes to repository sidebars for anyone with repository read access. File trees mark LFS pointers with a badge and show the referenced object size, including in nested directories and historical revisions.
+- Added repository icons. Maintainers upload and crop one in repository settings, and repositories without a manual icon adopt a conventional `icon.png`, `logo.png`, or `favicon.png` committed to the default branch, including under `static/`, `public/`, `assets/`, and `.github/`. Detection reads only the repository itself and never contacts an external host. Repositories with no icon fall back to a monogram.
 
 ### Changed
 
+- Split the repository sidebar's size readout into Git, LFS, and total cells, collapsing to a single figure when a repository stores nothing in LFS.
+- Moved the branch selector into the file tree header, where the branch it scopes is, and reduced the navigation rail to repository views while a repository is open.
 - Kept Gitadel online during administrator-triggered LFS storage migrations. Git operations and LFS downloads remain available; uploads continue during copying and wait only for final cutover. Failed migrations retain the source target.
 
 - Unified the NixOS service lifecycle around `services.gitadel.enable`, `package`, and `autoStart`. The default package remains the flake's tested `0.5.1` build; `autoStart = false` keeps Gitadel and enabled Gitadel-owned runner units manually startable without boot edges, while preserving the runner's dependency ordering and persisted state. The shared host Docker service remains under independent NixOS control.

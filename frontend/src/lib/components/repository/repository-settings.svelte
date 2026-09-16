@@ -1,11 +1,14 @@
 <script lang="ts">
   import Archive from "@lucide/svelte/icons/archive";
+  import ImageIcon from "@lucide/svelte/icons/image";
   import MapPin from "@lucide/svelte/icons/map-pin";
   import Settings2 from "@lucide/svelte/icons/settings-2";
   import Trash2 from "@lucide/svelte/icons/trash-2";
   import TriangleAlert from "@lucide/svelte/icons/triangle-alert";
 
+  import RepositoryIcon from "$lib/components/repository/repository-icon.svelte";
   import RepositoryIntegrationSettings from "$lib/components/repository/repository-integration-settings.svelte";
+  import AvatarCropDialog from "$lib/components/settings/avatar-crop-dialog.svelte";
   import RepositoryMirrorSettings from "$lib/components/repository/repository-mirror-settings.svelte";
   import RepositoryWebhookSettings from "$lib/components/repository/repository-webhook-settings.svelte";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
@@ -26,6 +29,7 @@
   let initializedFor = $state("");
   let moveDialogOpen = $state(false);
   let deleteDialogOpen = $state(false);
+  let iconEditorOpen = $state(false);
 
   // Sections are pages reached from the rail, so an unknown one falls back to
   // the first page rather than rendering nothing.
@@ -39,7 +43,8 @@
   // Only existing branches are valid targets for Git's symbolic HEAD, so the
   // current default is included even if the ref list has not loaded yet.
   const branches = $derived.by(() => {
-    const names = repository.browser.refs?.branches.map((branch) => branch.name) ?? [];
+    const names =
+      repository.browser.refs?.branches.map((branch) => branch.name) ?? [];
     return names.includes(defaultBranch) || !defaultBranch
       ? names
       : [defaultBranch, ...names];
@@ -154,7 +159,10 @@
         </Field.Field>
 
         <div class="flex justify-end">
-          <Button type="submit" disabled={repository.settings.repositoryControlPending}>
+          <Button
+            type="submit"
+            disabled={repository.settings.repositoryControlPending}
+          >
             {repository.settings.repositoryControlPending
               ? "Saving…"
               : "Save general settings"}
@@ -162,7 +170,74 @@
         </div>
       </form>
     </section>
+
+    <section
+      class="grid gap-5 p-5 md:grid-cols-[minmax(12rem,0.72fr)_minmax(0,1.5fr)] md:gap-10 md:p-6"
+      aria-labelledby="repository-icon-heading"
+    >
+      <header class="flex items-start gap-3">
+        <ImageIcon class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+        <div>
+          <h2 id="repository-icon-heading" class="font-semibold">Icon</h2>
+          <p class="mt-1 max-w-xs text-sm leading-5 text-muted-foreground">
+            Shown wherever this repository is listed.
+          </p>
+        </div>
+      </header>
+
+      <div class="flex max-w-2xl flex-col gap-4 sm:flex-row sm:items-center">
+        <RepositoryIcon
+          namespace={repository.namespace}
+          name={repository.name}
+          iconUpdatedAt={repository.repository?.icon_updated_at ?? null}
+          class="size-20 ring-1 ring-foreground/15"
+        />
+
+        <div class="grid gap-3">
+          <div class="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              disabled={repository.settings.iconPending}
+              onclick={() => (iconEditorOpen = true)}
+            >
+              {repository.repository?.icon_updated_at
+                ? "Change icon"
+                : "Upload icon"}
+            </Button>
+            {#if repository.repository?.icon_updated_at}
+              <Button
+                type="button"
+                variant="outline"
+                disabled={repository.settings.iconPending}
+                onclick={() => void repository.settings.removeIcon()}
+              >
+                Remove
+              </Button>
+            {/if}
+          </div>
+          <p class="max-w-sm text-xs leading-5 text-muted-foreground">
+            {#if repository.repository?.icon_source === "detected"}
+              Detected from a logo committed to
+              <code>{repository.repository?.default_branch}</code>. Uploading
+              one here replaces it.
+            {:else if repository.repository?.icon_source === "manual"}
+              Uploaded manually. Remove it to fall back to a logo committed to
+              the default branch.
+            {:else}
+              Commit an <code>icon.png</code>, <code>logo.png</code> or
+              <code>favicon.png</code> to the default branch and it is picked up automatically,
+              or upload one here.
+            {/if}
+          </p>
+        </div>
+      </div>
+    </section>
   </div>
+
+  <AvatarCropDialog
+    bind:open={iconEditorOpen}
+    onsave={(image) => repository.settings.updateIcon(image)}
+  />
 {:else if section === "location"}
   <div
     class="divide-y divide-border overflow-hidden rounded-xl bg-card/20 ring-1 ring-foreground/15"
@@ -226,7 +301,9 @@
             variant="outline"
             disabled={repository.settings.repositoryControlPending}
           >
-            {repository.settings.repositoryControlPending ? "Moving…" : "Save location"}
+            {repository.settings.repositoryControlPending
+              ? "Moving…"
+              : "Save location"}
           </Button>
         </div>
       </form>

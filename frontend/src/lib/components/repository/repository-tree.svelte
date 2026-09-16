@@ -5,6 +5,7 @@
 
   import { Spinner } from "$lib/components/ui/spinner/index.js";
   import { Badge } from "$lib/components/ui/badge/index.js";
+  import * as Select from "$lib/components/ui/select/index.js";
   import { formatDate, formatSize } from "$lib/repository/format.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
   import type { Tree } from "$lib/api/repositories.js";
@@ -42,17 +43,38 @@
 >
   {#if state.browser.repositoryTree}
     {@const tree = state.browser.repositoryTree}
-    <button
-      type="button"
-      class="group flex h-12 w-full shrink-0 items-center gap-3 border-b px-4 text-left font-medium hover:bg-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-      aria-label={`View commit history for ${tree.revision}, updated ${formatCommitAge(tree.commit_timestamp)}`}
-      onclick={() => state.navigate("history")}
-    >
-      <span class="flex min-w-0 flex-1 items-center gap-2 text-sm">
-        <GitBranch class="size-4 shrink-0 text-muted-foreground" />
-        <span class="truncate">{tree.revision}</span>
-      </span>
-      <span class="flex shrink-0 items-center gap-1.5 text-xs font-normal text-muted-foreground">
+    <!-- The branch scopes everything in this column, so it heads the column
+         rather than the repository toolbar. The commit chip beside it keeps the
+         old jump to history. -->
+    <div class="flex h-12 shrink-0 items-center gap-1 border-b pr-2 pl-1">
+      <Select.Root
+        type="single"
+        value={state.revision}
+        onValueChange={(value) => {
+          if (value && value !== state.revision) state.changeRevision(value);
+        }}
+      >
+        <Select.Trigger
+          class="h-8 min-w-0 flex-1 border-0 bg-transparent px-2 font-medium shadow-none hover:bg-accent/45"
+          aria-label="Switch branch"
+        >
+          <span class="flex min-w-0 items-center gap-2">
+            <GitBranch class="size-4 shrink-0 text-muted-foreground" />
+            <span class="truncate">{state.revision}</span>
+          </span>
+        </Select.Trigger>
+        <Select.Content align="start">
+          {#each state.browser.refs?.branches ?? [] as branch (branch.name)}
+            <Select.Item value={branch.name}>{branch.name}</Select.Item>
+          {/each}
+        </Select.Content>
+      </Select.Root>
+      <button
+        type="button"
+        class="flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent/45 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        aria-label={`View commit history for ${tree.revision}, updated ${formatCommitAge(tree.commit_timestamp)}`}
+        onclick={() => state.navigate("history")}
+      >
         <code>{tree.commit_oid.slice(0, 8)}</code>
         <span aria-hidden="true">·</span>
         <time
@@ -61,8 +83,8 @@
         >
           {formatCommitAge(tree.commit_timestamp)}
         </time>
-      </span>
-    </button>
+      </button>
+    </div>
     <!-- The history link stays pinned so it keeps forming the divider that runs
          under the app header while the entries scroll beneath it. -->
     <div class="min-h-0 flex-1 xl:overflow-y-auto xl:overscroll-contain">

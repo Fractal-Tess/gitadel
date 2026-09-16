@@ -313,38 +313,41 @@
      instead of taking the whole viewport height the way shadcn's default
      dashboard layout does. -->
 <Sidebar.Root collapsible="icon" class="md:top-16 md:h-[calc(100svh-4rem)]">
+  <!-- Inside a repository the rail is a repository menu and nothing else: the
+       places groups would push the views most of the way down the column, and
+       the header breadcrumb already leads back out to the namespace. -->
   <Sidebar.Content class="py-2">
-    <Sidebar.Group>
-      <Sidebar.GroupContent>
-        {@render linkMenu(exploreLinks, "Explore", "places")}
-      </Sidebar.GroupContent>
-    </Sidebar.Group>
-
-    {#if personalLinks.length}
-      <Sidebar.Group class="mt-3 border-t pt-3">
-        <Sidebar.GroupLabel>Personal</Sidebar.GroupLabel>
-        <Sidebar.GroupContent>
-          {@render linkMenu(personalLinks, "Personal", "places")}
-        </Sidebar.GroupContent>
-      </Sidebar.Group>
-    {/if}
-
-    {#if organizationLinks.length}
-      <Sidebar.Group class="mt-3 border-t pt-3">
-        <Sidebar.GroupLabel>Organizations</Sidebar.GroupLabel>
-        <Sidebar.GroupContent>
-          {@render linkMenu(organizationLinks, "Organizations", "places")}
-        </Sidebar.GroupContent>
-      </Sidebar.Group>
-    {/if}
-
     {#if repositoryLinks.length}
-      <Sidebar.Group class="mt-3 border-t pt-3">
+      <Sidebar.Group>
         <Sidebar.GroupLabel>Repository</Sidebar.GroupLabel>
         <Sidebar.GroupContent>
           {@render linkMenu(repositoryLinks, "Repository", "repository")}
         </Sidebar.GroupContent>
       </Sidebar.Group>
+    {:else}
+      <Sidebar.Group>
+        <Sidebar.GroupContent>
+          {@render linkMenu(exploreLinks, "Explore", "places")}
+        </Sidebar.GroupContent>
+      </Sidebar.Group>
+
+      {#if personalLinks.length}
+        <Sidebar.Group class="mt-3 border-t pt-3">
+          <Sidebar.GroupLabel>Personal</Sidebar.GroupLabel>
+          <Sidebar.GroupContent>
+            {@render linkMenu(personalLinks, "Personal", "places")}
+          </Sidebar.GroupContent>
+        </Sidebar.Group>
+      {/if}
+
+      {#if organizationLinks.length}
+        <Sidebar.Group class="mt-3 border-t pt-3">
+          <Sidebar.GroupLabel>Organizations</Sidebar.GroupLabel>
+          <Sidebar.GroupContent>
+            {@render linkMenu(organizationLinks, "Organizations", "places")}
+          </Sidebar.GroupContent>
+        </Sidebar.Group>
+      {/if}
     {/if}
   </Sidebar.Content>
 

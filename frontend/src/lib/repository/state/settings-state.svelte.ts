@@ -6,6 +6,7 @@ import {
   type Repository,
 } from "$lib/api/repositories.js";
 import { jsonBody, requestEmpty, requestJson } from "$lib/api/transport.js";
+import { blobToBase64 } from "$lib/avatar-crop.js";
 import type { RepositoryFeatureContext } from "./shared.js";
 import { errorMessage, repositoryApi } from "./shared.js";
 
@@ -36,6 +37,7 @@ export class RepositorySettingsState {
   repositoryControlPending = $state(false);
   lifecyclePending = $state(false);
   favoritePending = $state(false);
+  iconPending = $state(false);
   constructor(context: RepositoryFeatureContext, callbacks: SettingsCallbacks) {
     this.namespace = context.locator.namespace;
     this.name = context.locator.name;
@@ -91,6 +93,53 @@ export class RepositorySettingsState {
       toast.error(errorMessage(caught));
     } finally {
       this.favoritePending = false;
+    }
+  }
+  // The icon endpoints return no body, so the timestamp is advanced locally to
+  // bust the image cache rather than costing a second round trip.
+  async updateIcon(image: Blob): Promise<void> {
+    this.iconPending = true;
+    try {
+      await requestEmpty(repositoryApi(this, "/icon"), {
+        method: "PUT",
+        body: jsonBody({ image_base64: await blobToBase64(image) }),
+      });
+      const repository = this.getRepository();
+      if (repository) {
+        this.setRepository({
+          ...repository,
+          icon_updated_at: new Date().toISOString(),
+          icon_source: "manual",
+        });
+      }
+      this.invalidatePreload();
+      toast.success("Repository icon updated.");
+    } catch (caught) {
+      toast.error(errorMessage(caught));
+      throw caught;
+    } finally {
+      this.iconPending = false;
+    }
+  }
+  async removeIcon(): Promise<void> {
+    this.iconPending = true;
+    try {
+      await requestEmpty(repositoryApi(this, "/icon"), { method: "DELETE" });
+      const repository = this.getRepository();
+      if (repository) {
+        this.setRepository({
+          ...repository,
+          icon_updated_at: null,
+          icon_source: null,
+        });
+      }
+      this.invalidatePreload();
+      toast.success("Repository icon removed.");
+    } catch (caught) {
+      toast.error(errorMessage(caught));
+      throw caught;
+    } finally {
+      this.iconPending = false;
     }
   }
   async updateRepositoryControl(values: {

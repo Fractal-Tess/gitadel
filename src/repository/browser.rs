@@ -1086,6 +1086,17 @@ pub(super) async fn warm_repository_analysis(
     let Some(commit_oid) = overview.head else {
         return Ok(());
     };
+
+    // Runs ahead of the cache check below: the stats may already be warm while
+    // the push that triggered this pass was the one that added the logo.
+    if let Err(error) = super::icon::detect_icon(state, repository).await {
+        tracing::warn!(
+            %error,
+            repository_id = %repository.id,
+            "could not detect a repository icon"
+        );
+    }
+
     let need_stats = state
         .cached_stats(repository.id, &commit_oid)
         .await?

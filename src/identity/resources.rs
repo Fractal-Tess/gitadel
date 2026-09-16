@@ -953,6 +953,8 @@ mod tests {
             created_by: Set(user_id),
             archived_at: Set(None),
             deleted_at: Set(None),
+            icon_updated_at: Set(None),
+            icon_source: Set(None),
             created_at: Set(now),
             updated_at: Set(now),
         }

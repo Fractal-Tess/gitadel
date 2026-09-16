@@ -695,8 +695,27 @@ pub mod repository {
         pub created_by: Uuid,
         pub archived_at: Option<DateTimeUtc>,
         pub deleted_at: Option<DateTimeUtc>,
+        pub icon_updated_at: Option<DateTimeUtc>,
+        pub icon_source: Option<String>,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod repository_icon {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "repository_icons")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub repository_id: Uuid,
+        pub content: Vec<u8>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
