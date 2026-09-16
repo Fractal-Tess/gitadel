@@ -13,7 +13,6 @@ use axum::{
     routing::get,
 };
 use futures_util::stream;
-use rust_embed::RustEmbed;
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use tokio::{
@@ -34,9 +33,37 @@ use crate::{
     repository::{self, GitHttpState, RepositoryState},
 };
 
-#[derive(RustEmbed)]
-#[folder = "frontend/build/"]
-struct FrontendAssets;
+#[cfg(not(debug_assertions))]
+include!(concat!(env!("OUT_DIR"), "/frontend_assets.rs"));
+
+async fn frontend_asset(name: &str) -> Option<Cow<'static, [u8]>> {
+    if name.is_empty()
+        || std::path::Path::new(name)
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        let root = tokio::fs::canonicalize(concat!(env!("CARGO_MANIFEST_DIR"), "/frontend/build"))
+            .await
+            .ok()?;
+        let path = tokio::fs::canonicalize(root.join(name)).await.ok()?;
+        if !path.starts_with(&root) {
+            return None;
+        }
+        tokio::fs::read(path).await.ok().map(Cow::Owned)
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        FRONTEND_ASSETS
+            .binary_search_by(|(path, _)| path.cmp(&name))
+            .ok()
+            .map(|index| Cow::Borrowed(FRONTEND_ASSETS[index].1))
+    }
+}
 
 #[derive(Serialize)]
 struct HealthResponse {
@@ -417,17 +444,17 @@ async fn frontend(uri: Uri) -> Response {
         requested
     };
 
-    if let Some(asset) = FrontendAssets::get(asset_name) {
-        return asset_response(asset_name, asset.data);
+    if let Some(asset) = frontend_asset(asset_name).await {
+        return asset_response(asset_name, asset);
     }
 
     if !requested.contains('.')
-        && let Some(index) = FrontendAssets::get("index.html")
+        && let Some(index) = frontend_asset("index.html").await
     {
-        return asset_response("index.html", index.data);
+        return asset_response("index.html", index);
     }
 
-    if FrontendAssets::get("index.html").is_none() {
+    if frontend_asset("index.html").await.is_none() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "Frontend assets are not built. Run `bun run --cwd frontend build`.",

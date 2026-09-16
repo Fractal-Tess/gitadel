@@ -15,13 +15,13 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use comrak::{Options, markdown_to_html};
+use russh::keys::ssh_key::{HashAlg, PublicKey, SshSig};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 use serde::{Deserialize, Serialize};
 use sley::{
     GitError, GitObjectType, ObjectId, ReachableCommitOptions, ReferenceTarget,
     Repository as GitRepository, StreamControl, TagQueryOptions,
 };
-use ssh_key::{HashAlg, PublicKey, SshSig};
 use tokei::{Config as TokeiConfig, LanguageType};
 use tokio::{process::Command, task::JoinSet};
 use tokio_util::io::ReaderStream;
@@ -1787,8 +1787,8 @@ const fn default_per_page() -> usize {
 mod tests {
     use std::{fs, process::Command};
 
+    use russh::keys::ssh_key::{HashAlg, LineEnding, PrivateKey, private::Ed25519Keypair};
     use sley::Repository as GitRepository;
-    use ssh_key::{HashAlg, LineEnding, PrivateKey, private::Ed25519Keypair};
     use uuid::Uuid;
 
     use super::{SshCommitSignature, count_reachable_commits, verify_ssh_commit_signature};

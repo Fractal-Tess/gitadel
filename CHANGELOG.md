@@ -12,6 +12,7 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ### Changed
 
+- Removed the unused direct HTTP body utility dependency, consolidated SSH key handling on russh's key implementation, and replaced rust-embed with a generated asset lookup. Release builds still embed the frontend; debug builds read it from disk on each request.
 - Split the repository sidebar's size readout into Git, LFS, and total cells, collapsing to a single figure when a repository stores nothing in LFS.
 - Moved the branch selector into the file tree header, where the branch it scopes is, and reduced the navigation rail to repository views while a repository is open.
 - Kept Gitadel online during administrator-triggered LFS storage migrations. Git operations and LFS downloads remain available; uploads continue during copying and wait only for final cutover. Failed migrations retain the source target.

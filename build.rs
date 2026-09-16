@@ -1,4 +1,9 @@
-use std::{env, path::Path};
+use std::{
+    env,
+    fs::{self, File},
+    io::{self, BufWriter, Write},
+    path::Path,
+};
 
 fn main() {
     build_actions_protocol();
@@ -13,6 +18,48 @@ fn main() {
             "production frontend assets are missing; run `bun --cwd frontend run build` before `cargo build --release`"
         );
     }
+    build_frontend_assets(frontend_build).expect("could not generate frontend asset lookup");
+}
+
+fn build_frontend_assets(root: &Path) -> io::Result<()> {
+    let mut assets = Vec::new();
+    if root.try_exists()? {
+        let root = root.canonicalize()?;
+        let mut directories = vec![root.clone()];
+        while let Some(directory) = directories.pop() {
+            for entry in fs::read_dir(directory)? {
+                let entry = entry?;
+                let file_type = entry.file_type()?;
+                let path = entry.path();
+                if file_type.is_dir() {
+                    directories.push(path);
+                } else if file_type.is_file() {
+                    let name = path
+                        .strip_prefix(&root)
+                        .expect("asset is inside frontend build")
+                        .to_str()
+                        .ok_or_else(|| io::Error::other("frontend asset path is not UTF-8"))?
+                        .replace(std::path::MAIN_SEPARATOR, "/");
+                    assets.push((name, path));
+                } else {
+                    return Err(io::Error::other(format!(
+                        "frontend assets must be regular files or directories: {}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+    }
+    assets.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    let output =
+        Path::new(&env::var_os("OUT_DIR").expect("OUT_DIR is set")).join("frontend_assets.rs");
+    let mut output = BufWriter::new(File::create(output)?);
+    writeln!(output, "static FRONTEND_ASSETS: &[(&str, &[u8])] = &[")?;
+    for (name, path) in assets {
+        writeln!(output, "({name:?}, include_bytes!({path:?})),")?;
+    }
+    writeln!(output, "];")?;
+    output.flush()
 }
 
 fn build_actions_protocol() {

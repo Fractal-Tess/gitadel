@@ -33,7 +33,7 @@ The backend process is:
 watchexec --restart --exts rs -- cargo run
 ```
 
-Only the backend owns a port. In debug builds rust-embed reads
+Only the backend owns a port. In debug builds the backend reads
 `frontend/build/` from disk on every request, so a completed frontend build is
 served without restarting Rust. The backend restarts only for Rust changes.
 Add `-w Cargo.toml` when editing dependencies.

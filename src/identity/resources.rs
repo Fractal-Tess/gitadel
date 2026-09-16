@@ -6,12 +6,12 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use chrono::Utc;
+use russh::keys::ssh_key::{HashAlg, PublicKey};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
     PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait, sea_query::Expr,
 };
 use serde::{Deserialize, Serialize};
-use ssh_key::{HashAlg, PublicKey};
 use uuid::Uuid;
 
 use super::{
