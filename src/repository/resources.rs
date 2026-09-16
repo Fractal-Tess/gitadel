@@ -572,46 +572,35 @@ pub(super) async fn create_imported_repository(
     repository.object_format = initialized.object_format;
     repository.default_branch = initialized.default_branch;
 
-    let transaction = match state.identity().database().begin().await {
-        Ok(transaction) => transaction,
-        Err(error) => {
-            cleanup_lfs_blobs(state, storage_key).await;
-            cleanup_repository_storage(&path, &lfs_path).await;
-            return Err(error.into());
-        }
-    };
-    let repository = match repository.into_active_model().insert(&transaction).await {
+    // Keep target metadata consistent with the live store until the import commits.
+    // Acquire before the transaction so cutover cannot wait on our database lock.
+    let operation_guard = state.lfs_operation_guard().await;
+    let committed: Result<repository::Model, ApiError> = async {
+        let transaction = state.identity().database().begin().await?;
+        let repository = repository.into_active_model().insert(&transaction).await?;
+        catalog_repository_lfs(state, &transaction, &repository).await?;
+        state
+            .identity()
+            .audit_on(
+                &transaction,
+                Some(actor_user_id),
+                "repository.import.create",
+                Some(format!("{namespace}/{name}")),
+            )
+            .await?;
+        transaction.commit().await?;
+        Ok(repository)
+    }
+    .await;
+    drop(operation_guard);
+    let repository = match committed {
         Ok(repository) => repository,
         Err(error) => {
             cleanup_lfs_blobs(state, storage_key).await;
             cleanup_repository_storage(&path, &lfs_path).await;
-            return Err(error.into());
+            return Err(error);
         }
     };
-    if let Err(error) = catalog_repository_lfs(state, &transaction, &repository).await {
-        cleanup_lfs_blobs(state, repository.storage_key).await;
-        cleanup_repository_storage(&path, &lfs_path).await;
-        return Err(error);
-    }
-    if let Err(error) = state
-        .identity()
-        .audit_on(
-            &transaction,
-            Some(actor_user_id),
-            "repository.import.create",
-            Some(format!("{namespace}/{name}")),
-        )
-        .await
-    {
-        cleanup_lfs_blobs(state, repository.storage_key).await;
-        cleanup_repository_storage(&path, &lfs_path).await;
-        return Err(error);
-    }
-    if let Err(error) = transaction.commit().await {
-        cleanup_lfs_blobs(state, repository.storage_key).await;
-        cleanup_repository_storage(&path, &lfs_path).await;
-        return Err(error.into());
-    }
     state.queue_repository_analysis(repository.id).await;
     Ok(repository)
 }
@@ -1445,6 +1434,7 @@ async fn cleanup_lfs_blobs(state: &RepositoryState, storage_key: Uuid) {
             return;
         }
     };
+    let _operation_guard = state.lfs_operation_guard().await;
     if let Err(error) = targets::delete_prefix_from_all(
         state.identity().database(),
         state.local_lfs_root().to_path_buf(),

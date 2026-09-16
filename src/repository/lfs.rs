@@ -331,6 +331,7 @@ async fn upload(
     )
     .await?;
     let key = state.lfs_object_key(&repository, &oid)?;
+    let _operation_guard = state.lfs_operation_guard().await;
     if let Some(metadata) = state
         .lfs_store()
         .stat(&key)

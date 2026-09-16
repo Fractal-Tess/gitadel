@@ -52,7 +52,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    blob_store::{BlobStore, ObjectKey, ObjectPrefix, lfs_object_key, targets},
+    blob_store::{BlobStore, ObjectKey, ObjectPrefix, lfs_object_key},
     config::StorageSettings,
     entity::{
         namespace, organization_member, repository, repository_alias, repository_cache_entry,
@@ -77,8 +77,7 @@ pub struct RepositoryState {
     mirror_syncing: Arc<Mutex<HashSet<Uuid>>>,
     github_known_hosts: Arc<Mutex<Option<(String, Instant)>>>,
     lfs_root: Arc<PathBuf>,
-    lfs_store: Arc<dyn BlobStore>,
-    lfs_target_id: Option<Uuid>,
+    lfs_storage: Arc<crate::storage::LfsStorageManager>,
     public_url: Arc<Url>,
     ssh_port: u16,
     lfs_tokens: Arc<RwLock<HashMap<String, LfsAuthorization>>>,
@@ -110,6 +109,7 @@ struct LfsAuthorization {
 #[derive(Clone, Copy, Serialize, serde::Deserialize)]
 struct CachedRepositorySize {
     bytes: u64,
+    lfs_bytes: u64,
 }
 
 const ANALYSIS_CONCURRENCY: usize = 4;
@@ -133,8 +133,16 @@ impl RepositoryState {
     ) -> Result<Self, anyhow::Error> {
         fs::create_dir_all(&settings.repository_root).await?;
         mirrors::cleanup_temporary_files(&settings.repository_root).await?;
-        let active_storage =
-            targets::load_active(identity.database(), settings.lfs_root.clone()).await?;
+        let lfs_storage = match identity.lfs_storage().await {
+            Some(manager) => manager,
+            None => {
+                crate::storage::LfsStorageManager::new(
+                    identity.database(),
+                    settings.lfs_root.clone(),
+                )
+                .await?
+            }
+        };
         mirrors::cleanup_lfs_staging(&settings.lfs_root).await?;
         fs::create_dir_all(&settings.actions_artifact_root).await?;
         Ok(Self {
@@ -154,8 +162,7 @@ impl RepositoryState {
             mirror_syncing: Arc::new(Mutex::new(HashSet::new())),
             github_known_hosts: Arc::new(Mutex::new(None)),
             lfs_root: Arc::new(settings.lfs_root),
-            lfs_store: active_storage.store,
-            lfs_target_id: active_storage.target_id,
+            lfs_storage,
             public_url: Arc::new(public_url),
             ssh_port,
             lfs_tokens: Arc::new(RwLock::new(HashMap::new())),
@@ -220,12 +227,16 @@ impl RepositoryState {
         lfs_object_key(repository.storage_key, oid).map_err(ApiError::internal)
     }
 
-    pub(super) fn lfs_store(&self) -> &dyn BlobStore {
-        self.lfs_store.as_ref()
+    pub(super) fn lfs_store(&self) -> Arc<dyn BlobStore> {
+        self.lfs_storage.store()
     }
 
     pub(super) fn lfs_target_id(&self) -> Option<Uuid> {
-        self.lfs_target_id
+        self.lfs_storage.target_id()
+    }
+
+    pub(super) async fn lfs_operation_guard(&self) -> tokio::sync::RwLockReadGuard<'_, ()> {
+        self.lfs_storage.lock_operation().await
     }
 
     pub(super) fn lfs_endpoint(&self, repository: &repository::Model) -> String {
@@ -517,14 +528,14 @@ impl RepositoryState {
     async fn repository_size(
         &self,
         repository: &repository::Model,
-    ) -> Result<Option<u64>, ApiError> {
+    ) -> Result<Option<CachedRepositorySize>, ApiError> {
         let cached = self
             .cached_value::<CachedRepositorySize>(repository.id, CACHE_KIND_SIZE, "current")
             .await?;
         if cached.is_none() {
             self.queue_repository_size_refresh(repository.clone()).await;
         }
-        Ok(cached.map(|entry| entry.bytes))
+        Ok(cached)
     }
 
     async fn queue_repository_size_refresh(&self, repository: repository::Model) {
@@ -591,7 +602,7 @@ impl RepositoryState {
                 repository.id,
                 CACHE_KIND_SIZE,
                 "current",
-                &CachedRepositorySize { bytes },
+                &CachedRepositorySize { bytes, lfs_bytes },
                 REPOSITORY_SIZE_CACHE_LIFETIME,
             )
             .await?;

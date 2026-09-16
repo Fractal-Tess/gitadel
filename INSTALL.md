@@ -202,9 +202,11 @@ copy `rootCA-key.pem` or the Gitadel private key to another device.
 
 Git repositories, issue attachments, and release assets remain under the configured local storage roots. Administrators define tested filesystem and S3-compatible destinations under **Administration → Storage**. User-defined storage targets are also available as backup destinations; Gitadel does not create a default backup provider. Filesystem backups use a sibling `<storage-name>-backups` directory so an archive never contains itself; S3 backups use a `backups` child of the target prefix.
 
-**Administration → Git LFS** reports the current object count and logical bytes used. Exactly one target is active. Changing it runs an offline, restartable copy-and-verify migration with live byte progress that reconnects through maintenance mode. Gitadel verifies destination size and SHA-256 content, selects the destination in one database transaction, and restarts normal service. Source data is retained.
+**Administration → Git LFS** shows object counts and logical space by repository and owner. Search repository names, filter by user or organization and byte range, and sort by name or space. The list starts with ten repositories; **Load more** fetches the next ten.
 
-The same workflow is available from the CLI while Gitadel is stopped:
+Changing the active target runs in the background without restarting Gitadel. Browsing, Git operations, and LFS downloads remain available. LFS uploads continue during the initial copy, then wait while Gitadel drains in-flight writes, copies the remaining objects, and commits the target change. Migration verifies object size and SHA-256 content. Source data is retained; a failed or interrupted migration leaves the source active and can be retried.
+
+The CLI migration still requires Gitadel to be stopped:
 
 ```bash
 gitadel lfs target add-filesystem --name archive --path /mnt/archive/gitadel-lfs

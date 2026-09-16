@@ -1,16 +1,24 @@
+use std::{
+    collections::HashSet,
+    sync::{Arc, RwLock},
+};
+
 use anyhow::{Context, Result, ensure};
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait as _, ColumnTrait as _, DatabaseConnection, EntityTrait as _,
     QueryFilter as _, Set, TransactionTrait as _, sea_query::OnConflict,
 };
+use tokio::sync::{
+    Mutex, OwnedMutexGuard, OwnedRwLockWriteGuard, RwLock as AsyncRwLock, RwLockReadGuard,
+};
 use uuid::Uuid;
 
-use crate::archive::{MaintenancePhase, MaintenanceProgressReporter};
+use crate::archive::MaintenanceProgressReporter;
 use crate::{
     blob_store::{
         BlobDigest, BlobMetadata, FilesystemBlobStore, ObjectPrefix,
-        targets::{self, StorageTargetConfiguration},
+        targets::{self, ActiveBlobStore, StorageTargetConfiguration},
     },
     config::{LfsCommand, LfsTargetCommand, S3Settings, Settings},
     database,
@@ -18,6 +26,67 @@ use crate::{
         lfs_object, lfs_storage_migration, lfs_storage_state, lfs_storage_target, repository,
     },
 };
+
+/// The live LFS target, swapped atomically only after a migration has copied and
+/// verified every object. Writer read guards drain before the cutover write guard.
+pub(crate) struct LfsStorageManager {
+    active: RwLock<ActiveBlobStore>,
+    operations: Arc<AsyncRwLock<()>>,
+    migrations: Arc<Mutex<()>>,
+}
+
+impl LfsStorageManager {
+    pub(crate) async fn new(
+        database: &DatabaseConnection,
+        fallback_path: std::path::PathBuf,
+    ) -> Result<Arc<Self>> {
+        recover_online_migrations(database).await?;
+        Ok(Arc::new(Self {
+            active: RwLock::new(targets::load_active(database, fallback_path).await?),
+            operations: Arc::new(AsyncRwLock::new(())),
+            migrations: Arc::new(Mutex::new(())),
+        }))
+    }
+
+    pub(crate) fn store(&self) -> Arc<dyn crate::blob_store::BlobStore> {
+        self.active
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .store
+            .clone()
+    }
+
+    pub(crate) fn target_id(&self) -> Option<Uuid> {
+        self.active
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .target_id
+    }
+
+    pub(crate) async fn lock_operation(&self) -> RwLockReadGuard<'_, ()> {
+        self.operations.read().await
+    }
+
+    pub(crate) async fn lock_cutover(&self) -> OwnedRwLockWriteGuard<()> {
+        self.operations.clone().write_owned().await
+    }
+
+    pub(crate) fn try_lock_migration(self: &Arc<Self>) -> Option<OwnedMutexGuard<()>> {
+        self.migrations.clone().try_lock_owned().ok()
+    }
+
+    pub(crate) fn replace(
+        &self,
+        store: Arc<dyn crate::blob_store::BlobStore>,
+        target_id: Option<Uuid>,
+    ) {
+        *self
+            .active
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            ActiveBlobStore { store, target_id };
+    }
+}
 
 pub async fn run(command: &LfsCommand, settings: &Settings) -> Result<()> {
     let database = database::connect_and_migrate(&settings.database).await?;
@@ -110,6 +179,114 @@ pub(crate) async fn migrate(
     batch_size: usize,
     reporter: Option<&MaintenanceProgressReporter>,
 ) -> Result<()> {
+    migrate_inner(
+        database,
+        settings,
+        target_id,
+        batch_size,
+        Uuid::new_v4(),
+        None,
+        reporter,
+    )
+    .await
+}
+
+pub(crate) async fn migrate_online(
+    database: &DatabaseConnection,
+    settings: &Settings,
+    target_id: Uuid,
+    batch_size: usize,
+    operation_id: Uuid,
+    manager: Arc<LfsStorageManager>,
+    _migration_guard: OwnedMutexGuard<()>,
+) -> Result<()> {
+    let result = migrate_inner(
+        database,
+        settings,
+        target_id,
+        batch_size,
+        operation_id,
+        Some(manager),
+        None,
+    )
+    .await;
+    if let Err(error) = &result {
+        mark_failed(database, operation_id, error).await;
+    }
+    result
+}
+pub(crate) async fn reserve_online_migration(
+    database: &DatabaseConnection,
+    settings: &Settings,
+    target_id: Uuid,
+    operation_id: Uuid,
+) -> Result<lfs_storage_migration::Model> {
+    let active = targets::load_active(database, settings.storage.lfs_root.clone()).await?;
+    let destination_id = (!target_id.is_nil()).then_some(target_id);
+    ensure!(
+        active.target_id != destination_id,
+        "destination is already the active LFS storage target"
+    );
+    let now = Utc::now();
+    Ok(lfs_storage_migration::ActiveModel {
+        id: Set(operation_id),
+        source_target_id: Set(active.target_id),
+        target_id: Set(destination_id),
+        state: Set("pending".to_owned()),
+        phase: Set("pending".to_owned()),
+        last_key: Set(None),
+        copied_objects: Set(0),
+        copied_bytes: Set(0),
+        error: Set(None),
+        started_at: Set(now),
+        updated_at: Set(now),
+        completed_at: Set(None),
+    }
+    .insert(database)
+    .await?)
+}
+async fn recover_online_migrations(database: &DatabaseConnection) -> Result<()> {
+    let migrations = lfs_storage_migration::Entity::update_many()
+        .filter(lfs_storage_migration::Column::State.ne("completed"))
+        .filter(lfs_storage_migration::Column::State.ne("failed"))
+        .col_expr(
+            lfs_storage_migration::Column::State,
+            sea_orm::sea_query::Expr::value("failed"),
+        )
+        .col_expr(
+            lfs_storage_migration::Column::Phase,
+            sea_orm::sea_query::Expr::value("failed"),
+        )
+        .col_expr(
+            lfs_storage_migration::Column::Error,
+            sea_orm::sea_query::Expr::value(
+                "Gitadel restarted before the online migration completed.",
+            ),
+        )
+        .col_expr(
+            lfs_storage_migration::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::current_timestamp(),
+        )
+        .exec(database)
+        .await?;
+    if migrations.rows_affected > 0 {
+        tracing::warn!(
+            count = migrations.rows_affected,
+            "marked interrupted online LFS migrations as failed"
+        );
+    }
+    Ok(())
+}
+
+async fn migrate_inner(
+    database: &DatabaseConnection,
+    settings: &Settings,
+    target_id: Uuid,
+    batch_size: usize,
+    operation_id: Uuid,
+    manager: Option<Arc<LfsStorageManager>>,
+    reporter: Option<&MaintenanceProgressReporter>,
+) -> Result<()> {
     ensure!(
         batch_size > 0,
         "migration batch size must be greater than zero"
@@ -120,16 +297,24 @@ pub(crate) async fn migrate(
         active.target_id != destination_id,
         "destination is already the active LFS storage target"
     );
-    let target: std::sync::Arc<dyn crate::blob_store::BlobStore> =
-        if let Some(target_id) = destination_id {
-            let (_, target_configuration) = load_target(database, target_id).await?;
-            target_configuration.open().await?
-        } else {
-            std::sync::Arc::new(FilesystemBlobStore::new(settings.storage.lfs_root.clone()).await?)
-        };
+    if manager.is_some() {
+        set_migration_phase(database, operation_id, "copying", "check").await?;
+    }
+    if let Some(manager) = &manager {
+        ensure!(
+            manager.target_id() == active.target_id,
+            "the active LFS storage target changed while migration was starting"
+        );
+    }
+    let target: Arc<dyn crate::blob_store::BlobStore> = if let Some(target_id) = destination_id {
+        let (_, target_configuration) = load_target(database, target_id).await?;
+        target_configuration.open().await?
+    } else {
+        Arc::new(FilesystemBlobStore::new(settings.storage.lfs_root.clone()).await?)
+    };
     if let Some(reporter) = reporter {
         reporter.report(
-            MaintenancePhase::CheckingDestination,
+            crate::archive::MaintenancePhase::CheckingDestination,
             "Checking the LFS destination and ownership marker.",
         );
     }
@@ -137,12 +322,15 @@ pub(crate) async fn migrate(
         targets::verify_ownership(target.as_ref(), target_id).await?;
     }
 
-    let mut migration = match lfs_storage_migration::Entity::find()
-        .filter(lfs_storage_migration::Column::State.ne("completed"))
-        .one(database)
-        .await?
-    {
+    let mut migration_query = lfs_storage_migration::Entity::find()
+        .filter(lfs_storage_migration::Column::State.ne("completed"));
+    migration_query = migration_query.filter(lfs_storage_migration::Column::State.ne("failed"));
+    let mut migration = match migration_query.one(database).await? {
         Some(existing) => {
+            ensure!(
+                existing.id == operation_id || manager.is_none(),
+                "another LFS storage migration is already active"
+            );
             ensure!(
                 existing.target_id == destination_id
                     && existing.source_target_id == active.target_id,
@@ -153,7 +341,7 @@ pub(crate) async fn migrate(
         None => {
             let now = Utc::now();
             lfs_storage_migration::ActiveModel {
-                id: Set(Uuid::new_v4()),
+                id: Set(operation_id),
                 source_target_id: Set(active.target_id),
                 target_id: Set(destination_id),
                 state: Set("copying".to_owned()),
@@ -173,21 +361,24 @@ pub(crate) async fn migrate(
     let migration_id = migration.id;
 
     if let Some(reporter) = reporter {
-        reporter.report(MaintenancePhase::CopyingLfs, "Copying Git LFS objects.");
+        reporter.report(
+            crate::archive::MaintenancePhase::CopyingLfs,
+            "Copying Git LFS objects.",
+        );
     }
     let result = async {
-        let objects = lfs_objects(active.store.as_ref()).await?;
+        let source_store = manager
+            .as_ref()
+            .map_or_else(|| active.store.clone(), |manager| manager.store());
+        let objects = lfs_objects(source_store.as_ref()).await?;
         let total_bytes = objects
             .iter()
             .fold(0_u64, |total, object| total.saturating_add(object.size));
-        if let Some(reporter) = reporter {
-            reporter.report_progress(
-                MaintenancePhase::CopyingLfs,
-                "Copying Git LFS objects.",
-                u64::try_from(migration.copied_bytes).unwrap_or_default(),
-                total_bytes,
-            );
-        }
+        update_progress(
+            u64::try_from(migration.copied_bytes).unwrap_or_default(),
+            total_bytes,
+            reporter,
+        );
         let start_after = migration.last_key.clone();
         let mut since_checkpoint = 0_usize;
         for metadata in objects.iter().filter(|object| {
@@ -195,7 +386,7 @@ pub(crate) async fn migrate(
                 .as_deref()
                 .is_none_or(|key| object.key.as_str() > key)
         }) {
-            copy_object(active.store.as_ref(), target.as_ref(), metadata).await?;
+            copy_object(source_store.as_ref(), target.as_ref(), metadata).await?;
             catalog_object(database, metadata, active.target_id).await?;
             migration.last_key = Some(metadata.key.as_str().to_owned());
             migration.copied_objects += 1;
@@ -203,66 +394,131 @@ pub(crate) async fn migrate(
                 .copied_bytes
                 .saturating_add(i64::try_from(metadata.size)?);
             since_checkpoint += 1;
-            if let Some(reporter) = reporter {
-                reporter.report_progress(
-                    MaintenancePhase::CopyingLfs,
-                    "Copying Git LFS objects.",
-                    u64::try_from(migration.copied_bytes).unwrap_or_default(),
-                    total_bytes,
-                );
-            }
+            update_progress(
+                u64::try_from(migration.copied_bytes).unwrap_or_default(),
+                total_bytes,
+                reporter,
+            );
             if since_checkpoint >= batch_size {
                 migration = save_progress(database, migration, "copying", "copy").await?;
                 since_checkpoint = 0;
             }
         }
         migration = save_progress(database, migration, "verifying", "verify").await?;
-        if let Some(reporter) = reporter {
-            reporter.report_progress(
-                MaintenancePhase::CopyingLfs,
-                "Verifying copied Git LFS objects.",
-                total_bytes,
-                total_bytes,
+        verify_objects(target.as_ref(), &objects).await?;
+        if let Some(manager) = &manager {
+            let initial_keys = objects
+                .iter()
+                .map(|metadata| metadata.key.as_str())
+                .collect::<HashSet<_>>();
+            // Block writers only while copying objects created after the snapshot.
+            let _operation_guard = manager.lock_cutover().await;
+            let source_store = manager.store();
+            ensure!(
+                manager.target_id() == active.target_id,
+                "the active LFS storage target changed during migration"
             );
-        }
-        for metadata in &objects {
-            let copied = target
-                .stat(&metadata.key)
+            let delta = lfs_objects(source_store.as_ref())
                 .await?
-                .context("copied LFS object is missing from destination")?;
-            ensure!(
-                copied.size == metadata.size,
-                "copied LFS object size mismatch"
-            );
-            ensure!(
-                copied.digest == metadata.digest,
-                "copied LFS object digest mismatch"
-            );
+                .into_iter()
+                .filter(|metadata| !initial_keys.contains(metadata.key.as_str()))
+                .collect::<Vec<_>>();
+            for metadata in &delta {
+                copy_object(source_store.as_ref(), target.as_ref(), metadata).await?;
+                catalog_object(database, metadata, active.target_id).await?;
+                migration.copied_objects += 1;
+                migration.copied_bytes = migration
+                    .copied_bytes
+                    .saturating_add(i64::try_from(metadata.size)?);
+            }
+            verify_objects(target.as_ref(), &delta).await?;
+            migration = save_progress(database, migration, "cutover", "cutover").await?;
+            commit_cutover(database, migration, active.target_id, destination_id).await?;
+            manager.replace(target.clone(), destination_id);
+        } else {
+            commit_cutover(database, migration, active.target_id, destination_id).await?;
         }
-        migration = save_progress(database, migration, "cutover", "cutover").await?;
         if let Some(reporter) = reporter {
             reporter.report(
-                MaintenancePhase::WritingMetadata,
+                crate::archive::MaintenancePhase::WritingMetadata,
                 "Selecting the verified LFS target.",
             );
         }
-        commit_cutover(database, migration, active.target_id, destination_id).await?;
         Ok(())
     }
     .await;
 
-    if let Err(error) = &result
-        && let Ok(Some(failed)) = lfs_storage_migration::Entity::find_by_id(migration_id)
-            .one(database)
-            .await
+    if let Err(error) = &result {
+        mark_failed(database, migration_id, error).await;
+    }
+    result?;
+    println!("LFS storage migration completed; target {target_id} is active.");
+    Ok(())
+}
+fn update_progress(
+    processed_bytes: u64,
+    total_bytes: u64,
+    reporter: Option<&MaintenanceProgressReporter>,
+) {
+    if let Some(reporter) = reporter {
+        reporter.report_progress(
+            crate::archive::MaintenancePhase::CopyingLfs,
+            "Copying Git LFS objects.",
+            processed_bytes,
+            total_bytes,
+        );
+    }
+}
+
+async fn verify_objects(
+    target: &dyn crate::blob_store::BlobStore,
+    objects: &[BlobMetadata],
+) -> Result<()> {
+    for metadata in objects {
+        let copied = target
+            .stat(&metadata.key)
+            .await?
+            .context("copied LFS object is missing from destination")?;
+        ensure!(
+            copied.size == metadata.size,
+            "copied LFS object size mismatch"
+        );
+        ensure!(
+            copied.digest == metadata.digest,
+            "copied LFS object digest mismatch"
+        );
+    }
+    Ok(())
+}
+
+pub(crate) async fn mark_failed(
+    database: &DatabaseConnection,
+    migration_id: Uuid,
+    error: &anyhow::Error,
+) {
+    if let Ok(Some(failed)) = lfs_storage_migration::Entity::find_by_id(migration_id)
+        .one(database)
+        .await
     {
         let mut failed: lfs_storage_migration::ActiveModel = failed.into();
+        failed.state = Set("failed".to_owned());
+        failed.phase = Set("failed".to_owned());
         failed.error = Set(Some(format!("{error:#}")));
         failed.updated_at = Set(Utc::now());
         let _ = failed.update(database).await;
     }
-    result?;
-    println!("LFS storage migration completed; target {target_id} is active.");
+}
+async fn set_migration_phase(
+    database: &DatabaseConnection,
+    migration_id: Uuid,
+    state: &str,
+    phase: &str,
+) -> Result<()> {
+    let migration = lfs_storage_migration::Entity::find_by_id(migration_id)
+        .one(database)
+        .await?
+        .context("online LFS migration reservation is missing")?;
+    save_progress(database, migration, state, phase).await?;
     Ok(())
 }
 
@@ -343,12 +599,19 @@ async fn save_progress(
     state: &str,
     phase: &str,
 ) -> Result<lfs_storage_migration::Model> {
-    let mut active: lfs_storage_migration::ActiveModel = migration.into();
-    active.state = Set(state.to_owned());
-    active.phase = Set(phase.to_owned());
-    active.error = Set(None);
-    active.updated_at = Set(Utc::now());
-    Ok(active.update(database).await?)
+    Ok(lfs_storage_migration::ActiveModel {
+        id: sea_orm::Unchanged(migration.id),
+        copied_objects: Set(migration.copied_objects),
+        copied_bytes: Set(migration.copied_bytes),
+        last_key: Set(migration.last_key),
+        state: Set(state.to_owned()),
+        phase: Set(phase.to_owned()),
+        error: Set(None),
+        updated_at: Set(Utc::now()),
+        ..Default::default()
+    }
+    .update(database)
+    .await?)
 }
 
 async fn commit_cutover(
@@ -358,6 +621,14 @@ async fn commit_cutover(
     target_id: Option<Uuid>,
 ) -> Result<()> {
     let transaction = database.begin().await?;
+    let current_state = lfs_storage_state::Entity::find_by_id(1)
+        .one(&transaction)
+        .await?
+        .context("LFS storage state is missing")?;
+    ensure!(
+        current_state.active_target_id == source_id,
+        "the active LFS storage target changed before cutover"
+    );
     let mut objects = lfs_object::Entity::update_many();
     objects = objects.col_expr(
         lfs_object::Column::StorageTargetId,
@@ -479,6 +750,19 @@ mod tests {
                 .unwrap()
                 .active_target_id,
             Some(target.id)
+        );
+        let progress = lfs_storage_migration::Entity::find()
+            .one(&database)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (
+                progress.copied_objects,
+                progress.copied_bytes,
+                progress.last_key.as_deref()
+            ),
+            (1, payload.len() as i64, Some(key.as_str()))
         );
         let destination = FilesystemBlobStore::new(target_path).await.unwrap();
         assert_eq!(

@@ -4,7 +4,14 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+### Added
+
+- Added per-repository Git LFS usage in administration, with user and organization ownership, name and owner search, byte-range filters, space and name sorting, and ten-entry pagination.
+- Added separate Git and Git LFS storage sizes to repository sidebars for anyone with repository read access. File trees mark LFS pointers with a badge and show the referenced object size, including in nested directories and historical revisions.
+
 ### Changed
+
+- Kept Gitadel online during administrator-triggered LFS storage migrations. Git operations and LFS downloads remain available; uploads continue during copying and wait only for final cutover. Failed migrations retain the source target.
 
 - Unified the NixOS service lifecycle around `services.gitadel.enable`, `package`, and `autoStart`. The default package remains the flake's tested `0.5.1` build; `autoStart = false` keeps Gitadel and enabled Gitadel-owned runner units manually startable without boot edges, while preserving the runner's dependency ordering and persisted state. The shared host Docker service remains under independent NixOS control.
 

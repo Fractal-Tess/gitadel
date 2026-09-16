@@ -70,3 +70,23 @@ export const storageMigrationProgressSchema = z.object({
 export type StorageMigrationProgress = z.infer<
   typeof storageMigrationProgressSchema
 >;
+
+export const lfsRepositoryUsageSchema = z.object({
+  repository_id: z.uuid(),
+  repository_name: z.string(),
+  owner_name: z.string(),
+  owner_type: z.enum(["user", "organization"]),
+  object_count: z.number().nonnegative(),
+  total_bytes: z.number().nonnegative(),
+});
+export type LfsRepositoryUsage = z.infer<typeof lfsRepositoryUsageSchema>;
+
+export const lfsRepositoryUsageResponseSchema = z.object({
+  repositories: z.array(lfsRepositoryUsageSchema),
+  total: z.number().nonnegative(),
+  limit: z.number().int().positive(),
+  offset: z.number().int().nonnegative(),
+});
+export type LfsRepositoryUsageResponse = z.infer<
+  typeof lfsRepositoryUsageResponseSchema
+>;

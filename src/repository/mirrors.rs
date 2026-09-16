@@ -993,6 +993,7 @@ async fn promote_lfs_objects(
     storage_key: Uuid,
     staging: &Path,
 ) -> Result<(), ApiError> {
+    let _operation_guard = state.lfs_operation_guard().await;
     let objects = staging.join("objects");
     if !fs::try_exists(&objects).await.map_err(ApiError::internal)? {
         return Ok(());
@@ -1109,6 +1110,7 @@ fn is_lfs_oid(value: &str) -> bool {
 }
 
 async fn cleanup_imported_lfs(state: &RepositoryState, storage_key: Uuid) {
+    let _operation_guard = state.lfs_operation_guard().await;
     let prefix = match ObjectPrefix::new(storage_key.to_string()) {
         Ok(prefix) => prefix,
         Err(error) => {

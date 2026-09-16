@@ -1,21 +1,29 @@
 <script lang="ts">
-  import CheckCircle2 from "@lucide/svelte/icons/check-circle-2";
   import Cloud from "@lucide/svelte/icons/cloud";
   import Database from "@lucide/svelte/icons/database";
   import HardDrive from "@lucide/svelte/icons/hard-drive";
+  import Search from "@lucide/svelte/icons/search";
   import { Spinner } from "$lib/components/ui/spinner/index.js";
   import { toast } from "svelte-sonner";
 
   import * as Alert from "$lib/components/ui/alert/index.js";
+  import * as Empty from "$lib/components/ui/empty/index.js";
+  import * as Field from "$lib/components/ui/field/index.js";
+  import * as InputGroup from "$lib/components/ui/input-group/index.js";
+  import * as NativeSelect from "$lib/components/ui/native-select/index.js";
+  import * as Table from "$lib/components/ui/table/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
+  import { Input } from "$lib/components/ui/input/index.js";
   import { Progress } from "$lib/components/ui/progress/index.js";
   import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
   import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
   import { ApiFailure, jsonBody, requestJson } from "$lib/api/transport.js";
   import {
+    lfsRepositoryUsageResponseSchema,
     storageMigrationProgressSchema,
     storageMigrationScheduledSchema,
+    type LfsRepositoryUsageResponse,
     type LfsStorageStatus,
     type StorageMigrationProgress,
     type StorageTarget,
@@ -28,14 +36,23 @@
     peekStorageTargets,
     refreshLfsStatus,
     refreshStorageTargets,
-    setLfsStatus,
-    setStorageTargets,
   } from "$lib/settings/settings-data-cache.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
   const app = useAppState();
   let targets = $state.raw<StorageTarget[]>([]);
   let status = $state.raw<LfsStorageStatus | null>(null);
+  let usage = $state.raw<LfsRepositoryUsageResponse | null>(null);
+  let usageSearch = $state("");
+  let usageOwner = $state("");
+  let usageOwnerType = $state("");
+  let usageMinBytes = $state("");
+  let usageMaxBytes = $state("");
+  let usageSort = $state("bytes_desc");
+  let usageLoading = $state(true);
+  let usageLoadingMore = $state(false);
+  let usageError = $state<string | null>(null);
+  let usageRequestVersion = 0;
   let loading = $state(true);
   let working = $state(false);
   let error = $state<string | null>(null);
@@ -43,7 +60,6 @@
   let pendingTarget = $state.raw<StorageTarget | null>(null);
   let targetDialogOpen = $state(false);
   let progressSource: EventSource | null = null;
-  let migrationPoll = 0;
 
   let activeTarget = $derived(targets.find((target) => target.active) ?? null);
   let availableTargets = $derived(targets.filter((target) => !target.active));
@@ -62,8 +78,14 @@
     void load(scope);
     return () => {
       progressSource?.close();
-      migrationPoll += 1;
+      progressSource = null;
+      usageRequestVersion += 1;
     };
+  });
+
+  $effect(() => {
+    const scope = app.authorizationScope;
+    void loadUsage(scope, false);
   });
 
   async function load(scope: typeof app.authorizationScope) {
@@ -92,13 +114,76 @@
     }
   }
 
+  async function loadUsage(
+    scope: typeof app.authorizationScope,
+    append: boolean,
+  ) {
+    const version = ++usageRequestVersion;
+    usageError = null;
+    if (append) usageLoadingMore = true;
+    else {
+      usageLoading = true;
+    }
+    const parameters = new URLSearchParams({
+      limit: "10",
+      offset: append ? String(usage?.repositories.length ?? 0) : "0",
+      sort: usageSort,
+    });
+    if (usageSearch.trim()) parameters.set("search", usageSearch.trim());
+    if (usageOwner.trim()) parameters.set("owner", usageOwner.trim());
+    if (usageOwnerType) parameters.set("owner_type", usageOwnerType);
+    if (usageMinBytes.trim()) parameters.set("min_bytes", usageMinBytes.trim());
+    if (usageMaxBytes.trim()) parameters.set("max_bytes", usageMaxBytes.trim());
+    try {
+      const loaded = await requestJson(
+        `/api/v1/admin/storage/lfs/repositories?${parameters}`,
+        lfsRepositoryUsageResponseSchema,
+      );
+      if (version !== usageRequestVersion || app.authorizationScope !== scope)
+        return;
+      usage =
+        append && usage
+          ? {
+              ...loaded,
+              repositories: [...usage.repositories, ...loaded.repositories],
+            }
+          : loaded;
+    } catch (caught) {
+      if (version === usageRequestVersion && app.authorizationScope === scope) {
+        usageError = message(caught);
+      }
+    } finally {
+      if (version === usageRequestVersion) {
+        usageLoading = false;
+        usageLoadingMore = false;
+      }
+    }
+  }
+
+  function clearUsageFilters() {
+    usageSearch = "";
+    usageOwner = "";
+    usageOwnerType = "";
+    usageMinBytes = "";
+    usageMaxBytes = "";
+    usageSort = "bytes_desc";
+  }
+
+  function repositoryHref(
+    repository: NonNullable<LfsRepositoryUsageResponse>["repositories"][number],
+  ) {
+    return `/${encodeURIComponent(repository.owner_name)}/${encodeURIComponent(repository.repository_name)}`;
+  }
+
   function openTargetDialog() {
+    if (working) return;
     pendingTarget = availableTargets[0] ?? null;
     targetDialogOpen = true;
   }
 
   async function confirmMigration() {
     const target = pendingTarget;
+    const scope = app.authorizationScope;
     if (!target) return;
     targetDialogOpen = false;
     pendingTarget = null;
@@ -113,19 +198,19 @@
           body: jsonBody({ target_id: target.id, batch_size: 100 }),
         },
       );
-      invalidateAdminActivity(app.authorizationScope);
+      if (app.authorizationScope !== scope) return;
+      invalidateAdminActivity(scope);
       migration = {
         operation_id: response.operation_id,
         key: "",
         operation: "lfs_migrate",
         phase: "scheduled",
-        message: "Gitadel is entering maintenance mode.",
+        message: response.message,
         processed_bytes: null,
         total_bytes: null,
       };
       toast.success(response.message);
       watchMigration(response.operation_id);
-      void pollForMigration(target.id);
     } catch (caught) {
       working = false;
       toast.error(message(caught));
@@ -133,12 +218,14 @@
   }
 
   function watchMigration(operationId: string) {
+    const scope = app.authorizationScope;
     progressSource?.close();
     const source = new EventSource(
       `/api/v1/admin/storage/progress/${encodeURIComponent(operationId)}`,
     );
     progressSource = source;
     source.onmessage = (event) => {
+      if (progressSource !== source || app.authorizationScope !== scope) return;
       let value: unknown;
       try {
         value = JSON.parse(event.data);
@@ -148,51 +235,33 @@
       const parsed = storageMigrationProgressSchema.safeParse(value);
       if (!parsed.success || parsed.data.operation_id !== operationId) return;
       migration = parsed.data;
-      if (parsed.data.phase === "failed") {
-        error = parsed.data.message;
+      if (parsed.data.phase === "failed" || parsed.data.phase === "completed") {
         source.close();
+        progressSource = null;
         working = false;
-        migrationPoll += 1;
+        if (parsed.data.phase === "failed") {
+          error = parsed.data.message;
+        } else {
+          migration = null;
+          toast.success("Git LFS storage migration completed.");
+          void refreshAfterMigration(scope);
+        }
       }
     };
   }
 
-  async function pollForMigration(targetId: string) {
-    const poll = ++migrationPoll;
-    const deadline = Date.now() + 10 * 60 * 1_000;
-    let sawMaintenance = false;
-    while (poll === migrationPoll && Date.now() < deadline) {
-      try {
-        const updated = await refreshStorageTargets(app.authorizationScope);
-        if (updated.some((target) => target.id === targetId && target.active)) {
-          targets = updated;
-          setStorageTargets(app.authorizationScope, targets);
-          status = await refreshLfsStatus(app.authorizationScope);
-          setLfsStatus(app.authorizationScope, status);
-          progressSource?.close();
-          progressSource = null;
-          migration = null;
-          working = false;
-          toast.success("Git LFS storage migration completed.");
-          return;
-        }
-        if (sawMaintenance) {
-          progressSource?.close();
-          progressSource = null;
-          migration = null;
-          working = false;
-          error =
-            "Git LFS storage migration ended without selecting the destination.";
-          return;
-        }
-      } catch {
-        sawMaintenance = true;
-      }
-      await new Promise((resolve) => window.setTimeout(resolve, 1_000));
-    }
-    if (poll === migrationPoll) {
-      error = "Git LFS storage migration did not finish within 10 minutes.";
-      working = false;
+  async function refreshAfterMigration(scope: typeof app.authorizationScope) {
+    try {
+      const [updatedTargets, updatedStatus] = await Promise.all([
+        refreshStorageTargets(scope),
+        refreshLfsStatus(scope),
+      ]);
+      if (app.authorizationScope !== scope) return;
+      targets = updatedTargets;
+      status = updatedStatus;
+      await loadUsage(scope, false);
+    } catch (caught) {
+      if (app.authorizationScope === scope) error = message(caught);
     }
   }
 
@@ -315,11 +384,7 @@
         aria-live="polite"
       >
         <div class="flex items-start gap-3">
-          {#if migration.phase === "completed"}
-            <CheckCircle2 class="mt-0.5 size-5 text-emerald-500" />
-          {:else}
-            <Spinner class="mt-0.5 size-5 text-primary" />
-          {/if}
+          <Spinner class="mt-0.5 size-5 text-primary" />
           <div class="min-w-0 flex-1">
             <div class="flex items-center justify-between gap-3">
               <p class="text-sm font-medium">{migration.message}</p>
@@ -337,16 +402,187 @@
                 )}
               </p>
             {:else}
-              <Progress class="mt-3 h-2" value={0} max={100} />
               <p class="mt-2 text-xs text-muted-foreground">
-                This page reconnects automatically while Gitadel is in
-                maintenance mode.
+                {formatBytes(migration.processed_bytes ?? 0)} copied. Gitadel remains
+                online; LFS writes wait during final cutover.
               </p>
             {/if}
           </div>
         </div>
       </section>
     {/if}
+    <section
+      class="rounded-xl border bg-card/40 p-5 shadow-sm"
+      aria-labelledby="lfs-repository-usage-title"
+    >
+      <div class="flex flex-col gap-1">
+        <h2 id="lfs-repository-usage-title" class="text-base font-semibold">
+          Repository usage
+        </h2>
+        <p class="text-sm leading-6 text-muted-foreground">
+          Find repositories that currently consume Git LFS space. Usage is
+          logical: an object shared by repositories is counted once for each
+          repository that owns it.
+        </p>
+      </div>
+
+      <Field.Group class="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <Field.Field>
+          <Field.Label for="lfs-search">Repository search</Field.Label>
+          <InputGroup.Root>
+            <InputGroup.Input
+              id="lfs-search"
+              bind:value={usageSearch}
+              placeholder="Search by name"
+            />
+            <InputGroup.Addon><Search /></InputGroup.Addon>
+          </InputGroup.Root>
+        </Field.Field>
+        <Field.Field>
+          <Field.Label for="lfs-owner">Owner</Field.Label>
+          <Input
+            id="lfs-owner"
+            bind:value={usageOwner}
+            placeholder="Username or organization"
+          />
+        </Field.Field>
+        <Field.Field>
+          <Field.Label for="lfs-owner-type">Owner type</Field.Label>
+          <NativeSelect.Root id="lfs-owner-type" bind:value={usageOwnerType}>
+            <NativeSelect.Option value="">All owners</NativeSelect.Option>
+            <NativeSelect.Option value="user">Users</NativeSelect.Option>
+            <NativeSelect.Option value="organization"
+              >Organizations</NativeSelect.Option
+            >
+          </NativeSelect.Root>
+        </Field.Field>
+        <Field.Field>
+          <Field.Label for="lfs-sort">Sort</Field.Label>
+          <NativeSelect.Root id="lfs-sort" bind:value={usageSort}>
+            <NativeSelect.Option value="bytes_desc"
+              >Largest first</NativeSelect.Option
+            >
+            <NativeSelect.Option value="bytes_asc"
+              >Smallest first</NativeSelect.Option
+            >
+            <NativeSelect.Option value="name"
+              >Repository name</NativeSelect.Option
+            >
+          </NativeSelect.Root>
+        </Field.Field>
+        <Field.Field>
+          <Field.Label for="lfs-minimum">Minimum space (bytes)</Field.Label>
+          <Input
+            id="lfs-minimum"
+            type="number"
+            min="0"
+            step="1"
+            value={usageMinBytes}
+            placeholder="No minimum"
+            oninput={(event) => (usageMinBytes = event.currentTarget.value)}
+          />
+        </Field.Field>
+        <Field.Field>
+          <Field.Label for="lfs-maximum">Maximum space (bytes)</Field.Label>
+          <Input
+            id="lfs-maximum"
+            type="number"
+            min="0"
+            step="1"
+            value={usageMaxBytes}
+            placeholder="No maximum"
+            oninput={(event) => (usageMaxBytes = event.currentTarget.value)}
+          />
+        </Field.Field>
+        <div class="flex items-end md:col-span-2">
+          <Button type="button" variant="outline" onclick={clearUsageFilters}>
+            Clear filters
+          </Button>
+        </div>
+      </Field.Group>
+
+      {#if usageError}
+        <Alert.Root class="mt-5" variant="destructive">
+          <Alert.Title>Could not load repository usage</Alert.Title>
+          <Alert.Description>{usageError}</Alert.Description>
+        </Alert.Root>
+      {:else if usageLoading}
+        <div
+          class="mt-5 flex items-center gap-2 rounded-lg border p-4 text-sm text-muted-foreground"
+          aria-live="polite"
+        >
+          <Spinner class="size-4" /> Loading repository usage…
+        </div>
+      {:else if usage?.repositories.length === 0}
+        <Empty.Root class="mt-5 border border-dashed">
+          <Empty.Header>
+            <Empty.Title>No repositories match these filters</Empty.Title>
+            <Empty.Description
+              >Try another name, owner, or space range.</Empty.Description
+            >
+          </Empty.Header>
+        </Empty.Root>
+      {:else}
+        <div class="mt-5 overflow-x-auto rounded-lg border">
+          <Table.Root class="min-w-[620px]">
+            <Table.Header>
+              <Table.Row>
+                <Table.Head>Repository</Table.Head>
+                <Table.Head>Owner</Table.Head>
+                <Table.Head class="text-right">Objects</Table.Head>
+                <Table.Head class="text-right">Logical space</Table.Head>
+              </Table.Row>
+            </Table.Header>
+            <Table.Body>
+              {#each usage?.repositories ?? [] as repository (repository.repository_id)}
+                <Table.Row>
+                  <Table.Cell>
+                    <a
+                      class="font-medium text-primary underline-offset-4 hover:underline"
+                      href={repositoryHref(repository)}
+                    >
+                      {repository.repository_name}
+                    </a>
+                  </Table.Cell>
+                  <Table.Cell>
+                    <div>{repository.owner_name}</div>
+                    <div class="text-xs capitalize text-muted-foreground">
+                      {repository.owner_type}
+                    </div>
+                  </Table.Cell>
+                  <Table.Cell class="text-right tabular-nums">
+                    {repository.object_count.toLocaleString()}
+                  </Table.Cell>
+                  <Table.Cell class="text-right tabular-nums">
+                    {formatBytes(repository.total_bytes)}
+                  </Table.Cell>
+                </Table.Row>
+              {/each}
+            </Table.Body>
+          </Table.Root>
+        </div>
+        <div class="mt-4 flex flex-wrap items-center justify-between gap-3">
+          <p class="text-xs text-muted-foreground">
+            Showing {usage?.repositories.length.toLocaleString() ?? 0} of
+            {usage?.total.toLocaleString() ?? 0} repositories with LFS usage.
+          </p>
+          {#if usage && usage.repositories.length < usage.total}
+            <Button
+              type="button"
+              variant="outline"
+              disabled={usageLoadingMore}
+              onclick={() => void loadUsage(app.authorizationScope, true)}
+            >
+              {#if usageLoadingMore}
+                <Spinner data-icon="inline-start" /> Loading…
+              {:else}
+                Load more
+              {/if}
+            </Button>
+          {/if}
+        </div>
+      {/if}
+    </section>
   {/if}
 </div>
 
@@ -355,8 +591,8 @@
     <Dialog.Header>
       <Dialog.Title>Configure Git LFS storage</Dialog.Title>
       <Dialog.Description>
-        Choose a configured destination. Gitadel will enter maintenance mode,
-        copy and verify every object, then select it as the active target.
+        Choose a configured destination. Gitadel will copy and verify objects in
+        the background, then select it as the active target without restarting.
         Source objects will not be deleted.
       </Dialog.Description>
     </Dialog.Header>
@@ -392,8 +628,9 @@
         {/each}
       </div>
       <p class="text-xs leading-5 text-muted-foreground">
-        Gitadel remains unavailable to normal requests during the copy and
-        cutover.
+        Browsing, Git operations, and LFS downloads remain available. LFS
+        uploads continue during copying and wait while the final changes are
+        moved.
       </p>
       <Dialog.Footer>
         <Button

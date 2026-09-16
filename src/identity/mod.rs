@@ -1,4 +1,5 @@
 mod admin;
+mod admin_lfs;
 mod auth;
 mod avatar;
 mod integrations;
@@ -75,6 +76,7 @@ pub struct IdentityState {
     runtime_settings: Option<Arc<Settings>>,
     maintenance_sender: Option<mpsc::Sender<MaintenanceAction>>,
     maintenance_pending: Arc<Mutex<bool>>,
+    lfs_storage: Arc<tokio::sync::RwLock<Option<Arc<crate::storage::LfsStorageManager>>>>,
     validated_backups: Arc<Mutex<HashMap<Uuid, ValidatedBackup>>>,
     tested_backup_providers: Arc<Mutex<HashMap<Uuid, TestedBackupProvider>>>,
     integrity_settings_version: watch::Sender<u64>,
@@ -271,6 +273,7 @@ impl IdentityState {
             runtime_settings,
             maintenance_sender,
             maintenance_pending: Arc::new(Mutex::new(false)),
+            lfs_storage: Arc::new(tokio::sync::RwLock::new(None)),
             validated_backups: Arc::new(Mutex::new(HashMap::new())),
             tested_backup_providers: Arc::new(Mutex::new(HashMap::new())),
             integrity_settings_version: watch::channel(0).0,
@@ -279,6 +282,18 @@ impl IdentityState {
 
     pub fn database(&self) -> &DatabaseConnection {
         &self.database
+    }
+    pub(crate) async fn initialize_lfs_storage(
+        &self,
+        fallback_path: PathBuf,
+    ) -> Result<(), anyhow::Error> {
+        let manager = crate::storage::LfsStorageManager::new(&self.database, fallback_path).await?;
+        *self.lfs_storage.write().await = Some(manager);
+        Ok(())
+    }
+
+    pub(crate) async fn lfs_storage(&self) -> Option<Arc<crate::storage::LfsStorageManager>> {
+        self.lfs_storage.read().await.clone()
     }
 
     pub(crate) fn subscribe_integrity_settings(&self) -> watch::Receiver<u64> {
@@ -800,6 +815,10 @@ pub fn router() -> Router<IdentityState> {
             get(admin::list_storage_targets).post(admin::create_storage_target),
         )
         .route("/admin/storage/lfs/status", get(admin::lfs_storage_status))
+        .route(
+            "/admin/storage/lfs/repositories",
+            get(admin_lfs::list_lfs_repository_usage),
+        )
         .route(
             "/admin/storage/targets/test",
             post(admin::test_storage_target),

@@ -62,19 +62,12 @@ pub enum MaintenanceAction {
         provider: BackupProvider,
         safety_key: Option<String>,
     },
-    LfsMigrate {
-        operation_id: Uuid,
-        target_id: Uuid,
-        batch_size: usize,
-    },
 }
 
 impl MaintenanceAction {
     pub fn operation_id(&self) -> Uuid {
         match self {
-            Self::Create { operation_id, .. }
-            | Self::Restore { operation_id, .. }
-            | Self::LfsMigrate { operation_id, .. } => *operation_id,
+            Self::Create { operation_id, .. } | Self::Restore { operation_id, .. } => *operation_id,
         }
     }
 
@@ -82,14 +75,12 @@ impl MaintenanceAction {
         match self {
             Self::Create { .. } => MaintenanceOperation::Create,
             Self::Restore { .. } => MaintenanceOperation::Restore,
-            Self::LfsMigrate { .. } => MaintenanceOperation::LfsMigrate,
         }
     }
 
     fn key(&self) -> String {
         match self {
             Self::Create { key, .. } | Self::Restore { key, .. } => key.clone(),
-            Self::LfsMigrate { target_id, .. } => target_id.to_string(),
         }
     }
 }
@@ -99,7 +90,6 @@ impl MaintenanceAction {
 pub enum MaintenanceOperation {
     Create,
     Restore,
-    LfsMigrate,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -157,7 +147,6 @@ impl MaintenanceProgressReporter {
         let message = match self.sender.borrow().operation {
             MaintenanceOperation::Create => "Backup completed. Gitadel is restarting.",
             MaintenanceOperation::Restore => "Restore completed. Gitadel is restarting.",
-            MaintenanceOperation::LfsMigrate => "LFS migration completed. Gitadel is restarting.",
         };
         self.report(MaintenancePhase::Completed, message);
     }
@@ -166,7 +155,6 @@ impl MaintenanceProgressReporter {
         let operation = match self.sender.borrow().operation {
             MaintenanceOperation::Create => "Backup",
             MaintenanceOperation::Restore => "Restore",
-            MaintenanceOperation::LfsMigrate => "LFS migration",
         };
         self.report(
             MaintenancePhase::Failed,
@@ -905,18 +893,6 @@ pub async fn perform_maintenance(
                 "administrative restore completed"
             );
             Ok(())
-        }
-        MaintenanceAction::LfsMigrate {
-            operation_id: _,
-            target_id,
-            batch_size,
-        } => {
-            let database = database::connect_and_migrate(&settings.database).await?;
-            let result =
-                crate::storage::migrate(&database, settings, target_id, batch_size, Some(reporter))
-                    .await;
-            database.close().await?;
-            result
         }
     }
 }

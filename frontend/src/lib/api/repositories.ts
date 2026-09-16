@@ -68,6 +68,7 @@ export const refsSchema = z.object({
   branches: z.array(refSchema),
   tags: z.array(refSchema),
   size_bytes: z.number().int().nonnegative().nullable(),
+  lfs_size_bytes: z.number().int().nonnegative().nullable(),
 });
 
 export const treeEntrySchema = z.object({
@@ -77,6 +78,7 @@ export const treeEntrySchema = z.object({
   kind: z.enum(["tree", "blob", "symlink", "submodule"]),
   mode: z.number(),
   size: z.number().nullable(),
+  lfs_size: z.number().int().nonnegative().nullable(),
 });
 
 export const treeSchema = z.object({

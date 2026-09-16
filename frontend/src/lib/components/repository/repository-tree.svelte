@@ -4,6 +4,7 @@
   import MaterialFileIcon from "$lib/components/repository/material-file-icon.svelte";
 
   import { Spinner } from "$lib/components/ui/spinner/index.js";
+  import { Badge } from "$lib/components/ui/badge/index.js";
   import { formatDate, formatSize } from "$lib/repository/format.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
   import type { Tree } from "$lib/api/repositories.js";
@@ -101,16 +102,22 @@
             <MaterialFileIcon name={entry.path} class="size-4 shrink-0" />
           {/if}
           <span class="min-w-0 flex-1 truncate text-sm">{entry.name}</span>
+          {#if entry.lfs_size !== null}
+            <Badge variant="outline" title="Stored with Git LFS">LFS</Badge>
+          {/if}
           {#if entry.kind !== "tree"}
             <span class="shrink-0 text-xs text-muted-foreground">
-              {formatSize(entry.size)}
+              {formatSize(entry.lfs_size ?? entry.size)}
             </span>
           {/if}
         </button>
 
         {#if entry.kind === "tree" && state.browser.expandedPaths.has(entry.path)}
           {#if state.browser.expandedTrees[entry.path]}
-            {@render entries(state.browser.expandedTrees[entry.path], depth + 1)}
+            {@render entries(
+              state.browser.expandedTrees[entry.path],
+              depth + 1,
+            )}
           {:else if state.browser.loadingPaths.has(entry.path)}
             <div
               class="flex items-center gap-2 py-2 text-xs text-muted-foreground"

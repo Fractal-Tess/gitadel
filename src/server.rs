@@ -80,6 +80,10 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
     let identity_state =
         IdentityState::new_with_runtime(database, settings.clone(), maintenance_sender)
             .context("could not initialize authentication")?;
+    identity_state
+        .initialize_lfs_storage(settings.storage.lfs_root.clone())
+        .await
+        .context("could not initialize LFS storage")?;
     let ssh_port = settings.ssh.bind.port();
     let repository_state = RepositoryState::new(
         identity_state.clone(),

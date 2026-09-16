@@ -36,6 +36,7 @@ use crate::{
 };
 
 const MAX_TEXT_BLOB_BYTES: usize = 2 * 1024 * 1024;
+const MAX_LFS_POINTER_BYTES: u64 = 1024;
 const MAX_DIFF_BYTES: usize = 5 * 1024 * 1024;
 const DEFAULT_REPOSITORY_ACTIVITY_DAYS: u16 = 14;
 const MAX_REPOSITORY_ACTIVITY_DAYS: u16 = 365;
@@ -121,6 +122,7 @@ pub struct RefsResponse {
     branches: Vec<RefResponse>,
     tags: Vec<RefResponse>,
     size_bytes: Option<u64>,
+    lfs_size_bytes: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -141,6 +143,7 @@ pub struct TreeEntryResponse {
     kind: &'static str,
     mode: u32,
     size: Option<u64>,
+    lfs_size: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -448,7 +451,7 @@ pub async fn refs(
     jar: CookieJar,
 ) -> Result<Json<RefsResponse>, ApiError> {
     let repository = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
-    let size_bytes = state.repository_size(&repository).await?;
+    let size = state.repository_size(&repository).await?;
     let path = state.repository_path(&repository);
     let response = read_git(path, move |git| {
         let mut branches = git
@@ -473,7 +476,8 @@ pub async fn refs(
         Ok(RefsResponse {
             branches,
             tags,
-            size_bytes,
+            size_bytes: size.map(|size| size.bytes),
+            lfs_size_bytes: size.map(|size| size.lfs_bytes),
         })
     })
     .await?;
@@ -531,6 +535,13 @@ pub async fn tree(
             } else {
                 None
             };
+            // Only small regular blobs can be pointers; never load large files or symlinks.
+            let lfs_size =
+                if kind == "blob" && size.is_some_and(|size| size < MAX_LFS_POINTER_BYTES) {
+                    lfs_pointer_size(&git.blobs().read(entry.oid)?)
+                } else {
+                    None
+                };
             entries.push(TreeEntryResponse {
                 name,
                 path: entry_path,
@@ -538,6 +549,7 @@ pub async fn tree(
                 kind,
                 mode: entry.mode,
                 size,
+                lfs_size,
             });
         }
         entries.sort_unstable_by(|left, right| {
@@ -612,6 +624,55 @@ pub async fn tree(
         }
     }
     Ok(Json(response))
+}
+
+fn lfs_pointer_size(content: &[u8]) -> Option<u64> {
+    let text = std::str::from_utf8(content).ok()?.strip_suffix('\n')?;
+    let mut lines = text.split('\n');
+    match lines.next()? {
+        "version https://git-lfs.github.com/spec/v1"
+        | "version https://hawser.github.com/spec/v1" => {}
+        _ => return None,
+    }
+    let mut previous_key = "";
+    let mut has_oid = false;
+    let mut size = None;
+    for line in lines {
+        let (key, value) = line.split_once(' ')?;
+        if key.is_empty()
+            || key <= previous_key
+            || !key.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
+            })
+            || value.is_empty()
+            || value.contains('\r')
+        {
+            return None;
+        }
+        previous_key = key;
+        match key {
+            "oid" => {
+                let hash = value.strip_prefix("sha256:")?;
+                if hash.len() != 64
+                    || !hash
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    return None;
+                }
+                has_oid = true;
+            }
+            "size" => {
+                if !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return None;
+                }
+                size = Some(value.parse().ok()?);
+            }
+            "version" => return None,
+            _ => {}
+        }
+    }
+    has_oid.then_some(size).flatten()
 }
 
 pub async fn blob(
@@ -1720,6 +1781,25 @@ mod tests {
     use uuid::Uuid;
 
     use super::{SshCommitSignature, count_reachable_commits, verify_ssh_commit_signature};
+
+    #[test]
+    fn lfs_pointer_preserves_zero_size_with_extension_fields() {
+        let pointer = b"version https://git-lfs.github.com/spec/v1\next-0-test sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\noid sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nsize 0\n";
+        assert_eq!(super::lfs_pointer_size(pointer), Some(0));
+    }
+
+    #[test]
+    fn lfs_pointer_rejects_invalid_object_identity() {
+        let pointer =
+            b"version https://git-lfs.github.com/spec/v1\noid sha256:not-a-hash\nsize 12345\n";
+        assert_eq!(super::lfs_pointer_size(pointer), None);
+    }
+
+    #[test]
+    fn lfs_pointer_rejects_ambiguous_size() {
+        let pointer = b"version https://git-lfs.github.com/spec/v1\noid sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nsize 100\nsize 200\n";
+        assert_eq!(super::lfs_pointer_size(pointer), None);
+    }
 
     fn signed_commit() -> Vec<u8> {
         let payload = b"tree 0000000000000000000000000000000000000000\nauthor Alice <alice@example.com> 1 +0000\ncommitter Alice <alice@example.com> 1 +0000\n\nSigned commit\n";
