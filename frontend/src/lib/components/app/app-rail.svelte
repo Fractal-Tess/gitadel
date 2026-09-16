@@ -194,9 +194,7 @@
         organization.slug,
         organization.avatar_updated_at,
       ),
-      active:
-        page.params.namespace === organization.slug ||
-        page.params.slug === organization.slug,
+      active: page.params.namespace === organization.slug,
       preload: () => preloadExplore(scope, organization.slug),
     })),
   );

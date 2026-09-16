@@ -347,6 +347,7 @@ export class RepositoryPageState {
     });
   }
   selectEntry(entry: Tree["entries"][number]): void {
+    this.error = null;
     this.browser.selectedPath = entry.path;
     if (entry.kind === "tree") {
       void this.browser.toggleDirectory(entry.path, this.revision);
@@ -357,7 +358,8 @@ export class RepositoryPageState {
     this.commitOid = "";
     this.historyPage = 1;
     this.writeLocation();
-    void this.browser.selectBlob(entry.path, this.revision);
+    if (entry.kind === "submodule") this.browser.selectSubmodule(entry);
+    else void this.browser.selectBlob(entry.path, this.revision);
   }
   selectIssue(number: number | null): void {
     this.issues.selectedIssue = null;

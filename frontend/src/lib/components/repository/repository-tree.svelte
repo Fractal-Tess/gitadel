@@ -106,6 +106,12 @@
             ? state.browser.expandedPaths.has(entry.path)
             : undefined}
           onclick={() => state.selectEntry(entry)}
+          aria-label={entry.kind === "submodule"
+            ? `${entry.name} (submodule)`
+            : undefined}
+          title={entry.kind === "submodule"
+            ? `Submodule pinned to ${entry.oid}`
+            : undefined}
         >
           {#if entry.kind === "tree"}
             <ChevronRight
@@ -119,6 +125,9 @@
               expanded={state.browser.expandedPaths.has(entry.path)}
               class="size-4 shrink-0"
             />
+          {:else if entry.kind === "submodule"}
+            <span class="size-3.5 shrink-0"></span>
+            <GitBranch class="size-4 shrink-0 text-muted-foreground" />
           {:else}
             <span class="size-3.5 shrink-0"></span>
             <MaterialFileIcon name={entry.path} class="size-4 shrink-0" />
@@ -127,7 +136,7 @@
           {#if entry.lfs_size !== null}
             <Badge variant="outline" title="Stored with Git LFS">LFS</Badge>
           {/if}
-          {#if entry.kind !== "tree"}
+          {#if entry.kind !== "tree" && entry.kind !== "submodule"}
             <span class="shrink-0 text-xs text-muted-foreground">
               {formatSize(entry.lfs_size ?? entry.size)}
             </span>

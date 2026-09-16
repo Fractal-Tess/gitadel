@@ -41,6 +41,7 @@ export class RepositoryBrowserState {
   expandedPaths = $state.raw<SvelteSet<string>>(new SvelteSet());
   loadingPaths = $state.raw<SvelteSet<string>>(new SvelteSet());
   blob = $state.raw<Blob | null>(null);
+  submodule = $state.raw<Tree["entries"][number] | null>(null);
   history = $state.raw<History | null>(null);
   commit = $state.raw<Commit | null>(null);
   diff = $state.raw<Diff | null>(null);
@@ -82,6 +83,7 @@ export class RepositoryBrowserState {
     this.loadingPaths = new SvelteSet();
     this.selectedPath = "";
     this.blob = null;
+    this.submodule = null;
     this.highlighted = "";
     this.#highlightSequence += 1;
     this.history = null;
@@ -137,25 +139,33 @@ export class RepositoryBrowserState {
         const parentPaths = parts
           .slice(0, -1)
           .map((_, index) => parts.slice(0, index + 1).join("/"));
-        const [blob, parentTrees] = await Promise.all([
-          requestJson(
+        const parentTrees = await Promise.all(
+          parentPaths.map((path) =>
+            requestJson(
+              `${repositoryApi(this, "/tree")}?${this.query(revision, path)}`,
+              treeSchema,
+              init,
+            ),
+          ),
+        );
+        if (init.signal?.aborted || this.#destroyed || !this.isScopeCurrent())
+          return false;
+        const parent = parentTrees.at(-1) ?? tree;
+        const entry = parent.entries.find(
+          (entry) => entry.path === repositoryPath,
+        );
+        if (entry?.kind === "submodule") {
+          this.selectSubmodule(entry);
+        } else {
+          const blob = await requestJson(
             `${repositoryApi(this, "/blob")}?${this.query(revision, repositoryPath)}`,
             blobSchema,
             init,
-          ),
-          Promise.all(
-            parentPaths.map((path) =>
-              requestJson(
-                `${repositoryApi(this, "/tree")}?${this.query(revision, path)}`,
-                treeSchema,
-                init,
-              ),
-            ),
-          ),
-        ]);
-        if (init.signal?.aborted || this.#destroyed || !this.isScopeCurrent())
-          return false;
-        void this.setBlob(blob);
+          );
+          if (init.signal?.aborted || this.#destroyed || !this.isScopeCurrent())
+            return false;
+          void this.setBlob(blob);
+        }
         this.expandedPaths = new SvelteSet(parentPaths);
         this.expandedTrees = Object.fromEntries(
           parentPaths.map((path, index) => [path, parentTrees[index]!]),
@@ -249,6 +259,17 @@ export class RepositoryBrowserState {
       this.loadingPaths = nextLoading;
     }
   }
+  selectSubmodule(entry: Tree["entries"][number]): void {
+    if (this.#destroyed || !this.isScopeCurrent()) return;
+    this.#blobController?.abort();
+    this.#blobController = null;
+    this.#highlightSequence += 1;
+    this.blob = null;
+    this.highlighted = "";
+    this.readme = null;
+    this.selectedPath = entry.path;
+    this.submodule = entry;
+  }
   async selectBlob(path: string, revision: string): Promise<void> {
     this.#blobController?.abort();
     const controller = new AbortController();
@@ -295,6 +316,7 @@ export class RepositoryBrowserState {
   }
   async setBlob(blob: Blob): Promise<void> {
     if (!this.isScopeCurrent()) return;
+    this.submodule = null;
     this.blob = blob;
     const source = blob.content;
     const sequence = ++this.#highlightSequence;

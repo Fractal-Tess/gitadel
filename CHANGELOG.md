@@ -4,9 +4,17 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-17
+
 ### Added
 
 - Added `GITADEL_TOKEN_FILE` and the NixOS client `tokenFile` option for runtime secret files, including SOPS-managed credentials. Explicit token flags and `GITADEL_TOKEN` retain precedence.
+- Added a submodule detail panel with the upstream repository, pinned commit, tracking branch when configured, safe repository and commit links, and copyable checkout instructions. Metadata comes from `.gitmodules` at the selected revision without following includes or contacting external hosts.
+
+### Fixed
+
+- Display Git submodules as pinned repository references instead of requesting file contents. Submodule clicks, direct links, and browser history now show the commit ID and a link to `.gitmodules` when available.
+- Removed an obsolete organization route parameter from the navigation rail, restoring frontend type checking.
 
 ## [0.6.0] - 2026-09-16
 
@@ -203,7 +211,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/Fractal-Tess/gitadel/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/Fractal-Tess/gitadel/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.4.0...v0.5.0

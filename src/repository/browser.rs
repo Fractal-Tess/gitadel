@@ -52,6 +52,7 @@ use crate::{
 const MAX_TEXT_BLOB_BYTES: usize = 2 * 1024 * 1024;
 const MAX_LFS_POINTER_BYTES: u64 = 1024;
 const MAX_DIFF_BYTES: usize = 5 * 1024 * 1024;
+const MAX_GITMODULES_BYTES: usize = 128 * 1024;
 const DEFAULT_REPOSITORY_ACTIVITY_DAYS: u16 = 14;
 const MAX_REPOSITORY_ACTIVITY_DAYS: u16 = 365;
 const DEFAULT_OVERVIEW_PER_PAGE: usize = 20;
@@ -145,6 +146,13 @@ pub struct TreeResponse {
     entries: Vec<TreeEntryResponse>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SubmoduleResponse {
+    name: String,
+    url: Option<String>,
+    branch: Option<String>,
+}
+
 #[derive(Serialize)]
 pub struct TreeEntryResponse {
     name: String,
@@ -154,6 +162,7 @@ pub struct TreeEntryResponse {
     mode: u32,
     size: Option<u64>,
     lfs_size: Option<u64>,
+    submodule: Option<SubmoduleResponse>,
 }
 
 #[derive(Serialize)]
@@ -511,11 +520,12 @@ pub async fn tree(
     let count_path = path.clone();
     let (mut response, commit_oid) = read_git(path, move |git| {
         let commit_oid = git.peel_to_commit_oid(git.rev_parse(&revision)?)?;
-        let commit_timestamp = git
-            .read_commit(&commit_oid)?
+        let commit = git.read_commit(&commit_oid)?;
+        let commit_timestamp = commit
             .committer_signature()
             .map_or(0, |signature| signature.time.seconds);
-        let resolved = git.resolve_path(&revision, &requested_path)?;
+        let commit_revision = commit_oid.to_hex();
+        let resolved = git.resolve_path(&commit_revision, &requested_path)?;
         if resolved.object_type != GitObjectType::Tree {
             return Err(GitError::InvalidPath(requested_path));
         }
@@ -560,7 +570,16 @@ pub async fn tree(
                 mode: entry.mode,
                 size,
                 lfs_size,
+                submodule: None,
             });
+        }
+        if entries.iter().any(|entry| entry.kind == "submodule") {
+            let mut submodules = read_submodule_metadata(git, commit.tree)?;
+            for entry in &mut entries {
+                if entry.kind == "submodule" {
+                    entry.submodule = submodules.remove(&entry.path);
+                }
+            }
         }
         entries.sort_unstable_by(|left, right| {
             let left_file = left.kind != "tree";
@@ -634,6 +653,73 @@ pub async fn tree(
         }
     }
     Ok(Json(response))
+}
+
+fn read_submodule_metadata(
+    git: &GitRepository,
+    commit_tree_oid: ObjectId,
+) -> Result<HashMap<String, SubmoduleResponse>, GitError> {
+    let root_tree = git.read_tree(&commit_tree_oid)?;
+    let Some(config_entry) = root_tree.entries.into_iter().find(|entry| {
+        entry.name.as_bytes() == b".gitmodules" && matches!(entry.mode, 0o100644 | 0o100755)
+    }) else {
+        return Ok(HashMap::new());
+    };
+    let Some((object_type, size)) = git.read_object_header(&config_entry.oid)? else {
+        return Err(GitError::InvalidObject(format!(
+            "missing .gitmodules object {}",
+            config_entry.oid
+        )));
+    };
+    if object_type != GitObjectType::Blob {
+        return Err(GitError::InvalidObject(format!(
+            ".gitmodules object {} is not a blob",
+            config_entry.oid
+        )));
+    }
+    if size > MAX_GITMODULES_BYTES as u64 {
+        return Ok(HashMap::new());
+    }
+    let bytes = git.blobs().read(config_entry.oid)?;
+    Ok(parse_submodule_metadata(&bytes))
+}
+
+fn parse_submodule_metadata(bytes: &[u8]) -> HashMap<String, SubmoduleResponse> {
+    let Ok(config) = sley_config::GitConfig::parse(bytes) else {
+        return HashMap::new();
+    };
+
+    let mut submodules = HashMap::new();
+    for section in &config.sections {
+        if !section.name.eq_ignore_ascii_case("submodule") {
+            continue;
+        }
+        let Some(name) = section.subsection.as_ref().filter(|name| !name.is_empty()) else {
+            continue;
+        };
+        let path = config
+            .get("submodule", Some(name.as_str()), "path")
+            .map(str::to_owned)
+            .filter(|path| !path.is_empty());
+        let Some(path) = path else {
+            continue;
+        };
+        submodules.insert(
+            path,
+            SubmoduleResponse {
+                name: name.clone(),
+                url: config
+                    .get("submodule", Some(name.as_str()), "url")
+                    .map(str::to_owned)
+                    .filter(|value| !value.is_empty()),
+                branch: config
+                    .get("submodule", Some(name.as_str()), "branch")
+                    .map(str::to_owned)
+                    .filter(|value| !value.is_empty()),
+            },
+        );
+    }
+    submodules
 }
 
 fn lfs_pointer_size(content: &[u8]) -> Option<u64> {
@@ -1927,13 +2013,166 @@ const fn default_per_page() -> usize {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, process::Command};
+    use std::{fs, path::PathBuf, process::Command};
 
     use russh::keys::ssh_key::{HashAlg, LineEnding, PrivateKey, private::Ed25519Keypair};
-    use sley::Repository as GitRepository;
+    use sley::{
+        BString, CommitObject, GitObjectType, ObjectId, Repository as GitRepository, TreeEditor,
+    };
     use uuid::Uuid;
 
-    use super::{SshCommitSignature, count_reachable_commits, verify_ssh_commit_signature};
+    use super::{
+        SshCommitSignature, count_reachable_commits, read_submodule_metadata,
+        verify_ssh_commit_signature,
+    };
+
+    fn native_repository() -> (PathBuf, GitRepository) {
+        let path = std::env::temp_dir().join(format!("gitadel-submodule-test-{}", Uuid::new_v4()));
+        let repository = GitRepository::init(&path).expect("initialize native repository");
+        (path, repository)
+    }
+
+    fn native_tree(repository: &GitRepository, config_mode: u32, config: &[u8]) -> ObjectId {
+        let config_oid = repository
+            .write_blob(config.to_vec())
+            .expect("write gitmodules blob");
+        let mut tree = TreeEditor::new();
+        tree.upsert_raw(BString::from(b".gitmodules"), config_mode, config_oid);
+        repository.write_tree(tree).expect("write repository tree")
+    }
+
+    fn native_commit(
+        repository: &GitRepository,
+        tree: ObjectId,
+        parent: Option<ObjectId>,
+    ) -> ObjectId {
+        let commit = CommitObject {
+            tree,
+            parents: parent.into_iter().collect(),
+            author: b"Gitadel Test <gitadel@example.test> 1700000000 +0000".to_vec(),
+            committer: b"Gitadel Test <gitadel@example.test> 1700000000 +0000".to_vec(),
+            encoding: None,
+            message: b"submodule test\n".to_vec(),
+        };
+        repository
+            .write_raw_object(GitObjectType::Commit, commit.write())
+            .expect("write repository commit")
+    }
+
+    #[test]
+    fn submodule_metadata_uses_the_selected_commit_and_full_paths() {
+        let (path, repository) = native_repository();
+        let old_tree = native_tree(
+            &repository,
+            0o100644,
+            b"[submodule \"Chorus\"]\n\tpath = vendor/Chorus\n\turl = https://example.test/chorus-old.git\n\tbranch = old\n[submodule \"Nested tools\"]\n\tpath = vendor/tools/nested\n\turl = https://example.test/tools.git\n",
+        );
+        let old_commit = native_commit(&repository, old_tree, None);
+        let new_tree = native_tree(
+            &repository,
+            0o100644,
+            b"[submodule \"Chorus\"]\n\tpath = vendor/Chorus\n\turl = https://example.test/chorus-old.git\n[submodule \"Chorus\"]\n\turl = https://example.test/chorus-new.git\n\tbranch = new\n[submodule \"Nested tools\"]\n\tpath = vendor/tools/nested\n\turl = https://example.test/tools.git\n",
+        );
+        let new_commit = native_commit(&repository, new_tree, Some(old_commit));
+
+        let old_metadata = read_submodule_metadata(
+            &repository,
+            repository
+                .read_commit(&old_commit)
+                .expect("read old commit")
+                .tree,
+        )
+        .expect("read old submodule metadata");
+        let new_metadata = read_submodule_metadata(
+            &repository,
+            repository
+                .read_commit(&new_commit)
+                .expect("read new commit")
+                .tree,
+        )
+        .expect("read new submodule metadata");
+        assert_eq!(
+            old_metadata
+                .get("vendor/Chorus")
+                .and_then(|metadata| metadata.url.as_deref()),
+            Some("https://example.test/chorus-old.git")
+        );
+        assert_eq!(
+            new_metadata
+                .get("vendor/Chorus")
+                .and_then(|metadata| metadata.url.as_deref()),
+            Some("https://example.test/chorus-new.git")
+        );
+        assert_eq!(
+            new_metadata
+                .get("vendor/Chorus")
+                .and_then(|metadata| metadata.branch.as_deref()),
+            Some("new")
+        );
+        assert_eq!(
+            new_metadata
+                .get("vendor/tools/nested")
+                .map(|metadata| metadata.name.as_str()),
+            Some("Nested tools")
+        );
+        fs::remove_dir_all(path).expect("remove native repository");
+    }
+
+    #[test]
+    fn submodule_metadata_ignores_invalid_non_utf8_symlink_and_oversized_config() {
+        let (path, repository) = native_repository();
+        for (mode, config) in [
+            (
+                0o100644,
+                b"[submodule \"broken\"\n\tpath = vendor/Chorus\n".as_slice(),
+            ),
+            (0o100644, b"[submodule \"broken\"]\n\xff".as_slice()),
+            (
+                0o120000,
+                b"[submodule \"symlink\"]\n\tpath = vendor/Chorus\n".as_slice(),
+            ),
+        ] {
+            let tree = native_tree(&repository, mode, config);
+            assert!(
+                read_submodule_metadata(&repository, tree)
+                    .expect("read malformed submodule metadata")
+                    .is_empty()
+            );
+        }
+        let mut oversized =
+            b"[submodule \"Large\"]\npath = vendor/Chorus\nurl = https://example.test/large.git\n#"
+                .to_vec();
+        oversized.resize(super::MAX_GITMODULES_BYTES + 1, b'x');
+        let tree = native_tree(&repository, 0o100644, &oversized);
+        assert!(
+            read_submodule_metadata(&repository, tree)
+                .expect("read oversized submodule metadata")
+                .is_empty()
+        );
+        fs::remove_dir_all(path).expect("remove native repository");
+    }
+
+    #[test]
+    fn submodule_metadata_does_not_follow_committed_include() {
+        let (path, repository) = native_repository();
+        let external = path.join("external.gitmodules");
+        fs::write(
+            &external,
+            b"[submodule \"External\"]\n\tpath = external\n\turl = https://example.test/external.git\n",
+        )
+        .expect("write external module");
+        let config = format!(
+            "[include]\n\tpath = {}\n[submodule \"Local\"]\n\tpath = local\n\turl = https://example.test/local.git\n",
+            external.display()
+        );
+        let tree = native_tree(&repository, 0o100644, config.as_bytes());
+        let metadata =
+            read_submodule_metadata(&repository, tree).expect("read committed submodule metadata");
+        assert_eq!(metadata.len(), 1);
+        assert!(metadata.contains_key("local"));
+        assert!(!metadata.contains_key("external"));
+        fs::remove_dir_all(path).expect("remove native repository");
+    }
 
     #[test]
     fn lfs_pointer_preserves_zero_size_with_extension_fields() {

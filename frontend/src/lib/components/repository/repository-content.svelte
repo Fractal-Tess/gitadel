@@ -1,6 +1,7 @@
 <script lang="ts">
   import Braces from "@lucide/svelte/icons/braces";
   import Download from "@lucide/svelte/icons/download";
+  import RepositorySubmodule from "$lib/components/repository/repository-submodule.svelte";
   import MaterialFileIcon from "$lib/components/repository/material-file-icon.svelte";
 
   import { Button } from "$lib/components/ui/button/index.js";
@@ -12,13 +13,20 @@
 
 <!-- The metadata rail draws the divider on this column's right, so it only owns
      its own stacking border on narrow screens. -->
-<section class="flex min-w-0 flex-col border-b xl:h-full xl:min-h-0 xl:border-b-0">
-  {#if state.browser.blob}
+<section
+  class="flex min-w-0 flex-col border-b xl:h-full xl:min-h-0 xl:border-b-0"
+>
+  {#if state.browser.submodule}
+    <RepositorySubmodule {state} />
+  {:else if state.browser.blob}
     <header
       class="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-3 border-b px-5 py-2 text-sm font-semibold"
     >
       <span class="flex min-w-0 items-center gap-2">
-        <MaterialFileIcon name={state.browser.blob.path} class="size-4 shrink-0" />
+        <MaterialFileIcon
+          name={state.browser.blob.path}
+          class="size-4 shrink-0"
+        />
         <span class="truncate">{state.browser.blob.path}</span>
         <span
           class="shrink-0 rounded border bg-muted/45 px-1.5 py-0.5 font-mono text-[10px] font-normal text-muted-foreground"
@@ -37,7 +45,8 @@
             class={state.browser.wrapLines
               ? "gap-1.5 bg-accent text-foreground"
               : "gap-1.5 text-muted-foreground"}
-            onclick={() => (state.browser.wrapLines = !state.browser.wrapLines)}>Wrap</Button
+            onclick={() => (state.browser.wrapLines = !state.browser.wrapLines)}
+            >Wrap</Button
           >
         {/if}
         <Button

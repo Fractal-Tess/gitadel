@@ -81,6 +81,13 @@ export const treeEntrySchema = z.object({
   mode: z.number(),
   size: z.number().nullable(),
   lfs_size: z.number().int().nonnegative().nullable(),
+  submodule: z
+    .object({
+      name: z.string(),
+      url: z.string().nullable(),
+      branch: z.string().nullable(),
+    })
+    .nullable(),
 });
 
 export const treeSchema = z.object({
