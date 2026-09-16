@@ -4,6 +4,10 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+### Added
+
+- Added `GITADEL_TOKEN_FILE` and the NixOS client `tokenFile` option for runtime secret files, including SOPS-managed credentials. Explicit token flags and `GITADEL_TOKEN` retain precedence.
+
 ## [0.6.0] - 2026-09-16
 
 ### Added

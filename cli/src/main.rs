@@ -910,6 +910,10 @@ fn token_from(cli: &Cli) -> Result<Option<String>> {
         }
     } else if let Some(token) = std::env::var_os("GITADEL_TOKEN") {
         token.to_string_lossy().into_owned()
+    } else if let Some(file) = std::env::var_os("GITADEL_TOKEN_FILE") {
+        let file = PathBuf::from(file);
+        fs::read_to_string(&file)
+            .with_context(|| format!("could not read token file {}", file.display()))?
     } else {
         return Ok(None);
     };

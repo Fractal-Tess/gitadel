@@ -160,7 +160,7 @@ gitadel-cli --token-file ~/.config/gitadel/token repo archive archivist/old-proj
 gitadel-cli --token-file ~/.config/gitadel/token admin instance get
 ```
 
-The token file contains only the token and should have mode `0600`. `--token-stdin` and `--token-file -` read a token from standard input. An explicit token source overrides `GITADEL_TOKEN`; explicit sources are mutually exclusive. `--token` is also supported, but exposes the value in process arguments.
+The token file contains only the token and should have mode `0600`. Set `GITADEL_TOKEN_FILE` to its runtime path for repeated use; the NixOS client module exposes this as `programs.gitadel-cli.tokenFile`. Explicit token flags take precedence, followed by `GITADEL_TOKEN`, then `GITADEL_TOKEN_FILE`. The environment file path is always a file, not stdin. `--token-stdin` and `--token-file -` read a token from standard input. Explicit sources are mutually exclusive. `--token` is also supported, but exposes the value in process arguments.
 
 For CI, provide `GITADEL_SERVER` and a masked `GITADEL_TOKEN` secret through the job environment:
 
