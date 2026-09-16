@@ -50,6 +50,7 @@ use webauthn_rs::{
 use crate::{
     archive::MaintenanceAction,
     backup_provider::{BackupProvider, BackupProviderConfig},
+    blob_store::targets::MeasuredUsage,
     config::{AuthSettings, Settings},
     entity::{api_token, audit_event, namespace, oauth_access_token, session, ssh_key, user},
 };
@@ -79,6 +80,7 @@ pub struct IdentityState {
     lfs_storage: Arc<tokio::sync::RwLock<Option<Arc<crate::storage::LfsStorageManager>>>>,
     validated_backups: Arc<Mutex<HashMap<Uuid, ValidatedBackup>>>,
     tested_backup_providers: Arc<Mutex<HashMap<Uuid, TestedBackupProvider>>>,
+    measured_storage: Arc<Mutex<HashMap<Uuid, MeasuredUsage>>>,
     integrity_settings_version: watch::Sender<u64>,
 }
 
@@ -276,6 +278,7 @@ impl IdentityState {
             lfs_storage: Arc::new(tokio::sync::RwLock::new(None)),
             validated_backups: Arc::new(Mutex::new(HashMap::new())),
             tested_backup_providers: Arc::new(Mutex::new(HashMap::new())),
+            measured_storage: Arc::new(Mutex::new(HashMap::new())),
             integrity_settings_version: watch::channel(0).0,
         })
     }
@@ -387,6 +390,21 @@ impl IdentityState {
         proof.tested_at.elapsed() <= TESTED_BACKUP_PROVIDER_LIFETIME
             && proof.user_id == user_id
             && proof.config == *config
+    }
+
+    /// Scanning a target costs a full listing, so the result is kept until an
+    /// administrator asks for a fresh one. It is deliberately not persisted: a
+    /// figure that survives a restart would outlive the state it described.
+    pub(crate) async fn record_measured_storage(&self, target_id: Uuid, usage: MeasuredUsage) {
+        self.measured_storage.lock().await.insert(target_id, usage);
+    }
+
+    pub(crate) async fn measured_storage(&self) -> HashMap<Uuid, MeasuredUsage> {
+        self.measured_storage.lock().await.clone()
+    }
+
+    pub(crate) async fn forget_measured_storage(&self, target_id: Uuid) {
+        self.measured_storage.lock().await.remove(&target_id);
     }
 
     pub async fn schedule_maintenance(&self, action: MaintenanceAction) -> Result<(), ApiError> {
@@ -830,6 +848,10 @@ pub fn router() -> Router<IdentityState> {
         .route(
             "/admin/storage/targets/{target_id}/test",
             post(admin::test_saved_storage_target),
+        )
+        .route(
+            "/admin/storage/targets/{target_id}/usage",
+            post(admin::measure_storage_target),
         )
         .route("/admin/storage/migrations", post(admin::migrate_storage))
         .route(

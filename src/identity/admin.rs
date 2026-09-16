@@ -28,7 +28,7 @@ use crate::{
         self, BackupProvider, BackupProviderConfig, BackupProviderKind, BackupProviderSource,
         FilesystemSettings, RUNTIME_S3_PROVIDER_ID,
     },
-    blob_store::targets::{self, StorageTargetConfiguration, StorageTargetView},
+    blob_store::targets::{self, MeasuredUsage, StorageTargetConfiguration, StorageTargetView},
     config::S3Settings,
     entity::{audit_event, instance, instance_asset, lfs_storage_migration},
     storage,
@@ -560,11 +560,41 @@ pub async fn list_storage_targets(
 ) -> Result<Json<Vec<StorageTargetView>>, ApiError> {
     require_admin(&state, &headers, &jar, SCOPE_READ).await?;
     let settings = state.runtime_settings()?;
+    let measured = state.measured_storage().await;
     Ok(Json(
-        targets::list(state.database(), &settings.storage.lfs_root)
+        targets::list(state.database(), &settings.storage.lfs_root, &measured)
             .await
             .map_err(ApiError::internal)?,
     ))
+}
+
+/// Walks the destination and sums what is actually stored there. The database
+/// figure on every card covers LFS only, so this is what an administrator runs
+/// when they need to account for backup archives or objects left behind by an
+/// earlier migration.
+pub async fn measure_storage_target(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path(target_id): Path<Uuid>,
+) -> Result<Json<MeasuredUsage>, ApiError> {
+    require_admin(&state, &headers, &jar, SCOPE_READ).await?;
+    let configuration = if target_id.is_nil() {
+        let settings = state.runtime_settings()?;
+        StorageTargetConfiguration::Filesystem {
+            path: settings.storage.lfs_root.clone(),
+        }
+    } else {
+        targets::find(state.database(), target_id)
+            .await
+            .map_err(|error| ApiError::bad_request(format!("{error:#}")))?
+            .1
+    };
+    let usage = targets::measure(&configuration)
+        .await
+        .map_err(|error| ApiError::bad_request(format!("Could not measure storage: {error:#}")))?;
+    state.record_measured_storage(target_id, usage).await;
+    Ok(Json(usage))
 }
 
 #[derive(Serialize)]
@@ -673,6 +703,7 @@ pub async fn delete_storage_target(
         .map_err(|error| {
             ApiError::bad_request(format!("Could not delete storage target: {error:#}"))
         })?;
+    state.forget_measured_storage(target_id).await;
     state
         .audit(
             Some(actor.user.id),

@@ -40,6 +40,7 @@
     configureExternal = false,
     onremove = null,
     actions = null,
+    details = null,
   }: {
     name: string;
     provider: string;
@@ -62,6 +63,7 @@
     configureExternal?: boolean;
     onremove?: (() => void) | null;
     actions?: Snippet | null;
+    details?: Snippet | null;
   } = $props();
 
   function providerLogo(slug: string) {
@@ -147,6 +149,10 @@
       <Alert.Title>Connection error</Alert.Title>
       <Alert.Description>{error}</Alert.Description>
     </Alert.Root>
+  {/if}
+
+  {#if details}
+    {@render details()}
   {/if}
 
   {#if actions}

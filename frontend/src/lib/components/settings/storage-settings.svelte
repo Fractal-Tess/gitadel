@@ -1,5 +1,6 @@
 <script lang="ts">
   import Cloud from "@lucide/svelte/icons/cloud";
+  import Gauge from "@lucide/svelte/icons/gauge";
   import HardDrive from "@lucide/svelte/icons/hard-drive";
   import { Spinner } from "$lib/components/ui/spinner/index.js";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
@@ -8,6 +9,7 @@
   import { toast } from "svelte-sonner";
 
   import {
+    measuredUsageSchema,
     storageTargetSchema,
     storageTargetTestSchema,
     type StorageTarget,
@@ -54,6 +56,7 @@
   let testedFingerprint = $state<string | null>(null);
   let removeDialogOpen = $state(false);
   let pendingRemoveTarget = $state.raw<StorageTarget | null>(null);
+  let measuring = $state<string | null>(null);
 
   const inputFingerprint = $derived(
     JSON.stringify({
@@ -225,6 +228,71 @@
     }
     return `${target.configuration.s3.bucket} · ${target.configuration.s3.endpoint}`;
   }
+
+  async function measureTarget(target: StorageTarget) {
+    measuring = target.id;
+    try {
+      const measured = await requestJson(
+        `/api/v1/admin/storage/targets/${encodeURIComponent(target.id)}/usage`,
+        measuredUsageSchema,
+        { method: "POST" },
+      );
+      targets = targets.map((candidate) =>
+        candidate.id === target.id
+          ? { ...candidate, usage: { ...candidate.usage, measured } }
+          : candidate,
+      );
+      setStorageTargets(app.authorizationScope, targets);
+    } catch (caught) {
+      toast.error(message(caught));
+    } finally {
+      measuring = null;
+    }
+  }
+
+  // The scan is the fuller figure when it exists, since it also counts objects
+  // the database has no record of. Without one, the LFS total is all we know.
+  function storedBytes(target: StorageTarget) {
+    return target.usage.measured?.total_bytes ?? target.usage.lfs_bytes;
+  }
+
+  function usageBar(target: StorageTarget) {
+    const capacity = target.capacity;
+    if (!capacity || capacity.total_bytes === 0) return null;
+    const used = capacity.total_bytes - capacity.available_bytes;
+    const gitadel = Math.min(storedBytes(target), used);
+    const percent = (bytes: number) => (bytes / capacity.total_bytes) * 100;
+    return {
+      gitadel: percent(gitadel),
+      // Whatever else shares the volume. Gitadel cannot name it, but leaving it
+      // out would imply the free space is all ours to use.
+      other: percent(Math.max(used - gitadel, 0)),
+      label: `${formatBytes(gitadel)} used by Gitadel, ${formatBytes(
+        capacity.available_bytes,
+      )} free of ${formatBytes(capacity.total_bytes)}`,
+    };
+  }
+
+  function formatBytes(bytes: number) {
+    const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let value = bytes;
+    let unit = units[0];
+    for (const candidate of units) {
+      unit = candidate;
+      if (value < 1024 || candidate === units.at(-1)) break;
+      value /= 1024;
+    }
+    return `${value >= 10 || unit === "B" ? value.toFixed(0) : value.toFixed(1)} ${unit}`;
+  }
+
+  function formatMeasuredAt(value: string) {
+    const elapsed = Date.now() - new Date(value).getTime();
+    if (elapsed < 60_000) return "just now";
+    const minutes = Math.round(elapsed / 60_000);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.round(minutes / 60);
+    return hours < 24 ? `${hours}h ago` : `${Math.round(hours / 24)}d ago`;
+  }
 </script>
 
 <div class="flex flex-col gap-8">
@@ -274,6 +342,51 @@
                 <HardDrive class="size-6 text-primary" />
               {/if}
             {/snippet}
+            {#snippet details()}
+              {@const bar = usageBar(target)}
+              <div class="mt-4 flex flex-col gap-2">
+                {#if bar}
+                  <div
+                    class="flex h-1.5 overflow-hidden rounded-full bg-muted"
+                    role="img"
+                    aria-label={bar.label}
+                  >
+                    <div class="bg-primary" style="width: {bar.gitadel}%"></div>
+                    <div
+                      class="bg-foreground/25"
+                      style="width: {bar.other}%"
+                    ></div>
+                  </div>
+                  <div
+                    class="flex items-baseline justify-between gap-3 text-[11px] text-muted-foreground"
+                  >
+                    <span class="truncate">
+                      {formatBytes(storedBytes(target))} Gitadel
+                    </span>
+                    <span class="shrink-0 tabular-nums">
+                      {formatBytes(target.capacity?.available_bytes ?? 0)} free of
+                      {formatBytes(target.capacity?.total_bytes ?? 0)}
+                    </span>
+                  </div>
+                {:else}
+                  <div class="text-[11px] text-muted-foreground">
+                    {formatBytes(storedBytes(target))} stored · object storage reports
+                    no capacity
+                  </div>
+                {/if}
+                <div class="text-[11px] text-muted-foreground">
+                  {#if target.usage.measured}
+                    Scanned {formatMeasuredAt(
+                      target.usage.measured.measured_at,
+                    )}:
+                    {target.usage.measured.object_count.toLocaleString()} objects.
+                  {:else}
+                    {target.usage.lfs_object_count.toLocaleString()} LFS objects tracked.
+                    Scan to include anything else stored here.
+                  {/if}
+                </div>
+              </div>
+            {/snippet}
             {#snippet actions()}
               <Button
                 variant="outline"
@@ -283,6 +396,20 @@
                 disabled={working}
               >
                 <RefreshCw data-icon="inline-start" /> Test
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                class="flex-1"
+                onclick={() => measureTarget(target)}
+                disabled={working || measuring !== null}
+              >
+                {#if measuring === target.id}
+                  <Spinner class="size-4" data-icon="inline-start" />
+                {:else}
+                  <Gauge data-icon="inline-start" />
+                {/if}
+                Scan
               </Button>
               {#if !target.managed_by_config}
                 <Button

@@ -2,7 +2,9 @@ use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
-use sea_orm::{ActiveModelTrait as _, DatabaseConnection, EntityTrait as _, Set};
+use sea_orm::{
+    ActiveModelTrait as _, ConnectionTrait as _, DatabaseConnection, EntityTrait as _, Set,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncReadExt as _;
@@ -68,6 +70,97 @@ pub struct StorageTargetView {
     pub configuration: serde_json::Value,
     pub active: bool,
     pub managed_by_config: bool,
+    pub capacity: Option<StorageTargetCapacity>,
+    pub usage: StorageTargetUsage,
+}
+
+/// What the underlying volume holds, for targets that sit on one. Object stores
+/// publish no capacity, so S3 targets leave this empty rather than inventing a
+/// ceiling.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct StorageTargetCapacity {
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct StorageTargetUsage {
+    /// LFS bytes the database attributes to this target. Free to read on every
+    /// request, but it only counts objects Gitadel has a record of.
+    pub lfs_object_count: u64,
+    pub lfs_bytes: u64,
+    /// Everything actually stored at the destination, from the last scan. Costs
+    /// a full listing, so it is only ever filled in on request.
+    pub measured: Option<MeasuredUsage>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct MeasuredUsage {
+    pub object_count: u64,
+    pub total_bytes: u64,
+    pub measured_at: chrono::DateTime<Utc>,
+}
+
+/// `fs2` reports on the mount a path belongs to, so two targets on one disk
+/// report identical figures, and a path that does not exist yet reports none.
+fn filesystem_capacity(path: &std::path::Path) -> Option<StorageTargetCapacity> {
+    Some(StorageTargetCapacity {
+        total_bytes: fs2::total_space(path).ok()?,
+        available_bytes: fs2::available_space(path).ok()?,
+    })
+}
+
+/// LFS bytes per target in one pass. Objects written before any target existed
+/// carry no target id and belong to the configured local path, which `list`
+/// surfaces under the nil id.
+async fn lfs_usage_by_target(
+    database: &DatabaseConnection,
+) -> Result<std::collections::HashMap<Uuid, (u64, u64)>> {
+    let rows = database
+        .query_all_raw(sea_orm::Statement::from_string(
+            database.get_database_backend(),
+            "SELECT storage_target_id, COUNT(*) AS object_count, COALESCE(SUM(size), 0) AS total_bytes \
+             FROM lfs_objects GROUP BY storage_target_id",
+        ))
+        .await?;
+    let mut usage = std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let target_id = row
+            .try_get::<Option<Uuid>>("", "storage_target_id")?
+            .unwrap_or_else(Uuid::nil);
+        let object_count = row.try_get::<i64>("", "object_count")?;
+        let total_bytes = row.try_get::<i64>("", "total_bytes")?;
+        usage.insert(
+            target_id,
+            (
+                u64::try_from(object_count).unwrap_or(0),
+                u64::try_from(total_bytes).unwrap_or(0),
+            ),
+        );
+    }
+    Ok(usage)
+}
+
+/// Sums everything the destination actually holds. This is the only figure that
+/// catches objects the database has no record of, and the only usable one for
+/// S3, where the bucket reports no capacity to measure against.
+pub async fn measure(configuration: &StorageTargetConfiguration) -> Result<MeasuredUsage> {
+    let store = configuration.open().await?;
+    let mut object_count = 0;
+    let mut total_bytes = 0;
+    for object in store.list(&ObjectPrefix::new("")?).await? {
+        // The ownership marker is Gitadel's bookkeeping, not stored content.
+        if object.key.as_str().starts_with(".gitadel/") {
+            continue;
+        }
+        object_count += 1;
+        total_bytes += object.size;
+    }
+    Ok(MeasuredUsage {
+        object_count,
+        total_bytes,
+        measured_at: Utc::now(),
+    })
 }
 
 pub struct ActiveBlobStore {
@@ -106,6 +199,7 @@ pub async fn load_active(
 pub async fn list(
     database: &DatabaseConnection,
     fallback_path: &std::path::Path,
+    measured: &std::collections::HashMap<Uuid, MeasuredUsage>,
 ) -> Result<Vec<StorageTargetView>> {
     let active = lfs_storage_state::Entity::find_by_id(1)
         .one(database)
@@ -113,6 +207,15 @@ pub async fn list(
         .context("LFS storage state is missing")?
         .active_target_id;
     let targets = lfs_storage_target::Entity::find().all(database).await?;
+    let lfs_usage = lfs_usage_by_target(database).await?;
+    let usage_of = |id: Uuid| {
+        let (lfs_object_count, lfs_bytes) = lfs_usage.get(&id).copied().unwrap_or((0, 0));
+        StorageTargetUsage {
+            lfs_object_count,
+            lfs_bytes,
+            measured: measured.get(&id).copied(),
+        }
+    };
     let mut views = Vec::with_capacity(targets.len() + 1);
     views.push(StorageTargetView {
         id: Uuid::nil(),
@@ -124,10 +227,16 @@ pub async fn list(
         }),
         active: active.is_none(),
         managed_by_config: true,
+        capacity: filesystem_capacity(fallback_path),
+        usage: usage_of(Uuid::nil()),
     });
     for target in targets {
         let configuration: StorageTargetConfiguration = serde_json::from_str(&target.configuration)
             .context("stored LFS target configuration is invalid")?;
+        let capacity = match &configuration {
+            StorageTargetConfiguration::Filesystem { path } => filesystem_capacity(path),
+            StorageTargetConfiguration::S3 { .. } => None,
+        };
         views.push(StorageTargetView {
             id: target.id,
             name: target.name,
@@ -135,6 +244,8 @@ pub async fn list(
             configuration: configuration.redacted(),
             active: active == Some(target.id),
             managed_by_config: false,
+            capacity,
+            usage: usage_of(target.id),
         });
     }
     Ok(views)
@@ -188,6 +299,10 @@ pub async fn create(
             return Err(error.into());
         }
     };
+    let capacity = match &configuration {
+        StorageTargetConfiguration::Filesystem { path } => filesystem_capacity(path),
+        StorageTargetConfiguration::S3 { .. } => None,
+    };
     Ok(StorageTargetView {
         id,
         name: model.name,
@@ -195,6 +310,10 @@ pub async fn create(
         configuration: configuration.redacted(),
         active: false,
         managed_by_config: false,
+        capacity,
+        // A target has to be empty before Gitadel claims it, so there is nothing
+        // to report and nothing to scan for.
+        usage: StorageTargetUsage::default(),
     })
 }
 

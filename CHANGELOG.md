@@ -8,6 +8,7 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 - Added per-repository Git LFS usage in administration, with user and organization ownership, name and owner search, byte-range filters, space and name sorting, and ten-entry pagination.
 - Added separate Git and Git LFS storage sizes to repository sidebars for anyone with repository read access. File trees mark LFS pointers with a badge and show the referenced object size, including in nested directories and historical revisions.
+- Added capacity and usage to each storage target in administration. Filesystem targets show a bar splitting what Gitadel stores from what else shares the volume, alongside the free space remaining; object stores publish no capacity, so those targets report usage alone. Cards load with the LFS total the database already tracks, and a scan walks the destination on request to account for backup archives and anything an earlier migration left behind.
 - Added repository icons. Maintainers upload and crop one in repository settings, and repositories without a manual icon adopt a conventional `icon.png`, `logo.png`, or `favicon.png` committed to the default branch, including under `static/`, `public/`, `assets/`, and `.github/`. Detection reads only the repository itself and never contacts an external host. Repositories with no icon fall back to a monogram.
 
 ### Changed

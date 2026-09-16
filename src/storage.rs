@@ -111,7 +111,10 @@ async fn run_target(
             println!(
                 "{}",
                 serde_json::to_string_pretty(
-                    &targets::list(database, &settings.storage.lfs_root).await?,
+                    // The CLI holds no scan cache, so targets report their
+                    // database usage and the volume they sit on.
+                    &targets::list(database, &settings.storage.lfs_root, &Default::default())
+                        .await?,
                 )?
             );
         }
@@ -766,6 +769,40 @@ mod tests {
             ),
             (1, payload.len() as i64, Some(key.as_str()))
         );
+
+        // Reported usage follows the objects: cutover reattributes the bytes to
+        // the destination, and the configured local path goes back to nothing.
+        let views = targets::list(&database, &settings.storage.lfs_root, &Default::default())
+            .await
+            .unwrap();
+        let usage_of = |id: Uuid| views.iter().find(|view| view.id == id).unwrap().usage;
+        assert_eq!(
+            (
+                usage_of(target.id).lfs_object_count,
+                usage_of(target.id).lfs_bytes
+            ),
+            (1, payload.len() as u64)
+        );
+        assert_eq!(usage_of(Uuid::nil()).lfs_bytes, 0);
+        assert!(
+            views.iter().all(|view| view
+                .capacity
+                .is_some_and(|capacity| capacity.total_bytes > 0)),
+            "filesystem targets should report the volume they sit on"
+        );
+
+        // Scanning reads the destination itself, and leaves out the ownership
+        // marker Gitadel wrote when it claimed the target.
+        let measured = targets::measure(&StorageTargetConfiguration::Filesystem {
+            path: target_path.clone(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            (measured.object_count, measured.total_bytes),
+            (1, payload.len() as u64)
+        );
+
         let destination = FilesystemBlobStore::new(target_path).await.unwrap();
         assert_eq!(
             destination.stat(&key).await.unwrap().unwrap().size,

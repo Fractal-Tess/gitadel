@@ -20,6 +20,25 @@ const s3ConfigurationSchema = z.object({
   }),
 });
 
+// Object stores publish no capacity, so only filesystem targets carry this.
+export const storageTargetCapacitySchema = z.object({
+  total_bytes: z.number().nonnegative(),
+  available_bytes: z.number().nonnegative(),
+});
+
+export const measuredUsageSchema = z.object({
+  object_count: z.number().nonnegative(),
+  total_bytes: z.number().nonnegative(),
+  measured_at: z.string(),
+});
+export type MeasuredUsage = z.infer<typeof measuredUsageSchema>;
+
+export const storageTargetUsageSchema = z.object({
+  lfs_object_count: z.number().nonnegative(),
+  lfs_bytes: z.number().nonnegative(),
+  measured: measuredUsageSchema.nullable(),
+});
+
 export const storageTargetSchema = z.object({
   id: z.uuid(),
   name: z.string(),
@@ -30,6 +49,8 @@ export const storageTargetSchema = z.object({
   ]),
   active: z.boolean(),
   managed_by_config: z.boolean(),
+  capacity: storageTargetCapacitySchema.nullable(),
+  usage: storageTargetUsageSchema,
 });
 export type StorageTarget = z.infer<typeof storageTargetSchema>;
 
