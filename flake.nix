@@ -52,7 +52,7 @@
           commonRustAttrs = {
             inherit version;
             cargoLock.lockFile = ./Cargo.lock;
-            cargoLock.outputHashes."sley-0.10.0" = "sha256-QRlL9xx2eFGdBMw2SurYb5Ve0UuYlzM+190p3+atB3s=";
+            cargoLock.outputHashes."sley-0.10.0" = "sha256-ZSETbJhpqXVb+tlmySXAKPDcXo8suxMVhjsyNha2dJc=";
             doCheck = false;
           };
           # Only the manifest and lockfile, so editing frontend sources does not

@@ -4,7 +4,7 @@ default-members = ["."]
 resolver = "3"
 
 [workspace.package]
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
@@ -63,21 +63,21 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 serde_yml = "0.0.12"
 shlex = "2.0.1"
-sley = { git = "https://github.com/Fractal-Tess/sley", rev = "ee45763e763c06b35748c8f951a40f4ae450c8fb", default-features = false, features = ["fast-sha1", "mmap", "rendering", "history-editing", "remote"] }
-sley-remote = { git = "https://github.com/Fractal-Tess/sley", rev = "ee45763e763c06b35748c8f951a40f4ae450c8fb", default-features = false, features = ["http"] }
-sley-fsck = { git = "https://github.com/Fractal-Tess/sley", rev = "ee45763e763c06b35748c8f951a40f4ae450c8fb" }
-sley-gc = { git = "https://github.com/Fractal-Tess/sley", rev = "ee45763e763c06b35748c8f951a40f4ae450c8fb" }
-sley-archive = { git = "https://github.com/Fractal-Tess/sley", rev = "ee45763e763c06b35748c8f951a40f4ae450c8fb" }
-sley-transport = { git = "https://github.com/Fractal-Tess/sley", rev = "ee45763e763c06b35748c8f951a40f4ae450c8fb", default-features = false }
-sley-core = { git = "https://github.com/Fractal-Tess/sley", rev = "ee45763e763c06b35748c8f951a40f4ae450c8fb" }
-sley-config = { git = "https://github.com/Fractal-Tess/sley", rev = "ee45763e763c06b35748c8f951a40f4ae450c8fb" }
-sley-diff-merge = { git = "https://github.com/Fractal-Tess/sley", rev = "ee45763e763c06b35748c8f951a40f4ae450c8fb" }
-sley-formats = { git = "https://github.com/Fractal-Tess/sley", rev = "ee45763e763c06b35748c8f951a40f4ae450c8fb" }
-sley-odb = { git = "https://github.com/Fractal-Tess/sley", rev = "ee45763e763c06b35748c8f951a40f4ae450c8fb" }
-sley-protocol = { git = "https://github.com/Fractal-Tess/sley", rev = "ee45763e763c06b35748c8f951a40f4ae450c8fb" }
-sley-refs = { git = "https://github.com/Fractal-Tess/sley", rev = "ee45763e763c06b35748c8f951a40f4ae450c8fb" }
-sley-rev = { git = "https://github.com/Fractal-Tess/sley", rev = "ee45763e763c06b35748c8f951a40f4ae450c8fb" }
-sley-worktree = { git = "https://github.com/Fractal-Tess/sley", rev = "ee45763e763c06b35748c8f951a40f4ae450c8fb" }
+sley = { git = "https://github.com/Fractal-Tess/sley", rev = "3b15510590bc843f8382aca950744d44d9a8d0e8", default-features = false, features = ["fast-sha1", "mmap", "rendering", "history-editing", "remote"] }
+sley-remote = { git = "https://github.com/Fractal-Tess/sley", rev = "3b15510590bc843f8382aca950744d44d9a8d0e8", default-features = false, features = ["http"] }
+sley-fsck = { git = "https://github.com/Fractal-Tess/sley", rev = "3b15510590bc843f8382aca950744d44d9a8d0e8" }
+sley-gc = { git = "https://github.com/Fractal-Tess/sley", rev = "3b15510590bc843f8382aca950744d44d9a8d0e8" }
+sley-archive = { git = "https://github.com/Fractal-Tess/sley", rev = "3b15510590bc843f8382aca950744d44d9a8d0e8" }
+sley-transport = { git = "https://github.com/Fractal-Tess/sley", rev = "3b15510590bc843f8382aca950744d44d9a8d0e8", default-features = false }
+sley-core = { git = "https://github.com/Fractal-Tess/sley", rev = "3b15510590bc843f8382aca950744d44d9a8d0e8" }
+sley-config = { git = "https://github.com/Fractal-Tess/sley", rev = "3b15510590bc843f8382aca950744d44d9a8d0e8" }
+sley-diff-merge = { git = "https://github.com/Fractal-Tess/sley", rev = "3b15510590bc843f8382aca950744d44d9a8d0e8" }
+sley-formats = { git = "https://github.com/Fractal-Tess/sley", rev = "3b15510590bc843f8382aca950744d44d9a8d0e8" }
+sley-odb = { git = "https://github.com/Fractal-Tess/sley", rev = "3b15510590bc843f8382aca950744d44d9a8d0e8" }
+sley-protocol = { git = "https://github.com/Fractal-Tess/sley", rev = "3b15510590bc843f8382aca950744d44d9a8d0e8" }
+sley-refs = { git = "https://github.com/Fractal-Tess/sley", rev = "3b15510590bc843f8382aca950744d44d9a8d0e8" }
+sley-rev = { git = "https://github.com/Fractal-Tess/sley", rev = "3b15510590bc843f8382aca950744d44d9a8d0e8" }
+sley-worktree = { git = "https://github.com/Fractal-Tess/sley", rev = "3b15510590bc843f8382aca950744d44d9a8d0e8" }
 rust-s3 = { version = "0.37.2", default-features = false, features = ["fail-on-err", "tokio-rustls-tls"] }
 sha1 = "0.11.0"
 sha2 = "0.10.9"

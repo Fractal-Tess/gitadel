@@ -4,6 +4,13 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-09-17
+
+### Fixed
+
+- Replaced recursive object traversal in Sley's integrity checker with an explicit work stack. Deep commit histories and nested trees or tags no longer overflow a worker thread's stack and abort the Gitadel server.
+- Restored automatic NixOS service recovery after crashes with `Restart=on-failure`, retaining the two-second restart delay.
+
 ## [0.6.1] - 2026-09-17
 
 ### Added
@@ -211,7 +218,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/Fractal-Tess/gitadel/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/Fractal-Tess/gitadel/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/Fractal-Tess/gitadel/compare/v0.5.0...v0.5.1

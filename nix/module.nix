@@ -357,6 +357,7 @@ in
         ExecStartPre = lib.optional (cfg.initialAdmin != null) "-${bootstrapAdmin}";
         ExecStart = "${lib.getExe cfg.package} --config ${settingsFile}";
         EnvironmentFile = lib.mkIf (cfg.environmentFile != null) [ cfg.environmentFile ];
+        Restart = "on-failure";
         RestartSec = 2;
         UMask = "0027";
         StateDirectory = lib.mkIf (stateDirectory != null) stateDirectory;
