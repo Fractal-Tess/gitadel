@@ -7,7 +7,7 @@ RUN bun run build
 
 FROM rust:1.98.0-slim-trixie AS backend
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends build-essential cmake libssl-dev perl pkg-config \
+    && apt-get install --yes --no-install-recommends build-essential cmake libdav1d-dev libssl-dev perl pkg-config \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock build.rs CHANGELOG.md ./
@@ -21,7 +21,7 @@ RUN cargo build --release --locked --package gitadel --bin gitadel \
 
 FROM debian:trixie-slim AS runtime
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates curl libgcc-s1 libssl3t64 libstdc++6 \
+    && apt-get install --yes --no-install-recommends ca-certificates curl fonts-dejavu-core libdav1d7 libgcc-s1 libssl3t64 libstdc++6 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 --shell /usr/sbin/nologin gitadel \
     && install --directory --owner gitadel --group gitadel /data

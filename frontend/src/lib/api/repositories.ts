@@ -9,15 +9,16 @@ export const repositorySchema = z.object({
   topics: z.array(z.string()).default([]),
   object_format: z.enum(["sha1", "sha256"]),
   mirrored: z.boolean(),
-  default_branch: z.string(),
+  default_branch: z.string().nullable(),
   archived_at: z.string().nullable(),
   icon_updated_at: z.string().nullable(),
-  icon_source: z.enum(["manual", "detected"]).nullable(),
+  icon_source: z.enum(["automatic", "selected", "uploaded", "none"]).nullable(),
   created_at: z.string(),
   updated_at: z.string(),
   favorited: z.boolean(),
   ssh_clone_url: z.string(),
   can_manage: z.boolean(),
+  can_write: z.boolean(),
 });
 
 export const topicsSchema = z.object({
@@ -99,6 +100,12 @@ export const treeSchema = z.object({
   entries: z.array(treeEntrySchema),
 });
 
+export const imageMetadataSchema = z.object({
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+  mime_type: z.string(),
+});
+
 export const blobSchema = z.object({
   revision: z.string(),
   commit_oid: z.string(),
@@ -109,6 +116,8 @@ export const blobSchema = z.object({
   too_large: z.boolean(),
   content: z.string().nullable(),
   rendered_html: z.string().nullable(),
+  image: imageMetadataSchema.nullable(),
+  image_error: z.string().nullable(),
 });
 
 export const signatureSchema = z.object({
@@ -167,6 +176,31 @@ export const languageStatSchema = z.object({
   comments: z.number(),
   blanks: z.number(),
 });
+export const iconCandidateSchema = z.object({
+  path: z.string(),
+  oid: z.string(),
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+  mime_type: z.string(),
+  reasons: z.array(z.string()),
+  recommended: z.boolean(),
+});
+
+export const iconCandidatesSchema = z.object({
+  mode: z.enum(["automatic", "selected", "uploaded", "none"]),
+  selected_path: z.string().nullable(),
+  selected_missing: z.boolean(),
+  scan_status: z.enum(["pending", "complete", "failed", "partial"]),
+  candidates: z.array(iconCandidateSchema),
+  commit_oid: z.string().nullable(),
+  icon_updated_at: z.string().nullable(),
+});
+
+export const iconSelectionSchema = z.object({
+  mode: z.enum(["automatic", "selected", "none"]),
+  path: z.string().optional(),
+  commit_oid: z.string().optional(),
+});
 
 export type Repository = z.infer<typeof repositorySchema>;
 
@@ -184,6 +218,24 @@ export function repositoryIconUrl(
     : null;
 }
 
+// Image responses are always safe PNGs, pinned to an immutable commit so a
+// branch moving while the viewer is open cannot replace the preview.
+export function repositoryImageUrl(
+  namespace: string,
+  name: string,
+  commitOid: string,
+  path: string,
+): string {
+  const parameters = new URLSearchParams({ rev: commitOid, path });
+  return `/api/v1/repositories/${encodeURIComponent(namespace)}/${encodeURIComponent(
+    name,
+  )}/image?${parameters}`;
+}
+
+export type ImageMetadata = z.infer<typeof imageMetadataSchema>;
+export type IconCandidate = z.infer<typeof iconCandidateSchema>;
+export type IconCandidates = z.infer<typeof iconCandidatesSchema>;
+export type IconSelection = z.infer<typeof iconSelectionSchema>;
 export type RepositoryOverviewItem = z.infer<
   typeof repositoryOverviewItemSchema
 >;

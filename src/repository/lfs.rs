@@ -340,6 +340,7 @@ async fn upload(
     {
         upsert_lfs_object(&state, &repository, &oid, metadata.size).await?;
         state.invalidate_repository_size(repository.id).await;
+        state.queue_repository_analysis(repository.id).await;
         return Ok(StatusCode::OK);
     }
     let expected = oid.parse::<BlobDigest>().map_err(ApiError::internal)?;
@@ -361,6 +362,7 @@ async fn upload(
         })?;
     upsert_lfs_object(&state, &repository, &oid, outcome.size).await?;
     state.invalidate_repository_size(repository.id).await;
+    state.queue_repository_analysis(repository.id).await;
     Ok(StatusCode::OK)
 }
 

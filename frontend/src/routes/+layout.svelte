@@ -10,6 +10,7 @@
   import AppRail from "$lib/components/app/app-rail.svelte";
   import CommandPalette from "$lib/components/app/command-palette.svelte";
   import CreateDialog from "$lib/components/app/create-dialog.svelte";
+  import FileCreateDialog from "$lib/components/app/file-create-dialog.svelte";
   import OrganizationContextNav from "$lib/components/app/organization-context-nav.svelte";
   import * as Sidebar from "$lib/components/ui/sidebar/index.js";
   import { Toaster } from "$lib/components/ui/sonner/index.js";
@@ -196,6 +197,7 @@
   </Sidebar.Provider>
   <CommandPalette />
   <CreateDialog />
+  <FileCreateDialog />
 {:else}
   <div
     class="grid min-h-screen place-items-center bg-background text-sm text-muted-foreground"

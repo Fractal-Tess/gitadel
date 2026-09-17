@@ -49,6 +49,7 @@
             namespace: repository.namespace,
             name: repository.name,
             canManage: repository.can_manage,
+            canWrite: repository.can_write,
             mirrored: repository.mirrored,
           }
         : null,

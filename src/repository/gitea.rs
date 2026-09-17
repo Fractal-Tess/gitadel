@@ -46,7 +46,7 @@ pub struct GiteaRepositoryResponse {
     html_url: String,
     clone_url: String,
     ssh_url: String,
-    default_branch: String,
+    default_branch: Option<String>,
     archived: bool,
 }
 

@@ -81,6 +81,12 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum GitadelCommand {
+    #[command(hide = true)]
+    ImageRender {
+        path: String,
+        #[arg(long)]
+        thumbnail: bool,
+    },
     /// Create or restore an offline integrity-checked backup.
     Backup {
         #[command(subcommand)]

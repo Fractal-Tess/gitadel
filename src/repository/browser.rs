@@ -60,9 +60,9 @@ const MAX_OVERVIEW_PER_PAGE: usize = 50;
 
 #[derive(Deserialize)]
 pub struct BrowseQuery {
-    rev: Option<String>,
+    pub(super) rev: Option<String>,
     #[serde(default)]
-    path: String,
+    pub(super) path: String,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -176,6 +176,8 @@ pub struct BlobResponse {
     too_large: bool,
     content: Option<String>,
     rendered_html: Option<String>,
+    image: Option<super::image::ImageMetadata>,
+    image_error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -305,6 +307,7 @@ async fn repository_overview_item(
     repository: repository::Model,
     favorited: bool,
     can_manage: bool,
+    can_write: bool,
     start_date: NaiveDate,
     end_date: NaiveDate,
 ) -> Result<RepositoryOverviewItemResponse, ApiError> {
@@ -379,7 +382,9 @@ async fn repository_overview_item(
         branch_count: git_overview.branch_count,
         total_lines,
         languages,
-        repository: resources::RepositoryResponse::new(repository, state, favorited, can_manage),
+        repository: resources::RepositoryResponse::new(
+            repository, state, favorited, can_manage, can_write,
+        ),
     })
 }
 
@@ -415,12 +420,13 @@ pub async fn overview(
     for (index, repository) in page_repositories.into_iter().enumerate() {
         let favorited = accessible.favorite_ids.contains(&repository.id);
         let can_manage = accessible.manageable_ids.contains(&repository.id);
+        let can_write = accessible.writable_ids.contains(&repository.id);
         let state = state.clone();
         let slots = state.analysis_slots.clone();
         pending.spawn(async move {
             let _permit = slots.acquire_owned().await.map_err(ApiError::internal)?;
             let item = repository_overview_item(
-                &state, repository, favorited, can_manage, start_date, end_date,
+                &state, repository, favorited, can_manage, can_write, start_date, end_date,
             )
             .await?;
             Ok::<_, ApiError>((index, item))
@@ -513,7 +519,8 @@ pub async fn tree(
     let repository = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
     let revision = query
         .rev
-        .unwrap_or_else(|| repository.default_branch.clone());
+        .or_else(|| repository.default_branch.clone())
+        .ok_or_else(ApiError::not_found)?;
     let requested_path = normalize_browse_path(&query.path)?;
     let include_commit_count = requested_path.is_empty();
     let path = state.repository_path(&repository);
@@ -781,28 +788,48 @@ pub async fn blob(
     let repository = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
     let revision = query
         .rev
-        .unwrap_or_else(|| repository.default_branch.clone());
+        .or_else(|| repository.default_branch.clone())
+        .ok_or_else(ApiError::not_found)?;
     let requested_path = normalize_browse_path(&query.path)?;
     if requested_path.is_empty() {
         return Err(ApiError::bad_request("A file path is required."));
     }
     let path = state.repository_path(&repository);
-    let response = read_git(path, move |git| {
+    let (mut response, image_content) = read_git(path, move |git| {
         let commit_oid = git.peel_to_commit_oid(git.rev_parse(&revision)?)?;
-        let resolved = git.resolve_path(&revision, &requested_path)?;
+        let resolved = git.resolve_path(&commit_oid.to_hex(), &requested_path)?;
         if resolved.object_type != GitObjectType::Blob {
             return Err(GitError::InvalidPath(requested_path));
         }
-        let content = git.blobs().read(resolved.oid)?;
-        let size = content.len();
+        let size = git
+            .read_object_header(&resolved.oid)?
+            .map_or(usize::MAX, |(_, size)| {
+                usize::try_from(size).unwrap_or(usize::MAX)
+            });
+        let image_path = super::image::is_image_path(&requested_path);
+        let limit = if image_path {
+            super::image::MAX_IMAGE_BYTES
+        } else {
+            MAX_TEXT_BLOB_BYTES
+        };
+        let content = if size <= limit {
+            Some(git.blobs().read(resolved.oid)?)
+        } else {
+            None
+        };
         let too_large = size > MAX_TEXT_BLOB_BYTES;
-        let binary = content.iter().take(8192).any(|byte| *byte == 0)
-            || (!too_large && std::str::from_utf8(&content).is_err());
-        let text = (!too_large && !binary).then(|| String::from_utf8_lossy(&content).into_owned());
+        let binary = content.as_ref().is_some_and(|content| {
+            content.iter().take(8192).any(|byte| *byte == 0)
+                || (!too_large && std::str::from_utf8(content).is_err())
+        });
+        let text = content
+            .as_ref()
+            .filter(|_| !too_large && !binary)
+            .map(|content| String::from_utf8_lossy(content).into_owned());
         let rendered_html = text
             .as_deref()
             .and_then(|text| is_markdown_path(&requested_path).then(|| render_markdown(text)));
-        Ok(BlobResponse {
+        let response = BlobResponse {
             revision,
             commit_oid: commit_oid.to_hex(),
             path: requested_path,
@@ -812,9 +839,31 @@ pub async fn blob(
             too_large,
             content: text,
             rendered_html,
-        })
+            image: None,
+            image_error: (image_path && content.is_none()).then(|| {
+                "Image previews are limited to 16 MiB. Download the original instead.".to_owned()
+            }),
+        };
+        Ok((response, if image_path { content } else { None }))
     })
     .await?;
+    if let Some(content) = image_content {
+        match super::image::resolve_image_content(&state, &repository, content).await {
+            Ok(content) => {
+                response.size = content.len();
+                if response.path.to_ascii_lowercase().ends_with(".svg") {
+                    response.content = (content.len() <= MAX_TEXT_BLOB_BYTES)
+                        .then(|| std::str::from_utf8(&content).ok().map(str::to_owned))
+                        .flatten();
+                }
+                match super::image::cached_image(content, response.path.clone()).await {
+                    Ok(image) => response.image = Some(image.metadata),
+                    Err(error) => response.image_error = Some(error.to_string()),
+                }
+            }
+            Err(error) => response.image_error = Some(error.to_string()),
+        }
+    }
     Ok(Json(response))
 }
 
@@ -828,7 +877,8 @@ pub async fn raw(
     let repository = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
     let revision = query
         .rev
-        .unwrap_or_else(|| repository.default_branch.clone());
+        .or_else(|| repository.default_branch.clone())
+        .ok_or_else(ApiError::not_found)?;
     let requested_path = normalize_browse_path(&query.path)?;
     if requested_path.is_empty() {
         return Err(ApiError::bad_request("A file path is required."));
@@ -843,10 +893,25 @@ pub async fn raw(
         git.blobs().read(resolved.oid)
     })
     .await?;
-    let content_type = mime_guess::from_path(mime_path)
+    let content_type = mime_guess::from_path(&mime_path)
         .first_or_octet_stream()
         .to_string();
-    let mut response = Response::new(Body::from(content));
+    let body = if super::image::is_image_path(&mime_path)
+        && let Some(oid) = super::image::lfs_image_oid(&content)?
+    {
+        let key = state.lfs_object_key(&repository, oid)?;
+        let store = state.lfs_store();
+        store
+            .stat(&key)
+            .await
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::bad_request("The LFS image has not been uploaded."))?;
+        let reader = store.read(&key).await.map_err(ApiError::internal)?;
+        Body::from_stream(tokio_util::io::ReaderStream::new(reader))
+    } else {
+        Body::from(content)
+    };
+    let mut response = Response::new(body);
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_str(&content_type).map_err(ApiError::internal)?,
@@ -855,6 +920,29 @@ pub async fn raw(
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, no-cache"),
     );
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'none'; sandbox"),
+    );
+    if content_type == "image/svg+xml" {
+        let filename = std::path::Path::new(&mime_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("image.svg");
+        let encoded: String = url::form_urlencoded::byte_serialize(filename.as_bytes()).collect();
+        response.headers_mut().insert(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_str(&format!(
+                "attachment; filename*=UTF-8''{}",
+                encoded.replace('+', "%20")
+            ))
+            .map_err(ApiError::internal)?,
+        );
+    }
     Ok(response)
 }
 
@@ -868,7 +956,8 @@ pub async fn source_archive(
     let repository = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
     let revision = query
         .rev
-        .unwrap_or_else(|| repository.default_branch.clone());
+        .or_else(|| repository.default_branch.clone())
+        .ok_or_else(ApiError::not_found)?;
     let repository_path = state.repository_path(&repository);
     let (commit_oid, tree_oid, mtime) = read_git(repository_path.clone(), move |git| {
         let commit_oid = git.peel_to_commit_oid(git.rev_parse(&revision)?)?;
@@ -1042,7 +1131,8 @@ pub async fn history(
     let repository = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
     let revision = query
         .rev
-        .unwrap_or_else(|| repository.default_branch.clone());
+        .or_else(|| repository.default_branch.clone())
+        .ok_or_else(ApiError::not_found)?;
     let page = query.page.max(1);
     let per_page = query.per_page.clamp(1, 100);
     let path = state.repository_path(&repository);
@@ -1251,7 +1341,8 @@ pub async fn stats(
     let repository = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
     let revision = query
         .rev
-        .unwrap_or_else(|| repository.default_branch.clone());
+        .or_else(|| repository.default_branch.clone())
+        .ok_or_else(ApiError::not_found)?;
     let path = state.repository_path(&repository);
     let (commit_oid, tree_oid) = read_git(path.clone(), move |git| {
         let commit_oid = git.peel_to_commit_oid(git.rev_parse(&revision)?)?;
@@ -1277,14 +1368,19 @@ async fn read_repository_overview(
 ) -> Result<GitOverview, ApiError> {
     let cache_key = format!(
         "{}:{}:{}:{start_date}:{end_date}",
-        repository.storage_key, repository.updated_at, repository.default_branch
+        repository.storage_key,
+        repository.updated_at,
+        repository.default_branch.as_deref().unwrap_or("")
     );
     if let Some(cached) = state.cached_overview(repository.id, &cache_key).await? {
         return Ok(cached);
     }
 
     let path = state.repository_path(repository);
-    let default_reference = format!("refs/heads/{}", repository.default_branch);
+    let default_reference = repository
+        .default_branch
+        .as_ref()
+        .map(|branch| format!("refs/heads/{branch}"));
     let overview = read_git(path, move |git| {
         let references = git.references().list_refs_with_prefix("refs/heads/")?;
         let branch_count = references.len();
@@ -1295,7 +1391,7 @@ async fn read_repository_overview(
                 continue;
             };
             let commit_oid = git.peel_to_commit_oid(target)?;
-            if reference.name == default_reference {
+            if default_reference.as_deref() == Some(reference.name.as_str()) {
                 default_index = Some(roots.len());
             }
             roots.push(commit_oid);
@@ -1405,7 +1501,7 @@ pub(super) async fn warm_repository_analysis(
     Ok(())
 }
 
-async fn readable_repository(
+pub(super) async fn readable_repository(
     state: &RepositoryState,
     headers: &HeaderMap,
     jar: &CookieJar,
@@ -1460,7 +1556,7 @@ fn map_git_error(error: GitError) -> ApiError {
     }
 }
 
-fn normalize_browse_path(path: &str) -> Result<String, ApiError> {
+pub(super) fn normalize_browse_path(path: &str) -> Result<String, ApiError> {
     let normalized = path.trim_matches('/');
     if normalized.is_empty() {
         return Ok(String::new());

@@ -18,19 +18,20 @@
   import * as Select from "$lib/components/ui/select/index.js";
   import { Textarea } from "$lib/components/ui/textarea/index.js";
 
+  import { ApiFailure, jsonBody, requestJson } from "$lib/api/transport.js";
   import {
-    ApiFailure,
-    jsonBody,
-    requestJson,
-  } from "$lib/api/transport.js";
-  import { mirrorIdentitiesSchema, type MirrorIdentity } from "$lib/api/mirrors.js";
+    mirrorIdentitiesSchema,
+    type MirrorIdentity,
+  } from "$lib/api/mirrors.js";
   import { organizationSchema } from "$lib/api/organizations.js";
   import { repositorySchema } from "$lib/api/repositories.js";
   import { invalidateExplore } from "$lib/navigation-cache.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
-  import { useShellState } from "$lib/state/shell-state.svelte.js";
+  import {
+    useShellState,
+    type CreateMode,
+  } from "$lib/state/shell-state.svelte.js";
 
-  type CreateMode = "choose" | "repository" | "mirror" | "organization";
   type MirrorIdentityOption = MirrorIdentity & {
     namespace: string;
     namespaceLabel: string;
@@ -88,9 +89,9 @@
   let mirrorOptionsLoading = $state(false);
   let organizationSlug = $state("");
   let organizationDisplayName = $state("");
-
   const selectedMirrorIdentity = $derived(
-    mirrorIdentities.find((identity) => identity.id === mirrorIdentityId) ?? null,
+    mirrorIdentities.find((identity) => identity.id === mirrorIdentityId) ??
+      null,
   );
 
   $effect(() => {
@@ -108,7 +109,8 @@
     }
     if (wasOpen) return;
     wasOpen = true;
-    mode = "choose";
+    mode = shell.createMode;
+    shell.createMode = "choose";
     mirrorLoadError = null;
     namespace ||= viewer ?? "";
     visibility =
@@ -125,7 +127,6 @@
   function identitiesPath(target: string): string {
     return `/api/v1/namespaces/${encodeURIComponent(target)}/mirror-identities`;
   }
-
 
   function suggestedRepositoryName(url: string): string {
     const sshMatch = url.trim().match(/^git@[^:]+:(?:.+\/)?(.+?)(?:\.git)?$/i);
@@ -187,7 +188,9 @@
 
   function selectMirrorIdentity(next: string | undefined): void {
     mirrorIdentityId = next ?? "";
-    const identity = mirrorIdentities.find((candidate) => candidate.id === next);
+    const identity = mirrorIdentities.find(
+      (candidate) => candidate.id === next,
+    );
     if (identity) namespace = identity.namespace;
   }
 
@@ -417,8 +420,8 @@
               </Select.Content>
             </Select.Root>
             <Field.Description>
-              Public mirrors send no credential. Selecting a token identity
-              also selects and locks its personal or organization owner.
+              Public mirrors send no credential. Selecting a token identity also
+              selects and locks its personal or organization owner.
             </Field.Description>
           </Field.Field>
 
@@ -460,7 +463,6 @@
               Manage identities
             </Button>
           </div>
-
 
           <Field.Field>
             <Field.Label for="mirror-schedule">Synchronization</Field.Label>

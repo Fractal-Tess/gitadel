@@ -49,6 +49,11 @@ mod m20260903_000048_repository_analysis_cache;
 mod m20260903_000049_system_action_runners;
 mod m20260904_000050_integrity_settings;
 mod m20260915_000051_repository_icons;
+mod m20260918_000052_default_branch_selection;
+mod m20260918_000053_repository_icon_discovery;
+
+#[cfg(test)]
+mod tests;
 
 use sea_orm_migration::prelude::*;
 
@@ -109,6 +114,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260903_000049_system_action_runners::Migration),
             Box::new(m20260904_000050_integrity_settings::Migration),
             Box::new(m20260915_000051_repository_icons::Migration),
+            Box::new(m20260918_000052_default_branch_selection::Migration),
+            Box::new(m20260918_000053_repository_icon_discovery::Migration),
         ]
     }
 }

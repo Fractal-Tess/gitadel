@@ -428,7 +428,7 @@
                     repository.namespace,
                     repository.name,
                     scope,
-                    repository.default_branch,
+                    repository.default_branch ?? undefined,
                   )}
                 onpointerleave={() =>
                   cancelRepositoryPreload(
@@ -441,7 +441,7 @@
                     repository.namespace,
                     repository.name,
                     scope,
-                    repository.default_branch,
+                    repository.default_branch ?? undefined,
                   )}
                 onblur={() =>
                   cancelRepositoryPreload(

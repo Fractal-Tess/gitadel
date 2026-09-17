@@ -147,7 +147,7 @@ export class RepositoryPageState {
         this.repository = repository;
       },
       onDefaultBranchChanged: async () => {
-        this.revision = this.repository?.default_branch ?? this.revision;
+        this.revision = this.repository?.default_branch ?? "";
         await this.initialize();
       },
       invalidatePreload: () =>
@@ -174,7 +174,10 @@ export class RepositoryPageState {
   }
   get rawUrl(): string {
     if (!this.browser.blob) return "";
-    return `${repositoryApi(this, "/raw")}?${new URLSearchParams({ rev: this.revision, path: this.browser.blob.path })}`;
+    return `${repositoryApi(this, "/raw")}?${new URLSearchParams({
+      rev: this.browser.blob.commit_oid,
+      path: this.browser.blob.path,
+    })}`;
   }
   private isScopeCurrent(): boolean {
     return !this.#destroyed && this.#app.authorizationScope === this.scope;
@@ -458,7 +461,7 @@ export class RepositoryPageState {
         : this.view === "integrations"
           ? "integrations"
           : "general";
-    this.revision = parameters.get("rev") || repository.default_branch;
+    this.revision = parameters.get("rev") || repository.default_branch || "";
     this.repositoryPath = parameters.get("path") || "";
     this.commitOid = parameters.get("oid") || "";
     this.historyPage = Math.max(1, Number(parameters.get("page")) || 1);

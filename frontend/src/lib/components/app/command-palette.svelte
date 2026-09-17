@@ -1,10 +1,13 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
+  import { page } from "$app/state";
   import { resolve } from "$app/paths";
   import { Command as CommandPrimitive } from "bits-ui";
   import Archive from "@lucide/svelte/icons/archive";
   import Building2 from "@lucide/svelte/icons/building-2";
   import Compass from "@lucide/svelte/icons/compass";
+  import FilePlus2 from "@lucide/svelte/icons/file-plus-2";
+  import FolderPlus from "@lucide/svelte/icons/folder-plus";
   import Heart from "@lucide/svelte/icons/heart";
   import LockKeyhole from "@lucide/svelte/icons/lock-keyhole";
   import Plus from "@lucide/svelte/icons/plus";
@@ -25,6 +28,11 @@
     scheduleRepositoryPreload,
   } from "$lib/repository/repository-preload.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
+  import {
+    accountSettingsSections,
+    adminSettingsSections,
+  } from "$lib/settings/navigation.js";
+  import { repositorySettingsSections } from "$lib/repository/settings-sections.js";
   import { recentRepositoryPaths } from "$lib/state/recent-repositories.js";
   import {
     useShellState,
@@ -115,6 +123,7 @@
   }
   type SearchQuery = {
     needle: string;
+    terms: string[];
     topics: string[];
   };
 
@@ -128,24 +137,31 @@
         terms.push(token);
       }
     }
-    return { needle: terms.join(" "), topics };
+    return { needle: terms.join(" "), terms, topics };
   }
 
   const parsedQuery = $derived(parseSearchQuery(query));
 
-  /**
-   * Ranks a repository against the query. Repository names outrank namespaces,
-   * which outrank descriptions, so typing `web` finds `acme/web` before it
-   * finds `web-team/billing` or anything that merely mentions the web.
-   */
-  function score(repository: IndexedRepository, needle: string): number {
-    if (repository.normalizedName.startsWith(needle)) return 100;
-    if (repository.normalizedPath.startsWith(needle)) return 90;
-    if (repository.normalizedName.includes(needle)) return 70;
-    if (repository.normalizedPath.includes(needle)) return 55;
-    if (isSubsequence(repository.normalizedPath, needle)) return 35;
-    if (repository.normalizedDescription.includes(needle)) return 20;
-    return 0;
+  function score(repository: IndexedRepository, terms: string[]): number {
+    if (terms.length === 0) return 1;
+    const fields = [
+      [repository.normalizedName, 100],
+      [repository.normalizedPath, 80],
+      [repository.normalizedDescription, 30],
+    ] as const;
+    let total = 0;
+    for (const term of terms) {
+      const best = fields.reduce((current, [field, weight]) => {
+        if (field.startsWith(term)) return Math.max(current, weight);
+        if (field.includes(term)) return Math.max(current, weight - 20);
+        if (isSubsequence(field, term)) return Math.max(current, weight - 45);
+        return current;
+      }, 0);
+      if (!best) return 0;
+      total += best;
+    }
+    if (repository.normalizedPath.includes(terms.join(" "))) total += 20;
+    return total;
   }
 
   const results = $derived.by(() => {
@@ -186,7 +202,7 @@
     );
     const ranked = topicMatches
       .map((repository) => {
-        const base = needle ? score(repository, needle) : 1;
+        const base = score(repository, parsedQuery.terms);
         return {
           repository,
           rank:
@@ -213,12 +229,33 @@
     };
   });
 
+  function actionScore(action: PaletteAction): number {
+    if (parsedQuery.topics.length > 0 || parsedQuery.terms.length === 0)
+      return 1;
+    const label = action.label.toLowerCase();
+    const aliases = action.keywords.toLowerCase();
+    let total = 0;
+    for (const term of parsedQuery.terms) {
+      if (label.includes(term)) {
+        total += label.startsWith(term) ? 100 : 80;
+      } else if (aliases.includes(term)) {
+        total += 35;
+      } else {
+        return 0;
+      }
+    }
+    if (label.includes(parsedQuery.needle)) total += 25;
+    return total;
+  }
+
   function matches(action: PaletteAction): boolean {
-    if (parsedQuery.topics.length > 0) return false;
-    if (!parsedQuery.needle) return true;
-    return `${action.label} ${action.keywords}`
-      .toLowerCase()
-      .includes(parsedQuery.needle);
+    return actionScore(action) > 0;
+  }
+
+  function sortActions(actions: PaletteAction[]): PaletteAction[] {
+    return actions
+      .filter(matches)
+      .sort((left, right) => actionScore(right) - actionScore(left));
   }
 
   const navigationActions = $derived.by(() => {
@@ -239,35 +276,67 @@
       },
     ];
     if (app.authStatus?.authenticated) {
+      actions.push({
+        id: "organizations",
+        label: "Organizations",
+        icon: Building2,
+        keywords: "organization teams namespaces",
+        run: () => void goto(resolve("/-/organizations")),
+      });
       actions.push(
-        {
-          id: "account-settings",
-          label: "Account settings",
-          icon: Settings2,
-          keywords: "profile security passkeys tokens ssh keys avatar",
-          run: () =>
-            void goto(resolve("/-/account/[view]", { view: "profile" })),
-        },
-        {
-          id: "organizations",
-          label: "Organizations",
-          icon: Building2,
-          keywords:
-            "organizations runners integrations mirror identities tokens",
-          run: () => void goto(resolve("/-/organizations")),
-        },
+        ...accountSettingsSections.map(
+          (section) =>
+            ({
+              id: `account-settings-${section.id}`,
+              label: `Account settings · ${section.label}`,
+              icon: section.icon,
+              keywords: `account settings ${section.label} profile security`,
+              run: () =>
+                void goto(resolve("/-/account/[view]", { view: section.id })),
+            }) satisfies PaletteAction,
+        ),
       );
       if (app.authStatus.user?.is_admin) {
-        actions.push({
-          id: "administration",
-          label: "Administration",
-          icon: ShieldCheck,
-          keywords: "instance users access audit backups appearance",
-          run: () =>
-            void goto(
-              resolve("/-/administration/[view]", { view: "appearance" }),
+        actions.push(
+          ...adminSettingsSections.map(
+            (section) =>
+              ({
+                id: `admin-settings-${section.id}`,
+                label: `Administration · ${section.label}`,
+                icon: section.icon,
+                keywords: `administration admin settings ${section.label} instance ${section.id === "storage" ? "migration migrations migrate move storage target" : ""}`,
+                run: () =>
+                  void goto(
+                    resolve("/-/administration/[view]", { view: section.id }),
+                  ),
+              }) satisfies PaletteAction,
+          ),
+        );
+      }
+      const current = shell.activeRepository;
+      if (current?.canManage) {
+        actions.push(
+          ...repositorySettingsSections
+            .filter((section) => section.id !== "mirror" || current.mirrored)
+            .map(
+              (section) =>
+                ({
+                  id: `repository-settings-${section.id}`,
+                  label: `${current.namespace}/${current.name} · Settings · ${section.label}`,
+                  icon: section.icon,
+                  keywords: `repository repo settings ${section.label}`,
+                  run: () =>
+                    void goto(
+                      `${resolve("/[namespace]/[name]", {
+                        namespace: current.namespace,
+                        name: current.name,
+                      })}?view=settings${
+                        section.id === "general" ? "" : `&tab=${section.id}`
+                      }`,
+                    ),
+                }) satisfies PaletteAction,
             ),
-        });
+        );
       }
     }
     actions.push({
@@ -277,29 +346,107 @@
       keywords: "releases version updates",
       run: () => void goto(resolve("/changelog")),
     });
-    return actions.filter(matches);
+    return sortActions(actions);
+  });
+
+  const namespaceActions = $derived.by(() => {
+    const namespace = page.params.namespace;
+    if (!app.authStatus?.authenticated || !namespace || page.params.name)
+      return [];
+    const personal = namespace === viewer;
+    const organization = app.organizations.find(
+      (candidate) => candidate.slug === namespace,
+    );
+    const canManage = personal || organization?.role === "owner";
+    const canViewMembers = personal || Boolean(organization);
+    if (!canManage && !canViewMembers) return [];
+    const views = [
+      ...(canViewMembers
+        ? [{ id: "members", label: "Members", icon: Building2 }]
+        : []),
+      ...(canManage
+        ? [
+            { id: "runners", label: "Runners", icon: ShieldCheck },
+            { id: "integrations", label: "Integrations", icon: Settings2 },
+            {
+              id: "mirror-credentials",
+              label: "Mirror credentials",
+              icon: RefreshCw,
+            },
+            { id: "settings", label: "Settings", icon: Settings2 },
+          ]
+        : []),
+    ];
+    return sortActions(
+      views.map(
+        (view) =>
+          ({
+            id: `namespace-${view.id}`,
+            label: `${namespace} · ${view.label}`,
+            icon: view.icon,
+            keywords: `organization namespace ${namespace} ${view.label}`,
+            run: () =>
+              void goto(`${resolve("/[namespace]", { namespace })}/${view.id}`),
+          }) satisfies PaletteAction,
+      ),
+    );
   });
 
   const createActions = $derived.by(() => {
     if (!app.authStatus?.authenticated) return [];
-    return [
+    const actions: PaletteAction[] = [
       {
-        id: "create",
-        label: "Create or import repositories and organizations",
+        id: "new-repository",
+        label: "New repository",
+        icon: Plus,
+        keywords: "new create add repository repositories project",
+        run: () => shell.openCreate("repository"),
+      },
+      {
+        id: "new-organization",
+        label: "New organization",
+        icon: Building2,
+        keywords: "new create add organization organizations team namespace",
+        run: () => shell.openCreate("organization"),
+      },
+      {
+        id: "import-repositories",
+        label: "Import repositories",
         icon: Plus,
         keywords:
-          "create add import repository mirror organization initialise initialize github gitlab gitea forgejo",
-        run: () => (shell.createOpen = true),
-      } satisfies PaletteAction,
-    ].filter(matches);
+          "migration migrations migrate import imports transfer repositories github gitlab gitea forgejo",
+        run: () => void goto(resolve("/imports/new")),
+      },
+    ];
+    const current = shell.activeRepository;
+    if (current?.canWrite && !current.mirrored) {
+      actions.push(
+        {
+          id: "new-file",
+          label: `New file in ${current.namespace}/${current.name}`,
+          icon: FilePlus2,
+          keywords: "new file files create edit commit code",
+          run: () => shell.openFileCreate("file"),
+        },
+        {
+          id: "new-directory",
+          label: `New directory in ${current.namespace}/${current.name}`,
+          icon: FolderPlus,
+          keywords:
+            "new directory directories folder folders create gitkeep commit code",
+          run: () => shell.openFileCreate("directory"),
+        },
+      );
+    }
+    return sortActions(actions);
   });
-
   const repositoryRows = $derived(
     results.recent.length + results.matches.length,
   );
-  const hasResults = $derived(
-    repositoryRows + navigationActions.length + createActions.length > 0,
+  const actionRowsCount = $derived(
+    navigationActions.length + namespaceActions.length + createActions.length,
   );
+  const hasResults = $derived(repositoryRows + actionRowsCount > 0);
   const countLabel = $derived.by(() => {
     const total = repositories.length;
     if (loading && total === 0) return "Loading…";
@@ -327,7 +474,7 @@
       repository.namespace,
       repository.name,
       scope,
-      repository.default_branch,
+      repository.default_branch ?? undefined,
     );
     return () =>
       cancelRepositoryPreload(repository.namespace, repository.name, scope);
@@ -410,7 +557,7 @@
         repository.namespace,
         repository.name,
         scope,
-        repository.default_branch,
+        repository.default_branch ?? undefined,
       )}
     onmouseleave={() =>
       cancelRepositoryPreload(repository.namespace, repository.name, scope)}
@@ -525,13 +672,14 @@
         </Command.Group>
       {/if}
 
-      {#if repositoryRows && navigationActions.length + createActions.length}
+      {#if repositoryRows && actionRowsCount}
         <Command.Separator />
       {/if}
 
-      {#if navigationActions.length}
+      {#if navigationActions.length || namespaceActions.length}
         <Command.Group class={groupClass} heading="Go to">
           {@render actionRows(navigationActions)}
+          {@render actionRows(namespaceActions)}
         </Command.Group>
       {/if}
 

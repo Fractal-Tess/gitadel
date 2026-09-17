@@ -1,31 +1,23 @@
 <script lang="ts">
   import { page } from "$app/state";
   import { resolve } from "$app/paths";
-  import Activity from "@lucide/svelte/icons/activity";
-  import ArchiveRestore from "@lucide/svelte/icons/archive-restore";
-  import Database from "@lucide/svelte/icons/database";
-  import HardDrive from "@lucide/svelte/icons/hard-drive";
-  import Palette from "@lucide/svelte/icons/palette";
-  import ShieldCheck from "@lucide/svelte/icons/shield-check";
-  import UserPlus from "@lucide/svelte/icons/user-plus";
-  import Workflow from "@lucide/svelte/icons/workflow";
   import ContextNav, {
     type ContextNavItem,
   } from "$lib/components/app/context-nav.svelte";
-
+  import InstanceSettings from "$lib/components/settings/instance-settings.svelte";
   import ActionsSettings from "$lib/components/settings/actions-settings.svelte";
   import BackupSettings from "$lib/components/settings/backup-settings.svelte";
   import LfsSettings from "$lib/components/settings/lfs-settings.svelte";
-  import InstanceSettings from "$lib/components/settings/instance-settings.svelte";
   import IntegritySettings from "$lib/components/settings/integrity-settings.svelte";
   import StorageSettings from "$lib/components/settings/storage-settings.svelte";
-  import { useAppState } from "$lib/state/app-state.svelte.js";
   import { AccountSettingsState } from "$lib/settings/account-settings-state.svelte.js";
   import { systemRunnerScope } from "$lib/settings/account/actions-settings-state.svelte.js";
   import {
-    preloadAdminSettingsView,
+    adminSettingsSections,
     type AdminSettingsView,
-  } from "$lib/settings/settings-data-cache.js";
+  } from "$lib/settings/navigation.js";
+  import { preloadAdminSettingsView } from "$lib/settings/settings-data-cache.js";
+  import { useAppState } from "$lib/state/app-state.svelte.js";
 
   const app = useAppState();
   const accountState = new AccountSettingsState(app);
@@ -77,77 +69,17 @@
                   : "Review repository, authentication, and administration events.",
   );
 
-  const navigation = $derived.by<ContextNavItem[]>(() => [
-    {
-      id: "appearance",
-      label: "Appearance",
-      icon: Palette,
-      href: resolve("/-/administration/[view]", { view: "appearance" }),
-      active: view === "appearance",
+  const navigation = $derived.by<ContextNavItem[]>(() =>
+    adminSettingsSections.map((section) => ({
+      id: section.id,
+      label: section.label,
+      icon: section.icon,
+      href: resolve("/-/administration/[view]", { view: section.id }),
+      active: view === section.id,
       preload: () =>
-        preloadAdminSettingsView(app.authorizationScope, "appearance"),
-    },
-    {
-      id: "access",
-      label: "Access",
-      icon: UserPlus,
-      href: resolve("/-/administration/[view]", { view: "access" }),
-      active: view === "access",
-      preload: () => preloadAdminSettingsView(app.authorizationScope, "access"),
-    },
-    {
-      id: "runners",
-      label: "Runners",
-      icon: Workflow,
-      href: resolve("/-/administration/[view]", { view: "runners" }),
-      active: view === "runners",
-      preload: () => preloadAdminSettingsView(app.authorizationScope, "runners"),
-    },
-    {
-      id: "storage",
-      label: "Storage",
-      icon: Database,
-      href: resolve("/-/administration/[view]", { view: "storage" }),
-      active: view === "storage",
-      preload: () =>
-        preloadAdminSettingsView(app.authorizationScope, "storage"),
-    },
-    {
-      id: "lfs",
-      label: "Git LFS",
-      icon: HardDrive,
-      href: resolve("/-/administration/[view]", { view: "lfs" }),
-      active: view === "lfs",
-      preload: () => preloadAdminSettingsView(app.authorizationScope, "lfs"),
-    },
-    {
-      id: "backups",
-      label: "Backups",
-      icon: ArchiveRestore,
-      href: resolve("/-/administration/[view]", { view: "backups" }),
-      preload: () =>
-        preloadAdminSettingsView(app.authorizationScope, "backups"),
-      active: view === "backups",
-    },
-    {
-      id: "maintenance",
-      label: "Maintenance",
-      icon: ShieldCheck,
-      href: resolve("/-/administration/[view]", { view: "maintenance" }),
-      active: view === "maintenance",
-      preload: () =>
-        preloadAdminSettingsView(app.authorizationScope, "maintenance"),
-    },
-    {
-      id: "activity",
-      label: "Activity",
-      icon: Activity,
-      href: resolve("/-/administration/[view]", { view: "activity" }),
-      active: view === "activity",
-      preload: () =>
-        preloadAdminSettingsView(app.authorizationScope, "activity"),
-    },
-  ]);
+        preloadAdminSettingsView(app.authorizationScope, section.id),
+    })),
+  );
 
   $effect(() => {
     accountState.syncScope();

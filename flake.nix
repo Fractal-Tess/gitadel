@@ -115,7 +115,7 @@
               pname = "gitadel";
               src = ./.;
               nativeBuildInputs = buildDeps pkgs;
-              buildInputs = [ pkgs.openssl ];
+              buildInputs = [ pkgs.openssl pkgs.dav1d ];
               cargoBuildFlags = [
                 "--package"
                 "gitadel"
@@ -210,6 +210,7 @@
           default = pkgs.mkShell {
             packages = buildDeps pkgs ++ [
               pkgs.git
+              pkgs.dav1d
               pkgs.git-lfs
               pkgs.bun
               pkgs.curl

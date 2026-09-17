@@ -16,7 +16,7 @@ use tokio::fs;
 use url::Url;
 use uuid::Uuid;
 
-use super::{Permission, RepositoryState, github_mirror, native_remote};
+use super::{Permission, RepositoryState, github_mirror, native_remote, resources};
 use crate::{
     blob_store::ObjectPrefix,
     entity::{
@@ -73,7 +73,7 @@ pub(super) struct PreparedMirror {
 
 pub(super) struct MirrorInitialization {
     pub(super) object_format: String,
-    pub(super) default_branch: String,
+    pub(super) default_branch: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -609,6 +609,15 @@ async fn synchronize_inner(
     }
     let sync_result =
         native_remote::synchronize(state, &path, &mirror.remote_url, native_auth).await;
+    if sync_result.is_ok()
+        && let Err(error) = resources::ensure_default_branch(state, repository).await
+    {
+        tracing::warn!(
+            %error,
+            repository_id = %repository.id,
+            "could not resolve or repair repository default branch"
+        );
+    }
     let metadata_result = match (&sync_result, github.as_ref()) {
         (Ok(()), Some(github)) => Some(
             github_mirror::synchronize(
@@ -1280,7 +1289,7 @@ mod tests {
                 visibility: Set("private".to_owned()),
                 object_format: Set("sha1".to_owned()),
                 mirrored: Set(mirrored),
-                default_branch: Set("main".to_owned()),
+                default_branch: Set(Some("main".to_owned())),
                 issue_counter: Set(1),
                 storage_key: Set(Uuid::new_v4()),
                 created_by: Set(account.id),

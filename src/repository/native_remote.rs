@@ -84,7 +84,7 @@ impl Drop for CancelRemoteOnDrop {
 /// advertisement before the destination repository is initialized.
 pub(crate) struct NativeInitialization {
     pub(crate) object_format: String,
-    pub(crate) default_branch: String,
+    pub(crate) default_branch: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -793,37 +793,9 @@ fn initialize_repository(
     Ok(repository)
 }
 
-fn branch_from_head(head: Option<&str>) -> String {
+fn branch_from_head(head: Option<&str>) -> Option<&str> {
     head.and_then(|head| head.strip_prefix("refs/heads/"))
         .filter(|branch| !branch.is_empty())
-        .unwrap_or("main")
-        .to_owned()
-}
-
-fn apply_remote_head(
-    repository: &sley::Repository,
-    outcome: &sley_remote::FetchOutcome,
-) -> sley_core::Result<()> {
-    let target = if let Some(target) = &outcome.head_symref {
-        sley_refs::RefTarget::Symbolic(target.clone())
-    } else if let Some(head) = outcome
-        .ref_updates
-        .iter()
-        .find(|update| update.src == "HEAD")
-    {
-        sley_refs::RefTarget::Direct(head.oid)
-    } else {
-        return Ok(());
-    };
-    let refs = repository.references();
-    let mut transaction = refs.transaction();
-    transaction.update(sley_refs::RefUpdate {
-        name: "HEAD".to_owned(),
-        expected: None,
-        new: target,
-        reflog: None,
-    });
-    transaction.commit()
 }
 
 async fn run_blocking<T: Send + 'static>(
@@ -929,8 +901,17 @@ pub(super) async fn initialize(
         {
             outcome.head_symref = discovered_head;
         }
-        let branch = branch_from_head(outcome.head_symref.as_deref());
-        apply_remote_head(&repository, &outcome).map_err(map_remote_error)?;
+        let branch = crate::repository::resources::select_advertised_or_default_branch(
+            &repository,
+            branch_from_head(outcome.head_symref.as_deref()),
+        )
+        .map_err(map_remote_error)?;
+        if let Some(branch) = branch.as_deref() {
+            let reference = format!("refs/heads/{branch}");
+            repository
+                .set_head_symref(reference, sley::HeadUpdateOptions::new())
+                .map_err(map_remote_error)?;
+        }
         Ok(NativeInitialization {
             object_format: format.name().to_owned(),
             default_branch: branch,
@@ -975,8 +956,8 @@ pub(super) async fn synchronize(
             username: authentication.username,
             secret: authentication.secret,
         };
-        let mut progress = SilentProgress;
         let repository = sley::Repository::open(&path).map_err(map_remote_error)?;
+        let mut progress = SilentProgress;
         let outcome = repository
             .fetch_with_clients_and_cancel(
                 "origin",
@@ -989,7 +970,9 @@ pub(super) async fn synchronize(
                 sley_core::CancelFlag::new(&operation.flag),
             )
             .map_err(map_remote_error)?;
-        apply_remote_head(&repository, &outcome).map_err(map_remote_error)?;
+        // The persisted default, when present, is authoritative. The caller
+        // repairs HEAD after fetching instead of adopting a remote change.
+        let _ = outcome;
         Ok(())
     })
     .await

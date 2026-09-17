@@ -1,6 +1,9 @@
 <script lang="ts">
   import Archive from "@lucide/svelte/icons/archive";
   import ImageIcon from "@lucide/svelte/icons/image";
+  import Check from "@lucide/svelte/icons/check";
+  import Upload from "@lucide/svelte/icons/upload";
+  import { repositoryImageUrl } from "$lib/api/repositories.js";
   import MapPin from "@lucide/svelte/icons/map-pin";
   import Settings2 from "@lucide/svelte/icons/settings-2";
   import Trash2 from "@lucide/svelte/icons/trash-2";
@@ -27,10 +30,15 @@
   let repositoryName = $state("");
   let targetNamespace = $state("");
   let initializedFor = $state("");
+  let iconEditorOpen = $state(false);
+  let iconMode = $state<"automatic" | "selected" | "uploaded" | "none">(
+    "automatic",
+  );
+  let selectedIconPath = $state("");
+  let initializedIconFor = $state("");
+  let initializedIconSelection = $state("");
   let moveDialogOpen = $state(false);
   let deleteDialogOpen = $state(false);
-  let iconEditorOpen = $state(false);
-
   // Sections are pages reached from the rail, so an unknown one falls back to
   // the first page rather than rendering nothing.
   const section = $derived(
@@ -55,9 +63,50 @@
     if (!current || initializedFor === current.id) return;
     initializedFor = current.id;
     visibility = current.visibility;
-    defaultBranch = current.default_branch;
+    defaultBranch = current.default_branch ?? "";
     repositoryName = current.name;
     targetNamespace = current.namespace;
+  });
+
+  const defaultTip = $derived(
+    repository.browser.refs?.branches.find(
+      (branch) => branch.name === repository.repository?.default_branch,
+    )?.commit_oid ?? "",
+  );
+  $effect(() => {
+    const current = repository.repository;
+    const iconKey = current
+      ? `${current.id}:${current.default_branch ?? ""}:${defaultTip}`
+      : "";
+    if (section !== "general" || !current || initializedIconFor === iconKey)
+      return;
+    initializedIconFor = iconKey;
+    void repository.settings.loadIconCandidates();
+  });
+
+  $effect(() => {
+    const settings = repository.settings;
+    const candidates = settings.iconCandidates;
+    if (
+      section !== "general" ||
+      settings.iconCandidatesLoading ||
+      settings.iconSelectionPending ||
+      settings.iconPending ||
+      settings.iconCandidatesError
+    )
+      return;
+    if (candidates && candidates.scan_status !== "pending") return;
+    const timer = setTimeout(() => void settings.loadIconCandidates(), 1000);
+    return () => clearTimeout(timer);
+  });
+  $effect(() => {
+    const candidates = repository.settings.iconCandidates;
+    if (!candidates) return;
+    const key = `${repository.repository?.id}:${repository.repository?.default_branch}:${candidates.mode}:${candidates.selected_path ?? ""}`;
+    if (key === initializedIconSelection) return;
+    initializedIconSelection = key;
+    iconMode = candidates.mode;
+    selectedIconPath = candidates.selected_path ?? "";
   });
 
   async function saveGeneral() {
@@ -66,9 +115,10 @@
     try {
       await repository.settings.updateRepositoryControl({
         ...(visibility !== current.visibility && { visibility }),
-        ...(defaultBranch !== current.default_branch && {
-          default_branch: defaultBranch,
-        }),
+        ...(defaultBranch &&
+          defaultBranch !== current.default_branch && {
+            default_branch: defaultBranch,
+          }),
       });
     } catch {
       // The repository settings state owns mutation error toasts.
@@ -180,55 +230,201 @@
         <div>
           <h2 id="repository-icon-heading" class="font-semibold">Icon</h2>
           <p class="mt-1 max-w-xs text-sm leading-5 text-muted-foreground">
-            Shown wherever this repository is listed.
+            Choose the icon shown wherever this repository is listed.
           </p>
         </div>
       </header>
 
-      <div class="flex max-w-2xl flex-col gap-4 sm:flex-row sm:items-center">
-        <RepositoryIcon
-          namespace={repository.namespace}
-          name={repository.name}
-          iconUpdatedAt={repository.repository?.icon_updated_at ?? null}
-          class="size-20 ring-1 ring-foreground/15"
-        />
-
-        <div class="grid gap-3">
-          <div class="flex flex-wrap gap-2">
+      <div class="grid max-w-2xl gap-5">
+        <div class="flex items-center gap-4">
+          <RepositoryIcon
+            namespace={repository.namespace}
+            name={repository.name}
+            iconUpdatedAt={repository.repository?.icon_updated_at ?? null}
+            class="size-20 ring-1 ring-foreground/15"
+          />
+          <div class="text-sm">
+            <p class="font-medium">
+              Current: {repository.repository?.icon_source ?? "none"}
+            </p>
+            <p class="mt-1 text-xs text-muted-foreground">
+              {#if repository.settings.iconCandidatesLoading}
+                Loading logo candidates…
+              {:else if repository.settings.iconCandidatesError}
+                {repository.settings.iconCandidatesError}
+              {:else if !repository.repository?.default_branch}
+                Push a branch to discover logos, or upload an icon.
+              {:else if repository.settings.iconCandidates?.scan_status === "pending"}
+                Scanning the default branch for logos…
+              {:else if repository.settings.iconCandidates?.scan_status === "failed"}
+                Logo scan failed. You can upload an icon instead.
+              {:else if repository.settings.iconCandidates?.scan_status === "partial"}
+                Incomplete scan: some files were skipped or could not be
+                decoded.
+              {:else}
+                {#if !repository.settings.iconCandidates?.candidates.length}
+                  No logo candidates found on the default branch.
+                {:else}
+                  Candidate logos are read from a pinned commit.
+                {/if}
+              {/if}
+            </p>
+          </div>
+        </div>
+        <div class="grid gap-2">
+          <span class="text-sm font-medium">Source</span>
+          <div
+            class="flex flex-wrap gap-2"
+            role="group"
+            aria-label="Icon source"
+          >
             <Button
               type="button"
-              disabled={repository.settings.iconPending}
+              variant={iconMode === "automatic" ? "default" : "outline"}
+              disabled={repository.settings.iconSelectionPending}
+              aria-pressed={iconMode === "automatic"}
+              onclick={() => (iconMode = "automatic")}
+            >
+              Use automatic
+            </Button>
+            <Button
+              type="button"
+              variant={iconMode === "none" ? "default" : "outline"}
+              disabled={repository.settings.iconSelectionPending}
+              aria-pressed={iconMode === "none"}
+              onclick={() => (iconMode = "none")}
+            >
+              Remove
+            </Button>
+            <Button
+              type="button"
+              variant={iconMode === "uploaded" ? "default" : "outline"}
+              disabled={repository.settings.iconPending ||
+                repository.settings.iconSelectionPending}
               onclick={() => (iconEditorOpen = true)}
             >
-              {repository.repository?.icon_updated_at
-                ? "Change icon"
-                : "Upload icon"}
+              <Upload data-icon="inline-start" />Upload
             </Button>
-            {#if repository.repository?.icon_updated_at}
-              <Button
-                type="button"
-                variant="outline"
-                disabled={repository.settings.iconPending}
-                onclick={() => void repository.settings.removeIcon()}
-              >
-                Remove
-              </Button>
-            {/if}
           </div>
-          <p class="max-w-sm text-xs leading-5 text-muted-foreground">
-            {#if repository.repository?.icon_source === "detected"}
-              Detected from a logo committed to
-              <code>{repository.repository?.default_branch}</code>. Uploading
-              one here replaces it.
-            {:else if repository.repository?.icon_source === "manual"}
-              Uploaded manually. Remove it to fall back to a logo committed to
-              the default branch.
+        </div>
+        <div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={repository.settings.iconCandidatesLoading ||
+              repository.settings.iconSelectionPending ||
+              repository.settings.iconPending}
+            onclick={() => void repository.settings.loadIconCandidates()}
+          >
+            Refresh candidates
+          </Button>
+        </div>
+
+        {#if repository.settings.iconCandidates?.selected_missing}
+          <p
+            class="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300"
+          >
+            The previously selected logo is missing from the current default
+            branch. Choose another candidate or use Automatic.
+          </p>
+        {/if}
+
+        {#if repository.settings.iconCandidates?.candidates.length}
+          <div class="grid gap-2">
+            <div class="flex items-center justify-between">
+              <span class="text-sm font-medium">Detected logos</span>
+              {#if iconMode === "selected" && !selectedIconPath}
+                <span class="text-xs text-destructive">Choose one</span>
+              {/if}
+            </div>
+            <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+              {#each repository.settings.iconCandidates.candidates as candidate (candidate.path)}
+                <button
+                  type="button"
+                  class="group relative grid gap-2 rounded-lg border p-2 text-left transition-colors hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  class:border-primary={iconMode === "selected" &&
+                    selectedIconPath === candidate.path}
+                  aria-pressed={iconMode === "selected" &&
+                    selectedIconPath === candidate.path}
+                  onclick={() => {
+                    selectedIconPath = candidate.path;
+                    iconMode = "selected";
+                  }}
+                >
+                  {#if repository.settings.iconCandidates.commit_oid}
+                    <img
+                      class="aspect-square w-full rounded-md border bg-muted/30 object-contain"
+                      src={repositoryImageUrl(
+                        repository.namespace,
+                        repository.name,
+                        repository.settings.iconCandidates.commit_oid,
+                        candidate.path,
+                      )}
+                      alt={`Preview of ${candidate.path}`}
+                    />
+                  {:else}
+                    <div
+                      class="grid aspect-square place-items-center rounded-md border bg-muted/30 text-xs text-muted-foreground"
+                    >
+                      No preview
+                    </div>
+                  {/if}
+                  {#if iconMode === "selected" && selectedIconPath === candidate.path}
+                    <Check
+                      class="absolute top-3 right-3 size-4 rounded-full bg-primary p-0.5 text-primary-foreground"
+                    />
+                  {/if}
+                  <span class="min-w-0 truncate font-mono text-[11px]"
+                    >{candidate.path}</span
+                  >
+                  <span class="text-[10px] text-muted-foreground">
+                    {candidate.width} × {candidate.height} · {candidate.mime_type}
+                  </span>
+                  {#if candidate.recommended}
+                    <span class="text-[10px] font-medium text-primary"
+                      >Recommended</span
+                    >
+                  {/if}
+                  {#if candidate.reasons.length}
+                    <span class="text-[10px] leading-4 text-muted-foreground"
+                      >{candidate.reasons.join(" · ")}</span
+                    >
+                  {/if}
+                </button>
+              {/each}
+            </div>
+          </div>
+        {/if}
+
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <p class="text-xs text-muted-foreground">
+            {#if iconMode === "automatic"}
+              Use the recommended logo from the default branch.
+            {:else if iconMode === "selected"}
+              Use this file as it changes on the default branch.
+            {:else if iconMode === "uploaded"}
+              The uploaded icon stays unchanged until you replace or remove it.
             {:else}
-              Commit an <code>icon.png</code>, <code>logo.png</code> or
-              <code>favicon.png</code> to the default branch and it is picked up automatically,
-              or upload one here.
+              No repository icon will be shown.
             {/if}
           </p>
+          <Button
+            type="button"
+            disabled={repository.settings.iconSelectionPending ||
+              iconMode === "uploaded" ||
+              (iconMode === "selected" && !selectedIconPath)}
+            onclick={() => {
+              if (iconMode === "uploaded") return;
+              void repository.settings.saveIconSelection(
+                iconMode,
+                iconMode === "selected" ? selectedIconPath : undefined,
+                repository.settings.iconCandidates?.commit_oid ?? undefined,
+              );
+            }}
+          >
+            {repository.settings.iconSelectionPending ? "Saving…" : "Save icon"}
+          </Button>
         </div>
       </div>
     </section>

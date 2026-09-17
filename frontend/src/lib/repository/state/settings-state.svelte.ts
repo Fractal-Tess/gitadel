@@ -3,6 +3,8 @@ import { toast } from "svelte-sonner";
 import {
   topicsSchema,
   repositorySchema,
+  iconCandidatesSchema,
+  type IconCandidates,
   type Repository,
 } from "$lib/api/repositories.js";
 import { jsonBody, requestEmpty, requestJson } from "$lib/api/transport.js";
@@ -24,6 +26,7 @@ export class RepositorySettingsState {
   readonly namespace: string;
   readonly name: string;
   readonly scope: RepositoryFeatureContext["scope"];
+  readonly isScopeCurrent: RepositoryFeatureContext["isScopeCurrent"];
   readonly setError: SettingsCallbacks["setError"];
   readonly getRepository: SettingsCallbacks["getRepository"];
   readonly setRepository: SettingsCallbacks["setRepository"];
@@ -38,10 +41,16 @@ export class RepositorySettingsState {
   lifecyclePending = $state(false);
   favoritePending = $state(false);
   iconPending = $state(false);
+  iconCandidates = $state.raw<IconCandidates | null>(null);
+  iconCandidatesLoading = $state(false);
+  iconCandidatesError = $state<string | null>(null);
+  iconSelectionPending = $state(false);
+  #iconRequestSequence = 0;
   constructor(context: RepositoryFeatureContext, callbacks: SettingsCallbacks) {
     this.namespace = context.locator.namespace;
     this.name = context.locator.name;
     this.scope = context.scope;
+    this.isScopeCurrent = context.isScopeCurrent;
     this.setError = callbacks.setError;
     this.getRepository = callbacks.getRepository;
     this.setRepository = callbacks.setRepository;
@@ -95,21 +104,126 @@ export class RepositorySettingsState {
       this.favoritePending = false;
     }
   }
+  #applyIconCandidates(candidates: IconCandidates): void {
+    this.iconCandidates = candidates;
+    const repository = this.getRepository();
+    if (
+      repository &&
+      (repository.icon_source !== candidates.mode ||
+        repository.icon_updated_at !== candidates.icon_updated_at)
+    ) {
+      this.setRepository({
+        ...repository,
+        icon_source: candidates.mode,
+        icon_updated_at: candidates.icon_updated_at,
+      });
+    }
+  }
+  async loadIconCandidates(init: RequestInit = {}): Promise<void> {
+    if (this.iconPending || this.iconSelectionPending || !this.isScopeCurrent())
+      return;
+    const sequence = ++this.#iconRequestSequence;
+    this.iconCandidatesLoading = true;
+    this.iconCandidatesError = null;
+    try {
+      const candidates = await requestJson(
+        repositoryApi(this, "/icon/candidates"),
+        iconCandidatesSchema,
+        init,
+      );
+      if (
+        sequence === this.#iconRequestSequence &&
+        !init.signal?.aborted &&
+        this.isScopeCurrent()
+      ) {
+        this.#applyIconCandidates(candidates);
+      }
+    } catch (caught) {
+      if (
+        sequence === this.#iconRequestSequence &&
+        this.isScopeCurrent() &&
+        !(caught instanceof DOMException && caught.name === "AbortError")
+      ) {
+        this.iconCandidatesError = errorMessage(caught);
+        toast.error(this.iconCandidatesError);
+      }
+    } finally {
+      if (sequence === this.#iconRequestSequence)
+        this.iconCandidatesLoading = false;
+    }
+  }
+  async saveIconSelection(
+    mode: "automatic" | "selected" | "none",
+    path?: string,
+    commitOid?: string,
+  ): Promise<void> {
+    if (mode === "selected" && !path) return;
+    if (this.iconPending || this.iconSelectionPending || !this.isScopeCurrent())
+      return;
+    const sequence = ++this.#iconRequestSequence;
+    this.iconSelectionPending = true;
+    this.iconCandidatesLoading = false;
+    this.iconCandidatesError = null;
+    try {
+      const candidates = await requestJson(
+        repositoryApi(this, "/icon/selection"),
+        iconCandidatesSchema,
+        {
+          method: "PUT",
+          body: jsonBody({
+            mode,
+            ...(path ? { path } : {}),
+            ...(commitOid ? { commit_oid: commitOid } : {}),
+          }),
+        },
+      );
+      if (sequence !== this.#iconRequestSequence || !this.isScopeCurrent())
+        return;
+      this.#applyIconCandidates(candidates);
+      this.invalidatePreload();
+      toast.success(
+        mode === "none"
+          ? "Repository icon removed."
+          : "Repository icon updated.",
+      );
+    } catch (caught) {
+      toast.error(errorMessage(caught));
+    } finally {
+      this.iconSelectionPending = false;
+    }
+  }
   // The icon endpoints return no body, so the timestamp is advanced locally to
   // bust the image cache rather than costing a second round trip.
   async updateIcon(image: Blob): Promise<void> {
+    if (this.iconPending || this.iconSelectionPending || !this.isScopeCurrent())
+      return;
+    const sequence = ++this.#iconRequestSequence;
     this.iconPending = true;
+    this.iconCandidatesLoading = false;
+    this.iconCandidatesError = null;
     try {
       await requestEmpty(repositoryApi(this, "/icon"), {
         method: "PUT",
         body: jsonBody({ image_base64: await blobToBase64(image) }),
       });
+      if (sequence !== this.#iconRequestSequence || !this.isScopeCurrent())
+        return;
+      const updatedAt = new SvelteDate().toISOString();
+      if (this.iconCandidates) {
+        this.iconCandidates = {
+          ...this.iconCandidates,
+          mode: "uploaded",
+          selected_path: null,
+          selected_missing: false,
+          icon_updated_at: updatedAt,
+        };
+      }
       const repository = this.getRepository();
       if (repository) {
         this.setRepository({
           ...repository,
-          icon_updated_at: new Date().toISOString(),
-          icon_source: "manual",
+          icon_updated_at: updatedAt,
+          icon_source: "uploaded",
         });
       }
       this.invalidatePreload();
@@ -121,31 +235,9 @@ export class RepositorySettingsState {
       this.iconPending = false;
     }
   }
-  async removeIcon(): Promise<void> {
-    this.iconPending = true;
-    try {
-      await requestEmpty(repositoryApi(this, "/icon"), { method: "DELETE" });
-      const repository = this.getRepository();
-      if (repository) {
-        this.setRepository({
-          ...repository,
-          icon_updated_at: null,
-          icon_source: null,
-        });
-      }
-      this.invalidatePreload();
-      toast.success("Repository icon removed.");
-    } catch (caught) {
-      toast.error(errorMessage(caught));
-      throw caught;
-    } finally {
-      this.iconPending = false;
-    }
-  }
   async updateRepositoryControl(values: {
     description?: string | null;
-    visibility?: "public" | "private";
-    default_branch?: string;
+    default_branch?: string | null;
     name?: string;
     namespace?: string;
   }): Promise<void> {

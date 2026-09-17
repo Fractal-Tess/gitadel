@@ -947,7 +947,7 @@ mod tests {
             visibility: Set("private".to_owned()),
             object_format: Set("sha1".to_owned()),
             mirrored: Set(false),
-            default_branch: Set("main".to_owned()),
+            default_branch: Set(Some("main".to_owned())),
             issue_counter: Set(0),
             storage_key: Set(Uuid::new_v4()),
             created_by: Set(user_id),

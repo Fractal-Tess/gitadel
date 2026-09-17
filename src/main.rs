@@ -23,8 +23,16 @@ use clap::Parser;
 use config::{Cli, Settings};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    if let Some(config::GitadelCommand::ImageRender { path, thumbnail }) = cli.command() {
+        return repository::image::worker(path, *thumbnail);
+    }
+    run(cli)
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn run(cli: Cli) -> Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -33,9 +41,11 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let cli = Cli::parse();
     if let Some(command) = cli.command() {
         return match command {
+            config::GitadelCommand::ImageRender { .. } => {
+                unreachable!("Image workers run before starting Tokio")
+            }
             config::GitadelCommand::Backup { command } => {
                 let settings = Settings::load(&cli)?;
                 archive::run(command, &settings, cli.config_path()).await

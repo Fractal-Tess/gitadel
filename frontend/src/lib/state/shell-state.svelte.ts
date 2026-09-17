@@ -4,12 +4,16 @@ import type { Component } from "svelte";
 const SHELL_STATE = Symbol("gitadel-shell-state");
 const RAIL_STORAGE_KEY = "gitadel:rail-open";
 
+export type CreateMode = "choose" | "repository" | "mirror" | "organization";
+export type FileCreateMode = "file" | "directory";
+
 export type ShellIcon = Component;
 
 export type ActiveRepositoryNavigation = {
   namespace: string;
   name: string;
   canManage: boolean;
+  canWrite: boolean;
   mirrored: boolean;
 };
 
@@ -19,6 +23,9 @@ export class ShellState {
   railOpen = $state(false);
   paletteOpen = $state(false);
   createOpen = $state(false);
+  createMode = $state<CreateMode>("choose");
+  fileCreateOpen = $state(false);
+  fileCreateMode = $state<FileCreateMode>("file");
   railHidden = $state(false);
   activeRepository = $state.raw<ActiveRepositoryNavigation | null>(null);
 
@@ -30,6 +37,15 @@ export class ShellState {
   setRailOpen(open: boolean): void {
     this.railOpen = open;
     globalThis.localStorage?.setItem(RAIL_STORAGE_KEY, String(open));
+  }
+
+  openCreate(mode: CreateMode = "choose"): void {
+    this.createMode = mode;
+    this.createOpen = true;
+  }
+  openFileCreate(mode: FileCreateMode = "file"): void {
+    this.fileCreateMode = mode;
+    this.fileCreateOpen = true;
   }
 
   setActiveRepository(repository: ActiveRepositoryNavigation | null): void {

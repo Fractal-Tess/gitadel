@@ -20,9 +20,10 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use chrono::{Duration, Utc};
+use sea_orm::sea_query::OnConflict;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, Set,
-    TransactionTrait, sea_query::OnConflict,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, IntoActiveModel,
+    QueryFilter, QueryOrder, Set, Statement, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use sley::{FullName, ObjectFormat, Repository as SleyRepository};
@@ -40,7 +41,7 @@ pub struct RepositoryResponse {
     topics: Vec<String>,
     object_format: String,
     mirrored: bool,
-    default_branch: String,
+    default_branch: Option<String>,
     archived_at: Option<chrono::DateTime<Utc>>,
     icon_updated_at: Option<chrono::DateTime<Utc>>,
     icon_source: Option<String>,
@@ -49,11 +50,13 @@ pub struct RepositoryResponse {
     favorited: bool,
     ssh_clone_url: String,
     can_manage: bool,
+    can_write: bool,
 }
 
 pub(super) struct AccessibleRepositories {
     pub(super) favorite_ids: HashSet<Uuid>,
     pub(super) manageable_ids: HashSet<Uuid>,
+    pub(super) writable_ids: HashSet<Uuid>,
     pub(super) repositories: Vec<repository::Model>,
 }
 
@@ -63,6 +66,7 @@ impl RepositoryResponse {
         state: &RepositoryState,
         favorited: bool,
         can_manage: bool,
+        can_write: bool,
     ) -> Self {
         let ssh_clone_url = state.ssh_clone_url(&repository);
         Self {
@@ -82,6 +86,7 @@ impl RepositoryResponse {
             created_at: repository.created_at,
             updated_at: repository.updated_at,
             favorited,
+            can_write,
             ssh_clone_url,
             can_manage,
         }
@@ -107,7 +112,9 @@ pub async fn list_repositories(
         .map(|repository| {
             let favorited = accessible.favorite_ids.contains(&repository.id);
             let can_manage = accessible.manageable_ids.contains(&repository.id);
-            let mut response = RepositoryResponse::new(repository, &state, favorited, can_manage);
+            let can_write = accessible.writable_ids.contains(&repository.id);
+            let mut response =
+                RepositoryResponse::new(repository, &state, favorited, can_manage, can_write);
             response.topics = topics.remove(&response.id).unwrap_or_default();
             response
         })
@@ -157,6 +164,15 @@ pub(super) async fn accessible_repositories(
         .optional_user(headers, jar, SCOPE_READ)
         .await?
         .map(|account| account.id);
+    let has_write_scope = if headers.contains_key(axum::http::header::AUTHORIZATION) {
+        state
+            .identity()
+            .authenticate(headers, jar, SCOPE_WRITE)
+            .await
+            .is_ok()
+    } else {
+        true
+    };
     let database = state.identity().database();
 
     let Some(user_id) = user_id else {
@@ -169,6 +185,7 @@ pub(super) async fn accessible_repositories(
         return Ok(AccessibleRepositories {
             favorite_ids: HashSet::new(),
             manageable_ids: HashSet::new(),
+            writable_ids: HashSet::new(),
             repositories,
         });
     };
@@ -203,11 +220,16 @@ pub(super) async fn accessible_repositories(
         .into_iter()
         .map(|membership| (membership.organization_id, membership.role))
         .collect();
-    let collaborator_ids: HashSet<Uuid> = collaborators
-        .into_iter()
-        .map(|collaborator| collaborator.repository_id)
-        .collect();
+    let mut collaborator_ids = HashSet::new();
+    let mut writable_collaborator_ids = HashSet::new();
+    for collaborator in collaborators {
+        collaborator_ids.insert(collaborator.repository_id);
+        if collaborator.role == "write" {
+            writable_collaborator_ids.insert(collaborator.repository_id);
+        }
+    }
     let mut readable_namespaces = HashSet::new();
+    let mut writable_namespaces = HashSet::new();
     let mut manageable_namespaces = HashSet::new();
     for namespace in namespaces {
         let personally_owned = namespace.user_id == Some(user_id);
@@ -217,6 +239,9 @@ pub(super) async fn accessible_repositories(
         if personally_owned || organization_role.is_some() {
             readable_namespaces.insert(namespace.slug.clone());
         }
+        if personally_owned || organization_role.is_some() {
+            writable_namespaces.insert(namespace.slug.clone());
+        }
         if personally_owned || organization_role.is_some_and(|role| role == "owner") {
             manageable_namespaces.insert(namespace.slug);
         }
@@ -224,6 +249,7 @@ pub(super) async fn accessible_repositories(
 
     let mut accessible = Vec::with_capacity(repositories.len());
     let mut manageable_ids = HashSet::new();
+    let mut writable_ids = HashSet::new();
     for repository in repositories {
         let can_manage = manageable_namespaces.contains(&repository.namespace);
         let can_read = repository.visibility == "public"
@@ -235,12 +261,21 @@ pub(super) async fn accessible_repositories(
         if can_manage {
             manageable_ids.insert(repository.id);
         }
+        if has_write_scope
+            && !repository.mirrored
+            && repository.archived_at.is_none()
+            && (writable_namespaces.contains(&repository.namespace)
+                || writable_collaborator_ids.contains(&repository.id))
+        {
+            writable_ids.insert(repository.id);
+        }
         accessible.push(repository);
     }
 
     Ok(AccessibleRepositories {
         favorite_ids,
         manageable_ids,
+        writable_ids,
         repositories: accessible,
     })
 }
@@ -288,9 +323,12 @@ pub async fn create_repository(
     )
     .await?;
 
+    let can_write = !repository.mirrored && repository.archived_at.is_none();
     Ok((
         StatusCode::CREATED,
-        Json(RepositoryResponse::new(repository, &state, false, true)),
+        Json(RepositoryResponse::new(
+            repository, &state, false, true, can_write,
+        )),
     ))
 }
 
@@ -377,7 +415,7 @@ pub(super) async fn create_owned_repository(
         visibility,
         object_format: object_format.to_owned(),
         mirrored,
-        default_branch: "main".to_owned(),
+        default_branch: None,
         issue_counter: 0,
         storage_key,
         created_by: actor_user_id,
@@ -544,7 +582,7 @@ pub(super) async fn create_imported_repository(
         visibility: options.visibility,
         object_format: "sha1".to_owned(),
         mirrored: false,
-        default_branch: "main".to_owned(),
+        default_branch: None,
         issue_counter: 0,
         storage_key: Uuid::new_v4(),
         created_by: actor_user_id,
@@ -622,18 +660,43 @@ pub(super) async fn record_push(
         .one(state.identity().database())
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let replacement_default = replacement_default_branch(state, &repository).await?;
-    if let Some(branch) = replacement_default.as_deref() {
-        set_default_branch(state, &repository, branch).await?;
-    }
+    let candidate = if repository.default_branch.is_none() {
+        let path = state.repository_path(&repository);
+        read_git(path, |git| select_default_branch(git, None)).await?
+    } else {
+        None
+    };
 
     let transaction = state.identity().database().begin().await?;
-    let mut active = repository.into_active_model();
-    active.updated_at = Set(Utc::now());
-    if let Some(branch) = replacement_default {
-        active.default_branch = Set(branch);
+    if let Some(branch) = candidate {
+        let updated = repository::Entity::update_many()
+            .col_expr(
+                repository::Column::DefaultBranch,
+                sea_orm::sea_query::Expr::value(branch.clone()),
+            )
+            .col_expr(
+                repository::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(Utc::now()),
+            )
+            .filter(repository::Column::Id.eq(repository_id))
+            .filter(repository::Column::DefaultBranch.is_null())
+            .exec(&transaction)
+            .await?;
+        if updated.rows_affected > 0 {
+            // Keep the transaction open while changing HEAD: a competing
+            // first push cannot observe the new metadata until this succeeds.
+            set_head_to_branch(state, &repository, &branch).await?;
+        }
+    } else {
+        repository::Entity::update_many()
+            .col_expr(
+                repository::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(Utc::now()),
+            )
+            .filter(repository::Column::Id.eq(repository_id))
+            .exec(&transaction)
+            .await?;
     }
-    active.update(&transaction).await?;
     state
         .identity()
         .audit_on(
@@ -644,7 +707,104 @@ pub(super) async fn record_push(
         )
         .await?;
     transaction.commit().await?;
+
+    // A losing first-push race, or a previous filesystem failure, must not
+    // overwrite the winner's metadata. Re-read and repair HEAD from it.
+    let current = repository::Entity::find_by_id(repository_id)
+        .one(state.identity().database())
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    synchronize_default_head(state, &current).await?;
     state.queue_repository_analysis(repository_id).await;
+    Ok(())
+}
+
+/// Select and persist a repository's first branch, or repair its bare HEAD.
+/// The conditional update makes concurrent first pushes choose one winner.
+pub(super) async fn ensure_default_branch(
+    state: &RepositoryState,
+    repository: &repository::Model,
+) -> Result<repository::Model, ApiError> {
+    if repository.default_branch.is_none() {
+        let path = state.repository_path(repository);
+        let candidate = read_git(path, |git| select_default_branch(git, None)).await?;
+        if let Some(branch) = candidate {
+            let transaction = state.identity().database().begin().await?;
+            let updated = repository::Entity::update_many()
+                .col_expr(
+                    repository::Column::DefaultBranch,
+                    sea_orm::sea_query::Expr::value(branch.clone()),
+                )
+                .filter(repository::Column::Id.eq(repository.id))
+                .filter(repository::Column::DefaultBranch.is_null())
+                .exec(&transaction)
+                .await?;
+            if updated.rows_affected > 0 {
+                set_head_to_branch(state, repository, &branch).await?;
+            }
+            transaction.commit().await?;
+        }
+    }
+    let current = repository::Entity::find_by_id(repository.id)
+        .one(state.identity().database())
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    synchronize_default_head(state, &current).await?;
+    Ok(current)
+}
+
+/// One-time repair for repositories created before an unresolved default
+/// branch was representable. Only rows marked by the migration are examined.
+pub(super) async fn backfill_legacy_empty_defaults(
+    state: &RepositoryState,
+) -> Result<(), ApiError> {
+    let database = state.identity().database();
+    let backend = database.get_database_backend();
+    let rows = database
+        .query_all_raw(Statement::from_string(
+            backend,
+            "SELECT repository_id FROM repository_default_branch_backfills",
+        ))
+        .await?;
+    for row in rows {
+        let repository_id: Uuid = row.try_get("", "repository_id")?;
+        let Some(repository) = repository::Entity::find_by_id(repository_id)
+            .one(database)
+            .await?
+        else {
+            continue;
+        };
+        let path = state.repository_path(&repository);
+        let has_branches = read_git(path, |git| {
+            Ok(!git
+                .references()
+                .list_refs_with_prefix("refs/heads/")?
+                .is_empty())
+        })
+        .await?;
+        let transaction = database.begin().await?;
+        let marker = if backend == DbBackend::Postgres {
+            "$1"
+        } else {
+            "?"
+        };
+        if !has_branches {
+            let mut active = repository.into_active_model();
+            active.default_branch = Set(None);
+            active.updated_at = Set(Utc::now());
+            active.update(&transaction).await?;
+        }
+        transaction
+            .execute_raw(Statement::from_sql_and_values(
+                backend,
+                &format!(
+                    "DELETE FROM repository_default_branch_backfills WHERE repository_id = {marker}"
+                ),
+                vec![repository_id.into()],
+            ))
+            .await?;
+        transaction.commit().await?;
+    }
     Ok(())
 }
 
@@ -677,8 +837,23 @@ pub async fn get_repository(
     let can_manage = state
         .can_access(&repository, user_id, Permission::Manage)
         .await?;
+    let has_write_scope = if headers.contains_key(axum::http::header::AUTHORIZATION) {
+        state
+            .identity()
+            .authenticate(&headers, &jar, SCOPE_WRITE)
+            .await
+            .is_ok()
+    } else {
+        true
+    };
+    let can_write = has_write_scope
+        && !repository.mirrored
+        && repository.archived_at.is_none()
+        && state
+            .can_access(&repository, user_id, Permission::Write)
+            .await?;
     Ok(Json(RepositoryResponse::new(
-        repository, &state, favorited, can_manage,
+        repository, &state, favorited, can_manage, can_write,
     )))
 }
 
@@ -774,7 +949,7 @@ pub async fn update_repository_control(
             .await?;
     }
     if let Some(default_branch) = request.default_branch {
-        active.default_branch = Set(default_branch);
+        active.default_branch = Set(Some(default_branch));
     }
     active.updated_at = Set(Utc::now());
     let updated = active.update(&transaction).await?;
@@ -796,7 +971,10 @@ pub async fn update_repository_control(
     if default_branch_changed {
         state.queue_repository_analysis(updated.id).await;
     }
-    Ok(Json(RepositoryResponse::new(updated, &state, false, true)))
+    let can_write = !updated.mirrored && updated.archived_at.is_none();
+    Ok(Json(RepositoryResponse::new(
+        updated, &state, false, true, can_write,
+    )))
 }
 
 pub async fn archive_repository(
@@ -1069,50 +1247,11 @@ fn validate_visibility(value: String) -> Result<String, ApiError> {
     }
 }
 
-async fn replacement_default_branch(
-    state: &RepositoryState,
-    repository: &repository::Model,
-) -> Result<Option<String>, ApiError> {
-    let path = state.repository_path(repository);
-    let configured = repository.default_branch.clone();
-    read_git(path, move |git| {
-        select_replacement_default_branch(git, &configured)
-    })
-    .await
-}
-
-fn select_replacement_default_branch(
-    repository: &SleyRepository,
-    configured: &str,
-) -> sley::Result<Option<String>> {
-    let mut branches = Vec::new();
-    for reference in repository
-        .references()
-        .list_refs_with_prefix("refs/heads/")?
-    {
-        let Some(name) = reference.name.strip_prefix("refs/heads/") else {
-            continue;
-        };
-        let oid = repository.peel_to_commit_oid(repository.rev_parse(&reference.name)?)?;
-        let commit_time = repository
-            .read_commit(&oid)?
-            .committer_signature()
-            .map_or(i64::MIN, |signature| signature.time.seconds);
-        branches.push((name.to_owned(), commit_time));
-    }
-
-    if branches.iter().any(|(name, _)| name == configured) {
-        return Ok(None);
-    }
-    for preferred in ["main", "dev"] {
-        if branches.iter().any(|(name, _)| name == preferred) {
-            return Ok(Some(preferred.to_owned()));
-        }
-    }
-    let latest = branches
-        .into_iter()
-        .max_by(|left, right| left.1.cmp(&right.1).then_with(|| right.0.cmp(&left.0)));
-    Ok(latest.map(|(name, _)| name))
+fn valid_branch_name(branch: &str) -> bool {
+    !branch.is_empty()
+        && branch != "HEAD"
+        && !branch.starts_with('-')
+        && FullName::new(format!("refs/heads/{branch}")).is_ok()
 }
 
 async fn set_default_branch(
@@ -1140,28 +1279,92 @@ async fn set_default_branch(
     .await
     .map_err(|_| ApiError::bad_request("Default branch must already exist."))
 }
+pub(super) async fn synchronize_default_head(
+    state: &RepositoryState,
+    repository: &repository::Model,
+) -> Result<(), ApiError> {
+    let Some(branch) = repository.default_branch.as_deref() else {
+        return Ok(());
+    };
+    set_head_to_branch(state, repository, branch).await
+}
 
-fn valid_branch_name(branch: &str) -> bool {
-    if branch.is_empty()
-        || branch == "HEAD"
-        || branch.starts_with('/')
-        || branch.ends_with('/')
-        || branch.contains("..")
-        || branch.contains("@{")
-        || branch.contains(['\\', ' ', '~', '^', ':', '?', '*', '['])
+async fn set_head_to_branch(
+    state: &RepositoryState,
+    repository: &repository::Model,
+    branch: &str,
+) -> Result<(), ApiError> {
+    if !valid_branch_name(branch) {
+        return Err(ApiError::bad_request(
+            "Default branch is not a valid branch name.",
+        ));
+    }
+    let path = state.repository_path(repository);
+    let reference = format!("refs/heads/{branch}");
+    let reference_for_read = reference.clone();
+    read_git(path, move |git| {
+        if !git.reference_exists(&reference_for_read)? {
+            return Ok(());
+        }
+        git.set_head_symref(reference, sley::HeadUpdateOptions::new())
+            .map_err(|error| sley::GitError::Transaction(error.to_string()))
+    })
+    .await
+    .map_err(ApiError::from)
+}
+
+fn select_default_branch(
+    repository: &SleyRepository,
+    configured: Option<&str>,
+) -> sley::Result<Option<String>> {
+    let mut branches = Vec::new();
+    for reference in repository
+        .references()
+        .list_refs_with_prefix("refs/heads/")?
     {
-        return false;
+        let Some(name) = reference.name.strip_prefix("refs/heads/") else {
+            continue;
+        };
+        if !valid_branch_name(name) {
+            continue;
+        }
+        let Ok(oid) = repository.rev_parse(&reference.name) else {
+            continue;
+        };
+        let Ok(oid) = repository.peel_to_commit_oid(oid) else {
+            continue;
+        };
+        let Ok(commit) = repository.read_commit(&oid) else {
+            continue;
+        };
+        let commit_time = commit
+            .committer_signature()
+            .map_or(i64::MIN, |signature| signature.time.seconds);
+        branches.push((name.to_owned(), commit_time));
     }
-    if branch.split('/').any(|part| {
-        part.is_empty()
-            || part == "."
-            || part == ".."
-            || part.starts_with('.')
-            || part.ends_with(".lock")
-    }) {
-        return false;
+
+    if let Some(configured) = configured
+        .filter(|configured| valid_branch_name(configured))
+        .filter(|configured| branches.iter().any(|(name, _)| name == configured))
+    {
+        return Ok(Some(configured.to_owned()));
     }
-    FullName::new(format!("refs/heads/{branch}")).is_ok()
+    for preferred in ["main", "master", "prod", "staging"] {
+        if branches.iter().any(|(name, _)| name == preferred) {
+            return Ok(Some(preferred.to_owned()));
+        }
+    }
+    Ok(branches
+        .into_iter()
+        .max_by(|left, right| left.1.cmp(&right.1).then_with(|| right.0.cmp(&left.0)))
+        .map(|(name, _)| name))
+}
+
+pub(super) fn select_advertised_or_default_branch(
+    repository: &SleyRepository,
+    advertised: Option<&str>,
+) -> sley::Result<Option<String>> {
+    select_default_branch(repository, advertised)
 }
 
 pub async fn favorite_repository(
@@ -1483,7 +1686,7 @@ mod tests {
     use sley::Repository as SleyRepository;
     use uuid::Uuid;
 
-    use super::select_replacement_default_branch;
+    use super::select_default_branch;
 
     fn git(path: &Path, arguments: &[&str]) {
         let output = Command::new("git")
@@ -1524,35 +1727,55 @@ mod tests {
         );
     }
 
-    fn selected_branch(path: &Path, configured: &str) -> Option<String> {
+    fn selected_branch(path: &Path, configured: Option<&str>) -> Option<String> {
         let repository = SleyRepository::open(path.join(".git")).expect("open test repository");
-        select_replacement_default_branch(&repository, configured)
-            .expect("select replacement default branch")
+        select_default_branch(&repository, configured).expect("select default branch")
     }
 
     #[test]
-    fn replacement_default_prefers_main_then_dev_then_latest_activity() {
+    fn first_default_prefers_configured_then_ranked_then_latest_tip() {
         let path =
             std::env::temp_dir().join(format!("gitadel-default-branch-test-{}", Uuid::new_v4()));
         fs::create_dir(&path).expect("create test repository directory");
         git(&path, &["init", "--quiet", "--initial-branch=main"]);
         commit(&path, "main", "2026-01-01T00:00:00Z");
-        git(&path, &["branch", "old"]);
-        git(&path, &["switch", "--quiet", "--create", "dev"]);
-        commit(&path, "dev", "2026-01-02T00:00:00Z");
+        git(&path, &["branch", "master"]);
         git(&path, &["switch", "--quiet", "--create", "feature"]);
         commit(&path, "feature", "2026-01-03T00:00:00Z");
+        git(&path, &["switch", "--quiet", "--create", "staging"]);
+        commit(&path, "staging", "2026-01-02T00:00:00Z");
 
-        assert_eq!(selected_branch(&path, "feature"), None);
-        assert_eq!(selected_branch(&path, "missing").as_deref(), Some("main"));
-        git(&path, &["branch", "--delete", "--force", "main"]);
-        assert_eq!(selected_branch(&path, "missing").as_deref(), Some("dev"));
-        git(&path, &["branch", "--delete", "--force", "dev"]);
         assert_eq!(
-            selected_branch(&path, "missing").as_deref(),
+            selected_branch(&path, Some("feature")).as_deref(),
             Some("feature")
         );
+        assert_eq!(selected_branch(&path, None).as_deref(), Some("main"));
+        git(&path, &["branch", "--delete", "--force", "main"]);
+        assert_eq!(selected_branch(&path, None).as_deref(), Some("master"));
+        git(&path, &["branch", "--delete", "--force", "master"]);
+        git(&path, &["switch", "--quiet", "--detach"]);
+        git(&path, &["branch", "--delete", "--force", "staging"]);
+        assert_eq!(selected_branch(&path, None).as_deref(), Some("feature"));
 
+        fs::remove_dir_all(path).expect("remove test repository");
+    }
+
+    #[test]
+    fn first_default_uses_lexical_tie_break_and_leaves_tags_only_unresolved() {
+        let path =
+            std::env::temp_dir().join(format!("gitadel-default-branch-tie-{}", Uuid::new_v4()));
+        fs::create_dir(&path).expect("create test repository directory");
+        git(&path, &["init", "--quiet", "--initial-branch=beta"]);
+        commit(&path, "beta", "2026-01-01T00:00:00Z");
+        git(&path, &["switch", "--quiet", "--create", "alpha"]);
+        commit(&path, "alpha", "2026-01-01T00:00:00Z");
+        assert_eq!(selected_branch(&path, None).as_deref(), Some("alpha"));
+
+        git(&path, &["tag", "only-tag"]);
+        git(&path, &["switch", "--quiet", "--detach"]);
+        git(&path, &["branch", "--delete", "--force", "alpha"]);
+        git(&path, &["branch", "--delete", "--force", "beta"]);
+        assert_eq!(selected_branch(&path, None), None);
         fs::remove_dir_all(path).expect("remove test repository");
     }
 }

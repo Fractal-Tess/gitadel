@@ -204,6 +204,7 @@ export type MarkdownSource = {
   namespace: string;
   name: string;
   revision: string;
+  commit_oid?: string;
   path: string;
 };
 
@@ -245,10 +246,12 @@ function rewriteMarkdownReferences(node: HTMLElement, source: MarkdownSource) {
     );
     if (!resolved) continue;
     const parameters = new URLSearchParams({
-      rev: source.revision,
+      rev: source.commit_oid ?? source.revision,
       path: resolved.path,
     });
-    image.src = `${api}/raw?${parameters}`;
+    image.src = /\.svg$/i.test(resolved.path)
+      ? `${api}/image?${parameters}`
+      : `${api}/raw?${parameters}`;
   }
 
   for (const anchor of node.querySelectorAll<HTMLAnchorElement>("a[href]")) {
@@ -258,8 +261,7 @@ function rewriteMarkdownReferences(node: HTMLElement, source: MarkdownSource) {
     );
     if (!resolved) continue;
     const parameters = new URLSearchParams({
-      rev: source.revision,
-      path: resolved.path,
+      rev: source.commit_oid ?? source.revision,
     });
     anchor.href = `${repository}?${parameters}${resolved.hash}`;
   }

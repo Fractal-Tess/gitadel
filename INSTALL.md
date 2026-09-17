@@ -308,6 +308,20 @@ For a private clone or any push, enter your Gitadel username and an API token wh
 
 Plain HTTP also works, but sends the credential without application-layer encryption. Keep it on an encrypted private network such as NetBird; use HTTPS anywhere else.
 
+### Default branches
+
+An empty or tags-only repository has no default branch (`null` in the API). On the first branch upload, Gitadel preserves a valid configured branch or chooses `main`, `master`, `prod`, then `staging`. If none exists, it chooses the branch with the newest committer timestamp at its tip, breaking ties by branch name. Initial imports and mirrors prefer the remote's advertised HEAD.
+
+The choice is made before repository analysis and written to the bare repository's symbolic HEAD. Later pushes leave it unchanged. Maintainers can choose another existing branch under **Repository settings → General**.
+
+### Images and repository icons
+
+The file browser previews SVG, PNG, JPEG, WebP, GIF, AVIF, BMP, and ICO files. Animated images show their first frame. Previews are limited to 16 MiB of source, 16,777,216 pixels, and 16,384 pixels per edge. A time- and memory-limited subprocess renders PNG output; SVG previews cannot fetch external resources. Oversized or unsupported files still offer the original download, and raw SVG files download as attachments. LFS images use the same repository access checks as other files.
+
+**Repository settings → General → Icon** lists logos detected in the repository. Detection considers branding names, README references, asset locations, and image dimensions. Startup scans existing repositories in the background; pushes and LFS uploads refresh the candidates. Scans have bounded work limits, and a partial or failed scan preserves an existing automatic icon.
+
+Choose a candidate to follow that path on the default branch, upload an image, remove the icon, or return to automatic selection. Uploads and the no-icon preference survive later pushes. If a selected file disappears, Gitadel keeps its last valid image and marks the path as missing.
+
 ### Repository integrity checks
 
 Gitadel checks every active repository once a day at 03:00 UTC by default. Native checks verify Git objects, references, pack storage, indexes, and commit graphs; verify LFS objects against their SHA-256 IDs; check release and issue-attachment files; and reject database records that point outside their storage roots. The result appears in the administrator activity log. A failed check is also written to the server log with the affected repository and error. No external `git fsck` process is required.

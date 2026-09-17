@@ -688,7 +688,7 @@ pub mod repository {
         pub visibility: String,
         pub object_format: String,
         pub mirrored: bool,
-        pub default_branch: String,
+        pub default_branch: Option<String>,
         pub issue_counter: i64,
         #[sea_orm(unique)]
         pub storage_key: Uuid,
@@ -716,6 +716,57 @@ pub mod repository_icon {
         #[sea_orm(primary_key, auto_increment = false)]
         pub repository_id: Uuid,
         pub content: Vec<u8>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod repository_icon_candidate {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "repository_icon_candidates")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub repository_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub path: String,
+        pub commit_oid: String,
+        pub oid: String,
+        pub width: i32,
+        pub height: i32,
+        pub mime_type: String,
+        pub reasons_json: String,
+        pub recommended: bool,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod repository_icon_scan {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "repository_icon_scans")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub repository_id: Uuid,
+        pub commit_oid: Option<String>,
+        pub selected_path: Option<String>,
+        pub selected_missing: bool,
+        pub detector_version: i64,
+        pub status: String,
+        pub version: i64,
+        pub error: Option<String>,
+        pub updated_at: DateTimeUtc,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

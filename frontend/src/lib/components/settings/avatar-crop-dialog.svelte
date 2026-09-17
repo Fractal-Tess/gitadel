@@ -17,7 +17,13 @@
 
   const MAX_SOURCE_BYTES = 10 * 1024 * 1024;
   const MAX_SOURCE_PIXELS = 40_000_000;
-  const ACCEPTED_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+  const ACCEPTED_TYPES = new Set([
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/gif",
+    "image/svg+xml",
+  ]);
 
   let {
     open = $bindable(false),
@@ -92,8 +98,7 @@
     if (!file) return;
     error = null;
     if (!ACCEPTED_TYPES.has(file.type)) {
-      error = "Choose a JPG, PNG, or WebP image.";
-      return;
+      error = "Choose a JPG, PNG, WebP, GIF, or SVG image.";
     }
     if (file.size > MAX_SOURCE_BYTES) {
       error = "Choose an image smaller than 10 MB.";
@@ -214,13 +219,7 @@
     error = null;
     let blob: Blob;
     try {
-      blob = await renderAvatarPng(
-        image,
-        cropSize,
-        zoom,
-        offsetX,
-        offsetY,
-      );
+      blob = await renderAvatarPng(image, cropSize, zoom, offsetX, offsetY);
     } catch (caught) {
       error =
         caught instanceof Error
@@ -261,7 +260,7 @@
       bind:this={fileInput}
       class="sr-only"
       type="file"
-      accept="image/jpeg,image/png,image/webp"
+      accept="image/jpeg,image/png,image/webp,image/gif,image/svg+xml"
       aria-label="Choose profile picture"
       onchange={(event) => void selectFile(event.currentTarget.files?.[0])}
     />

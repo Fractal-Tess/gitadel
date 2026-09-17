@@ -1,9 +1,11 @@
 mod browser;
+mod files;
 mod git_http;
 mod git_service;
 mod gitea;
 mod github_mirror;
 mod icon;
+pub(crate) mod image;
 mod import_metadata;
 mod imports;
 mod integrations;
@@ -45,7 +47,10 @@ use axum::{
     routing::{delete, get},
 };
 use axum_extra::extract::cookie::CookieJar;
-use sea_orm::{ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, sea_query::OnConflict};
+use sea_orm::{
+    ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
+    sea_query::OnConflict,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
     fs,
@@ -149,7 +154,7 @@ impl RepositoryState {
         };
         mirrors::cleanup_lfs_staging(&settings.lfs_root).await?;
         fs::create_dir_all(&settings.actions_artifact_root).await?;
-        Ok(Self {
+        let state = Self {
             identity,
             repository_root: Arc::new(settings.repository_root),
             actions_artifact_root: Arc::new(settings.actions_artifact_root),
@@ -172,7 +177,29 @@ impl RepositoryState {
             lfs_tokens: Arc::new(RwLock::new(HashMap::new())),
             webhook_client: webhooks::webhook_client()?,
             tasks: TaskTracker::new(),
-        })
+        };
+        resources::backfill_legacy_empty_defaults(&state).await?;
+        let background = state.clone();
+        state.spawn_task(async move {
+            let result = async {
+                let mut pages = repository::Entity::find()
+                    .filter(repository::Column::DeletedAt.is_null())
+                    .order_by_asc(repository::Column::Id)
+                    .paginate(background.identity.database(), 50);
+                while let Some(repositories) = pages.fetch_and_next().await? {
+                    for repository in repositories {
+                        if let Err(error) = browser::warm_repository_analysis(&background, &repository).await {
+                            tracing::warn!(%error, repository_id = %repository.id, "could not backfill repository analysis");
+                        }
+                    }
+                }
+                Ok::<_, ApiError>(())
+            }.await;
+            if let Err(error) = result {
+                tracing::warn!(%error, "repository analysis backfill failed");
+            }
+        });
+        Ok(state)
     }
 
     pub(crate) fn spawn_task<F>(&self, task: F)
@@ -856,6 +883,14 @@ pub fn router() -> Router<RepositoryState> {
         )
         .route("/topics", get(topics::suggest_topics))
         .route(
+            "/repositories/{namespace}/{name}/icon/candidates",
+            get(icon::icon_candidates),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/icon/selection",
+            axum::routing::put(icon::select_icon),
+        )
+        .route(
             "/repositories/{namespace}/{name}/icon",
             get(icon::public_icon)
                 .put(icon::update_icon)
@@ -969,6 +1004,16 @@ pub fn router() -> Router<RepositoryState> {
         .route("/repositories/{namespace}/{name}/tree", get(browser::tree))
         .route("/repositories/{namespace}/{name}/blob", get(browser::blob))
         .route("/repositories/{namespace}/{name}/raw", get(browser::raw))
+        .route(
+            "/repositories/{namespace}/{name}/image",
+            get(image::preview),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/files",
+            axum::routing::post(files::create_file).layer(axum::extract::DefaultBodyLimit::max(
+                files::MAX_FILE_REQUEST_BYTES,
+            )),
+        )
         .route(
             "/repositories/{namespace}/{name}/source",
             get(browser::source_archive),

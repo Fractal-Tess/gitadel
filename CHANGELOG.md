@@ -4,9 +4,19 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-18
+
 ### Added
 
 - Added a built-in Docker/OCI registry on Gitadel's HTTP origin. Images belong to existing Git repositories and share their visibility, permissions, rename, deletion, and backup lifecycle. The registry supports API-token login, resumable uploads, layer mounts, image indexes, referrers, and content deletion.
+- Added repository previews for SVG, PNG, JPEG, WebP, GIF, AVIF, BMP, and ICO files, including repository-scoped LFS images. The viewer supports zoom, actual size, background selection, and SVG source. Rendering runs in a bounded subprocess; SVG downloads remain attachments and cannot load external resources in previews.
+- Added repository-wide logo discovery, ranked by branding names, README references, location, and dimensions. General settings now offers detected candidates, automatic selection, manual upload, and an explicit no-icon preference. Selected paths follow later commits and retain their last valid image if removed. Existing repositories are scanned in the background after startup.
+- Added in-browser file and tracked-directory creation with branch-tip conflict checks. Creating a directory requires an explicitly named file; existing files are never overwritten.
+- Added creation commands, repository imports and migrations, and direct links to specific settings sections in Ctrl+K search.
+
+### Changed
+
+- Empty and tags-only repositories now expose a null default branch. The first branch upload preserves a valid configured branch, otherwise chooses `main`, `master`, `prod`, or `staging`, then the newest committer tip with a lexical tie-break. Initial imports and mirrors prefer the remote's advertised HEAD. Gitadel synchronizes the bare repository's HEAD and preserves the chosen default on later pushes.
 
 ## [0.7.1] - 2026-09-17
 
@@ -244,7 +254,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/Fractal-Tess/gitadel/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/Fractal-Tess/gitadel/compare/v0.6.1...v0.6.2

@@ -1,11 +1,6 @@
 <script lang="ts">
   import { page } from "$app/state";
   import { resolve } from "$app/paths";
-  import AppWindow from "@lucide/svelte/icons/app-window";
-  import KeySquare from "@lucide/svelte/icons/key-square";
-  import LockKeyhole from "@lucide/svelte/icons/lock-keyhole";
-  import Terminal from "@lucide/svelte/icons/terminal";
-  import UserRound from "@lucide/svelte/icons/user-round";
   import ContextNav, {
     type ContextNavItem,
   } from "$lib/components/app/context-nav.svelte";
@@ -16,9 +11,10 @@
   import SecuritySettings from "$lib/components/settings/security-settings.svelte";
   import { AccountSettingsState } from "$lib/settings/account-settings-state.svelte.js";
   import {
-    preloadAccountSettingsView,
+    accountSettingsSections,
     type AccountSettingsView,
-  } from "$lib/settings/settings-data-cache.js";
+  } from "$lib/settings/navigation.js";
+  import { preloadAccountSettingsView } from "$lib/settings/settings-data-cache.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
   const app = useAppState();
@@ -60,54 +56,19 @@
     void state.initialize(view);
   });
 
-  const navigation = $derived.by<ContextNavItem[]>(() => [
-    {
-      id: "profile",
-      label: "Profile",
-      icon: UserRound,
-      href: resolve("/-/account/[view]", { view: "profile" }),
-      active: view === "profile",
-    },
-    {
-      id: "authentication",
-      label: "Authentication",
-      icon: LockKeyhole,
-      href: resolve("/-/account/[view]", { view: "authentication" }),
-      active: view === "authentication",
-      preload: () =>
-        preloadAccountSettingsView(app.authorizationScope, "authentication"),
-    },
-    {
-      id: "ssh-keys",
-      label: "SSH keys",
-      icon: Terminal,
-      href: resolve("/-/account/[view]", { view: "ssh-keys" }),
-      active: view === "ssh-keys",
-      preload: () =>
-        preloadAccountSettingsView(app.authorizationScope, "ssh-keys"),
-    },
-    {
-      id: "api-tokens",
-      label: "API tokens",
-      icon: KeySquare,
-      href: resolve("/-/account/[view]", { view: "api-tokens" }),
-      active: view === "api-tokens",
-      preload: () =>
-        preloadAccountSettingsView(app.authorizationScope, "api-tokens"),
-    },
-    {
-      id: "oauth-applications",
-      label: "OAuth applications",
-      icon: AppWindow,
-      href: resolve("/-/account/[view]", { view: "oauth-applications" }),
-      active: view === "oauth-applications",
-      preload: () =>
-        preloadAccountSettingsView(
-          app.authorizationScope,
-          "oauth-applications",
-        ),
-    },
-  ]);
+  const navigation = $derived.by<ContextNavItem[]>(() =>
+    accountSettingsSections.map((section) => ({
+      id: section.id,
+      label: section.label,
+      icon: section.icon,
+      href: resolve("/-/account/[view]", { view: section.id }),
+      active: view === section.id,
+      ...(section.id !== "profile" && {
+        preload: () =>
+          preloadAccountSettingsView(app.authorizationScope, section.id),
+      }),
+    })),
+  );
 </script>
 
 <svelte:head>
