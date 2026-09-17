@@ -10,18 +10,18 @@ RUN apt-get update \
     && apt-get install --yes --no-install-recommends build-essential cmake libssl-dev perl pkg-config \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
-COPY Cargo.toml Cargo.lock build.rs ./
+COPY Cargo.toml Cargo.lock build.rs CHANGELOG.md ./
 COPY src/ ./src/
 COPY cli/ ./cli/
 COPY proto/ ./proto/
 COPY --from=frontend /build/frontend/build ./frontend/build/
 COPY --from=frontend /build/frontend/static ./frontend/static/
-RUN cargo build --release --locked \
+RUN cargo build --release --locked --package gitadel --bin gitadel \
     && strip target/release/gitadel
 
 FROM debian:trixie-slim AS runtime
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates curl \
+    && apt-get install --yes --no-install-recommends ca-certificates curl libgcc-s1 libssl3t64 libstdc++6 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 --shell /usr/sbin/nologin gitadel \
     && install --directory --owner gitadel --group gitadel /data
@@ -31,6 +31,12 @@ USER gitadel
 WORKDIR /data
 VOLUME ["/data"]
 EXPOSE 3000 2222
-ENV GITADEL_PUBLIC_URL=http://localhost:3000
+ENV \
+    GITADEL_PUBLIC_URL=http://localhost:3000 \
+    GITADEL_BIND=0.0.0.0:3000 \
+    GITADEL_DATABASE_URL=sqlite:///data/gitadel.db?mode=rwc \
+    GITADEL_REPOSITORY_ROOT=/data/repositories \
+    GITADEL_LFS_ROOT=/data/lfs \
+    GITADEL_SSH_BIND=0.0.0.0:2222 \
+    GITADEL_SSH_HOST_KEY=/data/ssh-host-ed25519
 ENTRYPOINT ["gitadel"]
-CMD ["--bind", "0.0.0.0:3000", "--database-url", "sqlite:///data/gitadel.db?mode=rwc", "--repository-root", "/data/repositories", "--lfs-root", "/data/lfs", "--ssh-bind", "0.0.0.0:2222", "--ssh-host-key", "/data/ssh-host-ed25519"]

@@ -1,7 +1,42 @@
 .git
 .direnv
+
+# Local runtime state and build output.
 data
 target
 frontend/node_modules
 frontend/.svelte-kit
 frontend/build
+repositories
+lfs
+actions-artifacts
+runner-data
+runner-docker
+backups
+
+# Local secrets and environment files.
+.env
+/gitadel.toml
+.env.*
+**/.env
+**/.env.*
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.pem
+*.key
+*.crt
+*.secret
+*.token
+secrets
+.secrets
+.ssh
+registration-token
+ssh-host-*
+
+# Generated archives and logs.
+*.tar
+*.tar.*
+*.zip
+*.log

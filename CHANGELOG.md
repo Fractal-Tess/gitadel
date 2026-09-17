@@ -4,6 +4,17 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-17
+
+### Changed
+
+- Docker Compose now starts a standalone Gitadel server with localhost-only published ports. The privileged Actions runner stack is opt-in through `compose.actions.yaml`.
+- Container storage and listener defaults now use overridable environment variables, including when running offline backup commands.
+
+### Fixed
+
+- Copied the embedded changelog into the Docker build stage and declared the server's runtime library dependencies. The image builds only the server binary and excludes local configuration, secrets, and runtime data from its build context.
+
 ## [0.7.0] - 2026-09-17
 
 ### Added
@@ -229,7 +240,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/Fractal-Tess/gitadel/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/Fractal-Tess/gitadel/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/Fractal-Tess/gitadel/compare/v0.6.0...v0.6.1

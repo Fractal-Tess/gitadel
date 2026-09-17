@@ -4,26 +4,77 @@ Gitadel can run from Docker Compose or as a NixOS service. In both cases, put in
 
 ## Docker Compose
 
-Clone the repository and start the service:
+Clone the repository and start the standalone server:
 
 ```bash
 git clone https://github.com/Fractal-Tess/gitadel.git
 cd gitadel
-docker compose up --build
+docker compose up -d --build
 ```
 
-Open [http://localhost:3000/register](http://localhost:3000/register) to create the first administrator. The default deployment exposes HTTP on `3000`, SSH on `2222`, and stores the database, repositories, LFS objects, and SSH host key in the `gitadel-data` volume.
-
-Set the public URL or host ports through Compose environment variables:
+The default setup binds HTTP to `127.0.0.1:3000` and SSH to
+`127.0.0.1:2222`. Check the container and its health endpoint:
 
 ```bash
+docker compose ps
+curl --fail http://127.0.0.1:3000/healthz
+```
+
+Open [http://localhost:3000/register](http://localhost:3000/register) and
+create the first administrator. The `gitadel-data` named volume keeps the
+database, repositories, LFS objects, and SSH host key when the container is
+recreated.
+
+The image runs Gitadel as the non-root user with UID and GID `10001`. Docker
+creates the named volume with the image's `/data` ownership, so the normal
+deployment does not need a permission fix. If you replace the named volume
+with a host bind mount, make the mounted directory writable by that identity:
+
+```bash
+sudo chown -R 10001:10001 /path/to/gitadel-data
+```
+
+The runtime image includes Gitadel and its shared libraries, but does not
+install a system `git` executable. Git operations are handled by Gitadel.
+
+To stop and restart without removing data:
+
+```bash
+docker compose stop
+docker compose start
+```
+
+`docker compose down` removes containers but keeps `gitadel-data`. Do not use
+`docker compose down -v` for an instance that contains data. That command
+deletes the named volume.
+
+For access from another host, bind the published ports on all interfaces and
+set the browser-visible URL. Put public HTTP traffic behind a
+TLS-terminating reverse proxy:
+
+```bash
+GITADEL_LISTEN_ADDRESS=0.0.0.0 \
 GITADEL_PUBLIC_URL=https://git.example.com \
 GITADEL_HTTP_PORT=3000 \
 GITADEL_SSH_PORT=2222 \
 docker compose up -d --build
 ```
 
-`GITADEL_PUBLIC_URL` must be the browser-visible origin. Gitadel uses it for clone links, cookies, passkey verification, OAuth callbacks, and webhook payloads.
+`GITADEL_PUBLIC_URL` defaults to `http://localhost:3000` and must be the
+origin that users open in their browsers. Gitadel uses it for clone links,
+cookies, passkey verification, OAuth callbacks, and webhook payloads. Include
+the public HTTP port in the URL when it is not the standard port for its
+scheme.
+
+`GITADEL_HTTP_PORT` and `GITADEL_SSH_PORT` change the host ports. Gitadel
+currently has no separate advertised SSH-port setting. Keep the default host
+SSH port `2222` if you want generated SSH clone URLs to work as shown. If you
+map SSH to another host port, edit the port in each SSH clone URL or Git
+remote manually. The service still listens on port `2222` inside Compose.
+
+Actions runners are optional. See [Actions deployment](docs/actions.md#docker-compose)
+for the `compose.actions.yaml` overlay, which adds a privileged Docker-in-Docker
+daemon and a Forgejo Runner.
 
 ## NixOS
 
@@ -333,20 +384,32 @@ The target must be empty or contain Gitadel's matching ownership marker. S3 comm
 
 ## Backups
 
-Offline backups made with the `gitadel` server binary use a storage lock to guarantee one consistent snapshot. Stop the service before creating one:
+Offline backups made with the `gitadel` server binary use a storage lock to
+guarantee one consistent snapshot. Stop the service before creating one. The
+container runs as UID `10001`, so make a bind-mounted backup directory
+writable by that UID:
 
 ```bash
 mkdir -p backups
+sudo chown 10001:10001 backups
 docker compose stop gitadel
 docker compose run --rm -v "$PWD/backups:/backups" \
   gitadel backup create /backups/gitadel-backup.tar.zst
 docker compose start gitadel
 ```
 
-The archive contains the SQLite database (users, instance settings, credentials, and all other relational state), repositories and their attachments, LFS and release assets, the SSH host key, and the effective Gitadel configuration. Every file is covered by a SHA-256 manifest. Restore rejects changed, missing, or extra files and only writes database and storage data into empty configured paths:
+The archive contains the SQLite database (users, instance settings,
+credentials, and all other relational state), repositories and their
+attachments, LFS and release assets, the SSH host key, and the effective
+Gitadel configuration. Every file is covered by a SHA-256 manifest. Restore
+rejects changed, missing, or extra files and only writes database and storage
+data into empty configured paths. Stop the service before restoring:
 
 ```bash
-gitadel backup restore /backups/gitadel-backup.tar.zst
+docker compose stop gitadel
+docker compose run --rm -v "$PWD/backups:/backups:ro" \
+  gitadel backup restore /backups/gitadel-backup.tar.zst
+docker compose start gitadel
 ```
 
 For an S3-compatible store, configure its API origin and bucket. The endpoint must be the S3 API origin, not a web-console URL:

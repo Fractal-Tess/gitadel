@@ -2348,7 +2348,7 @@ dependencies = [
 
 [[package]]
 name = "gitadel"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "ammonia",
  "anyhow",
@@ -2428,7 +2428,7 @@ dependencies = [
 
 [[package]]
 name = "gitadel-cli"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "clap",
