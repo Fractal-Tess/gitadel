@@ -4,6 +4,17 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-17
+
+### Added
+
+- Added portable CLI login, status, and logout commands. Login validates API tokens before saving a private, server-bound credential file; token-file logins retain runtime references for secret rotation.
+
+### Changed
+
+- The NixOS CLI module now wraps the executable with server and token-file defaults instead of setting session-wide environment variables. SOPS secrets are read at runtime without placing token contents in the Nix store.
+- Renamed the remote client executable to `gtd`. Cargo and Nix package/module names remain `gitadel-cli`; existing environment variables and saved credentials are unchanged.
+
 ## [0.6.2] - 2026-09-17
 
 ### Fixed
@@ -218,7 +229,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/Fractal-Tess/gitadel/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/Fractal-Tess/gitadel/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.5.1...v0.6.0

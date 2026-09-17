@@ -8,6 +8,31 @@
 let
   cfg = config.programs.gitadel-cli;
   system = pkgs.stdenv.hostPlatform.system;
+  defaultEnvironment =
+    lib.optionalAttrs (cfg.serverUrl != null) { GITADEL_SERVER = cfg.serverUrl; }
+    // lib.optionalAttrs (cfg.tokenFile != null) { GITADEL_TOKEN_FILE = cfg.tokenFile; };
+  package =
+    if defaultEnvironment == { } then
+      cfg.package
+    else
+      pkgs.symlinkJoin {
+        name = "${cfg.package.name}-with-defaults";
+        paths = [ cfg.package ];
+        nativeBuildInputs = [ pkgs.makeWrapper ];
+        postBuild = ''
+          wrapProgram "$out/bin/gtd" ${
+            lib.concatStringsSep " " (
+              lib.mapAttrsToList (
+                name: value: "--set-default ${name} ${lib.escapeShellArg value}"
+              ) defaultEnvironment
+            )
+          }
+        '';
+        meta = (cfg.package.meta or { }) // {
+          mainProgram = "gtd";
+        };
+        passthru = cfg.package.passthru or { };
+      };
 in
 {
   options.programs.gitadel-cli = {
@@ -25,9 +50,10 @@ in
       default = null;
       example = "http://neo.netbird.cloud:3030";
       description = ''
-        Optional non-secret Gitadel server URL exported as GITADEL_SERVER for
-        users of the installed CLI. Authentication tokens are not configured
-        through NixOS options.
+        Optional non-secret Gitadel server URL supplied as the invocation
+        default GITADEL_SERVER for users of the installed CLI. Inherited
+        environment values and explicit command-line flags take precedence.
+        Authentication tokens are not configured through NixOS options.
       '';
     };
 
@@ -35,14 +61,11 @@ in
       type = lib.types.nullOr lib.types.str;
       default = null;
       example = "/run/secrets/gitadel_api_token";
-      description = "Runtime token-file path, exported as GITADEL_TOKEN_FILE. Never put the token itself in Nix.";
+      description = "Runtime token-file path supplied as the invocation default GITADEL_TOKEN_FILE. Never put the token itself in Nix.";
     };
   };
 
   config = lib.mkIf cfg.enable {
-    environment.systemPackages = [ cfg.package ];
-    environment.variables =
-      lib.optionalAttrs (cfg.serverUrl != null) { GITADEL_SERVER = cfg.serverUrl; }
-      // lib.optionalAttrs (cfg.tokenFile != null) { GITADEL_TOKEN_FILE = cfg.tokenFile; };
+    environment.systemPackages = [ package ];
   };
 }

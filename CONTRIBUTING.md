@@ -64,7 +64,7 @@ Build the embedded SvelteKit frontend and both release binaries with:
 just release-build
 ```
 
-The outputs are `target/release/gitadel` (server and offline maintenance) and `target/release/gitadel-cli` (token-authenticated remote client). To build only the client, run `cargo build --release --locked -p gitadel-cli`; it does not need a frontend build.
+The outputs are `target/release/gitadel` (server and offline maintenance) and `target/release/gtd` (token-authenticated remote client). To build only the client, run `cargo build --release --locked -p gitadel-cli`; it does not need a frontend build.
 
 Git, Git LFS, and OpenSSH remain in the development shell for interoperability checks. They are not server runtime dependencies. Native Git operations use the immutable Sley fork revision in `Cargo.toml`; dependency updates must also refresh `Cargo.lock` and the Nix Git-source hash.
 

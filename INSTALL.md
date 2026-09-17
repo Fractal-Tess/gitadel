@@ -128,7 +128,7 @@ The server and remote client have separate packages and modules:
 | Purpose | Flake output |
 | --- | --- |
 | Server package and app | `gitadel` (`default` also selects the server) |
-| Remote client package and app | `gitadel-cli` |
+| Remote client package and app | `gitadel-cli` (runs `gtd`) |
 | Server NixOS module | `nixosModules.gitadel` or `nixosModules.default` |
 | Client NixOS module | `nixosModules.gitadel-cli` |
 
@@ -144,40 +144,85 @@ Install the client on a machine without enabling the server:
 }
 ```
 
-`serverUrl` sets `GITADEL_SERVER`; do not put an API token in Nix configuration or the Nix store. Override `programs.gitadel-cli.package` or `services.gitadel.package` to select another build.
+`serverUrl` supplies a default `GITADEL_SERVER` through the installed executable's wrapper, not a session-wide environment variable. Inherited environment values and explicit CLI flags can override it. Do not put an API token in Nix configuration or the Nix store. Override `programs.gitadel-cli.package` or `services.gitadel.package` to select another build.
 
 ## Command-line client
 
-`gitadel-cli` talks to a running Gitadel server over HTTP(S). It does not open the server's database or repository directories. Install it with `nix profile install github:Fractal-Tess/gitadel#gitadel-cli`, or build it from source with `cargo build --release -p gitadel-cli`.
+`gtd` talks to a running Gitadel server over HTTP(S). It does not open the server's database or repository directories. Install it with `nix profile install github:Fractal-Tess/gitadel#gitadel-cli`, or build it from source with `cargo build --release -p gitadel-cli`. The executable is `gtd`; the Cargo package, Nix flake outputs, and NixOS options retain the name `gitadel-cli`.
 
 Create an API token under **Account settings → Access**. Reads require `read`; repository, organization, and administrator mutations require `write`. Adding or removing your SSH keys requires `ssh_keys`. Administrator commands also require an administrator account. A token does not bypass repository or organization permissions.
 
+### Login on Linux, WSL, and other systems
+
+No NixOS service or desktop keyring is required. From a source checkout with the Rust toolchain installed, `cargo install --path cli --locked` installs the client on your Cargo binary path.
+
 ```bash
-export GITADEL_SERVER=https://git.example.com
-gitadel-cli --token-file ~/.config/gitadel/token me profile
-gitadel-cli --token-file ~/.config/gitadel/token repo create archivist/old-project --private
-gitadel-cli --token-file ~/.config/gitadel/token repo archive archivist/old-project
-gitadel-cli --token-file ~/.config/gitadel/token admin instance get
+gtd auth login
+gtd me profile
+gtd repo list
+gtd auth status
 ```
 
-The token file contains only the token and should have mode `0600`. Set `GITADEL_TOKEN_FILE` to its runtime path for repeated use; the NixOS client module exposes this as `programs.gitadel-cli.tokenFile`. Explicit token flags take precedence, followed by `GITADEL_TOKEN`, then `GITADEL_TOKEN_FILE`. The environment file path is always a file, not stdin. `--token-stdin` and `--token-file -` read a token from standard input. Explicit sources are mutually exclusive. `--token` is also supported, but exposes the value in process arguments.
+Login prompts for the server origin and an API token without echoing the token. It checks the token with the server before replacing the saved login. You can provide the endpoint explicitly with `gtd --server https://git.example.com auth login`.
+
+The client remembers one login in the platform's per-user configuration directory. On Linux and WSL this is `$XDG_CONFIG_HOME/gitadel/auth.json`, normally `~/.config/gitadel/auth.json`. The file stores the token **unencrypted**; on Unix the directory is mode `0700` and the file is mode `0600`. Do not sync it into a public dotfiles repository. Login output identifies the storage location.
+
+`gtd auth logout` removes the saved login. It does not revoke the token on the server, delete an external token file, or disable environment credentials. Revoke tokens under **Account settings → Access**.
+
+### NixOS and SOPS
+
+Configure your encrypted secret through sops-nix as usual, then pass only its runtime path to the CLI module:
+
+```nix
+{ config, inputs, ... }: {
+  imports = [ inputs.gitadel.nixosModules.gitadel-cli ];
+
+  sops.secrets.gitadel_api_token = {
+    owner = "alice"; # The user running gtd.
+    mode = "0600";
+  };
+
+  programs.gitadel-cli = {
+    enable = true;
+    serverUrl = "https://git.example.com";
+    tokenFile = config.sops.secrets.gitadel_api_token.path;
+  };
+}
+```
+
+After installing the configuration, run `gtd me profile`; no login command or new shell session is needed. The wrapper supplies `GITADEL_SERVER` and `GITADEL_TOKEN_FILE` defaults. The client reads the secret file on each invocation, so secret rotation does not require rebuilding the wrapper. Neither the token contents nor a build-time read of the secret enters the Nix store. The decrypted file must be readable by the user running the CLI.
+
+### Token sources and automation
+
+Without NixOS, `GITADEL_TOKEN_FILE` provides the same runtime-file behavior. To remember a token-file reference without environment variables:
+
+```bash
+gtd --server https://git.example.com --token-file /path/to/token auth login
+gtd me profile
+```
+
+This saves the file path, not its contents, and preserves symlinks such as rotating SOPS paths. The token file contains only the token. Explicit `--token-stdin` or `--token-file -` reads from stdin; using either with `auth login` stores the token itself.
+
+Server selection is `--server`, then `GITADEL_SERVER`, then the saved server, then `http://127.0.0.1:3000`. Token precedence is an explicit token flag, then `GITADEL_TOKEN`, then `GITADEL_TOKEN_FILE`, then the saved login. Saved credentials are used only for their matching origin. Environment credentials paired with `GITADEL_SERVER` are also withheld when `--server` selects another origin; an explicit token flag is a deliberate override.
+
+Explicit token sources are mutually exclusive. The environment token-file path is always a file, not stdin. `--token` remains supported, but exposes the value in process arguments; prefer hidden login entry, a file, or stdin.
 
 For CI, provide `GITADEL_SERVER` and a masked `GITADEL_TOKEN` secret through the job environment:
 
 ```bash
-gitadel-cli repo list
-gitadel-cli admin instance update --body-file instance-settings.json
-gitadel-cli api user
+gtd repo list
+gtd admin instance update --body-file instance-settings.json
+gtd api user
 ```
 
-JSON commands write JSON to stdout and errors to stderr, with a nonzero exit status on failure. `--body-file -` accepts JSON from stdin, but cannot share stdin with a token source. Typed commands cover repositories, organizations, SSH keys, instance and authentication settings, OIDC, storage, backups, and audit records; `gitadel-cli --help` lists them. The `api` command exposes other token-authorized endpoints. Browser-only account-security and restore flows keep their existing authentication requirements.
+JSON commands write JSON to stdout and errors to stderr, with a nonzero exit status on failure. `--body-file -` accepts JSON from stdin, but cannot share stdin with a token source. Typed commands cover repositories, organizations, SSH keys, instance and authentication settings, OIDC, storage, backups, and audit records; `gtd --help` lists them. The `api` command exposes other token-authorized endpoints. Browser-only account-security and restore flows keep their existing authentication requirements.
 
 Backup downloads stream into a private temporary file and replace the requested output only after a complete transfer:
 
 ```bash
-gitadel-cli admin backup providers list
-gitadel-cli admin backup download "$PROVIDER_ID" "$BACKUP_KEY" --output backup.tar.zst
-gitadel-cli admin backup progress "$OPERATION_ID"
+gtd admin backup providers list
+gtd admin backup download "$PROVIDER_ID" "$BACKUP_KEY" --output backup.tar.zst
+gtd admin backup progress "$OPERATION_ID"
 ```
 
 Progress commands emit JSON Lines, reconnect after an interrupted stream, and exit unsuccessfully when the operation fails. Use HTTPS outside an encrypted private network; bearer tokens grant the account's configured access.
@@ -263,7 +308,7 @@ Git repositories, issue attachments, and release assets remain under the configu
 
 Changing the active target runs in the background without restarting Gitadel. Browsing, Git operations, and LFS downloads remain available. LFS uploads continue during the initial copy, then wait while Gitadel drains in-flight writes, copies the remaining objects, and commits the target change. Migration verifies object size and SHA-256 content. Source data is retained; a failed or interrupted migration leaves the source active and can be retried.
 
-The server's offline `gitadel lfs` migration commands still require Gitadel to be stopped. They are separate from `gitadel-cli`, which manages the running instance:
+The server's offline `gitadel lfs` migration commands still require Gitadel to be stopped. They are separate from `gtd`, which manages the running instance:
 
 ```bash
 gitadel lfs target add-filesystem --name archive --path /mnt/archive/gitadel-lfs

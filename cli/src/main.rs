@@ -11,21 +11,22 @@ use serde_json::{Value, json};
 use url::Url;
 use uuid::Uuid;
 
+mod auth;
+use auth::AuthCommand;
+
 #[derive(Debug, Parser)]
 #[command(
-    name = "gitadel-cli",
+    name = "gtd",
     version,
-    about = "Noninteractive management CLI for Gitadel"
+    about = "Command-line client for Gitadel"
 )]
 struct Cli {
     /// Gitadel HTTP origin (credentials and URL paths are not accepted).
-    #[arg(
-        long,
-        env = "GITADEL_SERVER",
-        default_value = "http://127.0.0.1:3000",
-        global = true
-    )]
-    server: Url,
+    ///
+    /// If omitted, GITADEL_SERVER, the saved login, and localhost are tried
+    /// in that order.
+    #[arg(long, global = true)]
+    server: Option<Url>,
 
     /// API token. The value is hidden in help and is never included in URLs.
     ///
@@ -66,6 +67,11 @@ enum Command {
     Admin {
         #[command(subcommand)]
         command: AdminCommand,
+    },
+    /// Manage the saved CLI login.
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
     },
     /// Call a remaining JSON API endpoint on the configured Gitadel origin.
     Api(ApiCommand),
@@ -879,52 +885,8 @@ fn command_uses_stdin_body(command: &Command) -> bool {
             _ => false,
         },
         Command::Api(command) => optional_body_command_uses_stdin(&command.body),
-        Command::Me { .. } | Command::Org { .. } => false,
+        Command::Auth { .. } | Command::Me { .. } | Command::Org { .. } => false,
     }
-}
-
-fn token_from(cli: &Cli) -> Result<Option<String>> {
-    let explicit_sources =
-        cli.token.is_some() as usize + cli.token_file.is_some() as usize + cli.token_stdin as usize;
-    if explicit_sources > 1 {
-        bail!("choose exactly one explicit token source");
-    }
-    let token = if let Some(token) = cli.token.as_deref() {
-        token.to_owned()
-    } else if cli.token_stdin {
-        let mut token = String::new();
-        io::stdin()
-            .read_to_string(&mut token)
-            .context("could not read API token from stdin")?;
-        token
-    } else if let Some(file) = cli.token_file.as_deref() {
-        if file == Path::new("-") {
-            let mut token = String::new();
-            io::stdin()
-                .read_to_string(&mut token)
-                .context("could not read API token from stdin")?;
-            token
-        } else {
-            fs::read_to_string(file)
-                .with_context(|| format!("could not read token file {}", file.display()))?
-        }
-    } else if let Some(token) = std::env::var_os("GITADEL_TOKEN") {
-        token.to_string_lossy().into_owned()
-    } else if let Some(file) = std::env::var_os("GITADEL_TOKEN_FILE") {
-        let file = PathBuf::from(file);
-        fs::read_to_string(&file)
-            .with_context(|| format!("could not read token file {}", file.display()))?
-    } else {
-        return Ok(None);
-    };
-    let token = token.trim();
-    if token.is_empty() {
-        bail!("API token is empty");
-    }
-    if !token.bytes().all(|byte| byte.is_ascii_graphic()) {
-        bail!("API token must contain only printable non-whitespace ASCII characters");
-    }
-    Ok(Some(token.to_owned()))
 }
 
 fn token_source_uses_stdin(cli: &Cli) -> bool {
@@ -986,8 +948,12 @@ async fn run(cli: Cli) -> Result<()> {
     if token_source_uses_stdin(&cli) && command_uses_stdin_body(&cli.command) {
         bail!("token stdin and body stdin cannot be used together");
     }
-    let token = token_from(&cli)?;
-    let api = ApiClient::new(cli.server, token)?;
+    if let Command::Auth { command } = &cli.command {
+        let value = auth::run(&cli, command).await?;
+        return print_json(value);
+    }
+    let resolved = auth::resolve(&cli)?;
+    let api = ApiClient::new(resolved.server, resolved.token)?;
     let value = match cli.command {
         Command::Repo { command } => run_repo(&api, command).await?,
         Command::Me { command } => run_me(&api, command).await?,
@@ -1026,6 +992,7 @@ async fn run(cli: Cli) -> Result<()> {
             };
             api.request(method, &command.path, body).await?
         }
+        Command::Auth { .. } => unreachable!("auth commands are handled before API setup"),
     };
     print_json(value)
 }

@@ -145,13 +145,13 @@
                 "--package"
                 "gitadel-cli"
                 "--bin"
-                "gitadel-cli"
+                "gtd"
               ];
               meta = {
                 description = "Token-authenticated Gitadel command-line client";
                 homepage = "https://github.com/Fractal-Tess/gitadel";
                 license = lib.licenses.mit;
-                mainProgram = "gitadel-cli";
+                mainProgram = "gtd";
                 platforms = lib.platforms.linux;
               };
             }

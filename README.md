@@ -44,16 +44,16 @@ See [INSTALL.md](INSTALL.md) for Docker, NixOS, configuration, reverse-proxy, an
 
 ## Command-line client
 
-`gitadel-cli` manages a running instance with an API token. It is separate from the `gitadel` server and uses the same permissions as the web API.
+`gtd` manages a running instance with an API token. It is separate from the `gitadel` server and uses the same permissions as the web API.
 
 ```bash
 nix profile install github:Fractal-Tess/gitadel#gitadel-cli
-export GITADEL_SERVER=https://git.example.com
-gitadel-cli --token-file ~/.config/gitadel/token repo list
-gitadel-cli --token-file ~/.config/gitadel/token admin instance get
+gtd auth login
+gtd repo list
+gtd admin instance get
 ```
 
-Save a token from **Account settings → Access** as raw text in a mode-`0600` file. See [client setup and CI usage](INSTALL.md#command-line-client).
+Create a token under **Account settings → Access**, then enter the server URL and token at the login prompts. The CLI remembers them for later commands. NixOS users can instead point the client at a runtime SOPS secret. See [client setup, credential storage, and CI usage](INSTALL.md#command-line-client).
 
 ## Dokploy
 
