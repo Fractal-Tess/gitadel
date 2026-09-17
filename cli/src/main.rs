@@ -15,11 +15,7 @@ mod auth;
 use auth::AuthCommand;
 
 #[derive(Debug, Parser)]
-#[command(
-    name = "gtd",
-    version,
-    about = "Command-line client for Gitadel"
-)]
+#[command(name = "gtd", version, about = "Command-line client for Gitadel")]
 struct Cli {
     /// Gitadel HTTP origin (credentials and URL paths are not accepted).
     ///

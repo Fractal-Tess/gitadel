@@ -63,19 +63,28 @@ struct SavedAuth {
     token_file: Option<PathBuf>,
 }
 
+fn select_server(
+    explicit: Option<Url>,
+    environment: Result<Option<Url>>,
+) -> Result<(Option<Url>, bool)> {
+    if let Some(server) = explicit {
+        let server = validate_origin(server)?;
+        // An overridden invalid endpoint must not block the flag or authorize
+        // forwarding credentials whose intended origin cannot be established.
+        let environment_credentials_allowed = environment.is_ok_and(|environment| {
+            environment.is_none_or(|environment| environment.origin() == server.origin())
+        });
+        Ok((Some(server), environment_credentials_allowed))
+    } else {
+        Ok((environment?, true))
+    }
+}
+
 pub(crate) fn resolve(cli: &Cli) -> Result<ResolvedAuth> {
     let explicit = explicit_token(cli)?;
-    let explicit_server = cli.server.clone().map(validate_origin).transpose()?;
-    let environment_server = if explicit_server.is_some() && explicit.is_some() {
-        None
-    } else {
-        environment_server()?
-    };
-    let environment_credentials_allowed = explicit_server
-        .as_ref()
-        .zip(environment_server.as_ref())
-        .is_none_or(|(explicit, environment)| explicit.origin() == environment.origin());
-    let (server, saved) = match explicit_server.or(environment_server) {
+    let (configured_server, environment_credentials_allowed) =
+        select_server(cli.server.clone(), environment_server())?;
+    let (server, saved) = match configured_server {
         Some(server) => (server, None),
         None => {
             let saved = load_saved()?;
@@ -136,39 +145,27 @@ pub(crate) async fn run(cli: &Cli, command: &AuthCommand) -> Result<Value> {
 
 async fn login(cli: &Cli) -> Result<Value> {
     let explicit = explicit_token(cli)?;
-    let explicit_server = cli.server.clone().map(validate_origin).transpose()?;
-    let environment_server = if explicit_server.is_some() && explicit.is_some() {
-        None
-    } else {
-        environment_server()?
-    };
-    let environment_file = environment_file_path();
-    let environment_credentials_bound_to_other_origin = explicit_server
-        .as_ref()
-        .zip(environment_server.as_ref())
-        .is_some_and(|(explicit, environment)| explicit.origin() != environment.origin());
-    let environment_token = if explicit.is_none() && !environment_credentials_bound_to_other_origin
-    {
+    let (configured_server, environment_credentials_allowed) =
+        select_server(cli.server.clone(), environment_server())?;
+    let environment_token = if explicit.is_none() && environment_credentials_allowed {
         environment_token()?
     } else {
         None
     };
-    let environment_file = (!environment_credentials_bound_to_other_origin)
-        .then_some(environment_file)
+    let environment_file = environment_credentials_allowed
+        .then(environment_file_path)
         .flatten();
     let interactive =
         explicit.is_none() && environment_token.is_none() && environment_file.is_none();
     if interactive && (!io::stdin().is_terminal() || !io::stderr().is_terminal()) {
         bail!("interactive login requires a terminal; use --token-stdin or --token-file");
     }
-    let saved = if cli.server.is_none() && environment_server.is_none() {
+    let saved = if configured_server.is_none() {
         load_saved()?
     } else {
         None
     };
-    let server = if let Some(server) = explicit_server {
-        server
-    } else if let Some(server) = environment_server {
+    let server = if let Some(server) = configured_server {
         server
     } else if interactive {
         prompt_server(
@@ -556,6 +553,15 @@ fn persist_saved(saved: &SavedAuth) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_server_overrides_invalid_environment_without_forwarding_its_credentials() {
+        let explicit = Url::parse("https://git.example.test").unwrap();
+        let (selected, allow_environment_credentials) =
+            select_server(Some(explicit.clone()), Err(anyhow::anyhow!("invalid URL"))).unwrap();
+        assert_eq!(selected, Some(explicit));
+        assert!(!allow_environment_credentials);
+        assert!(select_server(None, Err(anyhow::anyhow!("invalid URL"))).is_err());
+    }
     #[test]
     fn saved_token_is_bound_to_normalized_origin() {
         let saved =
