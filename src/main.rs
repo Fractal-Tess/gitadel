@@ -12,6 +12,7 @@ mod identity;
 mod integrations;
 mod migration;
 mod network;
+mod registry;
 mod repository;
 mod schedule;
 mod server;

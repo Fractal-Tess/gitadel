@@ -351,6 +351,64 @@ Restart the browser after changing its trust database. Every other device that
 opens the NetBird URL must also trust `$(mkcert -CAROOT)/rootCA.pem`; never
 copy `rootCA-key.pem` or the Gitadel private key to another device.
 
+## Container registry
+
+Gitadel includes a Docker/OCI registry at `/v2/` on its existing HTTP origin.
+It needs no separate registry process, port, or data volume.
+
+Create a lowercase Git repository such as `archivist/my-app` first, through
+the web UI or `gtd repo create`. Under **Account settings → Access**, create
+an API token with `read` and `write` scopes. Use that token as the password
+for Docker login, not your account password:
+
+```bash
+docker login git.example.com --username archivist
+docker tag my-app:latest git.example.com/archivist/my-app:latest
+docker push git.example.com/archivist/my-app:latest
+docker pull git.example.com/archivist/my-app:latest
+```
+
+For automation, use `docker login --password-stdin` with a secret supplied
+by your CI or secret manager. Images can also have a suffix, such as
+`git.example.com/archivist/my-app/worker:latest`; they still belong to
+`archivist/my-app`. Organization images use the organization namespace,
+but login always uses your own Gitadel username.
+
+Public repositories allow anonymous pulls. Private images require the
+same repository access as Git; pulls need a `read` token, and Docker pushes
+need `read` and `write`. Deleting registry content additionally requires
+repository management permission. Archived and mirrored repositories
+reject mutations. Each request rechecks the source token and current
+repository permissions, so revocation and access changes also apply to
+previously issued registry tokens.
+
+Use HTTPS for remote Docker clients. If you deliberately use plain HTTP
+outside loopback, Docker must be configured to trust that host and port
+as an insecure registry. Keep that traffic on an encrypted private
+network. The reverse proxy must forward `/v2/`, preserve authorization
+headers, allow streaming uploads and sufficiently large request bodies,
+and leave registry responses uncompressed.
+
+The registry supports Docker schema 2 manifests and manifest lists, OCI
+image manifests and indexes, resumable uploads, cross-image layer mounts,
+tag/catalog pagination, referrers, and tag/manifest/blob deletion through
+the OCI Distribution API. `docker image rm` only removes a local copy.
+Deleting a registry tag leaves its digest and layers intact; a manifest
+referenced by an index cannot be deleted until that index is removed.
+Unreferenced data is not garbage-collected automatically.
+
+Blobs use SHA-256 and are limited to 10 GiB each; manifests are limited to
+4 MiB. External descriptor URLs are not supported. Upload sessions expire
+after 24 hours; expired sessions are cleaned up during later upload
+activity for that image.
+
+Registry files live under
+`repository_root/<storage-key>.git/gitadel-registry/`, outside Git's object
+database. Renaming a repository keeps its images. Soft deletion hides
+them, restoration makes them available again, and permanent repository
+purge removes them. Gitadel backups include registry data. LFS storage
+target changes do not move container images.
+
 ## Git LFS storage
 
 Git repositories, issue attachments, and release assets remain under the configured local storage roots. Administrators define tested filesystem and S3-compatible destinations under **Administration → Storage**. User-defined storage targets are also available as backup destinations; Gitadel does not create a default backup provider. Filesystem backups use a sibling `<storage-name>-backups` directory so an archive never contains itself; S3 backups use a `backups` child of the target prefix.
@@ -400,8 +458,9 @@ docker compose start gitadel
 
 The archive contains the SQLite database (users, instance settings,
 credentials, and all other relational state), repositories and their
-attachments, LFS and release assets, the SSH host key, and the effective
-Gitadel configuration. Every file is covered by a SHA-256 manifest. Restore
+attachments and container images, LFS and release assets, the SSH host key,
+and the effective Gitadel configuration. Every file is covered by a SHA-256
+manifest. Restore
 rejects changed, missing, or extra files and only writes database and storage
 data into empty configured paths. Stop the service before restoring:
 

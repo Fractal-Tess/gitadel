@@ -15,7 +15,7 @@
 
 Gitadel keeps the useful parts of a forge without becoming another collaboration platform. It is for individuals and small teams that want to push repositories over SSH, browse them on the web, and keep the entire instance in one portable data directory.
 
-- **Store** public and private repositories under user or organization namespaces, with access controls, Git LFS, and file locks.
+- **Store** public and private repositories under user or organization namespaces, with access controls, Git LFS, file locks, and a built-in container registry.
 - **Browse** branches, tags, history, diffs, issues, rendered Markdown, syntax-highlighted source, topics, and language statistics.
 - **Mirror** public or token-authenticated repositories over HTTPS, keep every ref synchronized, import GitHub topics and issues, and convert a mirror into a writable repository without losing its contents.
 
@@ -54,6 +54,10 @@ gtd admin instance get
 ```
 
 Create a token under **Account settings → Access**, then enter the server URL and token at the login prompts. The CLI remembers them for later commands. NixOS users can instead point the client at a runtime SOPS secret. See [client setup, credential storage, and CI usage](INSTALL.md#command-line-client).
+
+## Container images
+
+Push Docker and OCI images to `git.example.com/owner/repository:tag` on the same origin as Gitadel. The Git repository must exist first; its visibility and permissions apply to the images. See [registry setup, authentication, and limits](INSTALL.md#container-registry).
 
 ## Dokploy
 

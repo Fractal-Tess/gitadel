@@ -4,6 +4,10 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+### Added
+
+- Added a built-in Docker/OCI registry on Gitadel's HTTP origin. Images belong to existing Git repositories and share their visibility, permissions, rename, deletion, and backup lifecycle. The registry supports API-token login, resumable uploads, layer mounts, image indexes, referrers, and content deletion.
+
 ## [0.7.1] - 2026-09-17
 
 ### Changed

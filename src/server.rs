@@ -4,8 +4,9 @@ use anyhow::{Context, Result};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{Path, State},
+    extract::{Path, Request, State},
     http::{HeaderValue, StatusCode, Uri, header},
+    middleware::{self, Next},
     response::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
@@ -21,6 +22,7 @@ use tokio::{
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
+use tower::ServiceExt;
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 use tracing::info;
 
@@ -69,6 +71,60 @@ async fn frontend_asset(name: &str) -> Option<Cow<'static, [u8]>> {
 struct HealthResponse {
     status: &'static str,
     database: &'static str,
+}
+
+async fn dispatch_registry(
+    State(registry): State<Router>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    // `v2` remains a valid Git namespace; registry requests must not steal its UI or Git transport.
+    let git_path = path
+        .strip_prefix("/v2/")
+        .and_then(|path| path.split_once('/'))
+        .is_some_and(|(_, resource)| {
+            matches!(
+                resource,
+                "info/refs"
+                    | "git-upload-pack"
+                    | "git-receive-pack"
+                    | "info/lfs/objects/batch"
+                    | "info/lfs/locks"
+                    | "info/lfs/locks/verify"
+            ) || resource
+                .strip_prefix("info/lfs/objects/")
+                .is_some_and(|oid| {
+                    oid.len() == 64 && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                || resource
+                    .strip_prefix("info/lfs/locks/")
+                    .and_then(|path| path.strip_suffix("/unlock"))
+                    .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+        });
+    let navigation = matches!(
+        *request.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    ) && request
+        .headers()
+        .get_all(header::ACCEPT)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|value| {
+            value
+                .split(';')
+                .next()
+                .is_some_and(|value| value.trim() == "text/html")
+        });
+    if path.starts_with("/v2/") && !git_path && !navigation {
+        match registry.oneshot(request).await {
+            Ok(response) => response,
+            Err(never) => match never {},
+        }
+    } else {
+        next.run(request).await
+    }
 }
 
 pub enum ServerExit {
@@ -148,6 +204,10 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
         .merge(repository::git_http_router().with_state(git_http_state))
         .fallback(get(frontend))
         .layer(CompressionLayer::new())
+        .layer(middleware::from_fn_with_state(
+            crate::registry::router(repository_state.clone()),
+            dispatch_registry,
+        ))
         .layer(TraceLayer::new_for_http());
 
     info!(
