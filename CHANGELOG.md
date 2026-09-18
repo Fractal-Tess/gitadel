@@ -4,6 +4,12 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-09-18
+
+### Changed
+
+- Simplified repository owner choices to names only. New repositories now start with the name focused; Tab moves through description and the large Private/Public buttons. Arrow keys move between visibility choices, Space selects one, and Enter creates the repository.
+
 ## [0.9.0] - 2026-09-18
 
 ### Added
@@ -268,7 +274,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/Fractal-Tess/gitadel/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/Fractal-Tess/gitadel/compare/v0.7.0...v0.7.1

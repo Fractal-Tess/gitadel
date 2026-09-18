@@ -6,6 +6,9 @@
   import Building2 from "@lucide/svelte/icons/building-2";
   import GitBranch from "@lucide/svelte/icons/git-branch";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+  import Globe from "@lucide/svelte/icons/globe";
+  import Lock from "@lucide/svelte/icons/lock";
+  import { tick } from "svelte";
   import { toast } from "svelte-sonner";
 
   import { avatarUrl } from "$lib/api/account.js";
@@ -17,6 +20,7 @@
   import { Input } from "$lib/components/ui/input/index.js";
   import * as Select from "$lib/components/ui/select/index.js";
   import { Textarea } from "$lib/components/ui/textarea/index.js";
+  import * as ToggleGroup from "$lib/components/ui/toggle-group/index.js";
 
   import { ApiFailure, jsonBody, requestJson } from "$lib/api/transport.js";
   import {
@@ -51,7 +55,6 @@
             {
               slug: user.username,
               label: user.username,
-              description: "Personal namespace",
               imageUrl: avatarUrl(user.id, user.avatar_updated_at),
               organization: false,
             },
@@ -60,7 +63,6 @@
       ...organizations.map((organization) => ({
         slug: organization.slug,
         label: organization.display_name || organization.slug,
-        description: organization.slug,
         imageUrl: organizationAvatarUrl(
           organization.slug,
           organization.avatar_updated_at,
@@ -80,6 +82,8 @@
   let mirrorLoadError = $state<string | null>(null);
   let namespace = $state("");
   let name = $state("");
+  let newRepositoryButton = $state<HTMLButtonElement | null>(null);
+  let repositoryNameInput = $state<HTMLInputElement | null>(null);
   let description = $state("");
   let visibility = $state<"public" | "private">("private");
   let mirrorRemoteUrl = $state("");
@@ -168,12 +172,18 @@
     }
   }
 
-  function selectMode(next: Exclude<CreateMode, "choose">): void {
+  async function selectMode(
+    next: Exclude<CreateMode, "choose">,
+  ): Promise<void> {
     mirrorLoadError = null;
     mode = next;
     if (next === "mirror") {
       mirrorIdentityId = "";
       void loadMirrorOptions();
+    }
+    if (next === "repository") {
+      await tick();
+      repositoryNameInput?.focus();
     }
   }
   function backToChoices(): void {
@@ -212,7 +222,16 @@
     return `${identity.name} · ${provider} · ${identity.namespaceLabel}`;
   }
 
+  function submitVisibility(
+    event: KeyboardEvent & { currentTarget: HTMLButtonElement },
+  ): void {
+    if (event.key !== "Enter" || event.isComposing) return;
+    event.preventDefault();
+    if (!event.repeat) event.currentTarget.form?.requestSubmit();
+  }
+
   async function createRepository(): Promise<void> {
+    if (creating) return;
     creating = true;
     try {
       const repository = await requestJson(
@@ -284,7 +303,22 @@
 </script>
 
 <Dialog.Root bind:open={shell.createOpen}>
-  <Dialog.Content class="ring-foreground/20 sm:max-w-2xl">
+  <Dialog.Content
+    class="ring-foreground/20 sm:max-w-2xl"
+    onOpenAutoFocus={(event) => {
+      // Deferred chooser autofocus can otherwise outlive a mode change.
+      const initialFocus =
+        mode === "repository"
+          ? repositoryNameInput
+          : mode === "choose"
+            ? newRepositoryButton
+            : null;
+      if (initialFocus) {
+        event.preventDefault();
+        initialFocus.focus();
+      }
+    }}
+  >
     {#if mode === "choose"}
       <Dialog.Header>
         <Dialog.Title>Create new</Dialog.Title>
@@ -295,6 +329,7 @@
       </Dialog.Header>
       <div class="grid gap-3">
         <button
+          bind:this={newRepositoryButton}
           type="button"
           class="group flex min-h-32 items-center gap-5 rounded-xl border bg-card/25 p-5 text-left transition-colors hover:border-foreground/25 hover:bg-card/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           onclick={() => selectMode("repository")}
@@ -496,10 +531,7 @@
               onValueChange={selectNamespace}
               disabled={mode === "mirror" && Boolean(mirrorIdentityId)}
             >
-              <Select.Trigger
-                id="repository-namespace"
-                class="h-auto min-h-9 w-full py-1.5"
-              >
+              <Select.Trigger id="repository-namespace" class="w-full">
                 {#if selectedOwner}
                   <span class="flex min-w-0 items-center gap-2 text-left">
                     <Avatar.Root class="size-6">
@@ -514,12 +546,7 @@
                         {/if}
                       </Avatar.Fallback>
                     </Avatar.Root>
-                    <span class="min-w-0">
-                      <span class="block truncate">{selectedOwner.label}</span>
-                      <span class="block truncate text-xs text-muted-foreground"
-                        >{selectedOwner.description}</span
-                      >
-                    </span>
+                    <span class="truncate">{selectedOwner.label}</span>
                   </span>
                 {:else}
                   Select an owner
@@ -541,15 +568,7 @@
                           {/if}
                         </Avatar.Fallback>
                       </Avatar.Root>
-                      <span class="min-w-0">
-                        <span class="block truncate font-medium"
-                          >{owner.label}</span
-                        >
-                        <span
-                          class="block truncate text-xs text-muted-foreground"
-                          >{owner.description}</span
-                        >
-                      </span>
+                      <span class="truncate font-medium">{owner.label}</span>
                     </span>
                   </Select.Item>
                 {/each}
@@ -560,6 +579,7 @@
             <Field.Label for="repository-name">Repository name</Field.Label>
             <Input
               id="repository-name"
+              bind:ref={repositoryNameInput}
               bind:value={name}
               maxlength={100}
               placeholder="project-name"
@@ -577,22 +597,40 @@
           />
         </Field.Field>
         <Field.Field>
-          <Field.Label for="repository-visibility">Visibility</Field.Label>
-          <Select.Root
+          <Field.Label id="repository-visibility-label">Visibility</Field.Label>
+          <ToggleGroup.Root
             type="single"
-            value={visibility}
-            onValueChange={(value) => {
-              if (value === "public" || value === "private") visibility = value;
-            }}
+            bind:value={
+              () => visibility,
+              (value) => {
+                if (value === "public" || value === "private")
+                  visibility = value;
+              }
+            }
+            variant="outline"
+            size="lg"
+            spacing={3}
+            class="grid w-full grid-cols-2"
+            aria-labelledby="repository-visibility-label"
+            disabled={creating}
           >
-            <Select.Trigger id="repository-visibility" class="w-full">
-              {visibility === "private" ? "Private" : "Public"}
-            </Select.Trigger>
-            <Select.Content>
-              <Select.Item value="private">Private</Select.Item>
-              <Select.Item value="public">Public</Select.Item>
-            </Select.Content>
-          </Select.Root>
+            <ToggleGroup.Item
+              value="private"
+              class="h-20 flex-col gap-2"
+              onkeydown={submitVisibility}
+            >
+              <Lock />
+              Private
+            </ToggleGroup.Item>
+            <ToggleGroup.Item
+              value="public"
+              class="h-20 flex-col gap-2"
+              onkeydown={submitVisibility}
+            >
+              <Globe />
+              Public
+            </ToggleGroup.Item>
+          </ToggleGroup.Root>
         </Field.Field>
         <Dialog.Footer class="sm:justify-between">
           <Button type="button" variant="ghost" onclick={backToChoices}>
