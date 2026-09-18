@@ -4,6 +4,10 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+### Fixed
+
+- Made the selected repository visibility clearly visible with a contrasting border, including the initial Private selection.
+
 ## [0.10.0] - 2026-09-18
 
 ### Added
