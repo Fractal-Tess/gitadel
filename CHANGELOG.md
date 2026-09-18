@@ -4,6 +4,17 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-18
+
+### Added
+
+- Added a **Container registry** tab to every repository, with image names, tags, digest-only references, stored sizes, push timestamps, and copyable Docker pull commands. Empty registries show publishing instructions to repository writers. The browsing API respects repository access and works with local, filesystem, and S3 storage.
+
+### Changed
+
+- Repository search results now show repository logos. Removed the decorative outline around repository logos.
+- Repositories without LFS data show **Size** as a plain metric alongside commits, branches, and tags. Repositories with LFS data retain the three-column Git, LFS, and total breakdown.
+
 ## [0.9.1] - 2026-09-18
 
 ### Changed
@@ -274,7 +285,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/Fractal-Tess/gitadel/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.7.1...v0.8.0

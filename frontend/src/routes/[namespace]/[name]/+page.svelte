@@ -10,6 +10,7 @@
   import RepositoryIssues from "$lib/components/repository/repository-issues.svelte";
   import RepositoryOverview from "$lib/components/repository/repository-overview.svelte";
   import RepositoryReleases from "$lib/components/repository/repository-releases.svelte";
+  import RepositoryRegistry from "$lib/components/repository/repository-registry.svelte";
   import RepositorySettings from "$lib/components/repository/repository-settings.svelte";
   import RepositorySidebar from "$lib/components/repository/repository-sidebar.svelte";
   import RepositoryTags from "$lib/components/repository/repository-tags.svelte";
@@ -159,6 +160,8 @@
             <RepositoryReleases {state} />
           {:else if state.view === "issues"}
             <RepositoryIssues {state} />
+          {:else if state.view === "registry"}
+            <RepositoryRegistry {state} />
           {/if}
         </div>
         <RepositorySidebar {state} />

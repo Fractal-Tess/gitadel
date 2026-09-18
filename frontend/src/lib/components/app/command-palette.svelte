@@ -16,6 +16,7 @@
   import Settings2 from "@lucide/svelte/icons/settings-2";
   import ShieldCheck from "@lucide/svelte/icons/shield-check";
 
+  import RepositoryIcon from "$lib/components/repository/repository-icon.svelte";
   import * as Command from "$lib/components/ui/command/index.js";
   import * as Kbd from "$lib/components/ui/kbd/index.js";
   import type { Repository } from "$lib/api/repositories.js";
@@ -562,6 +563,12 @@
     onmouseleave={() =>
       cancelRepositoryPreload(repository.namespace, repository.name, scope)}
   >
+    <RepositoryIcon
+      namespace={repository.namespace}
+      name={repository.name}
+      iconUpdatedAt={repository.icon_updated_at}
+      class="size-6"
+    />
     <span class="min-w-0 flex-1 truncate font-mono text-[0.8rem]">
       <span class="text-muted-foreground">{repository.namespace}/</span><span
         class="font-medium">{repository.name}</span

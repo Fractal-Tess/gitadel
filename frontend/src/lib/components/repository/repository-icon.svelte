@@ -39,7 +39,7 @@
   );
 </script>
 
-<Avatar.Root class={cn("shrink-0 rounded-md", className)}>
+<Avatar.Root class={cn("shrink-0 rounded-md after:hidden", className)}>
   {#if source}
     <Avatar.Image src={source} alt="" class="rounded-md object-cover" />
   {/if}

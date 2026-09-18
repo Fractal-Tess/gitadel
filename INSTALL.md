@@ -371,7 +371,7 @@ Gitadel includes a Docker/OCI registry at `/v2/` on its existing HTTP origin.
 It needs no separate registry process, port, or data volume.
 
 Create a lowercase Git repository such as `archivist/my-app` first, through
-the web UI or `gtd repo create`. Under **Account settings → Access**, create
+the web UI or `gtd repo create`. Under **Account settings → API tokens**, create
 an API token with `read` and `write` scopes. Use that token as the password
 for Docker login, not your account password:
 
@@ -387,6 +387,17 @@ by your CI or secret manager. Images can also have a suffix, such as
 `git.example.com/archivist/my-app/worker:latest`; they still belong to
 `archivist/my-app`. Organization images use the organization namespace,
 but login always uses your own Gitadel username.
+
+Open **Container registry** in the repository sidebar to browse its images,
+tags, and digest-only references, or copy a Docker pull command. The tab remains
+visible when empty and shows publishing instructions to repository writers.
+Stored sizes count blob and manifest payloads once, regardless of how many tags
+reference them, and exclude unfinished uploads. New pushes record timestamps;
+older references show unavailable dates until pushed again.
+
+`GET /api/v1/repositories/{namespace}/{name}/registry` returns the same listing.
+It accepts browser sessions or API tokens with `read` scope, and applies the
+repository's normal visibility and access checks.
 
 Public repositories allow anonymous pulls. Private images require the
 same repository access as Git; pulls need a `read` token, and Docker pushes

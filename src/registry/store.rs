@@ -1,4 +1,5 @@
 use axum::body::Body;
+use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -121,6 +122,23 @@ struct ManifestMeta {
 struct ReferenceMeta {
     reference: String,
     digest: String,
+    #[serde(default)]
+    updated_at: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ImageReferenceMetadata {
+    pub tag: Option<String>,
+    pub digest: String,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ImageMetadata {
+    pub suffix: String,
+    pub size_bytes: u64,
+    pub updated_at: Option<String>,
+    pub references: Vec<ImageReferenceMetadata>,
 }
 
 static IMAGE_LOCKS: LazyLock<Vec<Arc<Mutex<()>>>> = LazyLock::new(|| {
@@ -254,6 +272,68 @@ impl RegistryStore {
         result.sort();
         Ok(result)
     }
+    pub(crate) async fn browse_images(
+        &self,
+        repository_path: &Path,
+        repository_storage_key: Uuid,
+        backend: Option<Arc<dyn BlobStore>>,
+    ) -> Result<Vec<ImageMetadata>, StoreError> {
+        let suffixes = self.list_images(repository_path).await?;
+        let mut result = Vec::with_capacity(suffixes.len());
+        if let Some(backend) = backend {
+            let prefix = ObjectPrefix::new(format!("registry/{repository_storage_key}"))?;
+            let mut objects_by_image = HashMap::<String, Vec<_>>::new();
+            for object in backend.list(&prefix).await? {
+                let Some(relative) = object
+                    .key
+                    .as_str()
+                    .strip_prefix(prefix.as_str())
+                    .and_then(|value| value.strip_prefix('/'))
+                else {
+                    continue;
+                };
+                let Some((image_hash, _)) = relative.split_once('/') else {
+                    continue;
+                };
+                if image_hash.len() != 64
+                    || !image_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    continue;
+                }
+                objects_by_image
+                    .entry(image_hash.to_owned())
+                    .or_default()
+                    .push(object);
+            }
+            for suffix in suffixes {
+                let image_hash = hex_digest(suffix.as_bytes());
+                let image = self.image_external(
+                    repository_storage_key,
+                    repository_path.to_path_buf(),
+                    &suffix,
+                    backend.clone(),
+                );
+                let objects = objects_by_image.remove(&image_hash).unwrap_or_default();
+                let metadata = image.metadata(&objects).await?;
+                if !metadata.references.is_empty() {
+                    result.push(metadata);
+                }
+            }
+        } else {
+            for suffix in suffixes {
+                let image = self.image(repository_path.to_path_buf(), &suffix);
+                let local = FilesystemBlobStore::new(image.image_dir.clone()).await?;
+                let objects = local.list(&ObjectPrefix::new("")?).await?;
+                let metadata = image.metadata(&objects).await?;
+                if !metadata.references.is_empty() {
+                    result.push(metadata);
+                }
+            }
+        }
+        result.sort_by(|left, right| left.suffix.cmp(&right.suffix));
+        Ok(result)
+    }
+
     pub(crate) async fn metadata_usage(
         &self,
         repository_path: &Path,
@@ -313,6 +393,149 @@ impl std::ops::AddAssign for RegistryUsage {
         self.image_count += other.image_count;
         self.upload_count += other.upload_count;
         self.upload_bytes += other.upload_bytes;
+    }
+}
+
+impl ImageStore {
+    async fn metadata(
+        &self,
+        objects: &[crate::blob_store::BlobMetadata],
+    ) -> Result<ImageMetadata, StoreError> {
+        let _guard = self.lock().await?;
+        let mut manifest_sizes = HashMap::<String, u64>::new();
+        let mut size_bytes = 0_u64;
+        for object in objects {
+            let relative = if let Some(external) = &self.external {
+                object
+                    .key
+                    .as_str()
+                    .strip_prefix(external.prefix.as_str())
+                    .and_then(|value| value.strip_prefix('/'))
+            } else {
+                Some(object.key.as_str())
+            };
+            let Some(relative) = relative else {
+                continue;
+            };
+            if let Some(digest) = relative
+                .strip_prefix("manifests/objects/")
+                .filter(|value| !value.contains('/'))
+                .and_then(|value| value.parse::<BlobDigest>().ok())
+            {
+                let digest = format!("sha256:{}", digest.to_hex());
+                manifest_sizes.insert(digest, object.size);
+                size_bytes = size_bytes
+                    .checked_add(object.size)
+                    .ok_or_else(|| StoreError::Invalid("image size overflow".to_owned()))?;
+            } else if relative
+                .strip_prefix("blobs/")
+                .is_some_and(|value| value.split('/').count() == 3)
+            {
+                size_bytes = size_bytes
+                    .checked_add(object.size)
+                    .ok_or_else(|| StoreError::Invalid("image size overflow".to_owned()))?;
+            }
+        }
+
+        let mut references_by_digest = HashMap::<String, Vec<ReferenceMeta>>::new();
+        let mut entries = match fs::read_dir(self.refs_dir()).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                return Ok(ImageMetadata {
+                    suffix: self.suffix.to_string(),
+                    size_bytes,
+                    updated_at: None,
+                    references: manifest_sizes
+                        .into_keys()
+                        .map(|digest| ImageReferenceMetadata {
+                            tag: None,
+                            digest,
+                            updated_at: None,
+                        })
+                        .collect(),
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            let metadata = fs::symlink_metadata(entry.path()).await?;
+            if !metadata.file_type().is_file() {
+                continue;
+            }
+            let bytes = read_bounded_file(&entry.path(), 4096).await?;
+            let Ok(reference) = serde_json::from_slice::<ReferenceMeta>(&bytes) else {
+                continue;
+            };
+            let Ok(digest) = normalize_digest(&reference.digest) else {
+                continue;
+            };
+            let key = if reference.reference.starts_with("sha256:") {
+                let Ok(key) = normalize_digest(&reference.reference) else {
+                    continue;
+                };
+                key
+            } else {
+                reference.reference.clone()
+            };
+            if key != digest && !valid_tag(&key) {
+                continue;
+            }
+            references_by_digest
+                .entry(digest.clone())
+                .or_default()
+                .push(ReferenceMeta {
+                    reference: key,
+                    digest,
+                    updated_at: reference.updated_at,
+                });
+        }
+
+        let mut result = Vec::new();
+        let mut latest = None::<DateTime<Utc>>;
+        for digest in manifest_sizes.keys() {
+            let references = references_by_digest
+                .get(digest)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let digest_reference = references
+                .iter()
+                .find(|reference| reference.reference == *digest);
+            update_latest(
+                &mut latest,
+                digest_reference.and_then(|reference| reference.updated_at.as_deref()),
+            );
+            let mut has_tag = false;
+            for reference in references {
+                if reference.reference == *digest || !valid_tag(&reference.reference) {
+                    continue;
+                }
+                has_tag = true;
+                update_latest(&mut latest, reference.updated_at.as_deref());
+                result.push(ImageReferenceMetadata {
+                    tag: Some(reference.reference.clone()),
+                    digest: digest.clone(),
+                    updated_at: reference.updated_at.clone(),
+                });
+            }
+            if !has_tag {
+                result.push(ImageReferenceMetadata {
+                    tag: None,
+                    digest: digest.clone(),
+                    updated_at: digest_reference.and_then(|reference| reference.updated_at.clone()),
+                });
+            }
+        }
+        result.sort_by(|left, right| {
+            left.digest
+                .cmp(&right.digest)
+                .then_with(|| left.tag.cmp(&right.tag))
+        });
+        Ok(ImageMetadata {
+            suffix: self.suffix.to_string(),
+            size_bytes,
+            updated_at: latest.map(|value| value.to_rfc3339()),
+            references: result,
+        })
     }
 }
 
@@ -802,9 +1025,11 @@ impl ImageStore {
             }
             atomic_write(&metadata_path, &metadata_bytes).await?;
         }
+        let updated_at = Some(Utc::now().to_rfc3339());
         let digest_reference = ReferenceMeta {
             reference: digest.clone(),
             digest: digest.clone(),
+            updated_at: updated_at.clone(),
         };
         atomic_write(
             &self.reference_path(&digest),
@@ -818,6 +1043,7 @@ impl ImageStore {
                 &serde_json::to_vec(&ReferenceMeta {
                     reference: reference.to_owned(),
                     digest: digest.clone(),
+                    updated_at,
                 })
                 .map_err(|error| StoreError::Invalid(error.to_string()))?,
             )
@@ -1423,6 +1649,16 @@ fn now_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
+}
+
+fn update_latest(latest: &mut Option<DateTime<Utc>>, value: Option<&str>) {
+    let Some(value) = value.and_then(|value| DateTime::parse_from_rfc3339(value).ok()) else {
+        return;
+    };
+    let value = value.with_timezone(&Utc);
+    if latest.is_none_or(|current| value > current) {
+        *latest = Some(value);
+    }
 }
 async fn existing_regular_file(path: &Path) -> Result<Option<()>, StoreError> {
     match fs::symlink_metadata(path).await {

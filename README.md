@@ -59,7 +59,7 @@ Create a token under **Account settings → Access**, then enter the server URL 
 
 ## Container images
 
-Push Docker and OCI images to `git.example.com/owner/repository:tag` on the same origin as Gitadel. The Git repository must exist first; its visibility and permissions apply to the images. See [registry setup, authentication, and limits](INSTALL.md#container-registry).
+Push Docker and OCI images to `git.example.com/owner/repository:tag` on the same origin as Gitadel. The Git repository must exist first; its visibility and permissions apply to the images. Browse images, tags, sizes, and pull commands from the repository's **Container registry** tab. See [registry setup, authentication, and limits](INSTALL.md#container-registry).
 
 ## Dokploy
 

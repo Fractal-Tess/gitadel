@@ -317,22 +317,17 @@
             </dd>
           </div>
         </dl>
-      {:else}
-        <dl
-          class="mt-5 flex items-baseline justify-between gap-4 rounded-md border px-3 py-2.5"
-        >
-          <dt
-            class="text-[10px] font-medium uppercase tracking-wide text-muted-foreground"
-          >
-            Size
-          </dt>
-          <dd class="text-xs tabular-nums">
-            {formatRepositorySize(repository.browser.refs?.size_bytes)}
-          </dd>
-        </dl>
       {/if}
 
       <dl class="mt-4 flex flex-col gap-3 text-xs">
+        {#if !hasLfs}
+          <div class="flex justify-between gap-4">
+            <dt class="text-muted-foreground">Size</dt>
+            <dd class="tabular-nums">
+              {formatRepositorySize(repository.browser.refs?.size_bytes)}
+            </dd>
+          </div>
+        {/if}
         <div class="flex justify-between gap-4">
           <dt class="text-muted-foreground">Commits</dt>
           <dd>

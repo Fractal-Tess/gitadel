@@ -16,6 +16,7 @@ mod maintenance;
 mod mirror_scheduler;
 mod mirrors;
 mod native_remote;
+mod registry;
 mod releases;
 mod resources;
 mod ssh;
@@ -911,6 +912,10 @@ pub fn router() -> Router<RepositoryState> {
                 .layer(axum::extract::DefaultBodyLimit::max(
                     icon::MAX_ICON_REQUEST_BYTES,
                 )),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/registry",
+            get(registry::browse),
         )
         .route("/repositories/{namespace}/{name}/refs", get(browser::refs))
         .route(

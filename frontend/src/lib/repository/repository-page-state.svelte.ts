@@ -15,6 +15,7 @@ import {
   type Repository,
   type Tree,
 } from "$lib/api/repositories.js";
+import { registrySchema, type Registry } from "$lib/api/registry.js";
 import type { AuthStatus } from "$lib/api/auth.js";
 import type { AppState } from "$lib/state/app-state.svelte.js";
 import { copyText } from "$lib/clipboard.js";
@@ -38,6 +39,7 @@ export type RepositoryView =
   | "tags"
   | "releases"
   | "issues"
+  | "registry"
   | "settings"
   | "integrations";
 export type CopyTarget = "http" | "ssh";
@@ -49,6 +51,7 @@ const views: readonly RepositoryView[] = [
   "tags",
   "releases",
   "issues",
+  "registry",
   "settings",
   "integrations",
 ];
@@ -66,6 +69,9 @@ export class RepositoryPageState {
   readonly releases: RepositoryReleasesState;
   readonly webhooks: RepositoryWebhooksState;
   readonly settings: RepositorySettingsState;
+  registry = $state.raw<Registry | null>(null);
+  registryLoading = $state(false);
+  registryError = $state<string | null>(null);
   repository = $state.raw<Repository | null>(null);
   authStatus = $state.raw<AuthStatus | null>(null);
   view = $state<RepositoryView>("overview");
@@ -242,6 +248,13 @@ export class RepositoryPageState {
     const init = { signal: controller.signal };
     this.error = null;
     this.emptyRepository = false;
+    if (this.view === "registry") {
+      this.registry = null;
+      this.registryLoading = true;
+      this.registryError = null;
+    } else {
+      this.registryLoading = false;
+    }
     this.browser.resetView(this.revision);
     this.browser.selectedPath = this.repositoryPath;
     if (this.view !== "overview") void this.browser.loadStats(this.revision);
@@ -276,6 +289,20 @@ export class RepositoryPageState {
               : Promise.resolve(),
           ]);
           break;
+        case "registry": {
+          const registry = await requestJson(
+            repositoryApi(this, "/registry"),
+            registrySchema,
+            init,
+          );
+          if (
+            this.#viewRequestController !== controller ||
+            this.view !== "registry"
+          )
+            return;
+          this.registry = registry;
+          break;
+        }
         case "settings":
           await this.webhooks.loadWebhooks(init);
           break;
@@ -286,14 +313,21 @@ export class RepositoryPageState {
           break;
       }
     } catch (caught) {
+      if (this.#viewRequestController !== controller) return;
       if (!(caught instanceof DOMException && caught.name === "AbortError")) {
-        if (caught instanceof ApiFailure && caught.status === 404)
+        if (this.view === "registry") {
+          this.registryError = errorMessage(caught);
+        } else if (caught instanceof ApiFailure && caught.status === 404) {
           this.emptyRepository = true;
-        else this.setError(errorMessage(caught));
+        } else {
+          this.setError(errorMessage(caught));
+        }
       }
     } finally {
-      if (this.#viewRequestController === controller)
+      if (this.#viewRequestController === controller) {
         this.#viewRequestController = null;
+        if (this.view === "registry") this.registryLoading = false;
+      }
       if (!this.#destroyed) this.scheduleSupplementaryRefresh();
     }
   }

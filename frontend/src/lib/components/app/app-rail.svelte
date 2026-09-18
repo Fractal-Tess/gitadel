@@ -7,6 +7,7 @@
   import Building2 from "@lucide/svelte/icons/building-2";
   import CircleDot from "@lucide/svelte/icons/circle-dot";
   import Compass from "@lucide/svelte/icons/compass";
+  import Container from "@lucide/svelte/icons/container";
   import FileCode2 from "@lucide/svelte/icons/file-code-2";
   import Heart from "@lucide/svelte/icons/heart";
   import History from "@lucide/svelte/icons/history";
@@ -134,6 +135,12 @@
         href: `${base}?view=tags`,
         icon: Tag,
         active: view === "tags",
+      },
+      {
+        label: "Container registry",
+        href: `${base}?view=registry`,
+        icon: Container,
+        active: view === "registry",
       },
       ...(current?.canManage
         ? [
