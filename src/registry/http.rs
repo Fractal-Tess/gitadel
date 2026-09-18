@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, io::SeekFrom};
+use std::collections::BTreeSet;
 
 use axum::{
     Json, Router,
@@ -10,10 +10,6 @@ use axum::{
     routing::any,
 };
 use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder};
-use tokio::{
-    fs::File,
-    io::{AsyncReadExt, AsyncSeekExt},
-};
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
@@ -26,6 +22,7 @@ use super::{
     },
 };
 use crate::{
+    blob_store::BlobReader,
     entity::repository,
     repository::{Permission, RepositoryState},
 };
@@ -154,6 +151,11 @@ async fn dispatch(
     let resource = parse_resource(&path)?;
     let (parts, body) = request.into_parts();
     let query = parts.uri.query().unwrap_or("");
+    let _operation = if matches!(parts.method, Method::GET | Method::HEAD) {
+        None
+    } else {
+        Some(state.repositories.registry_storage().lock_operation().await)
+    };
     match resource {
         Resource::Catalog => catalog(&state, &parts.method, &parts.headers, query).await,
         Resource::Blob { image, digest } => {
@@ -305,9 +307,18 @@ async fn context(
                 RegistryError::challenge(challenge(state, image, action))
             }
         })?;
-    let store = state
-        .store
-        .image(state.repositories.repository_path(&repository), name.suffix);
+    let store = if let Some(backend) = state.repositories.registry_storage().store() {
+        state.store.image_external(
+            repository.storage_key,
+            state.repositories.repository_path(&repository),
+            name.suffix,
+            backend,
+        )
+    } else {
+        state
+            .store
+            .image(state.repositories.repository_path(&repository), name.suffix)
+    };
     Ok((repository, store))
 }
 
@@ -359,14 +370,30 @@ async fn blob(
                     .status(StatusCode::OK)
                     .header(header::CONTENT_LENGTH, size.to_string())
                     .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .header(header::ACCEPT_RANGES, "bytes")
                     .header("docker-content-digest", digest)
                     .body(Body::empty())?);
             }
-            let (file, size) = store
-                .open_blob(digest)
+            let size = store
+                .blob_size(digest)
                 .await?
                 .ok_or_else(|| missing("BLOB_UNKNOWN", "Blob not found."))?;
-            serve_blob(file, size, digest, headers).await
+            let range = headers
+                .get(header::RANGE)
+                .map(|value| {
+                    let value = value
+                        .to_str()
+                        .map_err(|_| RegistryError::range("Invalid range."))?;
+                    byte_range(value, size)
+                })
+                .transpose()?;
+            let reader_range = range.map(|(start, end)| (start, end.saturating_add(1)));
+            let reader = store
+                .blob_reader(digest, reader_range)
+                .await?
+                .ok_or_else(|| missing("BLOB_UNKNOWN", "Blob not found."))?
+                .0;
+            serve_blob(reader, size, digest, range).await
         }
         Method::DELETE => {
             authorize(state, headers, &repository, image, Actions::DELETE).await?;
@@ -414,36 +441,12 @@ fn byte_range(value: &str, size: u64) -> Result<(u64, u64), RegistryError> {
 }
 
 async fn serve_blob(
-    mut file: File,
+    reader: BlobReader,
     size: u64,
     digest: &str,
-    headers: &HeaderMap,
+    range: Option<(u64, u64)>,
 ) -> Result<Response, RegistryError> {
-    let range = match headers.get(header::RANGE) {
-        None => None,
-        Some(value) => match value
-            .to_str()
-            .ok()
-            .and_then(|value| byte_range(value, size).ok())
-        {
-            Some(range) => Some(range),
-            None => {
-                let mut response =
-                    RegistryError::range("Range is not satisfiable.").into_response();
-                response.headers_mut().insert(
-                    header::CONTENT_RANGE,
-                    HeaderValue::from_str(&format!("bytes */{size}"))?,
-                );
-                return Ok(response);
-            }
-        },
-    };
-    let (start, length) = range.map_or((0, size), |(start, end)| (start, end - start + 1));
-    if start != 0 {
-        file.seek(SeekFrom::Start(start))
-            .await
-            .map_err(StoreError::from)?;
-    }
+    let length = range.map_or(size, |(start, end)| end - start + 1);
     let mut response = Response::builder()
         .status(if range.is_some() {
             StatusCode::PARTIAL_CONTENT
@@ -457,7 +460,7 @@ async fn serve_blob(
     if let Some((start, end)) = range {
         response = response.header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}"));
     }
-    Ok(response.body(Body::from_stream(ReaderStream::new(file.take(length))))?)
+    Ok(response.body(Body::from_stream(ReaderStream::new(reader)))?)
 }
 
 async fn manifest(

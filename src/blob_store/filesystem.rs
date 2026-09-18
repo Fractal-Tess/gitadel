@@ -1,11 +1,11 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{io::SeekFrom, ops::Range, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use sha2::{Digest as _, Sha256};
 use tokio::{
     fs::{self, OpenOptions},
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
+    io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _},
 };
 use uuid::Uuid;
 
@@ -76,6 +76,21 @@ impl BlobStore for FilesystemBlobStore {
             .await
             .with_context(|| format!("could not open blob {}", path.display()))?;
         Ok(verifying_reader(Box::pin(file), expected))
+    }
+
+    async fn read_range(&self, key: &ObjectKey, range: Range<u64>) -> Result<BlobReader> {
+        ensure!(range.start < range.end, "blob byte range must not be empty");
+        let metadata = self.stat(key).await?.context("blob does not exist")?;
+        ensure!(
+            range.end <= metadata.size,
+            "blob byte range exceeds object size"
+        );
+        let path = self.path(key);
+        let mut file = fs::File::open(&path)
+            .await
+            .with_context(|| format!("could not open blob {}", path.display()))?;
+        file.seek(SeekFrom::Start(range.start)).await?;
+        Ok(Box::pin(file.take(range.end - range.start)))
     }
 
     async fn put_verified(
@@ -242,6 +257,32 @@ mod tests {
         assert_eq!(
             store.stat(&key).await.unwrap().unwrap().size,
             payload.len() as u64
+        );
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn range_reads_are_bounded_and_reject_invalid_offsets() {
+        let root = std::env::temp_dir().join(format!("gitadel-blob-test-{}", Uuid::new_v4()));
+        let store = FilesystemBlobStore::new(root.clone()).await.unwrap();
+        let payload = b"range payload";
+        let digest = BlobDigest::from_bytes(Sha256::digest(payload).into());
+        let key = ObjectKey::new(digest.to_hex()).unwrap();
+        store
+            .put_verified(&key, digest, Box::pin(Cursor::new(payload)))
+            .await
+            .unwrap();
+
+        let mut reader = store.read_range(&key, 3..8).await.unwrap();
+        let mut actual = Vec::new();
+        reader.read_to_end(&mut actual).await.unwrap();
+        assert_eq!(actual, &payload[3..8]);
+        assert!(store.read_range(&key, 0..0).await.is_err());
+        assert!(
+            store
+                .read_range(&key, 0..payload.len() as u64 + 1)
+                .await
+                .is_err()
         );
         fs::remove_dir_all(root).await.unwrap();
     }

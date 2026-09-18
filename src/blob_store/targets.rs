@@ -3,7 +3,8 @@ use std::{path::PathBuf, sync::Arc};
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait as _, ConnectionTrait as _, DatabaseConnection, EntityTrait as _, Set,
+    ActiveModelTrait as _, ColumnTrait as _, Condition, ConnectionTrait as _, DatabaseConnection,
+    EntityTrait as _, QueryFilter as _, Set,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -12,7 +13,10 @@ use uuid::Uuid;
 
 use crate::{
     config::S3Settings,
-    entity::{lfs_storage_state, lfs_storage_target},
+    entity::{
+        lfs_storage_state, lfs_storage_target, registry_storage_migration, registry_storage_state,
+        repository,
+    },
 };
 
 use super::{BlobDigest, BlobStore, FilesystemBlobStore, ObjectKey, ObjectPrefix, S3BlobStore};
@@ -69,6 +73,7 @@ pub struct StorageTargetView {
     pub kind: String,
     pub configuration: serde_json::Value,
     pub active: bool,
+    pub registry_active: bool,
     pub managed_by_config: bool,
     pub capacity: Option<StorageTargetCapacity>,
     pub usage: StorageTargetUsage,
@@ -85,12 +90,10 @@ pub struct StorageTargetCapacity {
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 pub struct StorageTargetUsage {
-    /// LFS bytes the database attributes to this target. Free to read on every
-    /// request, but it only counts objects Gitadel has a record of.
     pub lfs_object_count: u64,
     pub lfs_bytes: u64,
-    /// Everything actually stored at the destination, from the last scan. Costs
-    /// a full listing, so it is only ever filled in on request.
+    pub registry_object_count: u64,
+    pub registry_bytes: u64,
     pub measured: Option<MeasuredUsage>,
 }
 
@@ -206,13 +209,44 @@ pub async fn list(
         .await?
         .context("LFS storage state is missing")?
         .active_target_id;
+    let registry_active = registry_storage_state::Entity::find_by_id(1)
+        .one(database)
+        .await?
+        .map(|state| state.active_target_id)
+        .unwrap_or(None);
     let targets = lfs_storage_target::Entity::find().all(database).await?;
     let lfs_usage = lfs_usage_by_target(database).await?;
+    let mut registry_object_count = 0;
+    let mut registry_bytes = 0_u64;
+    if let Some(id) = registry_active {
+        let (_, configuration) = find(database, id).await?;
+        let store = configuration.open().await?;
+        verify_ownership(store.as_ref(), id).await?;
+        let repositories = repository::Entity::find().all(database).await?;
+        let objects =
+            crate::registry::storage::inventory(store.as_ref(), true, &repositories).await?;
+        registry_object_count = objects.len() as u64;
+        for object in objects {
+            registry_bytes = registry_bytes
+                .checked_add(object.size)
+                .context("registry usage overflow")?;
+        }
+    }
     let usage_of = |id: Uuid| {
         let (lfs_object_count, lfs_bytes) = lfs_usage.get(&id).copied().unwrap_or((0, 0));
         StorageTargetUsage {
             lfs_object_count,
             lfs_bytes,
+            registry_object_count: if registry_active == Some(id) {
+                registry_object_count
+            } else {
+                0
+            },
+            registry_bytes: if registry_active == Some(id) {
+                registry_bytes
+            } else {
+                0
+            },
             measured: measured.get(&id).copied(),
         }
     };
@@ -226,6 +260,7 @@ pub async fn list(
             "path": fallback_path,
         }),
         active: active.is_none(),
+        registry_active: false,
         managed_by_config: true,
         capacity: filesystem_capacity(fallback_path),
         usage: usage_of(Uuid::nil()),
@@ -243,6 +278,7 @@ pub async fn list(
             kind: target.kind,
             configuration: configuration.redacted(),
             active: active == Some(target.id),
+            registry_active: registry_active == Some(target.id),
             managed_by_config: false,
             capacity,
             usage: usage_of(target.id),
@@ -309,10 +345,9 @@ pub async fn create(
         kind: model.kind,
         configuration: configuration.redacted(),
         active: false,
+        registry_active: false,
         managed_by_config: false,
         capacity,
-        // A target has to be empty before Gitadel claims it, so there is nothing
-        // to report and nothing to scan for.
         usage: StorageTargetUsage::default(),
     })
 }
@@ -444,6 +479,27 @@ pub async fn delete(database: &DatabaseConnection, target_id: Uuid) -> Result<()
     if active.active_target_id == Some(target_id) {
         bail!("the active LFS storage target cannot be deleted");
     }
+    let registry = registry_storage_state::Entity::find_by_id(1)
+        .one(database)
+        .await?
+        .context("registry storage state is missing")?;
+    if registry.active_target_id == Some(target_id) {
+        bail!("the active registry storage target cannot be deleted");
+    }
+    let migration = registry_storage_migration::Entity::find()
+        .filter(registry_storage_migration::Column::State.ne("completed"))
+        .filter(registry_storage_migration::Column::State.ne("failed"))
+        .filter(
+            Condition::any()
+                .add(registry_storage_migration::Column::SourceTargetId.eq(target_id))
+                .add(registry_storage_migration::Column::TargetId.eq(target_id)),
+        )
+        .one(database)
+        .await?;
+    ensure!(
+        migration.is_none(),
+        "a target used by an in-progress registry migration cannot be deleted"
+    );
     let result = lfs_storage_target::Entity::delete_by_id(target_id)
         .exec(database)
         .await?;

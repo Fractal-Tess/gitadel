@@ -183,6 +183,9 @@ fn verifying_reader(inner: BlobReader, expected: BlobDigest) -> BlobReader {
 pub trait BlobStore: Send + Sync {
     async fn stat(&self, key: &ObjectKey) -> Result<Option<BlobMetadata>>;
     async fn read(&self, key: &ObjectKey) -> Result<BlobReader>;
+    /// Streams a nonempty, in-bounds half-open byte range without staging the object.
+    /// Partial reads cannot verify the full object's content digest.
+    async fn read_range(&self, key: &ObjectKey, range: std::ops::Range<u64>) -> Result<BlobReader>;
     async fn put_verified(
         &self,
         key: &ObjectKey,

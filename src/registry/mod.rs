@@ -1,7 +1,8 @@
 mod auth;
 mod error;
 mod http;
-mod store;
+pub(crate) mod storage;
+pub(crate) mod store;
 
 pub use http::router;
 

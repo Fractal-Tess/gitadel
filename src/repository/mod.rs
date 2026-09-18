@@ -87,6 +87,7 @@ pub struct RepositoryState {
     github_known_hosts: Arc<Mutex<Option<(String, Instant)>>>,
     lfs_root: Arc<PathBuf>,
     lfs_storage: Arc<crate::storage::LfsStorageManager>,
+    registry_storage: Arc<crate::registry::storage::RegistryStorageManager>,
     public_url: Arc<Url>,
     ssh_port: u16,
     lfs_tokens: Arc<RwLock<HashMap<String, LfsAuthorization>>>,
@@ -152,6 +153,12 @@ impl RepositoryState {
                 .await?
             }
         };
+        let registry_storage = match identity.registry_storage().await {
+            Some(manager) => manager,
+            None => {
+                crate::registry::storage::RegistryStorageManager::new(identity.database()).await?
+            }
+        };
         mirrors::cleanup_lfs_staging(&settings.lfs_root).await?;
         fs::create_dir_all(&settings.actions_artifact_root).await?;
         let state = Self {
@@ -170,6 +177,7 @@ impl RepositoryState {
             mirror_slots: Arc::new(Semaphore::new(MIRROR_SYNC_CONCURRENCY)),
             mirror_syncing: Arc::new(Mutex::new(HashSet::new())),
             github_known_hosts: Arc::new(Mutex::new(None)),
+            registry_storage,
             lfs_root: Arc::new(settings.lfs_root),
             lfs_storage,
             public_url: Arc::new(public_url),
@@ -265,6 +273,11 @@ impl RepositoryState {
         self.lfs_storage.lock_operation().await
     }
 
+    pub(crate) fn registry_storage(
+        &self,
+    ) -> &Arc<crate::registry::storage::RegistryStorageManager> {
+        &self.registry_storage
+    }
     pub(super) fn lfs_endpoint(&self, repository: &repository::Model) -> String {
         let mut endpoint = self.public_url.as_ref().clone();
         endpoint.set_path(&format!(

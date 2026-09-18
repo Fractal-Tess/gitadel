@@ -8,6 +8,7 @@
   import ActionsSettings from "$lib/components/settings/actions-settings.svelte";
   import BackupSettings from "$lib/components/settings/backup-settings.svelte";
   import LfsSettings from "$lib/components/settings/lfs-settings.svelte";
+  import RegistrySettings from "$lib/components/settings/registry-settings.svelte";
   import IntegritySettings from "$lib/components/settings/integrity-settings.svelte";
   import StorageSettings from "$lib/components/settings/storage-settings.svelte";
   import { AccountSettingsState } from "$lib/settings/account-settings-state.svelte.js";
@@ -28,6 +29,7 @@
       requestedView === "runners" ||
       requestedView === "storage" ||
       requestedView === "lfs" ||
+      requestedView === "registry" ||
       requestedView === "backups" ||
       requestedView === "maintenance" ||
       requestedView === "activity"
@@ -45,11 +47,13 @@
             ? "Storage"
             : view === "lfs"
               ? "Git LFS"
-              : view === "backups"
-                ? "Backups"
-                : view === "maintenance"
-                  ? "Maintenance"
-                  : "Activity",
+              : view === "registry"
+                ? "Container registry"
+                : view === "backups"
+                  ? "Backups"
+                  : view === "maintenance"
+                    ? "Maintenance"
+                    : "Activity",
   );
   const description = $derived(
     view === "appearance"
@@ -62,11 +66,13 @@
             ? "Define reusable filesystem and S3-compatible destinations."
             : view === "lfs"
               ? "Inspect Git LFS usage and move objects between storage targets."
-              : view === "backups"
-                ? "Add backup providers, then create and schedule complete instance snapshots."
-                : view === "maintenance"
-                  ? "Configure recurring repository integrity checks and review the latest result."
-                  : "Review repository, authentication, and administration events.",
+              : view === "registry"
+                ? "Inspect image usage and move container registry data between storage targets."
+                : view === "backups"
+                  ? "Add backup providers, then create and schedule complete instance snapshots."
+                  : view === "maintenance"
+                    ? "Configure recurring repository integrity checks and review the latest result."
+                    : "Review repository, authentication, and administration events.",
   );
 
   const navigation = $derived.by<ContextNavItem[]>(() =>
@@ -112,6 +118,8 @@
     <StorageSettings />
   {:else if view === "lfs"}
     <LfsSettings />
+  {:else if view === "registry"}
+    <RegistrySettings />
   {:else if view === "backups"}
     <BackupSettings />
   {:else if view === "maintenance"}

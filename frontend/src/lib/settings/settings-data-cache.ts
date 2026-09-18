@@ -19,8 +19,10 @@ import {
 import { auditEventSchema, type AuditEvent } from "$lib/api/instance.js";
 import {
   lfsStorageStatusSchema,
+  registryStorageStatusSchema,
   storageTargetsSchema,
   type LfsStorageStatus,
+  type RegistryStorageStatus,
   type StorageTarget,
 } from "$lib/api/storage.js";
 import { requestJson } from "$lib/api/transport.js";
@@ -121,6 +123,7 @@ export type AdminSettingsView =
   | "runners"
   | "storage"
   | "lfs"
+  | "registry"
   | "backups"
   | "maintenance"
   | "activity";
@@ -128,6 +131,7 @@ export type AdminSettingsView =
 const passkeys = new SettingsCache<PasskeySummary[]>();
 const sshKeys = new SettingsCache<SshKey[]>();
 const apiTokens = new SettingsCache<ApiToken[]>();
+const registryStatus = new SettingsCache<RegistryStorageStatus>();
 const oauthApplications = new SettingsCache<OauthApplication[]>();
 const storageTargets = new SettingsCache<StorageTarget[]>();
 const lfsStatus = new SettingsCache<LfsStorageStatus>();
@@ -293,6 +297,29 @@ export function refreshLfsStatus(
   lfsStatus.invalidate(key(scope));
   return loadLfsStatus(scope);
 }
+export function loadRegistryStatus(
+  scope: AuthorizationCacheScope,
+): Promise<RegistryStorageStatus> {
+  return registryStatus.load(key(scope), () =>
+    requestJson(
+      "/api/v1/admin/storage/registry/status",
+      registryStorageStatusSchema,
+    ),
+  );
+}
+
+export function peekRegistryStatus(
+  scope: AuthorizationCacheScope,
+): RegistryStorageStatus | null {
+  return registryStatus.peek(key(scope));
+}
+
+export function refreshRegistryStatus(
+  scope: AuthorizationCacheScope,
+): Promise<RegistryStorageStatus> {
+  registryStatus.invalidate(key(scope));
+  return loadRegistryStatus(scope);
+}
 
 export function loadAdminActivity(
   scope: AuthorizationCacheScope,
@@ -366,11 +393,13 @@ export function preloadAdminSettingsView(
         ? [loadStorageTargets(scope)]
         : view === "lfs"
           ? [loadStorageTargets(scope), loadLfsStatus(scope)]
-          : view === "backups"
-            ? (preloadBackupSettings(scope), [])
-            : view === "activity"
-              ? [loadAdminActivity(scope)]
-              : [];
+          : view === "registry"
+            ? [loadStorageTargets(scope), loadRegistryStatus(scope)]
+            : view === "backups"
+              ? (preloadBackupSettings(scope), [])
+              : view === "activity"
+                ? [loadAdminActivity(scope)]
+                : [];
   void Promise.allSettled(requests);
 }
 
@@ -381,6 +410,7 @@ export function clearSettingsDataCache(): void {
   oauthApplications.clear();
   storageTargets.clear();
   lfsStatus.clear();
+  registryStatus.clear();
   adminActivity.clear();
   authenticationConfiguration.clear();
   oidcProviders.clear();

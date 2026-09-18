@@ -1,14 +1,21 @@
 use std::{
+    ops::Range,
     pin::Pin,
     sync::Arc,
     task::{Context as TaskContext, Poll},
 };
 
-use ::s3::{Bucket, Region, creds::Credentials, error::S3Error};
+use ::s3::{
+    Bucket, Region,
+    command::Command,
+    creds::Credentials,
+    error::S3Error,
+    request::{request_trait::Request as _, tokio_backend::ReqwestRequest},
+};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use sha2::{Digest as _, Sha256};
-use tokio::io::{AsyncRead, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt as _, ReadBuf};
 
 use crate::config::{S3Settings, validate_s3_settings};
 
@@ -188,6 +195,35 @@ impl BlobStore for S3BlobStore {
         Ok(verifying_reader(Box::pin(response), metadata.digest))
     }
 
+    async fn read_range(&self, key: &ObjectKey, range: Range<u64>) -> Result<BlobReader> {
+        ensure!(range.start < range.end, "blob byte range must not be empty");
+        let metadata = self
+            .committed_metadata(key)
+            .await?
+            .context("S3 blob is not committed")?;
+        ensure!(
+            range.end <= metadata.size,
+            "blob byte range exceeds object size"
+        );
+        let remote_key = self.remote_key(key);
+        let request = ReqwestRequest::new(
+            &self.bucket,
+            &remote_key,
+            Command::GetObjectRange {
+                start: range.start,
+                end: Some(range.end - 1),
+            },
+        )
+        .await?;
+        let response = request.response_data_to_stream().await?;
+        ensure!(
+            response.status_code == 206,
+            "S3 range GET returned HTTP {}",
+            response.status_code
+        );
+        Ok(Box::pin(response.take(range.end - range.start)))
+    }
+
     async fn put_verified(
         &self,
         key: &ObjectKey,
@@ -280,7 +316,6 @@ impl BlobStore for S3BlobStore {
 mod tests {
     use super::*;
     use ::s3::{BucketConfiguration, bucket::Bucket};
-    use tokio::io::AsyncReadExt as _;
     use url::Url;
 
     #[tokio::test]
@@ -363,6 +398,14 @@ mod tests {
         let mut actual = Vec::new();
         reader.read_to_end(&mut actual).await.unwrap();
         assert_eq!(actual, payload);
+
+        let end = payload.len() as u64;
+        let mut reader = store.read_range(&key, end - 1..end).await.unwrap();
+        actual.clear();
+        reader.read_to_end(&mut actual).await.unwrap();
+        assert_eq!(actual, &payload[payload.len() - 1..]);
+        assert!(store.read_range(&key, 0..0).await.is_err());
+        assert!(store.read_range(&key, 0..end + 1).await.is_err());
 
         let prefix = ObjectPrefix::new(key.as_str().split('/').next().unwrap()).unwrap();
         assert_eq!(store.list(&prefix).await.unwrap().len(), 1);

@@ -167,6 +167,10 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
         .initialize_lfs_storage(settings.storage.lfs_root.clone())
         .await
         .context("could not initialize LFS storage")?;
+    identity_state
+        .initialize_registry_storage()
+        .await
+        .context("could not initialize registry storage")?;
     let ssh_port = settings.ssh.bind.port();
     let repository_state = RepositoryState::new(
         identity_state.clone(),
@@ -395,6 +399,12 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
     }
     repository_state.close_tasks();
     repository_state.wait_for_tasks().await;
+    if matches!(&outcome, Ok(ServerExit::Maintenance(_))) {
+        repository_state
+            .registry_storage()
+            .wait_for_migration()
+            .await;
+    }
     outcome
 }
 

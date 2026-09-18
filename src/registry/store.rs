@@ -1,3 +1,8 @@
+use axum::body::Body;
+use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 use std::{
     collections::{HashMap, hash_map::DefaultHasher},
     fmt,
@@ -7,18 +12,16 @@ use std::{
     sync::{Arc, LazyLock, Mutex as StdMutex, Weak},
     time::{SystemTime, UNIX_EPOCH},
 };
-
-use axum::body::Body;
-use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use sha2::{Digest as _, Sha256};
 use tokio::{
     fs::{self, File, OpenOptions},
     io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _, SeekFrom},
     sync::{Mutex, MutexGuard, OwnedMutexGuard},
 };
 use uuid::Uuid;
+
+use crate::blob_store::{
+    BlobDigest, BlobReader, BlobStore, DigestMismatch, FilesystemBlobStore, ObjectKey, ObjectPrefix,
+};
 
 pub(super) const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 pub(super) const MAX_BLOB_BYTES: u64 = 10 * 1024 * 1024 * 1024;
@@ -76,14 +79,31 @@ impl From<std::io::Error> for StoreError {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub(super) struct RegistryStore;
+impl From<anyhow::Error> for StoreError {
+    fn from(error: anyhow::Error) -> Self {
+        if error.downcast_ref::<DigestMismatch>().is_some() {
+            Self::DigestInvalid
+        } else {
+            Self::Io(std::io::Error::other(error))
+        }
+    }
+}
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RegistryStore;
+
+#[derive(Clone)]
+struct ExternalBackend {
+    store: Arc<dyn BlobStore>,
+    prefix: ObjectPrefix,
+}
+
+#[derive(Clone)]
 pub(super) struct ImageStore {
     image_dir: PathBuf,
     suffix: Arc<str>,
     valid: bool,
+    external: Option<ExternalBackend>,
 }
 
 #[derive(Clone, Debug)]
@@ -165,20 +185,38 @@ impl RegistryStore {
         Self
     }
 
-    pub fn image(&self, repository_path: PathBuf, suffix: &str) -> ImageStore {
-        let valid = valid_suffix(suffix);
-        let suffix: Arc<str> = Arc::from(suffix.to_owned());
-        let image_hash = hex_digest(suffix.as_bytes());
+    pub(super) fn image(&self, repository_path: PathBuf, suffix: &str) -> ImageStore {
         ImageStore {
             image_dir: repository_path
                 .join("gitadel-registry")
                 .join("images")
-                .join(image_hash),
-            suffix,
-            valid,
+                .join(hex_digest(suffix.as_bytes())),
+            suffix: Arc::from(suffix),
+            valid: valid_suffix(suffix),
+            external: None,
         }
     }
 
+    pub(super) fn image_external(
+        &self,
+        repository_storage_key: Uuid,
+        repository_path: PathBuf,
+        suffix: &str,
+        backend: Arc<dyn BlobStore>,
+    ) -> ImageStore {
+        let mut image = self.image(repository_path, suffix);
+        let image_hash = image
+            .image_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("image directory is a SHA-256 name");
+        image.external = Some(ExternalBackend {
+            store: backend,
+            prefix: ObjectPrefix::new(format!("registry/{repository_storage_key}/{image_hash}"))
+                .expect("registry object prefix is valid"),
+        });
+        image
+    }
     pub async fn list_images(&self, repository_path: &Path) -> Result<Vec<String>, StoreError> {
         let mut result = Vec::new();
         if existing_directory(repository_path).await?.is_none() {
@@ -215,6 +253,66 @@ impl RegistryStore {
         }
         result.sort();
         Ok(result)
+    }
+    pub(crate) async fn metadata_usage(
+        &self,
+        repository_path: &Path,
+    ) -> Result<RegistryUsage, StoreError> {
+        let images = self.list_images(repository_path).await?;
+        let mut usage = RegistryUsage {
+            image_count: images.len() as u64,
+            ..RegistryUsage::default()
+        };
+        for suffix in images {
+            let image = self.image(repository_path.to_path_buf(), &suffix);
+            usage.tag_count += image.tags().await?.len() as u64;
+            let mut uploads = match fs::read_dir(image.uploads_dir()).await {
+                Ok(uploads) => uploads,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            while let Some(upload) = uploads.next_entry().await? {
+                if !upload.file_type().await?.is_dir()
+                    || upload
+                        .file_name()
+                        .to_str()
+                        .and_then(|name| Uuid::parse_str(name).ok())
+                        .is_none()
+                {
+                    continue;
+                }
+                if let Some(size) = regular_file_len(&upload.path().join("data")).await? {
+                    usage.upload_count += 1;
+                    usage.upload_bytes += size;
+                }
+            }
+        }
+        Ok(usage)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub(crate) struct RegistryUsage {
+    pub object_count: u64,
+    pub total_bytes: u64,
+    pub blob_count: u64,
+    pub manifest_count: u64,
+    pub tag_count: u64,
+    pub image_count: u64,
+    pub upload_count: u64,
+    pub upload_bytes: u64,
+}
+
+impl std::ops::AddAssign for RegistryUsage {
+    fn add_assign(&mut self, other: Self) {
+        self.object_count += other.object_count;
+        self.total_bytes += other.total_bytes;
+        self.blob_count += other.blob_count;
+        self.manifest_count += other.manifest_count;
+        self.tag_count += other.tag_count;
+        self.image_count += other.image_count;
+        self.upload_count += other.upload_count;
+        self.upload_bytes += other.upload_bytes;
     }
 }
 
@@ -337,35 +435,52 @@ impl ImageStore {
     pub async fn blob_size(&self, digest: &str) -> Result<Option<u64>, StoreError> {
         let _guard = self.lock().await?;
         let path = self.blob_path(digest).await?;
-        regular_file_len(&path).await
+        self.payload_size(&path).await
     }
 
-    pub async fn open_blob(&self, digest: &str) -> Result<Option<(File, u64)>, StoreError> {
+    pub async fn blob_reader(
+        &self,
+        digest: &str,
+        range: Option<(u64, u64)>,
+    ) -> Result<Option<(BlobReader, u64)>, StoreError> {
         let _guard = self.lock().await?;
         let path = self.blob_path(digest).await?;
-        let Some(size) = regular_file_len(&path).await? else {
+        let Some(size) = self.payload_size(&path).await? else {
             return Ok(None);
         };
-        Ok(Some((File::open(path).await?, size)))
+        let (start, end) = range.unwrap_or((0, size));
+        if range.is_some() && (start >= end || end > size) {
+            return Err(StoreError::RangeInvalid);
+        }
+        let reader: BlobReader = if let Some(external) = &self.external {
+            let key = self.external_key(&path)?;
+            if start == 0 && end == size {
+                external.store.read(&key).await?
+            } else {
+                external.store.read_range(&key, start..end).await?
+            }
+        } else {
+            let mut file = File::open(path).await?;
+            if start != 0 {
+                file.seek(SeekFrom::Start(start)).await?;
+            }
+            Box::pin(file.take(end - start))
+        };
+        Ok(Some((reader, size)))
     }
-
     pub async fn delete_blob(&self, digest: &str) -> Result<bool, StoreError> {
         let _guard = self.lock().await?;
         let path = self.blob_path(digest).await?;
-        if !regular_file_exists(&path).await? {
+        if self.payload_size(&path).await?.is_none() {
             return Ok(false);
         }
         let digest = normalize_digest(digest)?;
         if self.digest_referenced(&digest).await? {
             return Err(StoreError::Referenced);
         }
-        fs::remove_file(&path).await?;
-        if let Some(parent) = path.parent() {
-            sync_directory(parent).await?;
-        }
+        self.delete_payload(&path).await?;
         Ok(true)
     }
-
     pub async fn mount_blob(&self, source: &ImageStore, digest: &str) -> Result<bool, StoreError> {
         if !self.valid || !source.valid {
             return Err(StoreError::Invalid("image name is invalid".to_owned()));
@@ -374,7 +489,15 @@ impl ImageStore {
         self.ensure_image().await?;
         let source_path = source.blob_path(digest).await?;
         let destination = self.blob_path(digest).await?;
-        if regular_file_exists(&destination).await? {
+        if self.payload_size(&destination).await?.is_some() {
+            return Ok(true);
+        }
+        if source.payload_size(&source_path).await?.is_none() {
+            return Ok(false);
+        }
+        if self.external.is_some() || source.external.is_some() {
+            let reader = source.read_payload(&source_path).await?;
+            self.publish_payload(&destination, digest, reader).await?;
             return Ok(true);
         }
         let Some(parent) = destination.parent() else {
@@ -384,20 +507,14 @@ impl ImageStore {
             ensure_directory(first).await?;
         }
         ensure_directory(parent).await?;
-        if !regular_file_exists(&source_path).await? {
-            return Ok(false);
-        }
         match fs::hard_link(source_path, &destination).await {
             Ok(()) => {
                 sync_directory(parent).await?;
                 Ok(true)
             }
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(true),
-            Err(error) if error.kind() == ErrorKind::CrossesDevices => Ok(false),
             Err(error) => Err(error.into()),
         }
     }
-
     pub async fn start_upload(&self, owner: Uuid) -> Result<Uuid, StoreError> {
         if !self.valid {
             return Err(StoreError::Invalid("image name is invalid".to_owned()));
@@ -447,7 +564,6 @@ impl ImageStore {
             "could not allocate upload identifier".to_owned(),
         ))
     }
-
     pub async fn upload_status(&self, id: Uuid, owner: Uuid) -> Result<Option<u64>, StoreError> {
         if !self.valid {
             return Err(StoreError::Invalid("image name is invalid".to_owned()));
@@ -464,7 +580,6 @@ impl ImageStore {
         self.check_upload_owner(&directory, owner).await?;
         Ok(Some(self.reconcile_upload(&directory).await?))
     }
-
     pub async fn append_upload(
         &self,
         id: Uuid,
@@ -569,6 +684,13 @@ impl ImageStore {
         }
         verify_file_digest(&data, &digest).await?;
         let destination = self.blob_path(&digest).await?;
+        if self.external.is_some() {
+            self.publish_payload(&destination, &digest, Box::pin(File::open(&data).await?))
+                .await?;
+            fs::remove_dir_all(&directory).await?;
+            sync_directory(&self.uploads_dir()).await?;
+            return Ok(size);
+        }
         if regular_file_exists(&destination).await? {
             let existing_size =
                 regular_file_len(&destination)
@@ -604,7 +726,6 @@ impl ImageStore {
             Err(error) => Err(error.into()),
         }
     }
-
     pub async fn cancel_upload(&self, id: Uuid, owner: Uuid) -> Result<bool, StoreError> {
         if !self.valid {
             return Err(StoreError::Invalid("image name is invalid".to_owned()));
@@ -623,7 +744,6 @@ impl ImageStore {
         sync_directory(&self.uploads_dir()).await?;
         Ok(true)
     }
-
     pub async fn put_manifest(
         &self,
         reference: &str,
@@ -631,7 +751,6 @@ impl ImageStore {
         bytes: &[u8],
     ) -> Result<StoredManifest, StoreError> {
         let _guard = self.lock().await?;
-        validate_reference(reference)?;
         if !supported_manifest_media_type(media_type) {
             return Err(StoreError::Invalid(
                 "manifest media type is unsupported".to_owned(),
@@ -654,8 +773,10 @@ impl ImageStore {
             media_type: media_type.to_owned(),
         })
         .map_err(|error| StoreError::Invalid(error.to_string()))?;
-        if existing_regular_file(&object).await?.is_some() {
-            let existing = read_bounded_file(&object, MAX_MANIFEST_BYTES).await?;
+        if self.payload_size(&object).await?.is_some() {
+            let existing = self
+                .read_bounded_payload(&object, MAX_MANIFEST_BYTES)
+                .await?;
             if existing != bytes {
                 return Err(StoreError::DigestInvalid);
             }
@@ -669,8 +790,17 @@ impl ImageStore {
                 atomic_write(&metadata_path, &metadata_bytes).await?;
             }
         } else {
+            if self.external.is_some() {
+                self.publish_payload(
+                    &object,
+                    &digest,
+                    Box::pin(std::io::Cursor::new(bytes.to_vec())),
+                )
+                .await?;
+            } else {
+                atomic_write(&object, bytes).await?;
+            }
             atomic_write(&metadata_path, &metadata_bytes).await?;
-            atomic_write(&object, bytes).await?;
         }
         let digest_reference = ReferenceMeta {
             reference: digest.clone(),
@@ -715,6 +845,7 @@ impl ImageStore {
         };
         self.read_manifest(&reference_meta.digest).await.map(Some)
     }
+
     pub async fn delete_manifest(&self, reference: &str) -> Result<bool, StoreError> {
         let _guard = self.lock().await?;
         validate_reference(reference)?;
@@ -754,12 +885,11 @@ impl ImageStore {
         }
         sync_directory(&self.refs_dir()).await?;
         let object = self.manifest_object_path(&digest).await?;
-        fs::remove_file(&object).await?;
+        self.delete_payload(&object).await?;
         fs::remove_file(object.with_extension("meta")).await?;
         sync_directory(&self.manifests_dir().join("objects")).await?;
         Ok(true)
     }
-
     pub async fn tags(&self) -> Result<Vec<String>, StoreError> {
         let _guard = self.lock().await?;
         let mut result = Vec::new();
@@ -786,7 +916,6 @@ impl ImageStore {
         result.sort();
         Ok(result)
     }
-
     pub async fn referrers(
         &self,
         digest: &str,
@@ -802,18 +931,21 @@ impl ImageStore {
         };
         while let Some(entry) = entries.next_entry().await? {
             let metadata = fs::symlink_metadata(entry.path()).await?;
-            if !metadata.file_type().is_file()
-                || entry.file_name().to_string_lossy().ends_with(".meta")
-            {
+            let name = entry.file_name();
+            let Some(hash) = name.to_str().and_then(|name| name.strip_suffix(".meta")) else {
+                continue;
+            };
+            if !metadata.file_type().is_file() {
                 continue;
             }
-            let object_digest = format!("sha256:{}", entry.file_name().to_string_lossy());
+            let object_digest = format!("sha256:{hash}");
             if normalize_digest(&object_digest).is_err()
                 || self.get_reference(&object_digest).await?.is_none()
             {
                 continue;
             }
-            let bytes = read_bounded_file(&entry.path(), MAX_MANIFEST_BYTES).await?;
+            let manifest = self.read_manifest(&object_digest).await?;
+            let bytes = manifest.bytes;
             let value: Value = match serde_json::from_slice(&bytes) {
                 Ok(value) => value,
                 Err(_) => continue,
@@ -831,7 +963,7 @@ impl ImageStore {
             if subject_digest != digest {
                 continue;
             }
-            let media_type = self.read_manifest_media_type(&object_digest).await?;
+            let media_type = manifest.media_type;
             let value_artifact_type = value
                 .get("artifactType")
                 .and_then(Value::as_str)
@@ -1037,13 +1169,13 @@ impl ImageStore {
                     ));
                 }
                 let object_path = self.manifest_object_path(&digest).await?;
-                let Some(actual) = regular_file_len(&object_path).await? else {
+                let Some(actual) = self.payload_size(&object_path).await? else {
                     return Err(StoreError::ManifestBlobUnknown(digest));
                 };
-                if actual != size || self.read_manifest_media_type(&digest).await? != media_type {
+                let manifest = self.read_manifest(&digest).await?;
+                if actual != size || manifest.media_type != media_type {
                     return Err(StoreError::ManifestBlobUnknown(digest));
                 }
-                verify_file_digest(&object_path, &digest).await?;
             }
             DescriptorKind::Blob => {
                 if supported_manifest_media_type(media_type) {
@@ -1052,7 +1184,7 @@ impl ImageStore {
                     ));
                 }
                 let blob = self.blob_path(&digest).await?;
-                let Some(actual) = regular_file_len(&blob).await? else {
+                let Some(actual) = self.payload_size(&blob).await? else {
                     return Err(StoreError::ManifestBlobUnknown(digest));
                 };
                 if actual != size {
@@ -1069,7 +1201,7 @@ impl ImageStore {
     async fn read_manifest(&self, digest: &str) -> Result<StoredManifest, StoreError> {
         let digest = normalize_digest(digest)?;
         let path = self.manifest_object_path(&digest).await?;
-        let bytes = read_bounded_file(&path, MAX_MANIFEST_BYTES).await?;
+        let bytes = self.read_bounded_payload(&path, MAX_MANIFEST_BYTES).await?;
         let actual = format!("sha256:{:x}", Sha256::digest(&bytes));
         if actual != digest {
             return Err(StoreError::DigestInvalid);
@@ -1111,23 +1243,119 @@ impl ImageStore {
         };
         while let Some(entry) = entries.next_entry().await? {
             let metadata = fs::symlink_metadata(entry.path()).await?;
-            if !metadata.file_type().is_file()
-                || entry.file_name().to_string_lossy().ends_with(".meta")
-            {
+            let name = entry.file_name();
+            let Some(hash) = name.to_str().and_then(|name| name.strip_suffix(".meta")) else {
+                continue;
+            };
+            if !metadata.file_type().is_file() {
                 continue;
             }
-            let object_digest = format!("sha256:{}", entry.file_name().to_string_lossy());
+            let object_digest = format!("sha256:{hash}");
             if normalize_digest(&object_digest).is_err()
                 || self.get_reference(&object_digest).await?.is_none()
             {
                 continue;
             }
-            let bytes = read_bounded_file(&entry.path(), MAX_MANIFEST_BYTES).await?;
+            let bytes = self.read_manifest(&object_digest).await?.bytes;
             if json_contains_digest(&bytes, digest) {
                 return Ok(true);
             }
         }
         Ok(false)
+    }
+}
+
+impl ImageStore {
+    fn relative_key(&self, path: &Path) -> Result<ObjectKey, StoreError> {
+        let relative = path
+            .strip_prefix(&self.image_dir)
+            .map_err(|error| StoreError::Invalid(error.to_string()))?;
+        let relative = relative
+            .to_str()
+            .ok_or_else(|| StoreError::Invalid("payload path is not UTF-8".to_owned()))?;
+        Ok(ObjectKey::new(relative)?)
+    }
+
+    fn external_key(&self, path: &Path) -> Result<ObjectKey, StoreError> {
+        let external = self
+            .external
+            .as_ref()
+            .ok_or_else(|| StoreError::Invalid("external backend is unavailable".to_owned()))?;
+        Ok(ObjectKey::new(format!(
+            "{}/{}",
+            external.prefix.as_str(),
+            self.relative_key(path)?
+        ))?)
+    }
+
+    async fn payload_size(&self, path: &Path) -> Result<Option<u64>, StoreError> {
+        if let Some(external) = &self.external {
+            Ok(external
+                .store
+                .stat(&self.external_key(path)?)
+                .await?
+                .map(|metadata| metadata.size))
+        } else {
+            regular_file_len(path).await
+        }
+    }
+
+    async fn read_payload(&self, path: &Path) -> Result<BlobReader, StoreError> {
+        if let Some(external) = &self.external {
+            Ok(external.store.read(&self.external_key(path)?).await?)
+        } else {
+            if existing_regular_file(path).await?.is_none() {
+                return Err(std::io::Error::from(ErrorKind::NotFound).into());
+            }
+            Ok(Box::pin(File::open(path).await?))
+        }
+    }
+
+    async fn read_bounded_payload(&self, path: &Path, limit: usize) -> Result<Vec<u8>, StoreError> {
+        if self.external.is_none() {
+            return read_bounded_file(path, limit).await;
+        }
+        let mut reader = self.read_payload(path).await?.take(limit as u64 + 1);
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await?;
+        if bytes.len() > limit {
+            return Err(StoreError::TooLarge);
+        }
+        Ok(bytes)
+    }
+
+    async fn publish_payload(
+        &self,
+        path: &Path,
+        digest: &str,
+        reader: BlobReader,
+    ) -> Result<(), StoreError> {
+        let digest = normalize_digest(digest)?;
+        let expected: BlobDigest = digest["sha256:".len()..].parse()?;
+        if let Some(external) = &self.external {
+            external
+                .store
+                .put_verified(&self.external_key(path)?, expected, reader)
+                .await?;
+        } else {
+            FilesystemBlobStore::new(self.image_dir.clone())
+                .await?
+                .put_verified(&self.relative_key(path)?, expected, reader)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn delete_payload(&self, path: &Path) -> Result<(), StoreError> {
+        if let Some(external) = &self.external {
+            external.store.delete(&self.external_key(path)?).await?;
+        } else {
+            fs::remove_file(path).await?;
+            if let Some(parent) = path.parent() {
+                sync_directory(parent).await?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1472,7 +1700,7 @@ mod tests {
             .unwrap();
         let digest = format!("sha256:{}", hex_digest(b"headtail"));
         reopened.finish_upload(id, owner, &digest).await.unwrap();
-        let (mut blob, _) = reopened.open_blob(&digest).await.unwrap().unwrap();
+        let (mut blob, _) = reopened.blob_reader(&digest, None).await.unwrap().unwrap();
         let mut bytes = Vec::new();
         blob.read_to_end(&mut bytes).await.unwrap();
         assert_eq!(bytes, b"headtail");

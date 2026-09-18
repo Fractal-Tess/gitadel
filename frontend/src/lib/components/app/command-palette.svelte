@@ -304,7 +304,7 @@
                 id: `admin-settings-${section.id}`,
                 label: `Administration · ${section.label}`,
                 icon: section.icon,
-                keywords: `administration admin settings ${section.label} instance ${section.id === "storage" ? "migration migrations migrate move storage target" : ""}`,
+                keywords: `administration admin settings ${section.label} instance ${section.id === "storage" ? "migration migrations migrate move storage target" : section.id === "registry" ? "container registry images blobs manifests tags usage migration migrate storage" : ""}`,
                 run: () =>
                   void goto(
                     resolve("/-/administration/[view]", { view: section.id }),

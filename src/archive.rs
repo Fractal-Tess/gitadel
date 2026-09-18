@@ -25,10 +25,10 @@ use walkdir::WalkDir;
 
 use crate::{
     backup_provider::{self, BackupProvider, BackupProviderConfig, FilesystemSettings},
-    blob_store::{BlobDigest, ObjectPrefix, targets},
+    blob_store::{BlobDigest, BlobStore as _, FilesystemBlobStore, ObjectPrefix, targets},
     config::{BackupCommand, DatabaseSettings, S3Settings, Settings},
     database,
-    entity::backup_provider_schedule,
+    entity::{backup_provider_schedule, repository},
     identity::IdentityState,
 };
 
@@ -630,6 +630,8 @@ async fn create_staged_backup(
 
     let database = database::connect_and_migrate(&settings.database).await?;
     let lfs_storage = targets::load_active(&database, settings.storage.lfs_root.clone()).await?;
+    let registry_storage = crate::registry::storage::load_active(&database).await?;
+    let registry_repositories = repository::Entity::find().all(&database).await?;
     let snapshot_path = staging.join("database.sqlite");
     snapshot_database(&database, &snapshot_path).await?;
     database
@@ -641,13 +643,31 @@ async fn create_staged_backup(
     if let Some(reporter) = reporter {
         reporter.report(
             MaintenancePhase::CopyingRepositories,
-            "Copying Git repositories.",
+            "Copying Git repositories and container registry objects.",
         );
     }
     copy_tree(
         &settings.storage.repository_root,
         &staging.join("repositories"),
+        registry_storage.is_some(),
     )?;
+    if let Some(active) = registry_storage {
+        let destination = FilesystemBlobStore::new(staging.join("repositories")).await?;
+        for object in
+            crate::registry::storage::inventory(active.store.as_ref(), true, &registry_repositories)
+                .await?
+        {
+            let key = crate::registry::storage::local_object_key(&object.key)?;
+            let reader = active.store.read(&object.key).await?;
+            let copied = destination
+                .put_verified(&key, object.digest, reader)
+                .await?;
+            ensure!(
+                copied.size == object.size,
+                "backup registry object size mismatch"
+            );
+        }
+    }
     if let Some(reporter) = reporter {
         reporter.report(MaintenancePhase::CopyingLfs, "Copying Git LFS objects.");
     }
@@ -721,10 +741,12 @@ async fn prepare_restored_snapshot(path: &Path) -> Result<()> {
              UPDATE lfs_storage_state SET active_target_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = 1;\
              UPDATE lfs_objects SET storage_target_id = NULL;\
              DELETE FROM lfs_storage_migrations;\
+             UPDATE registry_storage_state SET active_target_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = 1;\
+             DELETE FROM registry_storage_migrations;\
              PRAGMA wal_checkpoint(TRUNCATE);",
         )
         .await
-        .context("could not rebind staged backup to runtime-local LFS storage")?;
+        .context("could not rebind staged backup to runtime-local object storage")?;
     database.close().await?;
     Ok(())
 }
@@ -1403,8 +1425,8 @@ fn restore_from_staging(
     }
 
     let prepared = (|| -> Result<()> {
-        copy_tree(&root.join("repositories"), &repository_temp)?;
-        copy_tree(&root.join("lfs"), &lfs_temp)?;
+        copy_tree(&root.join("repositories"), &repository_temp, false)?;
+        copy_tree(&root.join("lfs"), &lfs_temp, false)?;
         copy_file(&root.join("database.sqlite"), &database_temp)?;
         if manifest.host_key {
             ensure_restore_target(&settings.ssh.host_key, false)?;
@@ -1638,7 +1660,7 @@ fn data_file_paths(root: &Path) -> Result<BTreeSet<String>> {
     Ok(files)
 }
 
-fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
+fn copy_tree(source: &Path, destination: &Path, skip_registry_payloads: bool) -> Result<()> {
     fs::create_dir_all(destination)
         .with_context(|| format!("could not create {}", destination.display()))?;
     if !source.exists() {
@@ -1657,6 +1679,14 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
         if entry.file_type().is_dir() {
             fs::create_dir_all(&target)?;
         } else if entry.file_type().is_file() {
+            if skip_registry_payloads
+                && relative
+                    .to_str()
+                    .and_then(crate::registry::storage::registry_object_key)
+                    .is_some()
+            {
+                continue;
+            }
             copy_file(entry.path(), &target)?;
         }
     }

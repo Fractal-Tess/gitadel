@@ -168,6 +168,52 @@ pub mod lfs_storage_migration {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod registry_storage_state {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "registry_storage_state")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: i32,
+        pub active_target_id: Option<Uuid>,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod registry_storage_migration {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "registry_storage_migrations")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub source_target_id: Option<Uuid>,
+        pub target_id: Option<Uuid>,
+        pub state: String,
+        pub phase: String,
+        pub last_key: Option<String>,
+        pub copied_objects: i64,
+        pub copied_bytes: i64,
+        pub total_bytes: Option<i64>,
+        pub error: Option<String>,
+        pub started_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+        pub completed_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod namespace_integration {
     use super::*;
 

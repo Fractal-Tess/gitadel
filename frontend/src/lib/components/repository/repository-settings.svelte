@@ -176,17 +176,11 @@
           <Field.Label>Visibility</Field.Label>
           <Select.Root type="single" bind:value={visibility}>
             <Select.Trigger class="w-full">
-              {visibility === "public"
-                ? "Public — visible to everyone"
-                : "Private — restricted access"}
+              {visibility === "public" ? "Public" : "Private"}
             </Select.Trigger>
             <Select.Content>
-              <Select.Item value="public">
-                Public — visible to everyone
-              </Select.Item>
-              <Select.Item value="private">
-                Private — restricted access
-              </Select.Item>
+              <Select.Item value="public">Public</Select.Item>
+              <Select.Item value="private">Private</Select.Item>
             </Select.Content>
           </Select.Root>
         </Field.Field>

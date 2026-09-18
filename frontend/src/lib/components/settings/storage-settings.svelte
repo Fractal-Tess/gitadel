@@ -251,9 +251,13 @@
   }
 
   // The scan is the fuller figure when it exists, since it also counts objects
-  // the database has no record of. Without one, the LFS total is all we know.
+  // the database has no record of. Without one, use the tracked LFS and
+  // registry totals without counting either category twice.
   function storedBytes(target: StorageTarget) {
-    return target.usage.measured?.total_bytes ?? target.usage.lfs_bytes;
+    return (
+      target.usage.measured?.total_bytes ??
+      target.usage.lfs_bytes + target.usage.registry_bytes
+    );
   }
 
   function usageBar(target: StorageTarget) {
@@ -329,9 +333,17 @@
               ? "Local filesystem"
               : "S3-compatible"}
             subtitle={targetDetail(target)}
-            description="Available to Git LFS and backup workflows."
+            description={target.managed_by_config
+              ? "Git LFS storage from the Gitadel configuration."
+              : "Available to Git LFS, the container registry, and backup workflows."}
             enabled
-            statusLabel={target.active ? "Used by Git LFS" : "Ready"}
+            statusLabel={target.active && target.registry_active
+              ? "Used by Git LFS and registry"
+              : target.active
+                ? "Used by Git LFS"
+                : target.registry_active
+                  ? "Used by registry"
+                  : "Ready"}
             statusHealthy
             detailLabel={target.managed_by_config ? "Config managed" : null}
           >
@@ -379,11 +391,17 @@
                     Scanned {formatMeasuredAt(
                       target.usage.measured.measured_at,
                     )}:
-                    {target.usage.measured.object_count.toLocaleString()} objects.
+                    {target.usage.measured.object_count.toLocaleString()} objects
+                    ({formatBytes(target.usage.measured.total_bytes)} total).
                   {:else}
-                    {target.usage.lfs_object_count.toLocaleString()} LFS objects tracked.
-                    Scan to include anything else stored here.
+                    {target.usage.lfs_object_count.toLocaleString()} LFS objects ·
+                    {target.usage.registry_object_count.toLocaleString()} registry
+                    objects tracked.
                   {/if}
+                </div>
+                <div class="text-[11px] text-muted-foreground">
+                  Registry: {target.usage.registry_object_count.toLocaleString()}
+                  objects · {formatBytes(target.usage.registry_bytes)} stored.
                 </div>
               </div>
             {/snippet}
@@ -417,11 +435,11 @@
                   size="icon-sm"
                   class="text-muted-foreground hover:text-destructive"
                   aria-label={`Remove ${target.name}`}
-                  title={target.active
-                    ? "Select another target on the Git LFS page before removing this one."
+                  title={target.active || target.registry_active
+                    ? "Select another target on the Git LFS or Container registry page before removing this one."
                     : undefined}
                   onclick={() => requestRemoveTarget(target)}
-                  disabled={working || target.active}
+                  disabled={working || target.active || target.registry_active}
                 >
                   <Trash2 class="size-4" />
                 </Button>

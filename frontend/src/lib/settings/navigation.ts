@@ -1,6 +1,7 @@
 import AppWindow from "@lucide/svelte/icons/app-window";
-import ArchiveRestore from "@lucide/svelte/icons/archive-restore";
 import Activity from "@lucide/svelte/icons/activity";
+import ArchiveRestore from "@lucide/svelte/icons/archive-restore";
+import Package from "@lucide/svelte/icons/package";
 import Database from "@lucide/svelte/icons/database";
 import HardDrive from "@lucide/svelte/icons/hard-drive";
 import KeySquare from "@lucide/svelte/icons/key-square";
@@ -36,6 +37,7 @@ export const adminSettingsSections = [
   { id: "runners", label: "Runners", icon: Workflow },
   { id: "storage", label: "Storage", icon: Database },
   { id: "lfs", label: "Git LFS", icon: HardDrive },
+  { id: "registry", label: "Container registry", icon: Package },
   { id: "backups", label: "Backups", icon: ArchiveRestore },
   { id: "maintenance", label: "Maintenance", icon: ShieldCheck },
   { id: "activity", label: "Activity", icon: Activity },

@@ -416,16 +416,38 @@ Blobs use SHA-256 and are limited to 10 GiB each; manifests are limited to
 after 24 hours; expired sessions are cleaned up during later upload
 activity for that image.
 
-Registry files live under
+By default, registry files live under
 `repository_root/<storage-key>.git/gitadel-registry/`, outside Git's object
-database. Renaming a repository keeps its images. Soft deletion hides
-them, restoration makes them available again, and permanent repository
-purge removes them. Gitadel backups include registry data. LFS storage
-target changes do not move container images.
+database. **Administration → Container registry** reports stored bytes,
+blob and manifest counts, tags, images, and staged uploads. Its repository
+list supports name, owner, owner type, and byte-range filters.
+
+Choose a filesystem or S3-compatible target created under
+**Administration → Storage**, or return to repository-backed local storage.
+Git LFS and the registry can share a target but select their destinations
+independently. Changing the LFS target does not move container images.
+External registry payloads use a separate `registry/` prefix; tags, manifest
+metadata, and upload staging stay beside the local bare repository.
+
+Migration waits for in-flight write requests, then pauses registry mutations
+while it copies and verifies payload sizes and SHA-256 content. Pulls remain
+available. A failed or interrupted migration leaves the previous target
+selected. Source copies are retained; selecting an old target again removes
+payloads that were deleted from the current target before cutover.
+
+Renaming or transferring a repository keeps its images. Soft deletion hides
+them, and restoration makes them available again. Permanent purge removes
+registry data from local storage and reachable configured targets.
 
 ## Git LFS storage
 
 Git repositories, issue attachments, and release assets remain under the configured local storage roots. Administrators define tested filesystem and S3-compatible destinations under **Administration → Storage**. User-defined storage targets are also available as backup destinations; Gitadel does not create a default backup provider. Filesystem backups use a sibling `<storage-name>-backups` directory so an archive never contains itself; S3 backups use a `backups` child of the target prefix.
+
+Filesystem targets need write access to both the target directory and its
+backup sibling. For example, `/mnt/archive/gitadel` uses
+`/mnt/archive/gitadel-backups`. Create both with the Gitadel service user's
+ownership. With a systemd filesystem sandbox, include both directories in
+`ReadWritePaths`; allowing the target alone does not make its sibling writable.
 
 **Administration → Git LFS** shows object counts and logical space by repository and owner. Search repository names, filter by user or organization and byte range, and sort by name or space. The list starts with ten repositories; **Load more** fetches the next ten.
 
@@ -484,6 +506,15 @@ docker compose run --rm -v "$PWD/backups:/backups:ro" \
   gitadel backup restore /backups/gitadel-backup.tar.zst
 docker compose start gitadel
 ```
+
+Registry and LFS payloads are restored into local storage, even when the
+snapshot was created from an external target. The original object store is
+not needed to serve restored data. Registry tags, referrers, and unfinished
+uploads are included; stale payloads retained at an inactive target are not.
+
+Offline restore also restores `gitadel.toml`. When relocating an instance,
+update its database URL, storage paths, SSH host-key path, and listener
+settings before starting it.
 
 For an S3-compatible store, configure its API origin and bucket. The endpoint must be the S3 API origin, not a web-console URL:
 

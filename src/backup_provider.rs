@@ -94,7 +94,7 @@ pub async fn list(
 }
 pub async fn list_with_storage(
     database: &DatabaseConnection,
-    _fallback_s3: Option<&S3Settings>,
+    fallback_s3: Option<&S3Settings>,
     _fallback_path: &std::path::Path,
 ) -> Result<Vec<BackupProvider>> {
     let excluded = backup_provider_exclusion::Entity::find()
@@ -104,7 +104,7 @@ pub async fn list_with_storage(
         .map(|exclusion| exclusion.provider_id)
         .collect::<HashSet<_>>();
     let mut providers = storage_providers(database, &excluded).await?;
-    for provider in list(database, None).await? {
+    for provider in list(database, fallback_s3).await? {
         if !providers
             .iter()
             .any(|candidate| candidate.id == provider.id)
@@ -136,7 +136,7 @@ pub async fn load(
 }
 pub async fn load_with_storage(
     database: &DatabaseConnection,
-    _fallback_s3: Option<&S3Settings>,
+    fallback_s3: Option<&S3Settings>,
     _fallback_path: &std::path::Path,
     id: Uuid,
 ) -> Result<Option<BackupProvider>> {
@@ -150,7 +150,7 @@ pub async fn load_with_storage(
     {
         return storage_target_provider(target).map(Some);
     }
-    load(database, None, id).await
+    load(database, fallback_s3, id).await
 }
 
 pub async fn save(database: &DatabaseConnection, provider: &BackupProvider) -> Result<()> {
@@ -370,6 +370,24 @@ mod tests {
 
         let with_runtime = list(&database, Some(&runtime_s3)).await?;
         assert_eq!(with_runtime.len(), 2);
+        let with_storage_runtime =
+            list_with_storage(&database, Some(&runtime_s3), directory.path()).await?;
+        assert!(
+            with_storage_runtime
+                .iter()
+                .any(|provider| provider.id == RUNTIME_S3_PROVIDER_ID)
+        );
+        assert_eq!(
+            load_with_storage(
+                &database,
+                Some(&runtime_s3),
+                directory.path(),
+                RUNTIME_S3_PROVIDER_ID
+            )
+            .await?
+            .map(|provider| provider.source),
+            Some(BackupProviderSource::RuntimeConfig)
+        );
         let distinct_s3 = BackupProvider {
             id: Uuid::new_v4(),
             name: "Stored S3".to_owned(),

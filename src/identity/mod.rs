@@ -1,5 +1,6 @@
 mod admin;
 mod admin_lfs;
+mod admin_registry;
 mod auth;
 mod avatar;
 mod integrations;
@@ -78,6 +79,8 @@ pub struct IdentityState {
     maintenance_sender: Option<mpsc::Sender<MaintenanceAction>>,
     maintenance_pending: Arc<Mutex<bool>>,
     lfs_storage: Arc<tokio::sync::RwLock<Option<Arc<crate::storage::LfsStorageManager>>>>,
+    registry_storage:
+        Arc<tokio::sync::RwLock<Option<Arc<crate::registry::storage::RegistryStorageManager>>>>,
     validated_backups: Arc<Mutex<HashMap<Uuid, ValidatedBackup>>>,
     tested_backup_providers: Arc<Mutex<HashMap<Uuid, TestedBackupProvider>>>,
     measured_storage: Arc<Mutex<HashMap<Uuid, MeasuredUsage>>>,
@@ -276,6 +279,7 @@ impl IdentityState {
             maintenance_sender,
             maintenance_pending: Arc::new(Mutex::new(false)),
             lfs_storage: Arc::new(tokio::sync::RwLock::new(None)),
+            registry_storage: Arc::new(tokio::sync::RwLock::new(None)),
             validated_backups: Arc::new(Mutex::new(HashMap::new())),
             tested_backup_providers: Arc::new(Mutex::new(HashMap::new())),
             measured_storage: Arc::new(Mutex::new(HashMap::new())),
@@ -293,6 +297,18 @@ impl IdentityState {
         let manager = crate::storage::LfsStorageManager::new(&self.database, fallback_path).await?;
         *self.lfs_storage.write().await = Some(manager);
         Ok(())
+    }
+
+    pub(crate) async fn initialize_registry_storage(&self) -> Result<(), anyhow::Error> {
+        let manager = crate::registry::storage::RegistryStorageManager::new(&self.database).await?;
+        *self.registry_storage.write().await = Some(manager);
+        Ok(())
+    }
+
+    pub(crate) async fn registry_storage(
+        &self,
+    ) -> Option<Arc<crate::registry::storage::RegistryStorageManager>> {
+        self.registry_storage.read().await.clone()
     }
 
     pub(crate) async fn lfs_storage(&self) -> Option<Arc<crate::storage::LfsStorageManager>> {
@@ -840,6 +856,22 @@ pub fn router() -> Router<IdentityState> {
         .route(
             "/admin/storage/targets/test",
             post(admin::test_storage_target),
+        )
+        .route(
+            "/admin/storage/registry/status",
+            get(admin_registry::registry_status),
+        )
+        .route(
+            "/admin/storage/registry/repositories",
+            get(admin_registry::list_registry_repository_usage),
+        )
+        .route(
+            "/admin/storage/registry/migrate",
+            post(admin_registry::migrate_registry),
+        )
+        .route(
+            "/admin/storage/registry/migrations/{operation_id}/events",
+            get(admin_registry::registry_migration_events),
         )
         .route(
             "/admin/storage/targets/{target_id}",

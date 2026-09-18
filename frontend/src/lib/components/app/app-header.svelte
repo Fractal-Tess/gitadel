@@ -53,6 +53,7 @@
     appearance: "Appearance",
     access: "Access",
     storage: "Storage",
+    registry: "Container registry",
     backups: "Backups",
     activity: "Activity",
     members: "Members",

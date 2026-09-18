@@ -144,7 +144,9 @@
       const providersValue = loaded.providers;
       const selected =
         providersValue.find((provider) => provider.id === selectedProviderId) ??
-        providersValue.find((provider) => provider.id === loaded.selectedProviderId) ??
+        providersValue.find(
+          (provider) => provider.id === loaded.selectedProviderId,
+        ) ??
         null;
       const snapshotsValue =
         selected?.id === loaded.selectedProviderId
@@ -467,7 +469,9 @@
       password = "";
       createSafetyBackup = true;
       confirmReplacement = false;
-      toast.success("Backup copied and verified. Review the restore details below.");
+      toast.success(
+        "Backup copied and verified. Review the restore details below.",
+      );
     });
   }
 
@@ -523,7 +527,10 @@
         caught instanceof ApiFailure || caught instanceof Error
           ? caught.message
           : "The request failed.";
-      if (caught instanceof BackupProgressFailure || failureTarget === "inline") {
+      if (
+        caught instanceof BackupProgressFailure ||
+        failureTarget === "inline"
+      ) {
         error = message;
       } else {
         toast.error(message);
@@ -637,7 +644,8 @@
             : (provider.bucket ?? "S3")}
           description={provider.managed_by_storage
             ? "Storage target managed from Administration → Storage."
-            : (catalogProvider?.description ?? "Configured backup destination.")}
+            : (catalogProvider?.description ??
+              "Configured backup destination.")}
           enabled
           statusLabel={provider.schedule ? "Scheduled" : "Ready"}
           statusHealthy
@@ -703,8 +711,8 @@
           <div>
             <Card.Title>Automatic backups</Card.Title>
             <Card.Description>
-              Create complete snapshots with {settings.name} on a predefined
-              interval or UTC cron schedule.
+              Create complete snapshots with {settings.name} on a predefined interval
+              or UTC cron schedule.
             </Card.Description>
           </div>
         </div>
@@ -718,7 +726,8 @@
         >
           <Field.Group>
             <Field.Field>
-              <Field.Label for="automatic-backup-schedule">Schedule</Field.Label>
+              <Field.Label for="automatic-backup-schedule">Schedule</Field.Label
+              >
               <Select.Root type="single" bind:value={scheduleMode}>
                 <Select.Trigger id="automatic-backup-schedule" class="w-full">
                   {SCHEDULE_OPTIONS.find(
@@ -756,9 +765,9 @@
                   placeholder="0 2 * * *"
                 />
                 <Field.Description>
-                  Five-field cron uses minute, hour, day of month, month, and day
-                  of week. Six- and seven-field expressions may include seconds
-                  and year.
+                  Five-field cron uses minute, hour, day of month, month, and
+                  day of week. Six- and seven-field expressions may include
+                  seconds and year.
                 </Field.Description>
               </Field.Field>
               <Alert.Root
@@ -812,8 +821,8 @@
           <div>
             <h3 class="text-sm font-semibold">Snapshots</h3>
             <p class="mt-0.5 text-xs text-muted-foreground">
-              Each snapshot includes the database, repositories, LFS, assets,
-              host key, and effective configuration.
+              Each snapshot includes the database, repositories, container
+              images, LFS, assets, host key, and effective configuration.
             </p>
           </div>
         </div>
@@ -838,9 +847,7 @@
             {#if backupProgress.phase === "completed"}
               <CheckCircle2 class="mt-0.5 size-4 shrink-0 text-emerald-400" />
             {:else}
-              <Spinner
-                class="mt-0.5 size-4 shrink-0 text-primary"
-              />
+              <Spinner class="mt-0.5 size-4 shrink-0 text-primary" />
             {/if}
             <div class="min-w-0 flex-1">
               <div class="flex items-center justify-between gap-3">
@@ -1102,8 +1109,8 @@
         <Field.Label for="backup-provider">Storage provider</Field.Label>
         <Select.Root type="single" bind:value={createProviderId}>
           <Select.Trigger id="backup-provider" class="w-full">
-            {providers.find((provider) => provider.id === createProviderId)?.name ??
-              "Choose a storage provider"}
+            {providers.find((provider) => provider.id === createProviderId)
+              ?.name ?? "Choose a storage provider"}
           </Select.Trigger>
           <Select.Content>
             <Select.Group>
@@ -1119,7 +1126,9 @@
       </Field.Field>
       <Field.Field>
         <Field.Label for="backup-name">
-          Backup name <span class="font-normal text-muted-foreground">(optional)</span>
+          Backup name <span class="font-normal text-muted-foreground"
+            >(optional)</span
+          >
         </Field.Label>
         <Input
           id="backup-name"
@@ -1130,7 +1139,12 @@
         />
       </Field.Field>
       <Dialog.Footer>
-        <Button type="button" variant="ghost" onclick={() => (createDialogOpen = false)} disabled={creating}>
+        <Button
+          type="button"
+          variant="ghost"
+          onclick={() => (createDialogOpen = false)}
+          disabled={creating}
+        >
           Cancel
         </Button>
         <Button type="submit" disabled={creating || !createProviderId}>

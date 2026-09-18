@@ -52,6 +52,8 @@ mod m20260915_000051_repository_icons;
 mod m20260918_000052_default_branch_selection;
 mod m20260918_000053_repository_icon_discovery;
 
+mod m20260918_000054_registry_storage;
+
 #[cfg(test)]
 mod tests;
 
@@ -116,6 +118,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260915_000051_repository_icons::Migration),
             Box::new(m20260918_000052_default_branch_selection::Migration),
             Box::new(m20260918_000053_repository_icon_discovery::Migration),
+            Box::new(m20260918_000054_registry_storage::Migration),
         ]
     }
 }

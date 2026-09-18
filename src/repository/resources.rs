@@ -1079,6 +1079,7 @@ pub async fn purge_repository(
             "Soft-delete the repository before permanently purging it.",
         ));
     }
+    let _registry_operation = state.registry_storage().lock_operation().await;
     let transaction = state.identity().database().begin().await?;
     state
         .identity()
@@ -1094,6 +1095,17 @@ pub async fn purge_repository(
         .await?;
     transaction.commit().await?;
     cleanup_lfs_blobs(&state, repository.storage_key).await;
+    let registry_prefix = ObjectPrefix::new(format!("registry/{}", repository.storage_key))
+        .map_err(ApiError::internal)?;
+    if let Err(error) = targets::delete_prefix_from_all(
+        state.identity().database(),
+        state.local_lfs_root().to_path_buf(),
+        &registry_prefix,
+    )
+    .await
+    {
+        tracing::error!(%error, "could not clean repository registry objects from every target");
+    }
     cleanup_repository_storage(
         &state.repository_path(&repository),
         &state.lfs_repository_path(&repository),

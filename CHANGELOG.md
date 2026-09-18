@@ -4,6 +4,20 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-18
+
+### Added
+
+- Added **Administration → Container registry** with global and per-repository usage, filters, and verified migration between repository-backed local storage and existing filesystem or S3 targets. Registry and Git LFS destinations are selected independently. Backups include external registry payloads and unfinished uploads, and restore them into local storage without requiring the original object store.
+
+### Changed
+
+- Shortened repository visibility choices to **Public** and **Private**.
+
+### Fixed
+
+- Preserved the configured S3 backup provider in listing and lookup when shared storage targets are included in the provider catalog.
+
 ## [0.8.0] - 2026-09-18
 
 ### Added
@@ -254,7 +268,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/Fractal-Tess/gitadel/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.6.2...v0.7.0
