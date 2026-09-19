@@ -81,7 +81,8 @@ export const treeEntrySchema = z.object({
   kind: z.enum(["tree", "blob", "symlink", "submodule"]),
   mode: z.number(),
   size: z.number().nullable(),
-  lfs_size: z.number().int().nonnegative().nullable(),
+  // Tree sizes are approximate JS numbers; blob.lfs.size preserves exact bytes.
+  lfs_size: z.number().nonnegative().refine(Number.isInteger).nullable(),
   submodule: z
     .object({
       name: z.string(),
@@ -118,6 +119,12 @@ export const blobSchema = z.object({
   rendered_html: z.string().nullable(),
   image: imageMetadataSchema.nullable(),
   image_error: z.string().nullable(),
+  lfs: z
+    .object({
+      oid: z.string().regex(/^[0-9a-f]{64}$/),
+      size: z.string().regex(/^(0|[1-9][0-9]*)$/),
+    })
+    .nullable(),
 });
 
 export const signatureSchema = z.object({

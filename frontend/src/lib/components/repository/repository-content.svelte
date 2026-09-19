@@ -4,6 +4,7 @@
   import Minus from "@lucide/svelte/icons/minus";
   import Plus from "@lucide/svelte/icons/plus";
   import RepositorySubmodule from "$lib/components/repository/repository-submodule.svelte";
+  import RepositoryLfs from "$lib/components/repository/repository-lfs.svelte";
   import MaterialFileIcon from "$lib/components/repository/material-file-icon.svelte";
 
   import { Button } from "$lib/components/ui/button/index.js";
@@ -130,6 +131,10 @@
 >
   {#if pageState.browser.submodule}
     <RepositorySubmodule state={pageState} />
+  {:else if pageState.browser.blob?.lfs}
+    {#key `${pageState.browser.blob.commit_oid}:${pageState.browser.blob.path}`}
+      <RepositoryLfs state={pageState} />
+    {/key}
   {:else if pageState.browser.blob}
     <header
       class="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-3 border-b px-5 py-2 text-sm font-semibold"

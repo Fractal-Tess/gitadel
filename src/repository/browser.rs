@@ -166,12 +166,19 @@ pub struct TreeEntryResponse {
 }
 
 #[derive(Serialize)]
+pub struct LfsMetadata {
+    oid: String,
+    size: String,
+}
+
+#[derive(Serialize)]
 pub struct BlobResponse {
     revision: String,
     commit_oid: String,
     path: String,
     oid: String,
     size: usize,
+    lfs: Option<LfsMetadata>,
     binary: bool,
     too_large: bool,
     content: Option<String>,
@@ -565,7 +572,7 @@ pub async fn tree(
             // Only small regular blobs can be pointers; never load large files or symlinks.
             let lfs_size =
                 if kind == "blob" && size.is_some_and(|size| size < MAX_LFS_POINTER_BYTES) {
-                    lfs_pointer_size(&git.blobs().read(entry.oid)?)
+                    lfs_pointer_metadata(&git.blobs().read(entry.oid)?).map(|pointer| pointer.size)
                 } else {
                     None
                 };
@@ -729,7 +736,13 @@ fn parse_submodule_metadata(bytes: &[u8]) -> HashMap<String, SubmoduleResponse> 
     submodules
 }
 
-fn lfs_pointer_size(content: &[u8]) -> Option<u64> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LfsPointerMetadata<'a> {
+    oid: &'a str,
+    size: u64,
+}
+
+fn lfs_pointer_metadata(content: &[u8]) -> Option<LfsPointerMetadata<'_>> {
     let text = std::str::from_utf8(content).ok()?.strip_suffix('\n')?;
     let mut lines = text.split('\n');
     match lines.next()? {
@@ -738,7 +751,7 @@ fn lfs_pointer_size(content: &[u8]) -> Option<u64> {
         _ => return None,
     }
     let mut previous_key = "";
-    let mut has_oid = false;
+    let mut oid = None;
     let mut size = None;
     for line in lines {
         let (key, value) = line.split_once(' ')?;
@@ -763,7 +776,7 @@ fn lfs_pointer_size(content: &[u8]) -> Option<u64> {
                 {
                     return None;
                 }
-                has_oid = true;
+                oid = Some(hash);
             }
             "size" => {
                 if !value.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -775,7 +788,10 @@ fn lfs_pointer_size(content: &[u8]) -> Option<u64> {
             _ => {}
         }
     }
-    has_oid.then_some(size).flatten()
+    Some(LfsPointerMetadata {
+        oid: oid?,
+        size: size?,
+    })
 }
 
 pub async fn blob(
@@ -822,6 +838,14 @@ pub async fn blob(
             content.iter().take(8192).any(|byte| *byte == 0)
                 || (!too_large && std::str::from_utf8(content).is_err())
         });
+        let lfs = content
+            .as_deref()
+            .filter(|_| size < MAX_LFS_POINTER_BYTES as usize)
+            .and_then(lfs_pointer_metadata)
+            .map(|pointer| LfsMetadata {
+                oid: pointer.oid.to_owned(),
+                size: pointer.size.to_string(),
+            });
         let text = content
             .as_ref()
             .filter(|_| !too_large && !binary)
@@ -829,22 +853,29 @@ pub async fn blob(
         let rendered_html = text
             .as_deref()
             .and_then(|text| is_markdown_path(&requested_path).then(|| render_markdown(text)));
+        let has_lfs = lfs.is_some();
+        let image_content = if image_path && !has_lfs {
+            content
+        } else {
+            None
+        };
         let response = BlobResponse {
             revision,
             commit_oid: commit_oid.to_hex(),
             path: requested_path,
             oid: resolved.oid.to_hex(),
             size,
+            lfs,
             binary,
             too_large,
             content: text,
             rendered_html,
             image: None,
-            image_error: (image_path && content.is_none()).then(|| {
+            image_error: (image_path && image_content.is_none() && !has_lfs).then(|| {
                 "Image previews are limited to 16 MiB. Download the original instead.".to_owned()
             }),
         };
-        Ok((response, if image_path { content } else { None }))
+        Ok((response, image_content))
     })
     .await?;
     if let Some(content) = image_content {
@@ -2273,20 +2304,40 @@ mod tests {
     #[test]
     fn lfs_pointer_preserves_zero_size_with_extension_fields() {
         let pointer = b"version https://git-lfs.github.com/spec/v1\next-0-test sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\noid sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nsize 0\n";
-        assert_eq!(super::lfs_pointer_size(pointer), Some(0));
+        assert_eq!(
+            super::lfs_pointer_metadata(pointer),
+            Some(super::LfsPointerMetadata {
+                oid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                size: 0,
+            })
+        );
     }
 
     #[test]
     fn lfs_pointer_rejects_invalid_object_identity() {
         let pointer =
             b"version https://git-lfs.github.com/spec/v1\noid sha256:not-a-hash\nsize 12345\n";
-        assert_eq!(super::lfs_pointer_size(pointer), None);
+        assert_eq!(super::lfs_pointer_metadata(pointer), None);
     }
 
     #[test]
     fn lfs_pointer_rejects_ambiguous_size() {
         let pointer = b"version https://git-lfs.github.com/spec/v1\noid sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nsize 100\nsize 200\n";
-        assert_eq!(super::lfs_pointer_size(pointer), None);
+        assert_eq!(super::lfs_pointer_metadata(pointer), None);
+    }
+
+    #[test]
+    fn lfs_pointer_preserves_maximum_u64_size() {
+        let pointer = format!(
+            "version https://git-lfs.github.com/spec/v1\noid sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nsize {0}\n",
+            u64::MAX
+        );
+        assert_eq!(
+            super::lfs_pointer_metadata(pointer.as_bytes())
+                .expect("parse maximum LFS pointer size")
+                .size,
+            u64::MAX
+        );
     }
 
     fn signed_commit() -> Vec<u8> {

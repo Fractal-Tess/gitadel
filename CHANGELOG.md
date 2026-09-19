@@ -4,6 +4,10 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+### Added
+
+- Added a dedicated Git LFS file preview with human-readable object sizes, an exact-byte toggle, a copyable SHA-256 object ID, and the original pointer text.
+
 ### Fixed
 
 - Made the selected repository visibility clearly visible with a contrasting border, including the initial Private selection.
