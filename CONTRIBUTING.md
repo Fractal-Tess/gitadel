@@ -82,7 +82,6 @@ cli/            Token-authenticated remote command-line client
 frontend/       SvelteKit web interface
 nix/            Separate NixOS server and client modules
 scripts/        Release and Nix dependency-hash helpers
-docs/research/  Product and integration research
 ```
 
 Release-facing changes belong in [CHANGELOG.md](CHANGELOG.md).

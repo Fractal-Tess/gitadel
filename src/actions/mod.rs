@@ -13,7 +13,10 @@ use axum::Router;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use tokio_util::sync::CancellationToken;
 
-use crate::{config::ActionsSettings, entity::action_runner, repository::RepositoryState};
+use crate::{
+    config::ActionsSettings, entity::action_runner, filesystem::create_private_directory_async,
+    repository::RepositoryState,
+};
 
 pub(crate) const REQUIRED_RUNNER_VERSION: &str = "13.0.0";
 
@@ -86,7 +89,7 @@ pub(crate) async fn bootstrap_system_runner(state: &ActionsState) -> anyhow::Res
         .registration_token_file
         .parent()
         .ok_or_else(|| anyhow::anyhow!("system runner token file requires a parent directory"))?;
-    tokio::fs::create_dir_all(parent).await?;
+    create_private_directory_async(parent).await?;
     tokio::fs::write(&settings.registration_token_file, raw).await?;
     tokio::fs::set_permissions(
         &settings.registration_token_file,

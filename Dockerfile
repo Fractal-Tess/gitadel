@@ -1,11 +1,11 @@
-FROM oven/bun:1.3.13 AS frontend
+FROM oven/bun:1.4.2 AS frontend
 WORKDIR /build/frontend
 COPY frontend/package.json frontend/bun.lock ./
 RUN bun install --frozen-lockfile
 COPY frontend/ ./
 RUN bun run build
 
-FROM rust:1.98.0-slim-trixie AS backend
+FROM rust:1.98.1-slim-trixie AS backend
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends build-essential cmake libdav1d-dev libssl-dev perl pkg-config \
     && rm -rf /var/lib/apt/lists/*

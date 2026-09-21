@@ -33,21 +33,28 @@
   let previewPending = $state(false);
   let pendingUploads = $state(0);
   let textarea = $state<HTMLTextAreaElement | null>(null);
+  let previewRequest = 0;
 
   async function switchMode(next: string) {
     if (next === mode) return;
+    const request = ++previewRequest;
     if (next !== "preview") {
       mode = "write";
+      previewPending = false;
       return;
     }
+    const draft = value;
     previewPending = true;
     try {
-      previewHtml = await repository.issues.previewMarkdown(value);
-      mode = "preview";
+      const html = await repository.issues.previewMarkdown(draft);
+      if (request === previewRequest && value === draft) {
+        previewHtml = html;
+        mode = "preview";
+      }
     } catch {
       // The repository issue state owns mutation error toasts.
     } finally {
-      previewPending = false;
+      if (request === previewRequest) previewPending = false;
     }
   }
 

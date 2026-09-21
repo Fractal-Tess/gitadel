@@ -53,6 +53,9 @@
             inherit version;
             cargoLock.lockFile = ./Cargo.lock;
             cargoLock.outputHashes."sley-0.10.0" = "sha256-ZSETbJhpqXVb+tlmySXAKPDcXo8suxMVhjsyNha2dJc=";
+            cargoLock.outputHashes."aws-creds-0.39.1" = "sha256-5camJxcM0dabqc5mWvikvGwOCFPbJr4FLhP3oIkSIUU=";
+            cargoLock.outputHashes."rust-s3-0.37.2" = "sha256-5camJxcM0dabqc5mWvikvGwOCFPbJr4FLhP3oIkSIUU=";
+            cargoLock.outputHashes."tokei-14.0.0" = "sha256-Ub4fEXLsGAKTm5jN2qHYqYBC1mrFZbADC35CpjVVcGQ=";
             doCheck = false;
           };
           # Only the manifest and lockfile, so editing frontend sources does not
@@ -85,7 +88,7 @@
               cp -R node_modules $out/
               runHook postInstall
             '';
-            outputHash = "sha256-HCNSaX62NMvNtBxWF6CAg1UunohZBQwEg/MCrka8M9s=";
+            outputHash = "sha256-/E6Yuvhojcy/Wo2iW2a8pgxERQsn2KD2Ad+nfDjZ5mo=";
             outputHashAlgo = "sha256";
             outputHashMode = "recursive";
           };
@@ -222,8 +225,10 @@
               pkgs.process-compose
               pkgs.rust-analyzer
               pkgs.watchexec
+              pkgs.playwright-driver.browsers
               rustToolchain
             ];
+            PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
           };
         }
       );

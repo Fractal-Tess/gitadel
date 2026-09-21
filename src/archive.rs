@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read as _, Write as _},
     path::{Component, Path, PathBuf},
     time::Duration,
@@ -29,13 +29,14 @@ use crate::{
     config::{BackupCommand, DatabaseSettings, S3Settings, Settings},
     database,
     entity::{backup_provider_schedule, repository},
+    filesystem::{create_private_directory, open_private_file},
     identity::IdentityState,
 };
 
 mod filesystem;
 mod s3;
 
-const FORMAT_VERSION: u32 = 2;
+const FORMAT_VERSION: u32 = 3;
 const MIN_FORMAT_VERSION: u32 = 1;
 const ARCHIVE_ROOT: &str = "backup";
 const MANIFEST_NAME: &str = "manifest.json";
@@ -542,12 +543,7 @@ pub fn acquire_storage_lock(database: &DatabaseSettings) -> Result<StorageLock> 
         fs::create_dir_all(parent)
             .with_context(|| format!("could not create {}", parent.display()))?;
     }
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
+    let file = open_private_file(&lock_path, false)
         .with_context(|| format!("could not open storage lock {}", lock_path.display()))?;
     file.try_lock_exclusive().with_context(|| {
         format!(
@@ -617,10 +613,11 @@ async fn create_staged_backup(
     backup_name: Option<&str>,
     reporter: Option<&MaintenanceProgressReporter>,
 ) -> Result<()> {
-    fs::create_dir_all(staging)
+    create_private_directory(staging)
         .with_context(|| format!("could not create {}", staging.display()))?;
     fs::create_dir(staging.join("repositories"))?;
     fs::create_dir(staging.join("lfs"))?;
+    fs::create_dir(staging.join("actions-artifacts"))?;
     if let Some(reporter) = reporter {
         reporter.report(
             MaintenancePhase::SnapshottingDatabase,
@@ -669,9 +666,18 @@ async fn create_staged_backup(
         }
     }
     if let Some(reporter) = reporter {
-        reporter.report(MaintenancePhase::CopyingLfs, "Copying Git LFS objects.");
+        reporter.report(
+            MaintenancePhase::CopyingLfs,
+            "Copying Git LFS objects and uploaded files.",
+        );
     }
+    copy_tree(&settings.storage.lfs_root, &staging.join("lfs"), false)?;
     materialize_lfs(lfs_storage.store.as_ref(), &staging.join("lfs")).await?;
+    copy_tree(
+        &settings.storage.actions_artifact_root,
+        &staging.join("actions-artifacts"),
+        false,
+    )?;
     if let Some(reporter) = reporter {
         reporter.report(
             MaintenancePhase::WritingMetadata,
@@ -714,7 +720,7 @@ async fn create_staged_backup(
         );
     }
 
-    let output = File::create(temporary_output)
+    let output = open_private_file(temporary_output, true)
         .with_context(|| format!("could not create {}", temporary_output.display()))?;
     let encoder = zstd::Encoder::new(output, 9).context("could not start Zstandard encoder")?;
     let mut archive = tar::Builder::new(encoder);
@@ -1339,6 +1345,11 @@ pub fn restore_available_space(settings: &Settings) -> Result<u64> {
             .lfs_root
             .parent()
             .unwrap_or_else(|| Path::new(".")),
+        settings
+            .storage
+            .actions_artifact_root
+            .parent()
+            .unwrap_or_else(|| Path::new(".")),
     ]
     .into_iter()
     .map(|path| {
@@ -1405,10 +1416,19 @@ fn restore_from_staging(
         manifest.format_version < 2 || settings_source.is_file(),
         "backup settings are missing"
     );
+    let includes_actions_artifacts = manifest.format_version >= 3;
+    if includes_actions_artifacts {
+        ensure!(
+            root.join("actions-artifacts").is_dir(),
+            "backup Actions artifacts are missing"
+        );
+        ensure_restore_target(&settings.storage.actions_artifact_root, true)?;
+    }
 
     let suffix = Uuid::new_v4().simple().to_string();
     let repository_temp = sibling_temp(&settings.storage.repository_root, &suffix);
     let lfs_temp = sibling_temp(&settings.storage.lfs_root, &suffix);
+    let actions_artifact_temp = sibling_temp(&settings.storage.actions_artifact_root, &suffix);
     let database_temp = sibling_temp(database_path, &suffix);
     let host_key_temp = sibling_temp(&settings.ssh.host_key, &suffix);
     let settings_temp = sibling_temp(config_path, &suffix);
@@ -1417,6 +1437,9 @@ fn restore_from_staging(
         lfs_temp.clone(),
         database_temp.clone(),
     ];
+    if includes_actions_artifacts {
+        temporary_paths.push(actions_artifact_temp.clone());
+    }
     if manifest.host_key {
         temporary_paths.push(host_key_temp.clone());
     }
@@ -1427,6 +1450,13 @@ fn restore_from_staging(
     let prepared = (|| -> Result<()> {
         copy_tree(&root.join("repositories"), &repository_temp, false)?;
         copy_tree(&root.join("lfs"), &lfs_temp, false)?;
+        if includes_actions_artifacts {
+            copy_tree(
+                &root.join("actions-artifacts"),
+                &actions_artifact_temp,
+                false,
+            )?;
+        }
         copy_file(&root.join("database.sqlite"), &database_temp)?;
         if manifest.host_key {
             ensure_restore_target(&settings.ssh.host_key, false)?;
@@ -1446,6 +1476,13 @@ fn restore_from_staging(
     remove_empty_target(&settings.storage.lfs_root)?;
     rename_prepared(&repository_temp, &settings.storage.repository_root)?;
     rename_prepared(&lfs_temp, &settings.storage.lfs_root)?;
+    if includes_actions_artifacts {
+        remove_empty_target(&settings.storage.actions_artifact_root)?;
+        rename_prepared(
+            &actions_artifact_temp,
+            &settings.storage.actions_artifact_root,
+        )?;
+    }
     rename_prepared(&database_temp, database_path)?;
     if manifest.host_key {
         rename_prepared(&host_key_temp, &settings.ssh.host_key)?;
@@ -1472,6 +1509,9 @@ fn replace_archive(input: &Path, settings: &Settings) -> Result<()> {
         sqlite_sidecar(&database_path, "-wal"),
         sqlite_sidecar(&database_path, "-shm"),
     ];
+    if inspection.format_version >= 3 {
+        targets.push(settings.storage.actions_artifact_root.clone());
+    }
     if inspection.includes_host_key {
         targets.push(settings.ssh.host_key.clone());
     }
@@ -1720,7 +1760,7 @@ fn sha256(path: &Path) -> Result<String> {
         }
         digest.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(hex::encode(digest.finalize()))
 }
 
 fn sqlite_path(url: &str) -> Result<PathBuf> {
@@ -1805,6 +1845,8 @@ mod tests {
     use sea_orm::Set;
 
     use super::s3::validate_managed_key as validate_managed_s3_backup_key;
+    use std::os::unix::fs::PermissionsExt as _;
+
     use super::*;
     use crate::{
         blob_store::lfs_object_key,
@@ -1818,6 +1860,8 @@ mod tests {
         site_description: Option<String>,
         repository: Vec<u8>,
         lfs: Vec<u8>,
+        upload: Vec<u8>,
+        actions_artifact: Vec<u8>,
         host_key: Vec<u8>,
         effective_settings: String,
     }
@@ -1847,8 +1891,23 @@ mod tests {
         settings.database.url = format!("sqlite://{}?mode=rwc", root.join("gitadel.db").display());
         settings.storage.repository_root = root.join("repositories");
         settings.storage.lfs_root = root.join("lfs");
+        settings.storage.actions_artifact_root = root.join("actions-artifacts");
         settings.ssh.host_key = root.join("ssh-host-key");
         settings
+    }
+
+    #[tokio::test]
+    async fn backup_creation_uses_owner_only_mode() -> Result<()> {
+        let directory = TestDirectory::new()?;
+        let instance_root = directory.path().join("mode-test");
+        fs::create_dir(&instance_root)?;
+        let settings = settings_at(&instance_root);
+        let backup = directory.path().join("private-backup.tar.zst");
+
+        create_archive(&backup, &settings).await?;
+
+        assert_eq!(fs::metadata(backup)?.permissions().mode() & 0o777, 0o600);
+        Ok(())
     }
 
     #[tokio::test]
@@ -1901,6 +1960,22 @@ mod tests {
         let lfs_file = source_settings.storage.lfs_root.join(lfs_relative.as_str());
         fs::create_dir_all(lfs_file.parent().context("LFS file has no parent")?)?;
         fs::write(&lfs_file, lfs_payload)?;
+        let upload_file = source_settings
+            .storage
+            .lfs_root
+            .join("uploads/issue-attachment");
+        fs::create_dir_all(upload_file.parent().context("upload file has no parent")?)?;
+        fs::write(&upload_file, b"issue-upload")?;
+        let artifact_file = source_settings
+            .storage
+            .actions_artifact_root
+            .join("workflow/artifact.zip");
+        fs::create_dir_all(
+            artifact_file
+                .parent()
+                .context("artifact file has no parent")?,
+        )?;
+        fs::write(&artifact_file, b"actions-artifact")?;
         fs::write(&source_settings.ssh.host_key, b"ssh-host-key")?;
 
         let backup = directory.path().join("complete.tar.zst");
@@ -1945,6 +2020,18 @@ mod tests {
                     .lfs_root
                     .join(lfs_relative.as_str()),
             )?,
+            upload: fs::read(
+                restored_settings
+                    .storage
+                    .lfs_root
+                    .join("uploads/issue-attachment"),
+            )?,
+            actions_artifact: fs::read(
+                restored_settings
+                    .storage
+                    .actions_artifact_root
+                    .join("workflow/artifact.zip"),
+            )?,
             host_key: fs::read(&restored_settings.ssh.host_key)?,
             effective_settings: fs::read_to_string(&restored_config)?,
         };
@@ -1954,6 +2041,8 @@ mod tests {
             site_description: Some("Complete backup".to_owned()),
             repository: b"repository-object".to_vec(),
             lfs: b"lfs-object".to_vec(),
+            upload: b"issue-upload".to_vec(),
+            actions_artifact: b"actions-artifact".to_vec(),
             host_key: b"ssh-host-key".to_vec(),
             effective_settings: toml::to_string_pretty(&source_settings)?,
         };

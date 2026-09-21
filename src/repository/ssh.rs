@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap, fs::OpenOptions, io::Write as _, os::unix::fs::OpenOptionsExt as _,
-    path::Path, sync::Arc, time::Duration,
-};
+use std::{collections::HashMap, io::Write as _, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use russh::{
@@ -21,7 +18,11 @@ use super::{
     resources::{CreateRepositoryOptions, create_owned_repository, record_push},
     webhooks::{dispatch_push, snapshot_refs},
 };
-use crate::{actions::ActionsState, config::SshSettings};
+use crate::{
+    actions::ActionsState,
+    config::SshSettings,
+    filesystem::{create_private_directory, open_private_file, protect_file_sync},
+};
 
 struct SshServer {
     state: RepositoryState,
@@ -498,24 +499,24 @@ fn reject(channel: ChannelId, session: &mut Session, message: &str) -> Result<()
 
 fn load_or_create_host_key(path: &Path) -> Result<PrivateKey> {
     if path.exists() {
-        return load_secret_key(path, None)
-            .with_context(|| format!("could not load SSH host key {}", path.display()));
+        protect_file_sync(path)
+            .with_context(|| format!("could not protect SSH host key {}", path.display()))?;
+        let key = load_secret_key(path, None)
+            .with_context(|| format!("could not load SSH host key {}", path.display()))?;
+        return supported_host_key(key);
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+    {
+        create_private_directory(parent)
             .with_context(|| format!("could not create {}", parent.display()))?;
     }
-    let key = PrivateKey::random(&mut rand_10::rng(), Algorithm::Ed25519)
+    let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
         .map_err(|error| anyhow!("could not generate SSH host key: {error}"))?;
     let encoded = key
         .to_openssh(LineEnding::LF)
         .context("could not encode SSH host key")?;
-    match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-    {
+    match open_private_file(path, true) {
         Ok(mut file) => {
             file.write_all(encoded.as_bytes())
                 .with_context(|| format!("could not write SSH host key {}", path.display()))?;
@@ -524,11 +525,41 @@ fn load_or_create_host_key(path: &Path) -> Result<PrivateKey> {
             Ok(key)
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            load_secret_key(path, None)
-                .with_context(|| format!("could not load SSH host key {}", path.display()))
+            let key = load_secret_key(path, None)
+                .with_context(|| format!("could not load SSH host key {}", path.display()))?;
+            supported_host_key(key)
         }
         Err(error) => {
             Err(error).with_context(|| format!("could not create SSH host key {}", path.display()))
         }
+    }
+}
+
+fn supported_host_key(key: PrivateKey) -> Result<PrivateKey> {
+    if matches!(key.algorithm(), Algorithm::Rsa { .. }) {
+        return Err(anyhow!(
+            "RSA SSH host keys are disabled because the upstream implementation has an unresolved timing advisory; use Ed25519"
+        ));
+    }
+    Ok(key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rsa_host_keys_are_rejected() {
+        let key = PrivateKey::random(
+            &mut rand::rng(),
+            Algorithm::Rsa {
+                hash: Some(HashAlg::Sha256),
+            },
+        )
+        .expect("generate RSA test key");
+
+        let error = supported_host_key(key).expect_err("reject RSA host key");
+
+        assert!(error.to_string().contains("timing advisory"));
     }
 }

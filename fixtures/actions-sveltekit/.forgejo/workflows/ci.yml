@@ -5,7 +5,7 @@ on:
     paths:
       - "src/**"
       - "package.json"
-      - "package-lock.json"
+      - "bun.lock"
       - "svelte.config.js"
       - "tsconfig.json"
       - "vite.config.ts"
@@ -17,6 +17,10 @@ jobs:
     outputs:
       commit: ${{ steps.metadata.outputs.commit }}
     steps:
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.2
       - name: Clone pushed commit
         env:
           CHECKOUT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -25,16 +29,16 @@ jobs:
           cd source
           git checkout --detach "${GITHUB_SHA}"
       - name: Install locked dependencies
-        run: npm --prefix source ci
+        run: bun install --cwd source --frozen-lockfile
       - name: Check Svelte project
-        run: npm --prefix source run check
+        run: bun run --cwd source check
       - name: Build SvelteKit project
-        run: npm --prefix source run build
+        run: bun run --cwd source build
       - name: Publish checked commit
         id: metadata
         run: echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
       - name: Upload production build
-        uses: forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e
+        uses: forgejo/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: sveltekit-build
           path: source/build
@@ -47,7 +51,7 @@ jobs:
       - name: Verify dependency output
         run: test "${{ needs.validate.outputs.commit }}" = "${GITHUB_SHA}"
       - name: Download production build
-        uses: forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e
+        uses: forgejo/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: sveltekit-build
           path: downloaded

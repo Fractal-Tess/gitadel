@@ -985,7 +985,7 @@ impl ImageStore {
         let value: Value = serde_json::from_slice(bytes)
             .map_err(|error| StoreError::Invalid(format!("manifest is not valid JSON: {error}")))?;
         self.validate_manifest(&value, media_type).await?;
-        let digest = format!("sha256:{:x}", Sha256::digest(bytes));
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
         if reference.starts_with("sha256:") && normalize_digest(reference)? != digest {
             return Err(StoreError::DigestInvalid);
         }
@@ -1428,7 +1428,7 @@ impl ImageStore {
         let digest = normalize_digest(digest)?;
         let path = self.manifest_object_path(&digest).await?;
         let bytes = self.read_bounded_payload(&path, MAX_MANIFEST_BYTES).await?;
-        let actual = format!("sha256:{:x}", Sha256::digest(&bytes));
+        let actual = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
         if actual != digest {
             return Err(StoreError::DigestInvalid);
         }
@@ -1613,7 +1613,7 @@ fn valid_descriptor_media_type(value: &str) -> bool {
 fn valid_tag(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
-        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && (value.as_bytes()[0].is_ascii_alphanumeric() || value.as_bytes()[0] == b'_')
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
@@ -1642,7 +1642,7 @@ fn normalize_digest(value: &str) -> Result<String, StoreError> {
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn now_seconds() -> u64 {
@@ -1791,7 +1791,7 @@ async fn verify_file_digest(path: &Path, expected: &str) -> Result<(), StoreErro
         }
         hasher.update(&buffer[..read]);
     }
-    let actual = format!("sha256:{:x}", hasher.finalize());
+    let actual = format!("sha256:{}", hex::encode(hasher.finalize()));
     if actual != expected {
         return Err(StoreError::DigestInvalid);
     }
@@ -1853,6 +1853,11 @@ fn json_contains_digest(bytes: &[u8], digest: &str) -> bool {
 mod tests {
     use super::*;
     use axum::body::Bytes;
+
+    #[test]
+    fn underscore_prefixed_tags_are_valid() {
+        assert!(valid_tag("_test"));
+    }
 
     struct Fixture {
         root: PathBuf,

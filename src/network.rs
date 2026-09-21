@@ -57,6 +57,45 @@ pub async fn pinned_public_https_client(
         .build()
         .map_err(|error| format!("Could not prepare git server connection: {error}"))
 }
+pub async fn pinned_public_http_client(
+    endpoint: &Url,
+    timeout: Duration,
+) -> Result<Client, String> {
+    if !matches!(endpoint.scheme(), "http" | "https") {
+        return Err("Endpoint must use HTTP or HTTPS.".to_owned());
+    }
+    let port = endpoint
+        .port_or_known_default()
+        .ok_or_else(|| "Endpoint port is invalid.".to_owned())?;
+    let mut builder = Client::builder()
+        .no_proxy()
+        .redirect(Policy::none())
+        .timeout(timeout);
+    match endpoint.host() {
+        Some(Host::Domain(host)) => {
+            let normalized_host = host.trim_end_matches('.');
+            if normalized_host.eq_ignore_ascii_case("localhost")
+                || normalized_host.to_ascii_lowercase().ends_with(".localhost")
+            {
+                return Err("Endpoint must use a public network address.".to_owned());
+            }
+            let addresses = lookup_host((normalized_host, port))
+                .await
+                .map_err(|error| format!("Could not resolve endpoint: {error}"))?
+                .collect::<Vec<_>>();
+            if addresses.is_empty() || addresses.iter().any(|address| !is_public_ip(address.ip())) {
+                return Err("Endpoint must use a public network address.".to_owned());
+            }
+            builder = builder.resolve_to_addrs(host, &addresses);
+        }
+        Some(Host::Ipv4(address)) if is_public_ip(IpAddr::V4(address)) => {}
+        Some(Host::Ipv6(address)) if is_public_ip(IpAddr::V6(address)) => {}
+        _ => return Err("Endpoint must use a public network address.".to_owned()),
+    }
+    builder
+        .build()
+        .map_err(|error| format!("Could not prepare endpoint connection: {error}"))
+}
 
 pub fn is_public_ip(address: IpAddr) -> bool {
     match address {
@@ -83,6 +122,28 @@ pub fn is_public_ip(address: IpAddr) -> bool {
                 && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
                 && !(segments[0] == 0x2001 && segments[1] == 0)
                 && segments[0] != 0x2002
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn public_http_client_rejects_non_public_literal_addresses() {
+        for endpoint in [
+            "http://127.0.0.1:8080/",
+            "http://169.254.169.254/",
+            "http://10.0.0.1/",
+            "http://[::1]/",
+        ] {
+            let endpoint = Url::parse(endpoint).unwrap();
+            assert!(
+                pinned_public_http_client(&endpoint, Duration::from_secs(1))
+                    .await
+                    .is_err()
+            );
         }
     }
 }

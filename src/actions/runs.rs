@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use chrono::{Duration, Utc};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
-    Set, TransactionTrait,
+    Set, TransactionTrait, sea_query::Expr,
 };
 use uuid::Uuid;
 
@@ -255,16 +255,37 @@ pub(crate) async fn maintain(state: &ActionsState) -> anyhow::Result<()> {
         let transaction = database.begin().await?;
         let id = job.id;
         let run_id = job.run_id;
-        let mut active = job.into_active_model();
-        active.status = Set("failure".to_owned());
-        active.result = Set(Some("failure".to_owned()));
-        active.failure_kind = Set(Some("runner_lost".to_owned()));
-        active.failure_summary = Set(Some(
-            "The runner stopped reporting; the job was not retried.".to_owned(),
-        ));
-        active.completed_at = Set(Some(now));
-        active.lease_deadline = Set(None);
-        active.update(&transaction).await?;
+        let transition = action_job::Entity::update_many()
+            .col_expr(action_job::Column::Status, Expr::value("failure"))
+            .col_expr(
+                action_job::Column::Result,
+                Expr::value(Some("failure".to_owned())),
+            )
+            .col_expr(
+                action_job::Column::FailureKind,
+                Expr::value(Some("runner_lost".to_owned())),
+            )
+            .col_expr(
+                action_job::Column::FailureSummary,
+                Expr::value(Some(
+                    "The runner stopped reporting; the job was not retried.".to_owned(),
+                )),
+            )
+            .col_expr(action_job::Column::CompletedAt, Expr::value(Some(now)))
+            .col_expr(
+                action_job::Column::LeaseDeadline,
+                Expr::value(Option::<chrono::DateTime<Utc>>::None),
+            )
+            .filter(action_job::Column::Id.eq(id))
+            .filter(action_job::Column::Status.is_in(["leased", "running"]))
+            .filter(action_job::Column::LeaseGeneration.eq(job.lease_generation))
+            .filter(action_job::Column::LeaseDeadline.eq(job.lease_deadline))
+            .exec(&transaction)
+            .await?;
+        if transition.rows_affected == 0 {
+            transaction.commit().await?;
+            continue;
+        }
         tokens::revoke_job(&transaction, id).await?;
         release_dependents(&transaction, id).await?;
         aggregate_run(&transaction, run_id).await?;

@@ -1007,6 +1007,9 @@ pub mod repository_webhook_delivery {
         pub response_body: Option<String>,
         pub duration_ms: i32,
         pub created_at: DateTimeUtc,
+        pub status: String,
+        pub attempt_count: i32,
+        pub attempted_at: Option<DateTimeUtc>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

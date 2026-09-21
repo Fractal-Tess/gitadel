@@ -657,6 +657,7 @@ async fn remove_runner_for_scope(
             "Runner removal requires an interactive session.",
         ));
     }
+    let _assignment_guard = runners::assignment_guard().await;
     let mut query = action_runner::Entity::find_by_id(runner_id)
         .filter(action_runner::Column::DeletedAt.is_null());
     query = match scope.namespace() {

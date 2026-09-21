@@ -8,6 +8,7 @@ mod blob_store;
 mod config;
 mod database;
 mod entity;
+mod filesystem;
 mod identity;
 mod integrations;
 mod migration;

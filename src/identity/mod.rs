@@ -15,13 +15,15 @@ pub(crate) use mirror_identities::{
     load_secret as load_mirror_identity_secret, mark_identity_used as mark_repository_identity_used,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
+    future::Future,
+    net::IpAddr,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
 
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use axum::{
     Json, Router,
     extract::DefaultBodyLimit,
@@ -32,7 +34,7 @@ use axum::{
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration as ChronoDuration, Utc};
-use rand::RngCore;
+use rand::RngExt as _;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
     PaginatorTrait, QueryFilter, Set, TransactionTrait,
@@ -40,7 +42,7 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::Duration as TimeDuration;
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, Semaphore, mpsc, watch};
 use url::Url;
 use uuid::Uuid;
 use webauthn_rs::{
@@ -64,6 +66,17 @@ pub const SCOPE_REPOSITORY_READ: i32 = 1 << 3;
 const VALIDATED_BACKUP_LIFETIME: Duration = Duration::from_secs(30 * 60);
 const TESTED_BACKUP_PROVIDER_LIFETIME: Duration = Duration::from_secs(10 * 60);
 const CHALLENGE_LIFETIME: Duration = Duration::from_secs(5 * 60);
+const AUTH_CHALLENGE_CAPACITY: usize = 1_024;
+const AUTH_CHALLENGE_SOURCE_CAPACITY: usize = 16;
+const AUTH_RATE_LIMIT_CAPACITY: usize = 4_096;
+const AUTH_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+const PASSWORD_WORK_CONCURRENCY: usize = 4;
+static PASSWORD_WORK: LazyLock<Semaphore> =
+    LazyLock::new(|| Semaphore::new(PASSWORD_WORK_CONCURRENCY));
+
+tokio::task_local! {
+    static REMOTE_ADDRESS: Option<IpAddr>;
+}
 
 #[derive(Clone)]
 pub struct IdentityState {
@@ -75,6 +88,7 @@ pub struct IdentityState {
     authentication_challenges: Arc<Mutex<HashMap<String, AuthenticationChallenge>>>,
     authorization_requests: Arc<Mutex<HashMap<String, oauth::AuthorizationRequest>>>,
     oidc_authorizations: Arc<sso::OidcAuthorizations>,
+    auth_rate_limits: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
     runtime_settings: Option<Arc<Settings>>,
     maintenance_sender: Option<mpsc::Sender<MaintenanceAction>>,
     maintenance_pending: Arc<Mutex<bool>>,
@@ -85,6 +99,7 @@ pub struct IdentityState {
     tested_backup_providers: Arc<Mutex<HashMap<Uuid, TestedBackupProvider>>>,
     measured_storage: Arc<Mutex<HashMap<Uuid, MeasuredUsage>>>,
     integrity_settings_version: watch::Sender<u64>,
+    dummy_password_hash: Arc<String>,
 }
 
 pub(crate) struct ValidatedBackup {
@@ -110,6 +125,7 @@ pub struct RegistrationChallenge {
 pub struct AuthenticationChallenge {
     pub state: DiscoverableAuthentication,
     pub created_at: Instant,
+    pub remote_address: Option<IpAddr>,
 }
 
 #[derive(Clone)]
@@ -177,6 +193,14 @@ impl ApiError {
         }
     }
 
+    pub fn too_many_requests(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "rate_limited",
+            message: message.into(),
+        }
+    }
+
     pub fn internal(error: impl std::fmt::Display) -> Self {
         tracing::error!(%error, "identity request failed");
         Self {
@@ -214,6 +238,14 @@ impl From<sea_orm::DbErr> for ApiError {
     fn from(error: sea_orm::DbErr) -> Self {
         Self::internal(error)
     }
+}
+
+pub async fn with_remote_address<F: Future>(address: Option<IpAddr>, future: F) -> F::Output {
+    REMOTE_ADDRESS.scope(address, future).await
+}
+
+pub fn remote_address() -> Option<IpAddr> {
+    REMOTE_ADDRESS.try_with(|address| *address).ok().flatten()
 }
 
 impl IdentityState {
@@ -266,6 +298,10 @@ impl IdentityState {
             .rp_name("Gitadel")
             .build()?;
 
+        let dummy_password_hash = Argon2::default()
+            .hash_password(b"gitadel-invalid-login")
+            .map_err(|error| anyhow::anyhow!("could not prepare password verification: {error}"))?
+            .to_string();
         Ok(Self {
             database,
             settings,
@@ -275,6 +311,7 @@ impl IdentityState {
             authentication_challenges: Arc::new(Mutex::new(HashMap::new())),
             authorization_requests: Arc::new(Mutex::new(HashMap::new())),
             oidc_authorizations: Arc::new(Mutex::new(HashMap::new())),
+            auth_rate_limits: Arc::new(Mutex::new(HashMap::new())),
             runtime_settings,
             maintenance_sender,
             maintenance_pending: Arc::new(Mutex::new(false)),
@@ -284,6 +321,7 @@ impl IdentityState {
             tested_backup_providers: Arc::new(Mutex::new(HashMap::new())),
             measured_storage: Arc::new(Mutex::new(HashMap::new())),
             integrity_settings_version: watch::channel(0).0,
+            dummy_password_hash: Arc::new(dummy_password_hash),
         })
     }
 
@@ -455,6 +493,52 @@ impl IdentityState {
     pub fn invitation_lifetime(&self) -> ChronoDuration {
         ChronoDuration::hours(self.settings.invitation_lifetime_hours)
     }
+    pub fn dummy_password_hash(&self) -> String {
+        self.dummy_password_hash.as_ref().clone()
+    }
+
+    pub async fn enforce_auth_rate_limit(
+        &self,
+        bucket: &str,
+        limit: usize,
+    ) -> Result<(), ApiError> {
+        let source = remote_address()
+            .map(|address| address.to_string())
+            .unwrap_or_else(|| "unknown".to_owned());
+        self.enforce_rate_limit(format!("source:{source}:{bucket}"), limit)
+            .await
+    }
+
+    pub async fn enforce_account_auth_rate_limit(
+        &self,
+        account: &str,
+        limit: usize,
+    ) -> Result<(), ApiError> {
+        self.enforce_rate_limit(format!("account:{account}"), limit)
+            .await
+    }
+
+    async fn enforce_rate_limit(&self, key: String, limit: usize) -> Result<(), ApiError> {
+        let mut limits = self.auth_rate_limits.lock().await;
+        let now = Instant::now();
+        limits.retain(|_, attempts| {
+            attempts.retain(|attempt| now.duration_since(*attempt) < AUTH_RATE_LIMIT_WINDOW);
+            !attempts.is_empty()
+        });
+        if !limits.contains_key(&key) && limits.len() >= AUTH_RATE_LIMIT_CAPACITY {
+            return Err(ApiError::too_many_requests(
+                "Too many authentication attempts. Try again later.",
+            ));
+        }
+        let attempts = limits.entry(key).or_default();
+        if attempts.len() >= limit {
+            return Err(ApiError::too_many_requests(
+                "Too many authentication attempts. Try again later.",
+            ));
+        }
+        attempts.push_back(now);
+        Ok(())
+    }
 
     pub async fn registration_challenges(
         &self,
@@ -470,6 +554,36 @@ impl IdentityState {
         let mut challenges = self.authentication_challenges.lock().await;
         challenges.retain(|_, challenge| challenge.created_at.elapsed() < CHALLENGE_LIFETIME);
         challenges
+    }
+
+    pub async fn insert_authentication_challenge(
+        &self,
+        id: String,
+        state: DiscoverableAuthentication,
+    ) -> Result<(), ApiError> {
+        let source = remote_address();
+        let mut challenges = self.authentication_challenges.lock().await;
+        challenges.retain(|_, challenge| challenge.created_at.elapsed() < CHALLENGE_LIFETIME);
+        if challenges.len() >= AUTH_CHALLENGE_CAPACITY
+            || challenges
+                .values()
+                .filter(|challenge| challenge.remote_address == source)
+                .count()
+                >= AUTH_CHALLENGE_SOURCE_CAPACITY
+        {
+            return Err(ApiError::too_many_requests(
+                "Too many authentication attempts. Try again later.",
+            ));
+        }
+        challenges.insert(
+            id,
+            AuthenticationChallenge {
+                state,
+                created_at: Instant::now(),
+                remote_address: source,
+            },
+        );
+        Ok(())
     }
 
     async fn authorization_requests(
@@ -659,13 +773,6 @@ impl IdentityState {
             .await?)
     }
 
-    pub async fn create_session(
-        &self,
-        user_id: Uuid,
-    ) -> Result<(String, Cookie<'static>), ApiError> {
-        self.create_session_on(&self.database, user_id).await
-    }
-
     pub async fn create_session_on<C: ConnectionTrait>(
         &self,
         connection: &C,
@@ -726,7 +833,7 @@ impl IdentityState {
             actor_user_id: Set(actor_user_id),
             action: Set(action.into()),
             target: Set(target),
-            remote_address: Set(None),
+            remote_address: Set(remote_address().map(|address| address.to_string())),
             created_at: Set(Utc::now()),
         }
         .insert(connection)
@@ -741,6 +848,11 @@ pub async fn bootstrap_admin(
     password: String,
 ) -> Result<user::Model, ApiError> {
     let username = validate_slug(username, "Username")?;
+    if user::Entity::find().count(database).await? != 0 {
+        return Err(ApiError::conflict(
+            "The first administrator already exists.",
+        ));
+    }
     let password_hash = hash_password(password).await?;
     let transaction = database.begin().await?;
     if user::Entity::find().count(&transaction).await? != 0 {
@@ -890,7 +1002,6 @@ pub fn router() -> Router<IdentityState> {
             "/admin/storage/progress/{operation_id}",
             get(admin::storage_progress),
         )
-        .route("/setup", post(auth::setup))
         .route("/register", post(auth::register))
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
@@ -1029,7 +1140,7 @@ pub fn oauth_router() -> Router<IdentityState> {
 
 pub fn random_secret(bytes: usize) -> String {
     let mut data = vec![0_u8; bytes];
-    rand::rng().fill_bytes(&mut data);
+    rand::rng().fill(&mut data);
     URL_SAFE_NO_PAD.encode(data)
 }
 
@@ -1039,13 +1150,11 @@ pub fn hash_secret(secret: &str) -> String {
 }
 
 pub async fn hash_password(password: String) -> Result<String, ApiError> {
+    let _permit = PASSWORD_WORK.acquire().await.map_err(ApiError::internal)?;
     validate_password(&password)?;
     tokio::task::spawn_blocking(move || {
-        let mut salt = [0_u8; 16];
-        rand::rng().fill_bytes(&mut salt);
-        let salt = SaltString::encode_b64(&salt).map_err(ApiError::internal)?;
         Argon2::default()
-            .hash_password(password.as_bytes(), &salt)
+            .hash_password(password.as_bytes())
             .map(|hash| hash.to_string())
             .map_err(ApiError::internal)
     })
@@ -1054,6 +1163,7 @@ pub async fn hash_password(password: String) -> Result<String, ApiError> {
 }
 
 pub async fn verify_password(password: String, encoded: String) -> Result<bool, ApiError> {
+    let _permit = PASSWORD_WORK.acquire().await.map_err(ApiError::internal)?;
     tokio::task::spawn_blocking(move || {
         let hash = PasswordHash::new(&encoded).map_err(ApiError::internal)?;
         Ok(Argon2::default()

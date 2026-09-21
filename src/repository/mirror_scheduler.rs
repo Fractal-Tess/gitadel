@@ -3,7 +3,7 @@ use std::time::Duration;
 use chrono::Utc;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, sea_query::Query};
 
-use super::{RepositoryState, mirrors};
+use super::{RepositoryState, issues, mirrors, webhooks};
 use crate::entity::{repository, repository_mirror};
 
 const SCHEDULER_INTERVAL: Duration = Duration::from_secs(30);
@@ -16,6 +16,12 @@ pub(crate) async fn serve_mirror_scheduler(state: RepositoryState) -> Result<(),
         interval.tick().await;
         if let Err(error) = mirrors::cleanup_temporary_files(&state.repository_root).await {
             tracing::warn!(%error, "could not clean stale mirror credential files");
+        }
+        if let Err(error) = issues::cleanup_expired_attachments(&state).await {
+            tracing::warn!(%error, "could not clean expired issue attachments");
+        }
+        if let Err(error) = webhooks::process_pending_deliveries(&state).await {
+            tracing::warn!(%error, "could not process pending webhook deliveries");
         }
         let due = repository_mirror::Entity::find()
             .filter(repository_mirror::Column::NextSyncAt.is_not_null())

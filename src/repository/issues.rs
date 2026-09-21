@@ -8,11 +8,11 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use futures_util::TryStreamExt as _;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, ExprTrait, PaginatorTrait, QueryFilter, QueryOrder,
-    Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, EntityTrait, ExprTrait, FromQueryResult, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use tokio::{fs, io::AsyncWriteExt as _};
@@ -25,6 +25,7 @@ use crate::{
         issue_attachment, issue_comment, issue_label, issue_label_assignment, namespace,
         organization_member, repository, repository_collaborator, repository_issue, user,
     },
+    filesystem::create_private_directory_async,
     identity::{ApiError, SCOPE_READ, SCOPE_WRITE},
 };
 
@@ -32,6 +33,23 @@ const MAX_ISSUE_TITLE_LENGTH: usize = 255;
 const MAX_ISSUE_BODY_LENGTH: usize = 1_000_000;
 const MAX_LABEL_NAME_LENGTH: usize = 64;
 const MAX_ISSUE_ATTACHMENT_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_ATTACHMENTS_PER_ISSUE: u64 = 20;
+const MAX_USER_ATTACHMENT_BYTES: i64 = 256 * 1024 * 1024;
+const MAX_USER_ATTACHMENTS: i64 = 256;
+const MAX_USER_UNBOUND_ATTACHMENT_BYTES: i64 = 64 * 1024 * 1024;
+const MAX_USER_UNBOUND_ATTACHMENTS: i64 = 16;
+const MAX_REPOSITORY_ATTACHMENT_BYTES: i64 = 2 * 1024 * 1024 * 1024;
+const MAX_REPOSITORY_ATTACHMENTS: i64 = 2_048;
+const MAX_INSTANCE_ATTACHMENT_BYTES: i64 = 20 * 1024 * 1024 * 1024;
+const MAX_INSTANCE_ATTACHMENTS: i64 = 20_000;
+const UNBOUND_ATTACHMENT_LIFETIME: Duration = Duration::hours(1);
+const ATTACHMENT_CLEANUP_BATCH_SIZE: u64 = 100;
+
+#[derive(FromQueryResult)]
+struct AttachmentUsage {
+    count: i64,
+    bytes: Option<i64>,
+}
 
 #[derive(Clone, Serialize)]
 pub struct IssueUserResponse {
@@ -778,7 +796,7 @@ pub async fn upload_attachment(
     let attachment_name = validate_attachment_name(&query.name)?;
     let attachment_id = Uuid::new_v4();
     let directory = issue_attachment_directory(&state, &repository);
-    fs::create_dir_all(&directory)
+    create_private_directory_async(&directory)
         .await
         .map_err(ApiError::internal)?;
     let path = directory.join(attachment_id.to_string());
@@ -800,10 +818,8 @@ pub async fn upload_attachment(
         output.write_all(&chunk).await.map_err(ApiError::internal)?;
     }
     output.flush().await.map_err(ApiError::internal)?;
+    output.sync_all().await.map_err(ApiError::internal)?;
     drop(output);
-    fs::rename(&temporary_path, &path)
-        .await
-        .map_err(ApiError::internal)?;
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -811,37 +827,146 @@ pub async fn upload_attachment(
         .chars()
         .take(255)
         .collect::<String>();
-    let attachment = issue_attachment::ActiveModel {
-        id: Set(attachment_id),
-        repository_id: Set(repository.id),
-        issue_id: Set(None),
-        uploader_user_id: Set(actor.user.id),
-        name: Set(attachment_name),
-        content_type: Set(content_type),
-        size_bytes: Set(size as i64),
-        created_at: Set(Utc::now()),
-    }
-    .insert(state.identity().database())
-    .await;
-    let attachment = match attachment {
-        Ok(attachment) => attachment,
-        Err(error) => {
-            let _ = fs::remove_file(&path).await;
-            return Err(error.into());
-        }
-    };
-    state
-        .identity()
-        .audit(
-            Some(actor.user.id),
-            "repository.issue.attachment.upload",
-            Some(format!("{namespace}/{name}/{}", attachment.id)),
+    let transaction = state.identity().database().begin().await?;
+    let persistence = async {
+        enforce_attachment_quotas(
+            &transaction,
+            repository.id,
+            actor.user.id,
+            i64::try_from(size).map_err(ApiError::internal)?,
         )
         .await?;
+        fs::rename(&temporary_path, &path)
+            .await
+            .map_err(ApiError::internal)?;
+        let attachment = issue_attachment::ActiveModel {
+            id: Set(attachment_id),
+            repository_id: Set(repository.id),
+            issue_id: Set(None),
+            uploader_user_id: Set(actor.user.id),
+            name: Set(attachment_name),
+            content_type: Set(content_type),
+            size_bytes: Set(size as i64),
+            created_at: Set(Utc::now()),
+        }
+        .insert(&transaction)
+        .await?;
+        state
+            .identity()
+            .audit_on(
+                &transaction,
+                Some(actor.user.id),
+                "repository.issue.attachment.upload",
+                Some(format!("{namespace}/{name}/{}", attachment.id)),
+            )
+            .await?;
+        transaction.commit().await?;
+        Ok::<_, ApiError>(attachment)
+    }
+    .await;
+    let attachment = match persistence {
+        Ok(attachment) => attachment,
+        Err(error) => {
+            let _ = fs::remove_file(&temporary_path).await;
+            let _ = fs::remove_file(&path).await;
+            return Err(error);
+        }
+    };
     Ok((
         StatusCode::CREATED,
         Json(attachment_response(&repository, attachment)),
     ))
+}
+
+async fn enforce_attachment_quotas<C>(
+    database: &C,
+    repository_id: Uuid,
+    uploader_user_id: Uuid,
+    incoming_bytes: i64,
+) -> Result<(), ApiError>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    let unbound = attachment_usage(database, None, Some(uploader_user_id), true).await?;
+    ensure_attachment_quota(
+        unbound,
+        incoming_bytes,
+        MAX_USER_UNBOUND_ATTACHMENTS,
+        MAX_USER_UNBOUND_ATTACHMENT_BYTES,
+        "You have too many unattached issue uploads. Attach or delete an upload before retrying.",
+    )?;
+    let user = attachment_usage(database, None, Some(uploader_user_id), false).await?;
+    ensure_attachment_quota(
+        user,
+        incoming_bytes,
+        MAX_USER_ATTACHMENTS,
+        MAX_USER_ATTACHMENT_BYTES,
+        "Your issue attachment storage quota is full.",
+    )?;
+    let repository = attachment_usage(database, Some(repository_id), None, false).await?;
+    ensure_attachment_quota(
+        repository,
+        incoming_bytes,
+        MAX_REPOSITORY_ATTACHMENTS,
+        MAX_REPOSITORY_ATTACHMENT_BYTES,
+        "This repository's issue attachment storage quota is full.",
+    )?;
+    let instance = attachment_usage(database, None, None, false).await?;
+    ensure_attachment_quota(
+        instance,
+        incoming_bytes,
+        MAX_INSTANCE_ATTACHMENTS,
+        MAX_INSTANCE_ATTACHMENT_BYTES,
+        "The instance issue attachment storage quota is full.",
+    )
+}
+
+async fn attachment_usage<C>(
+    database: &C,
+    repository_id: Option<Uuid>,
+    uploader_user_id: Option<Uuid>,
+    unbound_only: bool,
+) -> Result<AttachmentUsage, ApiError>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    let mut query = issue_attachment::Entity::find()
+        .select_only()
+        .column_as(issue_attachment::Column::Id.count(), "count")
+        .column_as(issue_attachment::Column::SizeBytes.sum(), "bytes");
+    if let Some(repository_id) = repository_id {
+        query = query.filter(issue_attachment::Column::RepositoryId.eq(repository_id));
+    }
+    if let Some(uploader_user_id) = uploader_user_id {
+        query = query.filter(issue_attachment::Column::UploaderUserId.eq(uploader_user_id));
+    }
+    if unbound_only {
+        query = query.filter(issue_attachment::Column::IssueId.is_null());
+    }
+    query
+        .into_model::<AttachmentUsage>()
+        .one(database)
+        .await?
+        .ok_or_else(|| ApiError::internal("attachment usage query returned no row"))
+}
+
+fn ensure_attachment_quota(
+    usage: AttachmentUsage,
+    incoming_bytes: i64,
+    max_count: i64,
+    max_bytes: i64,
+    message: &'static str,
+) -> Result<(), ApiError> {
+    if usage.count.saturating_add(1) > max_count
+        || usage
+            .bytes
+            .unwrap_or_default()
+            .saturating_add(incoming_bytes)
+            > max_bytes
+    {
+        return Err(ApiError::too_many_requests(message));
+    }
+    Ok(())
 }
 
 pub async fn download_attachment(
@@ -868,23 +993,109 @@ pub async fn download_attachment(
         }
     })?;
     let mut response = Response::new(Body::from_stream(ReaderStream::new(file)));
-    let content_type = HeaderValue::from_str(&attachment.content_type)
-        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+    let inline = matches!(
+        attachment.content_type.as_str(),
+        "image/png"
+            | "image/jpeg"
+            | "image/gif"
+            | "image/webp"
+            | "image/avif"
+            | "image/bmp"
+            | "image/x-icon"
+    );
+    let content_type = if inline {
+        HeaderValue::from_str(&attachment.content_type)
+            .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"))
+    } else {
+        HeaderValue::from_static("application/octet-stream")
+    };
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, content_type);
-    // Inline so Markdown images and previews can render the file directly.
     let safe_name = ascii_download_name(&attachment.name);
+    let disposition = if inline { "inline" } else { "attachment" };
     response.headers_mut().insert(
         header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&format!("inline; filename=\"{safe_name}\""))
-            .unwrap_or_else(|_| HeaderValue::from_static("inline")),
+        HeaderValue::from_str(&format!("{disposition}; filename=\"{safe_name}\""))
+            .unwrap_or_else(|_| HeaderValue::from_static("attachment")),
+    );
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'none'; sandbox"),
     );
     response.headers_mut().insert(
         header::CONTENT_LENGTH,
         HeaderValue::from_str(&attachment.size_bytes.to_string()).map_err(ApiError::internal)?,
     );
     Ok(response)
+}
+
+pub async fn delete_attachment(
+    State(state): State<RepositoryState>,
+    AxumPath((namespace, name, attachment_id)): AxumPath<(String, String, Uuid)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<StatusCode, ApiError> {
+    let (actor, repository) = state
+        .authenticated_repository(
+            &headers,
+            &jar,
+            &namespace,
+            &name,
+            Permission::Read,
+            SCOPE_WRITE,
+        )
+        .await?;
+    let attachment = issue_attachment::Entity::find_by_id(attachment_id)
+        .filter(issue_attachment::Column::RepositoryId.eq(repository.id))
+        .one(state.identity().database())
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let can_write = state
+        .can_access(&repository, Some(actor.user.id), Permission::Write)
+        .await?;
+    if attachment.uploader_user_id != actor.user.id && !can_write {
+        return Err(ApiError::not_found());
+    }
+    let path = issue_attachment_directory(&state, &repository).join(attachment.id.to_string());
+    let trash = path.with_extension(format!("delete-{}", Uuid::new_v4().simple()));
+    let moved = match fs::rename(&path, &trash).await {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(ApiError::internal(error)),
+    };
+    let transaction = state.identity().database().begin().await?;
+    let persistence = async {
+        issue_attachment::Entity::delete_by_id(attachment.id)
+            .exec(&transaction)
+            .await?;
+        state
+            .identity()
+            .audit_on(
+                &transaction,
+                Some(actor.user.id),
+                "repository.issue.attachment.delete",
+                Some(format!("{namespace}/{name}/{}", attachment.id)),
+            )
+            .await?;
+        transaction.commit().await?;
+        Ok::<(), ApiError>(())
+    }
+    .await;
+    if let Err(error) = persistence {
+        if moved {
+            let _ = fs::rename(&trash, &path).await;
+        }
+        return Err(error);
+    }
+    if moved {
+        let _ = fs::remove_file(trash).await;
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn issue_context(
@@ -940,8 +1151,18 @@ async fn bind_issue_attachments<C>(
 where
     C: sea_orm::ConnectionTrait,
 {
-    for id in ids {
-        let attachment = issue_attachment::Entity::find_by_id(*id)
+    let unique_ids = ids.iter().copied().collect::<BTreeSet<_>>();
+    if unique_ids.len() != ids.len() {
+        return Err(ApiError::bad_request(
+            "Issue attachments cannot contain duplicate IDs.",
+        ));
+    }
+    let mut attached = issue_attachment::Entity::find()
+        .filter(issue_attachment::Column::IssueId.eq(issue_id))
+        .count(transaction)
+        .await?;
+    for id in unique_ids {
+        let attachment = issue_attachment::Entity::find_by_id(id)
             .filter(issue_attachment::Column::RepositoryId.eq(repository_id))
             .one(transaction)
             .await?
@@ -954,6 +1175,14 @@ where
             return Err(ApiError::bad_request(
                 "The attachment cannot be added to this issue.",
             ));
+        }
+        if attachment.issue_id.is_none() {
+            if attached >= MAX_ATTACHMENTS_PER_ISSUE {
+                return Err(ApiError::bad_request(format!(
+                    "Issues cannot contain more than {MAX_ATTACHMENTS_PER_ISSUE} attachments.",
+                )));
+            }
+            attached = attached.saturating_add(1);
         }
         let mut active: issue_attachment::ActiveModel = attachment.into();
         active.issue_id = Set(Some(issue_id));
@@ -968,6 +1197,59 @@ fn issue_attachment_directory(state: &RepositoryState, repository: &repository::
         .join("issue-attachments")
 }
 
+pub(super) async fn cleanup_expired_attachments(state: &RepositoryState) -> Result<(), ApiError> {
+    let cutoff = Utc::now() - UNBOUND_ATTACHMENT_LIFETIME;
+    let attachments = issue_attachment::Entity::find()
+        .filter(issue_attachment::Column::IssueId.is_null())
+        .filter(issue_attachment::Column::CreatedAt.lt(cutoff))
+        .order_by_asc(issue_attachment::Column::CreatedAt)
+        .limit(ATTACHMENT_CLEANUP_BATCH_SIZE)
+        .all(state.identity().database())
+        .await?;
+    for attachment in attachments {
+        let Some(repository) = repository::Entity::find_by_id(attachment.repository_id)
+            .one(state.identity().database())
+            .await?
+        else {
+            continue;
+        };
+        let path = issue_attachment_directory(state, &repository).join(attachment.id.to_string());
+        let trash = path.with_extension(format!("expire-{}", Uuid::new_v4().simple()));
+        let moved = match fs::rename(&path, &trash).await {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                tracing::warn!(%error, attachment_id = %attachment.id, "could not stage expired issue attachment for deletion");
+                continue;
+            }
+        };
+        let deleted = issue_attachment::Entity::delete_many()
+            .filter(issue_attachment::Column::Id.eq(attachment.id))
+            .filter(issue_attachment::Column::IssueId.is_null())
+            .filter(issue_attachment::Column::CreatedAt.lt(cutoff))
+            .exec(state.identity().database())
+            .await;
+        match deleted {
+            Ok(result) if result.rows_affected == 1 => {
+                if moved {
+                    let _ = fs::remove_file(&trash).await;
+                }
+            }
+            Ok(_) => {
+                if moved {
+                    let _ = fs::rename(&trash, &path).await;
+                }
+            }
+            Err(error) => {
+                if moved {
+                    let _ = fs::rename(&trash, &path).await;
+                }
+                return Err(error.into());
+            }
+        }
+    }
+    Ok(())
+}
 fn attachment_response(
     repository: &repository::Model,
     attachment: issue_attachment::Model,
@@ -1372,4 +1654,47 @@ fn validate_label_description(value: String) -> Result<String, ApiError> {
         ));
     }
     Ok(value.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{http::StatusCode, response::IntoResponse as _};
+
+    use super::{AttachmentUsage, ensure_attachment_quota};
+
+    #[test]
+    fn attachment_quota_accepts_the_exact_boundary() {
+        let result = ensure_attachment_quota(
+            AttachmentUsage {
+                count: 2,
+                bytes: Some(90),
+            },
+            10,
+            3,
+            100,
+            "quota",
+        );
+
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn attachment_quota_rejects_an_excess_object() {
+        let error = ensure_attachment_quota(
+            AttachmentUsage {
+                count: 3,
+                bytes: Some(90),
+            },
+            1,
+            3,
+            100,
+            "quota",
+        )
+        .expect_err("reject attachment count above quota");
+
+        assert_eq!(
+            error.into_response().status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
 }

@@ -109,6 +109,7 @@ export function refreshExplore(
   if (active) return active;
 
   const refresh = fetchExplore(page, perPage, namespace).then((value) => {
+    if (exploreRefreshes.get(key) !== refresh) return value;
     exploreCache.delete(key);
     pruneCache(exploreCache);
     exploreCache.set(key, {
@@ -120,8 +121,12 @@ export function refreshExplore(
   });
   exploreRefreshes.set(key, refresh);
   void refresh.then(
-    () => exploreRefreshes.delete(key),
-    () => exploreRefreshes.delete(key),
+    () => {
+      if (exploreRefreshes.get(key) === refresh) exploreRefreshes.delete(key);
+    },
+    () => {
+      if (exploreRefreshes.get(key) === refresh) exploreRefreshes.delete(key);
+    },
   );
   return refresh;
 }

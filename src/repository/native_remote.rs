@@ -9,13 +9,13 @@ use std::{
 
 use bytes::{Buf, Bytes};
 use futures_util::StreamExt as _;
-use hmac_13::{Hmac, KeyInit as _, Mac as _};
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use reqwest::header::{HeaderName, HeaderValue};
 use russh::{
     Channel, ChannelMsg, Disconnect,
     client::{self, Handler},
     keys::{
-        PrivateKeyWithHashAlg,
+        PrivateKeyWithHashAlg, PublicKeyOrCertificate,
         ssh_key::{
             Algorithm, PrivateKey, PublicKey,
             known_hosts::{HostPatterns, KnownHosts, Marker},
@@ -285,8 +285,14 @@ struct NativeSshHandler {
 impl Handler for NativeSshHandler {
     type Error = russh::Error;
 
-    async fn check_server_key(&mut self, key: &PublicKey) -> Result<bool, Self::Error> {
-        let key = key.key_data();
+    async fn check_server_key(
+        &mut self,
+        key: &PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
+        let key = match key {
+            PublicKeyOrCertificate::PublicKey { key, .. } => key.key_data(),
+            PublicKeyOrCertificate::Certificate(certificate) => certificate.public_key(),
+        };
         Ok(!self
             .host_keys
             .revoked
@@ -1460,11 +1466,13 @@ mod tests {
 
     #[tokio::test]
     async fn host_key_comments_do_not_change_trust_or_revocation() {
-        let key = PublicKey::from_openssh(HOST_KEY).unwrap();
-        let other = PublicKey::from_openssh(
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPkqT0c97RcrMYzZSG9xih+OINZzxiWhvJSRNM9/1Xsl",
-        )
-        .unwrap();
+        let key = PublicKeyOrCertificate::from(PublicKey::from_openssh(HOST_KEY).unwrap());
+        let other = PublicKeyOrCertificate::from(
+            PublicKey::from_openssh(
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPkqT0c97RcrMYzZSG9xih+OINZzxiWhvJSRNM9/1Xsl",
+            )
+            .unwrap(),
+        );
         let allowed = PublicKey::from_openssh(&format!("{HOST_KEY} administrator note")).unwrap();
         let mut handler = NativeSshHandler {
             host_keys: TrustedHostKeys {

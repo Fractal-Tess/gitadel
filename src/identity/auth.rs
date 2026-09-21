@@ -21,9 +21,8 @@ use webauthn_rs::prelude::{
 };
 
 use super::{
-    ApiError, AuthenticationChallenge, IdentityState, RegistrationChallenge, UserResponse,
-    bootstrap_admin, hash_password, hash_secret, random_secret, validate_name, validate_slug,
-    verify_password,
+    ApiError, IdentityState, RegistrationChallenge, UserResponse, hash_password, hash_secret,
+    random_secret, validate_name, validate_slug, verify_password,
 };
 use crate::entity::{invitation, namespace, passkey, repository, session, user};
 
@@ -61,22 +60,6 @@ pub struct AuthResponse {
     user: UserResponse,
 }
 
-pub async fn setup(
-    State(state): State<IdentityState>,
-    jar: CookieJar,
-    Json(request): Json<CredentialsRequest>,
-) -> Result<impl IntoResponse, ApiError> {
-    let account = bootstrap_admin(state.database(), &request.username, request.password).await?;
-    let (_, cookie) = state.create_session(account.id).await?;
-    Ok((
-        StatusCode::CREATED,
-        jar.add(cookie),
-        Json(AuthResponse {
-            user: account.into(),
-        }),
-    ))
-}
-
 pub async fn login(
     State(state): State<IdentityState>,
     jar: CookieJar,
@@ -88,16 +71,23 @@ pub async fn login(
     {
         return Err(ApiError::forbidden("Password login is disabled."));
     }
+    state.enforce_auth_rate_limit("password-source", 20).await?;
     let username = validate_slug(&request.username, "Username")?;
+    state.enforce_account_auth_rate_limit(&username, 8).await?;
     let account = user::Entity::find()
         .filter(user::Column::Username.eq(username))
         .filter(user::Column::DisabledAt.is_null())
         .one(state.database())
         .await?;
+    let encoded = account
+        .as_ref()
+        .map(|account| account.password_hash.clone())
+        .unwrap_or_else(|| state.dummy_password_hash());
+    let valid = verify_password(request.password, encoded).await?;
     let Some(account) = account else {
         return Err(invalid_credentials());
     };
-    if !verify_password(request.password, account.password_hash.clone()).await? {
+    if !valid {
         return Err(invalid_credentials());
     }
 
@@ -380,13 +370,20 @@ pub async fn register(
     Json(request): Json<InvitationRegistrationRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let username = validate_slug(&request.username, "Username")?;
-    let password_hash = hash_password(request.password).await?;
     let transaction = state.database().begin().await?;
-    let invitation = invitation::Entity::find_by_id(hash_secret(&request.token))
-        .one(&transaction)
-        .await?
-        .filter(|invitation| invitation.used_at.is_none() && invitation.expires_at > Utc::now())
-        .ok_or_else(|| ApiError::bad_request("The invitation is invalid or has expired."))?;
+    let now = Utc::now();
+    let reserved = invitation::Entity::update_many()
+        .col_expr(invitation::Column::UsedAt, Expr::value(Some(now)))
+        .filter(invitation::Column::TokenHash.eq(hash_secret(&request.token)))
+        .filter(invitation::Column::UsedAt.is_null())
+        .filter(invitation::Column::ExpiresAt.gt(now))
+        .exec(&transaction)
+        .await?;
+    if reserved.rows_affected != 1 {
+        return Err(ApiError::bad_request(
+            "The invitation is invalid or has expired.",
+        ));
+    }
     if namespace::Entity::find_by_id(&username)
         .one(&transaction)
         .await?
@@ -394,8 +391,8 @@ pub async fn register(
     {
         return Err(ApiError::conflict("That username is already in use."));
     }
+    let password_hash = hash_password(request.password).await?;
 
-    let now = Utc::now();
     let account = user::ActiveModel {
         id: Set(Uuid::new_v4()),
         username: Set(username.clone()),
@@ -419,9 +416,6 @@ pub async fn register(
     }
     .insert(&transaction)
     .await?;
-    let mut used: invitation::ActiveModel = invitation.into();
-    used.used_at = Set(Some(now));
-    used.update(&transaction).await?;
     state
         .audit_on(
             &transaction,
@@ -732,6 +726,7 @@ pub async fn start_passkey_login(
     {
         return Err(ApiError::forbidden("Passkey login is disabled."));
     }
+    state.enforce_auth_rate_limit("passkey-start", 30).await?;
     let (options, authentication) = state
         .webauthn()
         .start_discoverable_authentication()
@@ -740,13 +735,9 @@ pub async fn start_passkey_login(
             ApiError::internal(error)
         })?;
     let challenge_id = random_secret(24);
-    state.authentication_challenges().await.insert(
-        challenge_id.clone(),
-        AuthenticationChallenge {
-            state: authentication,
-            created_at: Instant::now(),
-        },
-    );
+    state
+        .insert_authentication_challenge(challenge_id.clone(), authentication)
+        .await?;
     tracing::info!("discoverable passkey login challenge issued");
     Ok(Json(PasskeyRequestResponse {
         challenge_id,

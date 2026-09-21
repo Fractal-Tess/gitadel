@@ -138,7 +138,7 @@ fn render_isolated(
         .stdout
         .take()
         .ok_or_else(|| ApiError::internal("Image worker stdout unavailable"))?;
-    let result = std::thread::scope(|scope| {
+    std::thread::scope(|scope| {
         let writer = scope.spawn(move || input.write_all(bytes));
         let reader = scope.spawn(move || {
             let mut bytes = Vec::new();
@@ -200,8 +200,7 @@ fn render_isolated(
             height,
             mime_type: String::from_utf8(mime).map_err(ApiError::internal)?,
         })
-    });
-    result
+    })
 }
 
 pub(crate) fn worker(path: &str, thumbnail: bool) -> anyhow::Result<()> {
@@ -295,26 +294,29 @@ fn render_native(bytes: &[u8], path: &str, thumbnail: bool) -> anyhow::Result<Re
         });
     }
     ensure!(is_svg_path(path), "Unsupported image content");
-    let mut options = resvg::usvg::Options::default();
-    options.image_href_resolver = resvg::usvg::ImageHrefResolver {
-        resolve_data: Box::new(|_, data, _| {
-            if data.len() > MAX_IMAGE_BYTES {
-                return None;
-            }
-            let format = image::guess_format(&data).ok()?;
-            let (width, height) = ImageReader::with_format(Cursor::new(data.as_slice()), format)
-                .into_dimensions()
-                .ok()?;
-            check_dimensions(width, height).ok()?;
-            match format {
-                ImageFormat::Png => Some(resvg::usvg::ImageKind::PNG(data)),
-                ImageFormat::Jpeg => Some(resvg::usvg::ImageKind::JPEG(data)),
-                ImageFormat::Gif => Some(resvg::usvg::ImageKind::GIF(data)),
-                ImageFormat::WebP => Some(resvg::usvg::ImageKind::WEBP(data)),
-                _ => None,
-            }
-        }),
-        resolve_string: Box::new(|_, _| None),
+    let mut options = resvg::usvg::Options {
+        image_href_resolver: resvg::usvg::ImageHrefResolver {
+            resolve_data: Box::new(|_, data, _| {
+                if data.len() > MAX_IMAGE_BYTES {
+                    return None;
+                }
+                let format = image::guess_format(&data).ok()?;
+                let (width, height) =
+                    ImageReader::with_format(Cursor::new(data.as_slice()), format)
+                        .into_dimensions()
+                        .ok()?;
+                check_dimensions(width, height).ok()?;
+                match format {
+                    ImageFormat::Png => Some(resvg::usvg::ImageKind::PNG(data)),
+                    ImageFormat::Jpeg => Some(resvg::usvg::ImageKind::JPEG(data)),
+                    ImageFormat::Gif => Some(resvg::usvg::ImageKind::GIF(data)),
+                    ImageFormat::WebP => Some(resvg::usvg::ImageKind::WEBP(data)),
+                    _ => None,
+                }
+            }),
+            resolve_string: Box::new(|_, _| None),
+        },
+        ..Default::default()
     };
     options.fontdb_mut().load_system_fonts();
     let tree = resvg::usvg::Tree::from_data(bytes, &options)?;

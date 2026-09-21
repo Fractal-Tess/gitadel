@@ -239,7 +239,7 @@ fn upsert_file(
         builder.upsert_raw(BString::from(name.as_bytes()), 0o100644, blob);
     } else {
         let child = match existing {
-            Some((mode, oid)) if mode == 0o040000 => Some(oid),
+            Some((0o040000, oid)) => Some(oid),
             Some(_) => return Err(ApiError::conflict("A path component is already a file.")),
             None => None,
         };

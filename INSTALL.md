@@ -4,12 +4,18 @@ Gitadel can run from Docker Compose or as a NixOS service. In both cases, put in
 
 ## Docker Compose
 
-Clone the repository and start the standalone server:
+Clone the repository, build the image, and create the first administrator
+before starting the server:
 
 ```bash
 git clone https://github.com/Fractal-Tess/gitadel.git
 cd gitadel
-docker compose up -d --build
+docker compose build
+read -rsp "Administrator password: " GITADEL_ADMIN_PASSWORD; echo
+printf '%s' "$GITADEL_ADMIN_PASSWORD" \
+  | docker compose run --rm -T gitadel --bootstrap-admin admin --password-stdin
+unset GITADEL_ADMIN_PASSWORD
+docker compose up -d
 ```
 
 The default setup binds HTTP to `127.0.0.1:3000` and SSH to
@@ -20,10 +26,11 @@ docker compose ps
 curl --fail http://127.0.0.1:3000/healthz
 ```
 
-Open [http://localhost:3000/register](http://localhost:3000/register) and
-create the first administrator. The `gitadel-data` named volume keeps the
-database, repositories, LFS objects, and SSH host key when the container is
-recreated.
+Open [http://localhost:3000/login](http://localhost:3000/login) and sign in
+with the administrator created above. The first administrator can only be
+created through the local command, never through the public HTTP service. The
+`gitadel-data` named volume keeps the database, repositories, LFS objects,
+Actions artifacts, and SSH host key when the container is recreated.
 
 The image runs Gitadel as the non-root user with UID and GID `10001`. Docker
 creates the named volume with the image's `/data` ownership, so the normal
@@ -72,9 +79,8 @@ SSH port `2222` if you want generated SSH clone URLs to work as shown. If you
 map SSH to another host port, edit the port in each SSH clone URL or Git
 remote manually. The service still listens on port `2222` inside Compose.
 
-Actions runners are optional. See [Actions deployment](docs/actions.md#docker-compose)
-for the `compose.actions.yaml` overlay, which adds a privileged Docker-in-Docker
-daemon and a Forgejo Runner.
+Actions runners are optional. The `compose.actions.yaml` overlay adds a
+privileged Docker-in-Docker daemon and a Forgejo Runner.
 
 ## NixOS
 
@@ -92,6 +98,10 @@ Add the flake and enable its module:
         {
           services.gitadel = {
             enable = true;
+            initialAdmin = {
+              username = "admin";
+              passwordFile = "/run/secrets/gitadel-initial-admin";
+            };
             autoStart = true;
             publicUrl = "https://git.example.com";
             openFirewall = true;
@@ -507,8 +517,15 @@ The archive contains the SQLite database (users, instance settings,
 credentials, and all other relational state), repositories and their
 attachments and container images, LFS and release assets, the SSH host key,
 and the effective Gitadel configuration. Every file is covered by a SHA-256
-manifest. Restore
-rejects changed, missing, or extra files and only writes database and storage
+manifest.
+
+Treat every backup archive as a secret-bearing credential bundle. Gitadel creates
+local backup files with mode `0600`; keep their parent directory private, encrypt
+archives at rest, and restrict access to the service operator. For remote backups,
+use provider-side encryption with a dedicated key and a least-privilege bucket
+policy in addition to HTTPS in transit.
+
+Restore rejects changed, missing, or extra files and only writes database and storage
 data into empty configured paths. Stop the service before restoring:
 
 ```bash

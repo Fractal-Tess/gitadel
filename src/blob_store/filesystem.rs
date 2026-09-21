@@ -13,6 +13,7 @@ use super::{
     BlobDigest, BlobMetadata, BlobReader, BlobStore, DigestMismatch, ObjectKey, ObjectPrefix,
     PutOutcome, verifying_reader,
 };
+use crate::filesystem::create_private_directory_async;
 
 #[derive(Clone, Debug)]
 pub struct FilesystemBlobStore {
@@ -21,7 +22,7 @@ pub struct FilesystemBlobStore {
 
 impl FilesystemBlobStore {
     pub async fn new(root: PathBuf) -> Result<Self> {
-        fs::create_dir_all(&root)
+        create_private_directory_async(&root)
             .await
             .with_context(|| format!("could not create blob store {}", root.display()))?;
         let root = fs::canonicalize(&root)

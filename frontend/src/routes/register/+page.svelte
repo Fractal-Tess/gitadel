@@ -34,23 +34,12 @@
     }
     working = true;
     try {
-      const creatingAdministrator = setupRequired;
-      await requestJson(
-        creatingAdministrator ? "/api/v1/setup" : "/api/v1/register",
-        authResponseSchema,
-        {
-          method: "POST",
-          body: creatingAdministrator
-            ? jsonBody({ username, password })
-            : jsonBody({ token: invitationToken, username, password }),
-        },
-      );
+      await requestJson("/api/v1/register", authResponseSchema, {
+        method: "POST",
+        body: jsonBody({ token: invitationToken, username, password }),
+      });
       await app.refreshAuth();
-      if (creatingAdministrator) {
-        await goto(resolve("/-/administration/[view]", { view: "appearance" }));
-      } else {
-        await goto(resolve("/"));
-      }
+      await goto(resolve("/"));
     } catch (caught) {
       toast.error(
         caught instanceof ApiFailure || caught instanceof Error
@@ -91,61 +80,66 @@
     </h1>
     <p class="mt-2 text-sm leading-6 text-muted-foreground">
       {setupRequired
-        ? "This is the only open registration. Further accounts require an administrator invitation."
+        ? "Create the first administrator from the Gitadel host. The public setup endpoint is disabled."
         : "This private invitation grants access to this Gitadel instance."}
     </p>
 
-
-    <form
-      class="mt-6 grid gap-4"
-      onsubmit={(event) => {
-        event.preventDefault();
-        void createAccount();
-      }}
-    >
-      <Field.Field>
-        <Field.Label for="register-username">Username</Field.Label>
-        <Input
-          id="register-username"
-          bind:value={username}
-          autocomplete="username"
-          minlength={3}
-          required
-        />
-      </Field.Field>
-      <Field.Field>
-        <Field.Label for="register-password">Password</Field.Label>
-        <Input
-          id="register-password"
-          type="password"
-          bind:value={password}
-          autocomplete="new-password"
-          minlength={12}
-          required
-        />
-      </Field.Field>
-      <Field.Field data-invalid={validationError !== null}>
-        <Field.Label for="register-confirmation">Confirm password</Field.Label>
-        <Input
-          id="register-confirmation"
-          type="password"
-          bind:value={confirmation}
-          autocomplete="new-password"
-          minlength={12}
-          aria-invalid={validationError !== null}
-          required
-        />
-        {#if validationError}
-          <Field.Error>{validationError}</Field.Error>
-        {/if}
-      </Field.Field>
-      <Button
-        class="mt-2"
-        type="submit"
-        disabled={working || (!setupRequired && !invitationToken)}
+    {#if setupRequired}
+      <pre
+        class="mt-6 overflow-x-auto rounded-md border bg-muted/40 p-4 text-xs leading-5"
+      ><code>printf '%s\n' 'choose-a-strong-password' | gitadel --bootstrap-admin admin --password-stdin</code></pre>
+    {:else}
+      <form
+        class="mt-6 grid gap-4"
+        onsubmit={(event) => {
+          event.preventDefault();
+          void createAccount();
+        }}
       >
-        {setupRequired ? "Create administrator" : "Create account"}
-      </Button>
-    </form>
+        <Field.Field>
+          <Field.Label for="register-username">Username</Field.Label>
+          <Input
+            id="register-username"
+            bind:value={username}
+            autocomplete="username"
+            minlength={3}
+            required
+          />
+        </Field.Field>
+        <Field.Field>
+          <Field.Label for="register-password">Password</Field.Label>
+          <Input
+            id="register-password"
+            type="password"
+            bind:value={password}
+            autocomplete="new-password"
+            minlength={12}
+            required
+          />
+        </Field.Field>
+        <Field.Field data-invalid={validationError !== null}>
+          <Field.Label for="register-confirmation">Confirm password</Field.Label>
+          <Input
+            id="register-confirmation"
+            type="password"
+            bind:value={confirmation}
+            autocomplete="new-password"
+            minlength={12}
+            aria-invalid={validationError !== null}
+            required
+          />
+          {#if validationError}
+            <Field.Error>{validationError}</Field.Error>
+          {/if}
+        </Field.Field>
+        <Button
+          class="mt-2"
+          type="submit"
+          disabled={working || !invitationToken}
+        >
+          Create account
+        </Button>
+      </form>
+    {/if}
   </section>
 </main>

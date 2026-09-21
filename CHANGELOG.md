@@ -7,10 +7,21 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 ### Added
 
 - Added a dedicated Git LFS file preview with human-readable object sizes, an exact-byte toggle, a copyable SHA-256 object ID, and the original pointer text.
+- Added durable webhook delivery queuing with restart recovery, bounded dispatch, and visible pending state.
+- Added bounded source-archive caching and attachment quotas, expiry cleanup, and authenticated deletion.
+- Added browser regression coverage for private attachment access, download hardening, and deletion.
+
+### Changed
+
+- Updated every direct Rust dependency to its latest published release, including Comrak 0.55.0 and Russh 0.63.3.
+- Standardized frontend and fixture package management on Bun 1.4.2, including Forgejo workflows, and refreshed Nix, container, and JavaScript dependencies to their latest compatible releases.
+- Restricted databases, backups, storage roots, archive caches, and generated SSH private keys to their owning account.
+- Replaced the unmaintained `serde_yml` and `term_size` dependency paths with maintained or feature-gated upstream alternatives.
 
 ### Fixed
 
 - Made the selected repository visibility clearly visible with a contrasting border, including the initial Private selection.
+- Hardened authentication state and password work, OIDC callbacks and redirects, administrator bootstrap, webhook egress, uploaded attachments, backups, Actions state transitions, registry tags, browser headers, audit addresses, and affected dependencies following the September security review.
 
 ## [0.10.0] - 2026-09-18
 

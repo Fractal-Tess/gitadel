@@ -1,11 +1,15 @@
-use std::{borrow::Cow, convert::Infallible, net::TcpListener as StdTcpListener};
+use std::{
+    borrow::Cow,
+    convert::Infallible,
+    net::{SocketAddr, TcpListener as StdTcpListener},
+};
 
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{Path, Request, State},
-    http::{HeaderValue, StatusCode, Uri, header},
+    extract::{ConnectInfo, Path, Request, State},
+    http::{HeaderName, HeaderValue, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{
         IntoResponse, Response,
@@ -13,11 +17,12 @@ use axum::{
     },
     routing::get,
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_util::stream;
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tokio::{
-    net::TcpListener,
     sync::{mpsc, watch},
     time::Duration,
 };
@@ -126,6 +131,32 @@ async fn dispatch_registry(
         next.run(request).await
     }
 }
+async fn request_context(request: Request, next: Next) -> Response {
+    let address = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(peer)| peer.ip());
+    let mut response = identity::with_remote_address(address, next.run(request)).await;
+    let headers = response.headers_mut();
+    headers.entry(header::CONTENT_SECURITY_POLICY).or_insert(
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+        ),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("same-origin"),
+    );
+    headers.insert(
+        HeaderName::from_static("permissions-policy"),
+        HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+    );
+    response
+}
 
 pub enum ServerExit {
     Shutdown,
@@ -212,7 +243,8 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
             crate::registry::router(repository_state.clone()),
             dispatch_registry,
         ))
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn(request_context));
 
     info!(
         address = %http_bind,
@@ -235,13 +267,13 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
             axum_server::from_tcp_rustls(listener, tls)
                 .context("could not configure HTTPS listener")?
                 .handle(http_handle)
-                .serve(app.into_make_service())
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
                 .await
         } else {
             axum_server::from_tcp(listener)
                 .context("could not configure HTTP listener")?
                 .handle(http_handle)
-                .serve(app.into_make_service())
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
                 .await
         };
         shutdown_task.abort();
@@ -417,10 +449,23 @@ struct MaintenanceStatusState {
 pub async fn perform_maintenance(settings: &Settings, action: MaintenanceAction) -> Result<()> {
     let reporter = MaintenanceProgressReporter::new(&action);
     let operation_id = action.operation_id();
-    let shutdown = CancellationToken::new();
-    let http_shutdown = shutdown.clone();
-    let status_server = match TcpListener::bind(settings.server.bind).await {
+    let status_server = match StdTcpListener::bind(settings.server.bind) {
         Ok(listener) => {
+            listener
+                .set_nonblocking(true)
+                .context("could not configure maintenance listener as non-blocking")?;
+            let tls = if let Some(tls) = &settings.server.tls {
+                Some(
+                    axum_server::tls_rustls::RustlsConfig::from_pem_file(
+                        &tls.certificate,
+                        &tls.private_key,
+                    )
+                    .await
+                    .context("could not load TLS configuration for maintenance status")?,
+                )
+            } else {
+                None
+            };
             let state = MaintenanceStatusState {
                 operation_id,
                 receiver: reporter.subscribe(),
@@ -435,11 +480,26 @@ pub async fn perform_maintenance(settings: &Settings, action: MaintenanceAction)
                     get(maintenance_progress),
                 )
                 .with_state(state);
-            Some(tokio::spawn(async move {
-                axum::serve(listener, app)
-                    .with_graceful_shutdown(http_shutdown.cancelled_owned())
-                    .await
-            }))
+            let handle = axum_server::Handle::new();
+            let server_handle = handle.clone();
+            let task = tokio::spawn(async move {
+                if let Some(tls) = tls {
+                    axum_server::from_tcp_rustls(listener, tls)
+                        .context("could not configure maintenance HTTPS listener")?
+                        .handle(server_handle)
+                        .serve(app.into_make_service())
+                        .await
+                        .context("maintenance HTTPS listener stopped")
+                } else {
+                    axum_server::from_tcp(listener)
+                        .context("could not configure maintenance HTTP listener")?
+                        .handle(server_handle)
+                        .serve(app.into_make_service())
+                        .await
+                        .context("maintenance HTTP listener stopped")
+                }
+            });
+            Some((handle, task))
         }
         Err(error) => {
             tracing::warn!(%error, "could not start maintenance progress server");
@@ -453,13 +513,14 @@ pub async fn perform_maintenance(settings: &Settings, action: MaintenanceAction)
         Err(error) => reporter.fail(error),
     }
     tokio::time::sleep(Duration::from_secs(2)).await;
-    shutdown.cancel();
-    if let Some(mut status_server) = status_server
-        && tokio::time::timeout(Duration::from_secs(2), &mut status_server)
+    if let Some((handle, mut status_server)) = status_server {
+        handle.graceful_shutdown(Some(Duration::from_secs(2)));
+        if tokio::time::timeout(Duration::from_secs(2), &mut status_server)
             .await
             .is_err()
-    {
-        status_server.abort();
+        {
+            status_server.abort();
+        }
     }
     result
 }
@@ -536,6 +597,9 @@ async fn frontend(uri: Uri) -> Response {
 }
 
 fn asset_response(path: &str, data: Cow<'static, [u8]>) -> Response {
+    let content_security_policy = (path == "index.html")
+        .then(|| frontend_content_security_policy(data.as_ref()))
+        .flatten();
     let bytes = match data {
         Cow::Borrowed(bytes) => Bytes::from_static(bytes),
         Cow::Owned(bytes) => Bytes::from(bytes),
@@ -557,7 +621,44 @@ fn asset_response(path: &str, data: Cow<'static, [u8]>) -> Response {
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, cache_control);
+    if let Some(policy) = content_security_policy {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_SECURITY_POLICY, policy);
+    }
     response
+}
+
+fn frontend_content_security_policy(data: &[u8]) -> Option<HeaderValue> {
+    let Ok(html) = std::str::from_utf8(data) else {
+        return None;
+    };
+    let mut hashes = Vec::new();
+    let mut remaining = html;
+    while let Some(start) = remaining.find("<script") {
+        remaining = &remaining[start + "<script".len()..];
+        let Some(open_end) = remaining.find('>') else {
+            break;
+        };
+        let attributes = &remaining[..open_end];
+        remaining = &remaining[open_end + 1..];
+        let Some(close) = remaining.find("</script>") else {
+            break;
+        };
+        let script = &remaining[..close];
+        if !attributes.contains("src=") {
+            hashes.push(format!(
+                "'sha256-{}'",
+                STANDARD.encode(Sha256::digest(script.as_bytes()))
+            ));
+        }
+        remaining = &remaining[close + "</script>".len()..];
+    }
+    let hashes = hashes.join(" ");
+    let policy = format!(
+        "default-src 'self'; script-src 'self' {hashes}; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+    );
+    HeaderValue::from_str(&policy).ok()
 }
 
 async fn shutdown_signal() {

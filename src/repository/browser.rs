@@ -1,8 +1,10 @@
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
+    fs::File,
     io::{self, Write},
     path::{Path, PathBuf},
+    time::{Duration as StdDuration, Instant},
 };
 
 use axum::{
@@ -13,10 +15,8 @@ use axum::{
     response::Response,
 };
 use axum_extra::extract::cookie::CookieJar;
-use bytes::Bytes;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use comrak::{Options, markdown_to_html};
-use futures_util::stream;
 use russh::keys::ssh_key::{HashAlg, PublicKey, SshSig};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 use serde::{Deserialize, Serialize};
@@ -38,7 +38,7 @@ use sley_diff_merge::{
     diff_name_status_trees_with_options,
 };
 use tokei::{Config as TokeiConfig, LanguageType};
-use tokio::{sync::mpsc, task::JoinSet};
+use tokio::task::JoinSet;
 
 use super::{
     Permission, RepositoryState,
@@ -46,6 +46,7 @@ use super::{
 };
 use crate::{
     entity::{repository, repository_release, ssh_key as ssh_key_entity, user},
+    filesystem::{create_private_directory_async, open_private_file},
     identity::{ApiError, SCOPE_READ},
 };
 
@@ -1006,117 +1007,116 @@ pub async fn source_archive(
         repository.name,
         query.format.extension()
     );
-    let prefix = format!("{}-{short_oid}/", repository.name);
-    let format = query.format;
-    let (sender, receiver) = mpsc::channel(8);
-    let archive_path = repository_path.clone();
-    let worker_sender = sender.clone();
-    state.spawn_task(async move {
-        let result = tokio::task::spawn_blocking(move || {
-            write_archive_stream(
-                &archive_path,
-                format,
-                commit_oid,
-                tree_oid,
-                mtime,
-                prefix,
-                worker_sender,
-            )
-        })
-        .await;
-        if let Err(error) = result {
-            let _ = sender.blocking_send(Err(ApiError::internal(error)));
-        } else if let Ok(Err(error)) = result {
-            let _ = sender.blocking_send(Err(ApiError::internal(error)));
+    let cache_path =
+        state.source_archive_cache_path(&repository, &commit_hex, query.format.extension());
+    if !tokio::fs::try_exists(&cache_path)
+        .await
+        .map_err(ApiError::internal)?
+    {
+        let permit = state.try_archive_generation()?;
+        if !tokio::fs::try_exists(&cache_path)
+            .await
+            .map_err(ApiError::internal)?
+        {
+            let cache_directory = state.source_archive_cache_directory(&repository);
+            create_private_directory_async(&cache_directory)
+                .await
+                .map_err(ApiError::internal)?;
+            let temporary_path = cache_directory.join(format!(
+                ".{}.{}.tmp",
+                commit_hex,
+                uuid::Uuid::new_v4().simple()
+            ));
+            let prefix = format!("{}-{short_oid}/", repository.name);
+            let format = query.format;
+            let published_path = cache_path.clone();
+            tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                let _permit = permit;
+                let result = write_archive_file(
+                    &repository_path,
+                    &temporary_path,
+                    format,
+                    commit_oid,
+                    tree_oid,
+                    mtime,
+                    prefix,
+                )
+                .and_then(|()| {
+                    if published_path.exists() {
+                        Ok(())
+                    } else {
+                        std::fs::rename(&temporary_path, &published_path).map_err(Into::into)
+                    }
+                })
+                .and_then(|()| prune_archive_cache(&cache_directory));
+                let _ = std::fs::remove_file(&temporary_path);
+                result
+            })
+            .await
+            .map_err(ApiError::internal)?
+            .map_err(ApiError::internal)?;
         }
-    });
-    let stream = stream::unfold(receiver, |mut receiver| async {
-        receiver.recv().await.map(|chunk| (chunk, receiver))
-    });
-    let mut response = Response::new(Body::from_stream(stream));
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static(format.content_type()),
-    );
-    response.headers_mut().insert(
-        header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&format!("attachment; filename=\"{archive_name}\""))
-            .map_err(ApiError::internal)?,
-    );
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-cache"),
-    );
-    Ok(response)
-}
-
-const ARCHIVE_CHUNK_BYTES: usize = 64 * 1024;
-
-struct ArchiveStreamWriter {
-    sender: mpsc::Sender<Result<Bytes, ApiError>>,
-    buffer: Vec<u8>,
-}
-
-impl ArchiveStreamWriter {
-    fn flush_chunks(&mut self) -> io::Result<()> {
-        while self.buffer.len() >= ARCHIVE_CHUNK_BYTES {
-            let chunk = Bytes::copy_from_slice(&self.buffer[..ARCHIVE_CHUNK_BYTES]);
-            self.buffer.drain(..ARCHIVE_CHUNK_BYTES);
-            self.sender
-                .blocking_send(Ok(chunk))
-                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "archive client closed"))?;
-        }
-        Ok(())
     }
+    source_archive_response(&cache_path, &archive_name, query.format).await
 }
 
-impl Write for ArchiveStreamWriter {
+const MAX_SOURCE_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
+const SOURCE_ARCHIVE_GENERATION_TIMEOUT: StdDuration = StdDuration::from_secs(2 * 60);
+const MAX_CACHED_ARCHIVES_PER_REPOSITORY: usize = 8;
+
+struct ArchiveFileWriter {
+    file: File,
+    bytes_written: u64,
+    deadline: Instant,
+}
+
+impl Write for ArchiveFileWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let mut offset = 0;
-        while offset < bytes.len() {
-            let available = ARCHIVE_CHUNK_BYTES - self.buffer.len();
-            let amount = available.min(bytes.len() - offset);
-            self.buffer
-                .extend_from_slice(&bytes[offset..offset + amount]);
-            offset += amount;
-            self.flush_chunks()?;
+        if Instant::now() >= self.deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "source archive generation timed out",
+            ));
         }
-        Ok(bytes.len())
+        if self.bytes_written.saturating_add(bytes.len() as u64) > MAX_SOURCE_ARCHIVE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                "source archive exceeds the output size limit",
+            ));
+        }
+        let written = self.file.write(bytes)?;
+        self.bytes_written = self.bytes_written.saturating_add(written as u64);
+        Ok(written)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        if !self.buffer.is_empty() {
-            let chunk = Bytes::from(std::mem::take(&mut self.buffer));
-            self.sender
-                .blocking_send(Ok(chunk))
-                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "archive client closed"))?;
-        }
-        Ok(())
+        self.file.flush()
     }
 }
 
-fn write_archive_stream(
-    path: &Path,
+fn write_archive_file(
+    repository_path: &Path,
+    output_path: &Path,
     archive_format: SourceArchiveFormat,
     commit_oid: ObjectId,
     tree_oid: ObjectId,
     mtime: u64,
     prefix: String,
-    sender: mpsc::Sender<Result<Bytes, ApiError>>,
-) -> sley::Result<()> {
-    let repository = GitRepository::open_exact_bare(path)?;
+) -> anyhow::Result<()> {
+    let repository = GitRepository::open_exact_bare(repository_path)?;
     let config = repository.config()?;
     let converter = ArchiveConvert::from_tree(
-        path,
-        path,
+        repository_path,
+        repository_path,
         &config,
         repository.object_database(),
         repository.object_format(),
         &tree_oid,
     )?;
-    let mut writer = ArchiveStreamWriter {
-        sender,
-        buffer: Vec::with_capacity(ARCHIVE_CHUNK_BYTES),
+    let mut writer = ArchiveFileWriter {
+        file: open_private_file(output_path, true)?,
+        bytes_written: 0,
+        deadline: Instant::now() + SOURCE_ARCHIVE_GENERATION_TIMEOUT,
     };
     match archive_format {
         SourceArchiveFormat::Zip => write_zip_archive_full(
@@ -1150,7 +1150,59 @@ fn write_archive_stream(
         )?,
     }
     writer.flush()?;
+    writer.file.sync_all()?;
     Ok(())
+}
+
+fn prune_archive_cache(directory: &Path) -> anyhow::Result<()> {
+    let mut entries = std::fs::read_dir(directory)?
+        .filter_map(Result::ok)
+        .filter(|entry| !entry.file_name().to_string_lossy().ends_with(".tmp"))
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            metadata
+                .is_file()
+                .then(|| (metadata.modified().ok(), entry.path()))
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.0);
+    let remove = entries
+        .len()
+        .saturating_sub(MAX_CACHED_ARCHIVES_PER_REPOSITORY);
+    for (_, path) in entries.into_iter().take(remove) {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+async fn source_archive_response(
+    path: &Path,
+    archive_name: &str,
+    format: SourceArchiveFormat,
+) -> Result<Response, ApiError> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(ApiError::internal)?;
+    let size = file.metadata().await.map_err(ApiError::internal)?.len();
+    let mut response = Response::new(Body::from_stream(tokio_util::io::ReaderStream::new(file)));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(format.content_type()),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{archive_name}\""))
+            .map_err(ApiError::internal)?,
+    );
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&size.to_string()).map_err(ApiError::internal)?,
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=31536000, immutable"),
+    );
+    Ok(response)
 }
 pub async fn history(
     State(state): State<RepositoryState>,
@@ -2017,7 +2069,6 @@ fn is_markdown_path(path: &str) -> bool {
 pub(crate) fn render_markdown(markdown: &str) -> String {
     let mut options = Options::default();
     options.extension.strikethrough = true;
-    options.extension.tagfilter = true;
     options.extension.table = true;
     options.extension.autolink = true;
     options.extension.tasklist = true;
@@ -2140,7 +2191,13 @@ const fn default_per_page() -> usize {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf, process::Command};
+    use std::{
+        fs,
+        io::Write as _,
+        path::PathBuf,
+        process::Command,
+        time::{Duration, Instant},
+    };
 
     use russh::keys::ssh_key::{HashAlg, LineEnding, PrivateKey, private::Ed25519Keypair};
     use sley::{
@@ -2149,8 +2206,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        SshCommitSignature, count_reachable_commits, read_submodule_metadata,
-        verify_ssh_commit_signature,
+        ArchiveFileWriter, MAX_SOURCE_ARCHIVE_BYTES, SshCommitSignature, count_reachable_commits,
+        read_submodule_metadata, verify_ssh_commit_signature,
     };
 
     fn native_repository() -> (PathBuf, GitRepository) {
@@ -2184,6 +2241,40 @@ mod tests {
         repository
             .write_raw_object(GitObjectType::Commit, commit.write())
             .expect("write repository commit")
+    }
+
+    #[test]
+    fn source_archive_writer_rejects_output_over_limit() {
+        let path =
+            std::env::temp_dir().join(format!("gitadel-archive-limit-test-{}", Uuid::new_v4()));
+        let mut writer = ArchiveFileWriter {
+            file: fs::File::create(&path).expect("create archive output"),
+            bytes_written: MAX_SOURCE_ARCHIVE_BYTES,
+            deadline: Instant::now() + Duration::from_secs(1),
+        };
+
+        let error = writer
+            .write_all(&[0])
+            .expect_err("reject oversized archive");
+        fs::remove_file(path).expect("remove archive output");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge);
+    }
+
+    #[test]
+    fn source_archive_writer_rejects_expired_generation() {
+        let path =
+            std::env::temp_dir().join(format!("gitadel-archive-timeout-test-{}", Uuid::new_v4()));
+        let mut writer = ArchiveFileWriter {
+            file: fs::File::create(&path).expect("create archive output"),
+            bytes_written: 0,
+            deadline: Instant::now(),
+        };
+
+        let error = writer.write_all(&[0]).expect_err("reject expired archive");
+        fs::remove_file(path).expect("remove archive output");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     }
 
     #[test]

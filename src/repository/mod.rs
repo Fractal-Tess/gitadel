@@ -53,10 +53,7 @@ use sea_orm::{
     sea_query::OnConflict,
 };
 use serde::{Serialize, de::DeserializeOwned};
-use tokio::{
-    fs,
-    sync::{Mutex, RwLock, Semaphore},
-};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio_util::task::TaskTracker;
 use url::Url;
 use uuid::Uuid;
@@ -68,6 +65,7 @@ use crate::{
         namespace, organization_member, repository, repository_alias, repository_cache_entry,
         repository_collaborator, user,
     },
+    filesystem::create_private_directory_async,
     identity::{ApiError, AuthenticatedUser, IdentityState},
 };
 
@@ -75,6 +73,8 @@ use crate::{
 pub struct RepositoryState {
     identity: IdentityState,
     repository_root: Arc<PathBuf>,
+    archive_cache_root: Arc<PathBuf>,
+    archive_slots: Arc<Semaphore>,
     actions_artifact_root: Arc<PathBuf>,
     analysis_slots: Arc<Semaphore>,
     analysis_refreshing: Arc<Mutex<HashMap<Uuid, bool>>>,
@@ -123,6 +123,7 @@ struct CachedRepositorySize {
     lfs_bytes: u64,
 }
 
+const ARCHIVE_GENERATION_CONCURRENCY: usize = 2;
 const ANALYSIS_CONCURRENCY: usize = 4;
 const COMMIT_COUNT_CONCURRENCY: usize = 2;
 const ANALYSIS_CACHE_LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -142,7 +143,9 @@ impl RepositoryState {
         public_url: Url,
         ssh_port: u16,
     ) -> Result<Self, anyhow::Error> {
-        fs::create_dir_all(&settings.repository_root).await?;
+        create_private_directory_async(&settings.repository_root).await?;
+        let archive_cache_root = settings.repository_root.join(".cache/source-archives");
+        create_private_directory_async(&archive_cache_root).await?;
         mirrors::cleanup_temporary_files(&settings.repository_root).await?;
         let lfs_storage = match identity.lfs_storage().await {
             Some(manager) => manager,
@@ -161,10 +164,12 @@ impl RepositoryState {
             }
         };
         mirrors::cleanup_lfs_staging(&settings.lfs_root).await?;
-        fs::create_dir_all(&settings.actions_artifact_root).await?;
+        create_private_directory_async(&settings.actions_artifact_root).await?;
         let state = Self {
             identity,
             repository_root: Arc::new(settings.repository_root),
+            archive_cache_root: Arc::new(archive_cache_root),
+            archive_slots: Arc::new(Semaphore::new(ARCHIVE_GENERATION_CONCURRENCY)),
             actions_artifact_root: Arc::new(settings.actions_artifact_root),
             analysis_slots: Arc::new(Semaphore::new(ANALYSIS_CONCURRENCY)),
             analysis_refreshing: Arc::new(Mutex::new(HashMap::new())),
@@ -238,6 +243,32 @@ impl RepositoryState {
             .join(format!("{}.git", repository.storage_key))
     }
 
+    pub(super) fn source_archive_cache_path(
+        &self,
+        repository: &repository::Model,
+        commit: &str,
+        extension: &str,
+    ) -> PathBuf {
+        self.archive_cache_root
+            .join(repository.storage_key.to_string())
+            .join(format!("{commit}.{extension}"))
+    }
+
+    pub(super) fn source_archive_cache_directory(&self, repository: &repository::Model) -> PathBuf {
+        self.archive_cache_root
+            .join(repository.storage_key.to_string())
+    }
+
+    pub(super) fn try_archive_generation(&self) -> Result<OwnedSemaphorePermit, ApiError> {
+        Arc::clone(&self.archive_slots)
+            .try_acquire_owned()
+            .map_err(|_| {
+                ApiError::too_many_requests(
+                    "Source archive capacity is busy. Try the request again later.",
+                )
+            })
+    }
+
     pub(crate) fn actions_artifact_root(&self) -> &Path {
         self.actions_artifact_root.as_ref()
     }
@@ -288,10 +319,6 @@ impl RepositoryState {
         endpoint.set_query(None);
         endpoint.set_fragment(None);
         endpoint.to_string().trim_end_matches('/').to_owned()
-    }
-
-    pub(crate) fn webhook_client(&self) -> &reqwest::Client {
-        &self.webhook_client
     }
 
     pub(crate) fn http_clone_url(&self, repository: &repository::Model) -> String {
@@ -1013,7 +1040,7 @@ pub fn router() -> Router<RepositoryState> {
         )
         .route(
             "/repositories/{namespace}/{name}/issue-attachments/{attachment_id}",
-            get(issues::download_attachment),
+            get(issues::download_attachment).delete(issues::delete_attachment),
         )
         .route(
             "/repositories/{namespace}/{name}/activity",

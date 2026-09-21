@@ -818,20 +818,14 @@ fn discover(
 ) -> sley::Result<Discovery> {
     let commit_oid = git.peel_to_commit_oid(git.rev_parse(revision)?)?;
     let tree_oid = git.read_commit(&commit_oid)?.tree;
-    let mut files = Vec::new();
-    let mut readmes = Vec::new();
-    let mut visited = 0;
-    let mut partial = false;
-    collect_files(
-        git,
-        tree_oid,
-        "",
-        &mut files,
-        &mut readmes,
-        0,
-        &mut visited,
-        &mut partial,
-    )?;
+    let mut collection = FileCollection::default();
+    collect_files(git, tree_oid, "", 0, &mut collection)?;
+    let FileCollection {
+        mut files,
+        readmes,
+        mut partial,
+        ..
+    } = collection;
     let commit_hex = commit_oid.to_hex();
     if let Some(path) = selected_path
         && !files.iter().any(|(candidate, _)| candidate == path)
@@ -907,24 +901,29 @@ fn discover(
     })
 }
 
+#[derive(Default)]
+struct FileCollection {
+    files: Vec<(String, sley::ObjectId)>,
+    readmes: Vec<(String, Vec<u8>)>,
+    visited: usize,
+    partial: bool,
+}
+
 fn collect_files(
     git: &GitRepository,
     tree_oid: sley::ObjectId,
     prefix: &str,
-    files: &mut Vec<(String, sley::ObjectId)>,
-    readmes: &mut Vec<(String, Vec<u8>)>,
     depth: usize,
-    visited: &mut usize,
-    partial: &mut bool,
+    collection: &mut FileCollection,
 ) -> sley::Result<()> {
-    if depth > MAX_SCAN_DEPTH || *visited >= MAX_SCAN_ENTRIES {
-        *partial = true;
+    if depth > MAX_SCAN_DEPTH || collection.visited >= MAX_SCAN_ENTRIES {
+        collection.partial = true;
         return Ok(());
     }
     for entry in git.read_tree(&tree_oid)?.entries {
-        *visited += 1;
-        if *visited > MAX_SCAN_ENTRIES {
-            *partial = true;
+        collection.visited += 1;
+        if collection.visited > MAX_SCAN_ENTRIES {
+            collection.partial = true;
             break;
         }
         let name = String::from_utf8_lossy(entry.name.as_bytes()).into_owned();
@@ -937,41 +936,32 @@ fn collect_files(
             continue;
         }
         if entry.is_tree() {
-            collect_files(
-                git,
-                entry.oid,
-                &path,
-                files,
-                readmes,
-                depth + 1,
-                visited,
-                partial,
-            )?;
+            collect_files(git, entry.oid, &path, depth + 1, collection)?;
             continue;
         }
         let lower = path.to_ascii_lowercase();
         let header = git.read_object_header(&entry.oid).ok().flatten();
         let Some((object_type, size)) = header else {
-            *partial = true;
+            collection.partial = true;
             continue;
         };
         if object_type != GitObjectType::Blob {
             continue;
         }
         if is_readme(&lower) {
-            if readmes.len() >= MAX_SCAN_READMES {
-                *partial = true;
+            if collection.readmes.len() >= MAX_SCAN_READMES {
+                collection.partial = true;
             } else if size <= MAX_SCAN_README_BYTES as u64
                 && let Ok(content) = git.blobs().read(entry.oid)
             {
-                readmes.push((path.clone(), content));
+                collection.readmes.push((path.clone(), content));
             }
         }
         if image_mime(&path).is_some() {
             if size <= MAX_ICON_BYTES as u64 {
-                files.push((path, entry.oid));
+                collection.files.push((path, entry.oid));
             } else {
-                *partial = true;
+                collection.partial = true;
             }
         }
     }

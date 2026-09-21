@@ -30,41 +30,40 @@ panic = "abort"
 strip = "symbols"
 
 [dependencies]
-ammonia = "4.1.4"
-anyhow = "1.0.100"
-async-trait = "0.1.89"
-argon2 = "0.5.3"
-axum = { version = "0.8.8", features = ["multipart"] }
+ammonia = "4.2.0"
+anyhow = "1.0.104"
+async-trait = "0.1.92"
+argon2 = "0.6.0"
+axum = { version = "0.8.9", features = ["multipart"] }
 axum-extra = { version = "0.12.6", features = ["cookie"] }
-base64 = "0.22.1"
+base64 = "0.23.1"
 bytes = "1.12.1"
-clap = { version = "4.5.53", features = ["derive", "env"] }
-config = { version = "0.15.18", default-features = false, features = ["toml"] }
-comrak = { version = "0.54.0", default-features = false }
-chrono = { version = "0.4.42", features = ["serde"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
+config = { version = "0.15.25", default-features = false, features = ["toml"] }
+comrak = { version = "0.55.0", default-features = false }
+chrono = { version = "0.4.45", features = ["serde"] }
 cron = "0.17.0"
-globset = "0.4.18"
-hmac = "0.12.1"
-hmac_13 = { package = "hmac", version = "0.13.0" }
+globset = "0.4.20"
+hmac = "0.13.0"
+hex = "0.4.3"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "ico", "avif-native"] }
 libc = "0.2"
-resvg = { version = "0.47", default-features = false, features = ["text", "system-fonts", "raster-images"] }
+resvg = { version = "0.48", default-features = false, features = ["text", "system-fonts", "raster-images"] }
 mime_guess = "2.0.5"
-rand = "0.9.2"
-png = "0.18.0"
-prost = "0.14.3"
-quick-xml = "0.38.4"
+rand = "0.10.3"
+png = "0.18.1"
+prost = "0.14.4"
+quick-xml = "0.42.0"
 pbjson = "0.9.0"
 pbjson-types = "0.9.0"
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
-rand_10 = { package = "rand", version = "0.10.2" }
-russh = { version = "0.62.7", default-features = false, features = ["ring", "rsa"] }
-sea-orm = { version = "2.0.2", default-features = false, features = ["runtime-tokio-rustls", "sqlx-sqlite", "with-chrono", "with-uuid"] }
-sea-orm-migration = { version = "2.0.2", default-features = false, features = ["runtime-tokio-rustls", "sqlx-sqlite", "with-chrono", "with-uuid"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "stream"] }
+russh = { version = "0.63.3", default-features = false, features = ["ring", "rsa"] }
+sea-orm = { version = "2.0.3", default-features = false, features = ["runtime-tokio-rustls", "sqlx-sqlite", "with-chrono", "with-uuid"] }
+sea-orm-migration = { version = "2.0.3", default-features = false, features = ["runtime-tokio-rustls", "sqlx-sqlite", "with-chrono", "with-uuid"] }
 semver = "1.0.28"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
-serde_yml = "0.0.12"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+yaml_serde = "0.10.3"
 shlex = "2.0.1"
 sley = { git = "https://github.com/Fractal-Tess/sley", rev = "3b15510590bc843f8382aca950744d44d9a8d0e8", default-features = false, features = ["fast-sha1", "mmap", "rendering", "history-editing", "remote"] }
 sley-remote = { git = "https://github.com/Fractal-Tess/sley", rev = "3b15510590bc843f8382aca950744d44d9a8d0e8", default-features = false, features = ["http"] }
@@ -81,33 +80,36 @@ sley-protocol = { git = "https://github.com/Fractal-Tess/sley", rev = "3b1551059
 sley-refs = { git = "https://github.com/Fractal-Tess/sley", rev = "3b15510590bc843f8382aca950744d44d9a8d0e8" }
 sley-rev = { git = "https://github.com/Fractal-Tess/sley", rev = "3b15510590bc843f8382aca950744d44d9a8d0e8" }
 sley-worktree = { git = "https://github.com/Fractal-Tess/sley", rev = "3b15510590bc843f8382aca950744d44d9a8d0e8" }
-rust-s3 = { version = "0.37.2", default-features = false, features = ["fail-on-err", "tokio-rustls-tls"] }
+rust-s3 = { git = "https://github.com/aznashwan/rust-s3", rev = "01b6ccb9babf858475163a4b9bcd7dea3d56fd00", default-features = false, features = ["fail-on-err", "tokio-rustls-tls"] }
 sha1 = "0.11.0"
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 subtle = "2.6.1"
-time = "0.3.44"
-tokio = { version = "1.48.0", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "time"] }
-toml = "0.8.23"
+time = "0.3.55"
+tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "time"] }
+toml = "1.1.6"
 tokio-util = { version = "0.7.19", features = ["io", "rt"] }
 tower = { version = "0.5.3", features = ["util"] }
-tower-http = { version = "0.6.6", features = ["compression-br", "compression-gzip", "trace"] }
-tokei = { version = "14.0.0", default-features = false }
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
-url = { version = "2.5.7", features = ["serde"] }
-uuid = { version = "1.19.0", features = ["serde", "v4"] }
+tower-http = { version = "0.7.1", features = ["compression-br", "compression-gzip", "trace"] }
+tokei = { git = "https://github.com/XAMPPRocky/tokei", rev = "c277b1515eff47937f3fe5214b817e8231321e07", default-features = false }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+url = { version = "2.5.8", features = ["serde"] }
+uuid = { version = "1.26.1", features = ["serde", "v4"] }
 webauthn-rs = { version = "0.5.5", default-features = false, features = ["conditional-ui"] }
 fs2 = "0.4.3"
-futures-util = "0.3.31"
+futures-util = "0.3.34"
 tar = "0.4.46"
 walkdir = "2.5.0"
-zstd = "0.13.3"
+zstd = "0.14.0"
 axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls"] }
-rustls = { version = "0.23.43", default-features = false, features = ["aws-lc-rs"] }
+rustls = { version = "0.23.45", default-features = false, features = ["aws-lc-rs"] }
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
 
 
 [build-dependencies]
 pbjson-build = "0.9.0"
-prost-build = "0.14.3"
+prost-build = "0.14.4"
 protoc-bin-vendored = "3.2.0"
+
+[patch.crates-io]
+aws-creds = { git = "https://github.com/aznashwan/rust-s3", rev = "01b6ccb9babf858475163a4b9bcd7dea3d56fd00" }

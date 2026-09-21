@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
+    sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
 
@@ -12,15 +13,17 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use chrono::{DateTime, Utc};
-use hmac::{Hmac, Mac};
+use futures_util::TryStreamExt as _;
+use hmac::{Hmac, KeyInit as _, Mac};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, ExprTrait, QueryFilter,
+    QueryOrder, QuerySelect, Set, TransactionTrait, sea_query::Expr,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Sha256;
 use sley::{DiffNameStatusOptions, ReferenceTarget};
+use tokio::sync::Semaphore;
 use url::Url;
 use uuid::Uuid;
 
@@ -29,6 +32,7 @@ use crate::{
     actions::ActionsState,
     entity::{repository, repository_webhook, repository_webhook_delivery, user},
     identity::{ApiError, SCOPE_READ, SCOPE_WRITE},
+    network::pinned_public_http_client,
 };
 
 pub(super) type RefSnapshot = BTreeMap<String, String>;
@@ -38,6 +42,10 @@ const WEBHOOK_DELIVERY_HISTORY_LIMIT: usize = 50;
 
 /// Maximum number of response body characters stored per delivery.
 const WEBHOOK_DELIVERY_BODY_LIMIT: usize = 2048;
+const WEBHOOK_RESPONSE_BYTE_LIMIT: usize = WEBHOOK_DELIVERY_BODY_LIMIT * 4;
+const WEBHOOK_DELIVERY_CONCURRENCY: usize = 8;
+static WEBHOOK_DELIVERY_SLOTS: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(WEBHOOK_DELIVERY_CONCURRENCY)));
 
 #[derive(Serialize)]
 struct WebhookConfigResponse {
@@ -124,13 +132,16 @@ pub struct WebhookDeliveryResponse {
 
 impl WebhookDeliveryResponse {
     fn new(delivery: repository_webhook_delivery::Model) -> Self {
-        let status = if delivery
-            .response_status
-            .is_some_and(|code| (200..300).contains(&code))
-        {
-            "ok"
-        } else {
-            "failed"
+        let status = match delivery.status.as_str() {
+            "pending" | "delivering" => "pending",
+            "completed"
+                if delivery
+                    .response_status
+                    .is_some_and(|code| (200..300).contains(&code)) =>
+            {
+                "ok"
+            }
+            _ => "failed",
         };
         Self {
             id: delivery.id,
@@ -242,7 +253,7 @@ pub async fn create_webhook(
         .await?;
     validate_kind(request.name.as_deref(), request.events.as_deref())?;
     validate_content_type(request.config.content_type.as_deref())?;
-    let endpoint = validate_endpoint(&request.config.url)?;
+    let endpoint = validate_endpoint(&request.config.url).await?;
     let secret = validate_secret(request.config.secret)?;
     let now = Utc::now();
     let transaction = state.identity().database().begin().await?;
@@ -271,7 +282,7 @@ pub async fn create_webhook(
         .await?;
     transaction.commit().await?;
 
-    queue_ping(state.clone(), hook.clone(), repository.clone(), actor.user);
+    queue_ping(state.clone(), hook.clone(), repository.clone(), actor.user).await?;
     Ok((
         StatusCode::CREATED,
         Json(WebhookResponse::new(hook, &state, &repository)),
@@ -304,7 +315,7 @@ pub async fn update_webhook(
     if let Some(config) = request.config {
         validate_content_type(config.content_type.as_deref())?;
         if let Some(endpoint) = config.url {
-            active.url = Set(validate_endpoint(&endpoint)?);
+            active.url = Set(validate_endpoint(&endpoint).await?);
         }
         if let Some(secret) = config.secret {
             active.secret = Set(validate_secret(Some(secret))?);
@@ -436,7 +447,7 @@ pub async fn redeliver_webhook_delivery(
             Some(format!("{namespace}/{name}/{id}/{delivery_id}")),
         )
         .await?;
-    queue_delivery(state, hook, delivery.event, payload);
+    queue_delivery(&state, &hook, delivery.event, payload).await?;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -477,7 +488,7 @@ pub async fn ping_webhook(
             Some(format!("{namespace}/{name}/{id}")),
         )
         .await?;
-    queue_ping(state, hook, repository, actor.user);
+    queue_ping(state, hook, repository, actor.user).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -559,12 +570,7 @@ pub(super) async fn dispatch_push(
             );
         }
         for hook in &hooks {
-            queue_delivery(
-                state.clone(),
-                hook.clone(),
-                String::from("push"),
-                payload.clone(),
-            );
+            queue_delivery(state, hook, String::from("push"), payload.clone()).await?;
         }
         if integrations_enabled {
             super::integrations::dispatch_push(
@@ -591,12 +597,12 @@ fn pushed_paths(commits: &[Value]) -> Vec<String> {
     paths.into_iter().collect()
 }
 
-fn queue_ping(
+async fn queue_ping(
     state: RepositoryState,
     hook: repository_webhook::Model,
     repository: repository::Model,
     actor: user::Model,
-) {
+) -> Result<(), ApiError> {
     let payload = json!({
         "zen": "Design for failure.",
         "hook_id": hook.id,
@@ -604,109 +610,185 @@ fn queue_ping(
         "repository": repository_payload(&state, &repository),
         "sender": user_payload(&actor),
     });
-    queue_delivery(state, hook, String::from("ping"), payload);
+    queue_delivery(&state, &hook, String::from("ping"), payload).await
 }
 
-fn queue_delivery(
-    state: RepositoryState,
-    hook: repository_webhook::Model,
+async fn queue_delivery(
+    state: &RepositoryState,
+    hook: &repository_webhook::Model,
     event: String,
     payload: Value,
-) {
-    let task_state = state.clone();
-    task_state.spawn_task(async move {
-        if let Err(error) = deliver(&state, &hook, &event, &payload).await {
-            tracing::warn!(%error, webhook_id = %hook.id, %event, "webhook delivery failed");
+) -> Result<(), ApiError> {
+    repository_webhook_delivery::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        webhook_id: Set(hook.id),
+        event: Set(event),
+        payload: Set(payload.to_string()),
+        response_status: Set(None),
+        response_body: Set(None),
+        duration_ms: Set(0),
+        created_at: Set(Utc::now()),
+        status: Set("pending".to_owned()),
+        attempt_count: Set(0),
+        attempted_at: Set(None),
+    }
+    .insert(state.identity().database())
+    .await?;
+    process_pending_deliveries(state).await
+}
+
+pub(super) async fn process_pending_deliveries(state: &RepositoryState) -> Result<(), ApiError> {
+    let database = state.identity().database();
+    let stale = Utc::now() - chrono::Duration::minutes(1);
+    repository_webhook_delivery::Entity::update_many()
+        .col_expr(
+            repository_webhook_delivery::Column::Status,
+            Expr::value("pending"),
+        )
+        .filter(repository_webhook_delivery::Column::Status.eq("delivering"))
+        .filter(repository_webhook_delivery::Column::AttemptedAt.lt(stale))
+        .exec(database)
+        .await?;
+    loop {
+        let Ok(permit) = Arc::clone(&WEBHOOK_DELIVERY_SLOTS).try_acquire_owned() else {
+            break;
+        };
+        let Some(delivery) = repository_webhook_delivery::Entity::find()
+            .filter(repository_webhook_delivery::Column::Status.eq("pending"))
+            .order_by_asc(repository_webhook_delivery::Column::CreatedAt)
+            .one(database)
+            .await?
+        else {
+            break;
+        };
+        let claimed = repository_webhook_delivery::Entity::update_many()
+            .col_expr(
+                repository_webhook_delivery::Column::Status,
+                Expr::value("delivering"),
+            )
+            .col_expr(
+                repository_webhook_delivery::Column::AttemptCount,
+                Expr::col(repository_webhook_delivery::Column::AttemptCount).add(1),
+            )
+            .col_expr(
+                repository_webhook_delivery::Column::AttemptedAt,
+                Expr::value(Utc::now()),
+            )
+            .filter(repository_webhook_delivery::Column::Id.eq(delivery.id))
+            .filter(repository_webhook_delivery::Column::Status.eq("pending"))
+            .exec(database)
+            .await?;
+        if claimed.rows_affected == 0 {
+            continue;
         }
-    });
+        let delivery = repository_webhook_delivery::Entity::find_by_id(delivery.id)
+            .one(database)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        let Some(hook) = repository_webhook::Entity::find_by_id(delivery.webhook_id)
+            .one(database)
+            .await?
+        else {
+            continue;
+        };
+        let worker_state = state.clone();
+        let task_state = worker_state.clone();
+        task_state.spawn_task(async move {
+            let _permit = permit;
+            if let Err(error) = deliver(&worker_state, &hook, &delivery).await {
+                let message = error.to_string();
+                if let Err(record_error) =
+                    finish_delivery(&worker_state, &hook, &delivery, None, 0, Some(message)).await
+                {
+                    tracing::warn!(%record_error, webhook_id = %hook.id, delivery_id = %delivery.id, "could not record failed webhook delivery");
+                }
+            }
+        });
+    }
+    Ok(())
 }
 
 async fn deliver(
     state: &RepositoryState,
     hook: &repository_webhook::Model,
-    event: &str,
-    payload: &Value,
+    delivery: &repository_webhook_delivery::Model,
 ) -> Result<(), ApiError> {
-    let body = serde_json::to_vec(payload).map_err(ApiError::internal)?;
-    let delivery_id = Uuid::new_v4();
-    let mut request = state
-        .webhook_client()
-        .post(&hook.url)
+    let body = delivery.payload.as_bytes();
+    let endpoint = Url::parse(&hook.url).map_err(ApiError::internal)?;
+    let client = pinned_public_http_client(&endpoint, Duration::from_secs(10))
+        .await
+        .map_err(ApiError::bad_request)?;
+    let mut request = client
+        .post(endpoint)
         .header("content-type", "application/json")
         .header("user-agent", "Gitadel-Hookshot/1.0")
-        .header("x-github-event", event)
-        .header("x-github-delivery", delivery_id.to_string())
+        .header("x-github-event", &delivery.event)
+        .header("x-github-delivery", delivery.id.to_string())
         .header("x-github-hook-id", hook.id.to_string())
-        .header("x-gitadel-event", event)
-        .body(body.clone());
+        .header("x-gitadel-event", &delivery.event)
+        .body(body.to_vec());
     if let Some(secret) = &hook.secret {
-        request = request.header("x-hub-signature-256", signature(secret, &body)?);
+        request = request.header("x-hub-signature-256", signature(secret, body)?);
     }
 
     let started = Instant::now();
     let (status, response_body) = match request.send().await {
         Ok(response) => {
             let status = i32::from(response.status().as_u16());
-            let text = response.text().await.unwrap_or_default();
+            let mut stream = response.bytes_stream();
+            let mut bytes = Vec::with_capacity(WEBHOOK_RESPONSE_BYTE_LIMIT);
+            while bytes.len() < WEBHOOK_RESPONSE_BYTE_LIMIT {
+                let Some(chunk) = stream.try_next().await.map_err(ApiError::internal)? else {
+                    break;
+                };
+                let remaining = WEBHOOK_RESPONSE_BYTE_LIMIT - bytes.len();
+                bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            }
+            let text = String::from_utf8_lossy(&bytes).into_owned();
             (Some(status), (!text.is_empty()).then_some(text))
         }
         Err(error) => (None, Some(error.to_string())),
     };
     let duration_ms = i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX);
-    record_delivery(
-        state,
-        hook.id,
-        event,
-        payload,
-        status,
-        duration_ms,
-        &response_body,
-    )
-    .await?;
-
-    let mut active: repository_webhook::ActiveModel = hook.clone().into();
-    active.last_delivery_at = Set(Some(Utc::now()));
-    active.last_response_status = Set(status);
-    active.last_response_message = Set(response_body
-        .as_ref()
-        .map(|body| body.chars().take(512).collect::<String>()));
-    active.update(state.identity().database()).await?;
-    Ok(())
+    finish_delivery(state, hook, delivery, status, duration_ms, response_body).await
 }
 
-async fn record_delivery(
+async fn finish_delivery(
     state: &RepositoryState,
-    webhook_id: Uuid,
-    event: &str,
-    payload: &Value,
-    status: Option<i32>,
+    hook: &repository_webhook::Model,
+    delivery: &repository_webhook_delivery::Model,
+    response_status: Option<i32>,
     duration_ms: i32,
-    response_body: &Option<String>,
+    response_body: Option<String>,
 ) -> Result<(), ApiError> {
     let database = state.identity().database();
-    repository_webhook_delivery::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        webhook_id: Set(webhook_id),
-        event: Set(event.to_owned()),
-        payload: Set(payload.to_string()),
-        response_status: Set(status),
-        response_body: Set(response_body.as_ref().map(|body| {
-            body.chars()
-                .take(WEBHOOK_DELIVERY_BODY_LIMIT)
-                .collect::<String>()
-        })),
-        duration_ms: Set(duration_ms),
-        created_at: Set(Utc::now()),
-    }
-    .insert(database)
-    .await?;
-    prune_deliveries(database, webhook_id).await?;
-    Ok(())
+    let successful = response_status.is_some_and(|status| (200..300).contains(&status));
+    let mut active: repository_webhook_delivery::ActiveModel = delivery.clone().into();
+    active.status = Set(if successful { "completed" } else { "failed" }.to_owned());
+    active.response_status = Set(response_status);
+    active.response_body = Set(response_body.as_ref().map(|body| {
+        body.chars()
+            .take(WEBHOOK_DELIVERY_BODY_LIMIT)
+            .collect::<String>()
+    }));
+    active.duration_ms = Set(duration_ms);
+    active.update(database).await?;
+
+    let mut active_hook: repository_webhook::ActiveModel = hook.clone().into();
+    active_hook.last_delivery_at = Set(Some(Utc::now()));
+    active_hook.last_response_status = Set(response_status);
+    active_hook.last_response_message = Set(response_body
+        .as_ref()
+        .map(|body| body.chars().take(512).collect::<String>()));
+    active_hook.update(database).await?;
+    prune_deliveries(database, hook.id).await
 }
 
 async fn prune_deliveries(database: &DatabaseConnection, webhook_id: Uuid) -> Result<(), ApiError> {
+    let terminal = ["completed", "failed"];
     let keep = repository_webhook_delivery::Entity::find()
         .filter(repository_webhook_delivery::Column::WebhookId.eq(webhook_id))
+        .filter(repository_webhook_delivery::Column::Status.is_in(terminal))
         .order_by_desc(repository_webhook_delivery::Column::CreatedAt)
         .limit(WEBHOOK_DELIVERY_HISTORY_LIMIT as u64)
         .all(database)
@@ -716,9 +798,13 @@ async fn prune_deliveries(database: &DatabaseConnection, webhook_id: Uuid) -> Re
     }
     repository_webhook_delivery::Entity::delete_many()
         .filter(repository_webhook_delivery::Column::WebhookId.eq(webhook_id))
+        .filter(repository_webhook_delivery::Column::Status.is_in(terminal))
         .filter(
-            repository_webhook_delivery::Column::Id
-                .is_not_in(keep.into_iter().map(|d| d.id).collect::<Vec<_>>()),
+            repository_webhook_delivery::Column::Id.is_not_in(
+                keep.into_iter()
+                    .map(|delivery| delivery.id)
+                    .collect::<Vec<_>>(),
+            ),
         )
         .exec(database)
         .await?;
@@ -756,7 +842,7 @@ fn validate_content_type(content_type: Option<&str>) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn validate_endpoint(value: &str) -> Result<String, ApiError> {
+async fn validate_endpoint(value: &str) -> Result<String, ApiError> {
     let endpoint = Url::parse(value.trim())
         .map_err(|_| ApiError::bad_request("Webhook URL must be a valid HTTP or HTTPS URL."))?;
     if !matches!(endpoint.scheme(), "http" | "https")
@@ -770,6 +856,9 @@ fn validate_endpoint(value: &str) -> Result<String, ApiError> {
             "Webhook URL must be an HTTP or HTTPS URL without credentials or a fragment.",
         ));
     }
+    pinned_public_http_client(&endpoint, Duration::from_secs(10))
+        .await
+        .map_err(ApiError::bad_request)?;
     Ok(endpoint.to_string())
 }
 
@@ -1020,4 +1109,30 @@ pub(super) fn webhook_client() -> Result<reqwest::Client, reqwest::Error> {
         .timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_webhook_delivery_is_visible_as_pending() {
+        let delivery = repository_webhook_delivery::Model {
+            id: Uuid::new_v4(),
+            webhook_id: Uuid::new_v4(),
+            event: "push".to_owned(),
+            payload: "{}".to_owned(),
+            response_status: None,
+            response_body: None,
+            duration_ms: 0,
+            created_at: Utc::now(),
+            status: "pending".to_owned(),
+            attempt_count: 0,
+            attempted_at: None,
+        };
+
+        let response = WebhookDeliveryResponse::new(delivery);
+
+        assert_eq!(response.status, "pending");
+    }
 }

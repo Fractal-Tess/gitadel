@@ -6,9 +6,9 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
 };
 use serde_json::json;
-use serde_yml::{Mapping, Value};
 use sley::GitObjectType;
 use uuid::Uuid;
+use yaml_serde::{Mapping, Value};
 
 use crate::{
     entity::{action_job, action_job_need, action_run, repository, user},
@@ -196,7 +196,7 @@ fn validate_workflow(
         ));
     }
     let value: Value =
-        serde_yml::from_str(text).map_err(|error| fail("workflow_invalid", error.to_string()))?;
+        yaml_serde::from_str(text).map_err(|error| fail("workflow_invalid", error.to_string()))?;
     let root = value.as_mapping().cloned().ok_or_else(|| {
         fail(
             "workflow_invalid",
@@ -222,9 +222,12 @@ fn validate_workflow(
     let mut keys = BTreeSet::new();
     let mut edge_count = 0;
     for (key, body) in jobs_value {
-        let key = key
-            .as_str()
-            .ok_or_else(|| fail("workflow_invalid", "job IDs must be strings".to_owned()))?;
+        let Some(key) = key.as_str() else {
+            return Err(fail(
+                "workflow_invalid",
+                "workflow job IDs must be strings".to_owned(),
+            ));
+        };
         if !valid_job_key(key) || !keys.insert(key.to_owned()) {
             return Err(fail(
                 "workflow_invalid",
@@ -328,7 +331,7 @@ fn validate_push_filters(push: Option<&Value>) -> Result<(), String> {
     ];
     if config
         .keys()
-        .any(|key| !key.as_str().is_some_and(|key| FILTERS.contains(&key)))
+        .any(|key| key.as_str().is_none_or(|key| !FILTERS.contains(&key)))
     {
         return Err("push trigger contains an unsupported filter".to_owned());
     }
@@ -606,13 +609,13 @@ async fn enqueue_plan(
             .and_then(Value::as_mapping)
             .expect("validated jobs");
         let selected = all_jobs
-            .get(Value::String(job.key.clone()))
+            .get(job.key.as_str())
             .expect("validated job")
             .clone();
         let mut one = Mapping::new();
         one.insert(Value::String(job.key.clone()), selected);
         root.insert(Value::String("jobs".to_owned()), Value::Mapping(one));
-        let payload = serde_yml::to_string(&Value::Mapping(root))
+        let payload = yaml_serde::to_string(&Value::Mapping(root))
             .map_err(ApiError::internal)?
             .into_bytes();
         let stored = action_job::ActiveModel {
@@ -710,7 +713,7 @@ async fn record_failure(
 }
 
 fn get<'a>(mapping: &'a Mapping, key: &str) -> Option<&'a Value> {
-    mapping.get(Value::String(key.to_owned()))
+    mapping.get(key)
 }
 
 fn valid_job_key(key: &str) -> bool {
@@ -746,7 +749,7 @@ mod tests {
 
     #[test]
     fn branch_and_path_filters_match() {
-        let root: Value = serde_yml::from_str(
+        let root: Value = yaml_serde::from_str(
             "on:\n  push:\n    branches: [main]\n    paths: [src/**]\njobs: {}\n",
         )
         .unwrap();
@@ -763,12 +766,12 @@ mod tests {
     #[test]
     fn branch_and_tag_filters_do_not_cross_trigger() {
         let tags: Value =
-            serde_yml::from_str("on:\n  push:\n    tags: ['v*']\njobs: {}\n").unwrap();
+            yaml_serde::from_str("on:\n  push:\n    tags: ['v*']\njobs: {}\n").unwrap();
         assert!(!matches_push(tags.as_mapping().unwrap(), "refs/heads/main", &[]).unwrap());
         assert!(matches_push(tags.as_mapping().unwrap(), "refs/tags/v1.0.0", &[]).unwrap());
 
         let branches: Value =
-            serde_yml::from_str("on:\n  push:\n    branches: [main]\njobs: {}\n").unwrap();
+            yaml_serde::from_str("on:\n  push:\n    branches: [main]\njobs: {}\n").unwrap();
         assert!(!matches_push(branches.as_mapping().unwrap(), "refs/tags/v1.0.0", &[]).unwrap());
     }
 
@@ -779,7 +782,7 @@ mod tests {
             "on:\n  push:\n    paths: [src/**]\n    paths-ignore: [docs/**]\n",
             "on:\n  push:\n    unsupported: true\n",
         ] {
-            let root: Value = serde_yml::from_str(source).unwrap();
+            let root: Value = yaml_serde::from_str(source).unwrap();
             assert!(validate_trigger(root.as_mapping().unwrap()).is_err());
         }
     }

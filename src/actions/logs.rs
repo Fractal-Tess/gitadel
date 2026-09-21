@@ -30,6 +30,11 @@ pub(crate) async fn append(
         .await?
         .filter(|job| job.runner_id == Some(runner_id))
         .ok_or(LogError::ForeignTask)?;
+    if !matches!(job.status.as_str(), "leased" | "running") {
+        return Err(LogError::Invalid(
+            "log rows cannot be appended after the job finishes".to_owned(),
+        ));
+    }
     if start_index > job.expected_log_index {
         return Err(LogError::Invalid("log rows must be contiguous".to_owned()));
     }
@@ -65,8 +70,9 @@ pub(crate) async fn append(
         if index != expected {
             return Err(LogError::Invalid("log rows must be contiguous".to_owned()));
         }
-        if bytes + content.len() as i64 <= max_job_bytes {
-            let content_bytes = content.len() as i64;
+        let content_bytes = i64::try_from(content.len().max(1))
+            .map_err(|_| LogError::Invalid("log row is too large".to_owned()))?;
+        if bytes + content_bytes <= max_job_bytes {
             action_job_log::ActiveModel {
                 job_id: Set(task_id),
                 row_index: Set(index),

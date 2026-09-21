@@ -1,4 +1,9 @@
-use std::{collections::HashSet, io::ErrorKind, path::PathBuf};
+use std::{
+    collections::HashSet,
+    io::ErrorKind,
+    path::PathBuf,
+    sync::{LazyLock, Mutex},
+};
 
 use super::{
     ActionsState,
@@ -34,6 +39,34 @@ use tokio::{
 use uuid::Uuid;
 
 const MAX_BLOCK_ID: usize = 256;
+static FINALIZING_ARTIFACTS: LazyLock<Mutex<HashSet<i64>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+struct FinalizationGuard {
+    artifact_id: i64,
+}
+
+impl FinalizationGuard {
+    fn acquire(artifact_id: i64) -> Result<Self, ApiError> {
+        let mut finalizing = FINALIZING_ARTIFACTS
+            .lock()
+            .map_err(|_| ApiError::internal("artifact finalization lock is poisoned"))?;
+        if !finalizing.insert(artifact_id) {
+            return Err(ApiError::conflict(
+                "Artifact finalization is already in progress.",
+            ));
+        }
+        Ok(Self { artifact_id })
+    }
+}
+
+impl Drop for FinalizationGuard {
+    fn drop(&mut self) {
+        if let Ok(mut finalizing) = FINALIZING_ARTIFACTS.lock() {
+            finalizing.remove(&self.artifact_id);
+        }
+    }
+}
 
 #[derive(Deserialize)]
 struct SignedQuery {
@@ -89,12 +122,6 @@ fn blocks_dir(state: &ActionsState, row: &action_artifact::Model) -> PathBuf {
         .repository()
         .actions_artifact_root()
         .join(format!(".blocks-{}", row.storage_key))
-}
-fn finalizing_path(state: &ActionsState, row: &action_artifact::Model) -> PathBuf {
-    state
-        .repository()
-        .actions_artifact_root()
-        .join(format!(".{}.finalizing", row.storage_key))
 }
 
 async fn job(state: &ActionsState, headers: &HeaderMap) -> Result<AuthenticatedJob, ApiError> {
@@ -260,6 +287,7 @@ async fn finalize(
             artifact_id: row.id,
         }));
     }
+    let _finalization = FinalizationGuard::acquire(row.id)?;
     let expected_size = u64::try_from(request.size)
         .map_err(|_| ApiError::bad_request("Artifact size is invalid."))?;
     let max_artifact = u64::try_from(state.settings().max_artifact_bytes)
@@ -281,7 +309,11 @@ async fn finalize(
     fs::create_dir_all(state.repository().actions_artifact_root())
         .await
         .map_err(ApiError::internal)?;
-    let temporary = finalizing_path(&state, &row);
+    let temporary = state.repository().actions_artifact_root().join(format!(
+        ".{}.{}.finalizing",
+        row.storage_key,
+        Uuid::new_v4()
+    ));
     let mut output = fs::File::create(&temporary)
         .await
         .map_err(ApiError::internal)?;
@@ -318,7 +350,7 @@ async fn finalize(
     } else {
         ordered_ids
             .iter()
-            .map(|id| source.join(format!("{:x}", Sha256::digest(id.as_bytes()))))
+            .map(|id| source.join(hex::encode(Sha256::digest(id.as_bytes()))))
             .collect()
     };
     for path in block_paths {
@@ -349,7 +381,7 @@ async fn finalize(
     }
     output.flush().await.map_err(ApiError::internal)?;
     drop(output);
-    let actual = format!("{:x}", hasher.finalize());
+    let actual = hex::encode(hasher.finalize());
     if total != expected_size || actual != expected_hash {
         let _ = fs::remove_file(&temporary).await;
         return Err(ApiError::bad_request(
@@ -600,7 +632,7 @@ async fn upload(
     fs::create_dir_all(&directory)
         .await
         .map_err(ApiError::internal)?;
-    let path = directory.join(format!("{:x}", Sha256::digest(block_id.as_bytes())));
+    let path = directory.join(hex::encode(Sha256::digest(block_id.as_bytes())));
     let temporary = directory.join(format!(".upload-{}", Uuid::new_v4()));
     let old_metadata = match fs::metadata(&path).await {
         Ok(metadata) => Some(metadata),
@@ -721,15 +753,12 @@ fn parse_block_list(bytes: &[u8], max_blocks: usize) -> Result<Vec<String>, ApiE
             .read_event_into(&mut buffer)
             .map_err(|_| ApiError::bad_request("Malformed artifact block list."))?
         {
-            Event::Start(event) if event.name().as_ref() == b"Latest" => {
+            Event::Start(event) if event.name().as_ref() == "Latest" => {
                 let value = match reader
                     .read_event_into(&mut buffer)
                     .map_err(|_| ApiError::bad_request("Malformed artifact block list."))?
                 {
-                    Event::Text(text) => text
-                        .decode()
-                        .map_err(|_| ApiError::bad_request("Malformed artifact block list."))?
-                        .into_owned(),
+                    Event::Text(text) => text.xml10_content().into_owned(),
                     _ => return Err(ApiError::bad_request("Malformed artifact block list.")),
                 };
                 validate_block_id(&value)?;
@@ -823,12 +852,30 @@ pub(crate) async fn cleanup(state: &ActionsState) -> Result<(), sea_orm::DbErr> 
         .await?;
     for row in rows {
         let mut disk_cleanup_failed = false;
-        for path in [artifact_path(state, &row), finalizing_path(state, &row)] {
-            if let Err(error) = fs::remove_file(path).await
-                && error.kind() != ErrorKind::NotFound
-            {
-                tracing::warn!(artifact_id = row.id, %error, "could not remove Actions artifact");
-                disk_cleanup_failed = true;
+        let path = artifact_path(state, &row);
+        if let Err(error) = fs::remove_file(path).await
+            && error.kind() != ErrorKind::NotFound
+        {
+            tracing::warn!(artifact_id = row.id, %error, "could not remove Actions artifact");
+            disk_cleanup_failed = true;
+        }
+        let staging_prefix = format!(".{}.", row.storage_key);
+        if let Ok(mut entries) = fs::read_dir(state.repository().actions_artifact_root()).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with(&staging_prefix)
+                    && name.ends_with(".finalizing")
+                    && let Err(error) = fs::remove_file(entry.path()).await
+                    && error.kind() != ErrorKind::NotFound
+                {
+                    tracing::warn!(
+                        artifact_id = row.id,
+                        %error,
+                        "could not remove staged Actions artifact"
+                    );
+                    disk_cleanup_failed = true;
+                }
             }
         }
         if let Err(error) = fs::remove_dir_all(blocks_dir(state, &row)).await

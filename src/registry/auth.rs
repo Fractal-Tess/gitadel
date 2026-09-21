@@ -9,7 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use rand::RngCore;
+use rand::RngExt as _;
 use serde::Serialize;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -186,7 +186,7 @@ impl RegistryAuth {
         }
 
         let mut raw = [0_u8; 32];
-        rand::rng().fill_bytes(&mut raw);
+        rand::rng().fill(&mut raw);
         let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
         let now = Instant::now();
         let mut tokens = self.tokens.write().await;

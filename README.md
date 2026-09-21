@@ -65,7 +65,6 @@ Push Docker and OCI images to `git.example.com/owner/repository:tag` on the same
 
 Gitadel implements the Gitea OAuth and repository APIs used by Dokploy. Dokploy can discover accessible repositories and branches, clone them with repository-scoped OAuth tokens, and deploy on push. Add one or more named Dokploy connections to an account or organization, then choose which connection each repository should use—without adding a webhook per repository.
 
-See [the Dokploy integration guide](docs/dokploy.md) for setup.
 
 ## Project documentation
 

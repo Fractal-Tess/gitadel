@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    net::IpAddr,
     time::{Duration, Instant},
 };
 
@@ -7,9 +8,9 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Redirect},
+    response::{IntoResponse, Redirect, Response},
 };
-use axum_extra::extract::cookie::CookieJar;
+use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use chrono::Utc;
 use openidconnect::{
     AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointMaybeSet, EndpointNotSet,
@@ -18,19 +19,26 @@ use openidconnect::{
     reqwest,
 };
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseTransaction, EntityTrait,
-    PaginatorTrait, QueryFilter, TransactionTrait,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseTransaction,
+    EntityTrait, PaginatorTrait, QueryFilter, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq as _;
 use tokio::sync::Mutex;
 use url::Url;
 use uuid::Uuid;
 
 use crate::entity::{instance, namespace, oidc_identity, oidc_provider, passkey, user};
 
-use super::{ApiError, IdentityState, SCOPE_READ, SCOPE_WRITE, hash_password, random_secret};
+use super::{
+    ApiError, IdentityState, SCOPE_READ, SCOPE_WRITE, hash_password, hash_secret, random_secret,
+    remote_address,
+};
 
 const OIDC_REQUEST_LIFETIME: Duration = Duration::from_secs(10 * 60);
+const OIDC_AUTHORIZATION_CAPACITY: usize = 1_024;
+const OIDC_SOURCE_CAPACITY: usize = 16;
+const OIDC_TRANSACTION_COOKIE: &str = "gitadel_oidc_transaction";
 
 pub(super) struct OidcAuthorization {
     provider_id: Uuid,
@@ -38,6 +46,8 @@ pub(super) struct OidcAuthorization {
     pkce_verifier: PkceCodeVerifier,
     return_to: String,
     created_at: Instant,
+    transaction_hash: String,
+    remote_address: Option<IpAddr>,
 }
 
 pub(super) type OidcAuthorizations = Mutex<HashMap<String, OidcAuthorization>>;
@@ -88,8 +98,10 @@ pub struct StartQuery {
 pub async fn start(
     State(state): State<IdentityState>,
     Path(provider_id): Path<Uuid>,
+    jar: CookieJar,
     Query(query): Query<StartQuery>,
-) -> Result<Redirect, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
+    state.enforce_auth_rate_limit("oidc-start", 30).await?;
     let provider = enabled_provider(state.database(), provider_id).await?;
     let client = oidc_client(&state, &provider).await?;
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
@@ -103,8 +115,24 @@ pub async fn start(
         .add_scope(Scope::new("profile".to_owned()))
         .set_pkce_challenge(pkce_challenge)
         .url();
-    let return_to = safe_return_to(query.return_to.as_deref());
-    state.oidc_authorizations().lock().await.insert(
+    let return_to = safe_return_to(state.public_url(), query.return_to.as_deref());
+    let transaction_secret = random_secret(32);
+    let source = remote_address();
+    let mut authorizations = state.oidc_authorizations().lock().await;
+    authorizations
+        .retain(|_, authorization| authorization.created_at.elapsed() <= OIDC_REQUEST_LIFETIME);
+    if authorizations.len() >= OIDC_AUTHORIZATION_CAPACITY
+        || authorizations
+            .values()
+            .filter(|authorization| authorization.remote_address == source)
+            .count()
+            >= OIDC_SOURCE_CAPACITY
+    {
+        return Err(ApiError::too_many_requests(
+            "Too many OIDC login attempts. Try again later.",
+        ));
+    }
+    authorizations.insert(
         csrf.secret().clone(),
         OidcAuthorization {
             provider_id,
@@ -112,9 +140,19 @@ pub async fn start(
             pkce_verifier,
             return_to,
             created_at: Instant::now(),
+            transaction_hash: hash_secret(&transaction_secret),
+            remote_address: source,
         },
     );
-    Ok(Redirect::to(authorization_url.as_str()))
+    drop(authorizations);
+    let cookie = Cookie::build((OIDC_TRANSACTION_COOKIE, transaction_secret))
+        .path("/api/v1/auth/oidc")
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .secure(state.public_url().scheme() == "https")
+        .max_age(time::Duration::minutes(10))
+        .build();
+    Ok((jar.add(cookie), Redirect::to(authorization_url.as_str())))
 }
 
 #[derive(Deserialize)]
@@ -130,7 +168,27 @@ pub async fn callback(
     Path(provider_id): Path<Uuid>,
     jar: CookieJar,
     Query(query): Query<CallbackQuery>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Response {
+    let transaction_secret = jar
+        .get(OIDC_TRANSACTION_COOKIE)
+        .map(|cookie| cookie.value().to_owned());
+    let removal = Cookie::build(OIDC_TRANSACTION_COOKIE)
+        .path("/api/v1/auth/oidc")
+        .build();
+    match complete_callback(&state, provider_id, query, transaction_secret.as_deref()).await {
+        Ok((session, return_to)) => {
+            (jar.remove(removal).add(session), Redirect::to(&return_to)).into_response()
+        }
+        Err(error) => (jar.remove(removal), error).into_response(),
+    }
+}
+
+async fn complete_callback(
+    state: &IdentityState,
+    provider_id: Uuid,
+    query: CallbackQuery,
+    transaction_secret: Option<&str>,
+) -> Result<(Cookie<'static>, String), ApiError> {
     if let Some(error) = query.error {
         let description = query.error_description.unwrap_or(error);
         return Err(ApiError::bad_request(format!(
@@ -140,24 +198,35 @@ pub async fn callback(
     let csrf = query
         .state
         .ok_or_else(|| ApiError::bad_request("The OIDC state is missing."))?;
-    let authorization = state
-        .oidc_authorizations()
-        .lock()
-        .await
-        .remove(&csrf)
+    let presented_hash = transaction_secret.map(hash_secret);
+    let mut authorizations = state.oidc_authorizations().lock().await;
+    let authorization = authorizations
+        .get(&csrf)
         .ok_or_else(|| ApiError::bad_request("The OIDC login request is missing or expired."))?;
+    let transaction_matches = presented_hash.as_ref().is_some_and(|presented| {
+        bool::from(
+            presented
+                .as_bytes()
+                .ct_eq(authorization.transaction_hash.as_bytes()),
+        )
+    });
     if authorization.provider_id != provider_id
         || authorization.created_at.elapsed() > OIDC_REQUEST_LIFETIME
+        || !transaction_matches
     {
         return Err(ApiError::bad_request(
             "The OIDC login request is missing or expired.",
         ));
     }
+    let authorization = authorizations
+        .remove(&csrf)
+        .expect("checked OIDC authorization must remain present");
+    drop(authorizations);
     let code = query
         .code
         .ok_or_else(|| ApiError::bad_request("The authorization code is missing."))?;
     let provider = enabled_provider(state.database(), provider_id).await?;
-    let client = oidc_client(&state, &provider).await?;
+    let client = oidc_client(state, &provider).await?;
     let http_client = oidc_http_client()?;
     let token = client
         .exchange_code(AuthorizationCode::new(code))
@@ -184,7 +253,7 @@ pub async fn callback(
         .map(|value| value.as_str().to_owned())
         .or_else(|| claims.email().map(|value| value.as_str().to_owned()))
         .unwrap_or_else(|| format!("sso-{}", &subject[..subject.len().min(12)]));
-    let account = resolve_account(&state, &provider, &subject, &username_hint).await?;
+    let account = resolve_account(state, &provider, &subject, &username_hint).await?;
     let transaction = state.database().begin().await?;
     let (_, cookie) = state.create_session_on(&transaction, account.id).await?;
     state
@@ -197,8 +266,10 @@ pub async fn callback(
         .await?;
     transaction.commit().await?;
     tracing::info!(user_id = %account.id, provider_id = %provider.id, "OIDC login completed");
-    let return_to = successful_return_to(&authorization.return_to, provider.id);
-    Ok((jar.add(cookie), Redirect::to(&return_to)))
+    Ok((
+        cookie,
+        successful_return_to(&authorization.return_to, provider.id),
+    ))
 }
 
 async fn enabled_provider(
@@ -255,16 +326,49 @@ fn oidc_http_client() -> Result<reqwest::Client, ApiError> {
         .map_err(ApiError::internal)
 }
 
-fn safe_return_to(value: Option<&str>) -> String {
-    match value {
-        Some(value) if value.starts_with('/') && !value.starts_with("//") => value.to_owned(),
-        _ => "/".to_owned(),
+fn safe_return_to(public_url: &Url, value: Option<&str>) -> String {
+    let Some(value) = value.filter(|value| {
+        value.starts_with('/')
+            && !value.starts_with("//")
+            && !value.contains('\\')
+            && !value.chars().any(char::is_control)
+    }) else {
+        return "/".to_owned();
+    };
+    let Ok(candidate) = public_url.join(value) else {
+        return "/".to_owned();
+    };
+    if candidate.scheme() != public_url.scheme()
+        || candidate.host_str() != public_url.host_str()
+        || candidate.port_or_known_default() != public_url.port_or_known_default()
+    {
+        return "/".to_owned();
     }
+    let mut target = candidate.path().to_owned();
+    if let Some(query) = candidate.query() {
+        target.push('?');
+        target.push_str(query);
+    }
+    if let Some(fragment) = candidate.fragment() {
+        target.push('#');
+        target.push_str(fragment);
+    }
+    target
 }
 
 fn successful_return_to(return_to: &str, provider_id: Uuid) -> String {
-    let separator = if return_to.contains('?') { '&' } else { '?' };
-    format!("{return_to}{separator}loginMethod=sso%3A{provider_id}")
+    let (target, fragment) = return_to
+        .split_once('#')
+        .map_or((return_to, None), |(target, fragment)| {
+            (target, Some(fragment))
+        });
+    let separator = if target.contains('?') { '&' } else { '?' };
+    let mut result = format!("{target}{separator}loginMethod=sso%3A{provider_id}");
+    if let Some(fragment) = fragment {
+        result.push('#');
+        result.push_str(fragment);
+    }
+    result
 }
 
 async fn resolve_account(
@@ -447,45 +551,79 @@ pub async fn update_configuration(
     Json(request): Json<UpdateAuthenticationConfiguration>,
 ) -> Result<Json<AuthenticationConfiguration>, ApiError> {
     let actor = super::admin::require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    validate_method_configuration(&state, &request).await?;
+    let transaction = state.database().begin().await?;
     let settings = instance::Entity::find_by_id(1)
-        .one(state.database())
+        .one(&transaction)
         .await?
         .ok_or_else(|| ApiError::internal("instance settings row is missing"))?;
     let mut active: instance::ActiveModel = settings.into();
     active.password_login_enabled = Set(request.password_enabled);
     active.passkey_login_enabled = Set(request.passkey_enabled);
     active.updated_at = Set(Utc::now());
-    active.update(state.database()).await?;
+    active.update(&transaction).await?;
+    ensure_admin_login_available(
+        &transaction,
+        request.password_enabled,
+        request.passkey_enabled,
+    )
+    .await?;
     state
-        .audit(Some(actor.user.id), "admin.authentication.update", None)
+        .audit_on(
+            &transaction,
+            Some(actor.user.id),
+            "admin.authentication.update",
+            None,
+        )
         .await?;
+    transaction.commit().await?;
     Ok(Json(public_configuration(state.database()).await?))
 }
 
-async fn validate_method_configuration(
-    state: &IdentityState,
-    request: &UpdateAuthenticationConfiguration,
+async fn ensure_admin_login_available<C: ConnectionTrait>(
+    connection: &C,
+    password_enabled: bool,
+    passkey_enabled: bool,
 ) -> Result<(), ApiError> {
-    let enabled_provider_count = oidc_provider::Entity::find()
-        .filter(oidc_provider::Column::Enabled.eq(true))
-        .count(state.database())
-        .await?;
-    if !request.password_enabled && !request.passkey_enabled && enabled_provider_count == 0 {
-        return Err(ApiError::bad_request(
-            "At least one login method must remain enabled.",
-        ));
+    let administrator_ids = user::Entity::find()
+        .filter(user::Column::IsAdmin.eq(true))
+        .filter(user::Column::DisabledAt.is_null())
+        .all(connection)
+        .await?
+        .into_iter()
+        .map(|account| account.id)
+        .collect::<Vec<_>>();
+    if password_enabled && !administrator_ids.is_empty() {
+        return Ok(());
     }
-    if !request.password_enabled
-        && request.passkey_enabled
-        && enabled_provider_count == 0
-        && passkey::Entity::find().count(state.database()).await? == 0
+    if passkey_enabled
+        && passkey::Entity::find()
+            .filter(passkey::Column::UserId.is_in(administrator_ids.clone()))
+            .count(connection)
+            .await?
+            > 0
     {
-        return Err(ApiError::bad_request(
-            "Register at least one passkey before disabling password login.",
-        ));
+        return Ok(());
     }
-    Ok(())
+    let provider_ids = oidc_provider::Entity::find()
+        .filter(oidc_provider::Column::Enabled.eq(true))
+        .all(connection)
+        .await?
+        .into_iter()
+        .map(|provider| provider.id)
+        .collect::<Vec<_>>();
+    if !provider_ids.is_empty()
+        && oidc_identity::Entity::find()
+            .filter(oidc_identity::Column::UserId.is_in(administrator_ids))
+            .filter(oidc_identity::Column::ProviderId.is_in(provider_ids))
+            .count(connection)
+            .await?
+            > 0
+    {
+        return Ok(());
+    }
+    Err(ApiError::bad_request(
+        "At least one enabled administrator login credential must remain.",
+    ))
 }
 
 pub async fn list_providers(
@@ -554,15 +692,17 @@ pub async fn update_provider(
     Json(request): Json<SaveProviderRequest>,
 ) -> Result<Json<AdminOidcProvider>, ApiError> {
     let actor = super::admin::require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    let provider = oidc_provider::Entity::find_by_id(provider_id)
+    let current = oidc_provider::Entity::find_by_id(provider_id)
         .one(state.database())
         .await?
         .ok_or_else(|| ApiError::bad_request("The identity provider does not exist."))?;
-    let values = validate_provider_request(request, Some(provider.client_secret.as_str()))?;
+    let values = validate_provider_request(request, Some(&current.client_secret))?;
     validate_discovery(&values.issuer_url).await?;
-    if !values.enabled {
-        ensure_provider_removal_is_safe(&state, provider_id).await?;
-    }
+    let transaction = state.database().begin().await?;
+    let provider = oidc_provider::Entity::find_by_id(provider_id)
+        .one(&transaction)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("The identity provider does not exist."))?;
     let mut active: oidc_provider::ActiveModel = provider.into();
     active.name = Set(values.name);
     active.issuer_url = Set(values.issuer_url);
@@ -571,14 +711,28 @@ pub async fn update_provider(
     active.enabled = Set(values.enabled);
     active.auto_provision = Set(values.auto_provision);
     active.updated_at = Set(Utc::now());
-    let provider = active.update(state.database()).await?;
+    let provider = active.update(&transaction).await?;
+    if !provider.enabled {
+        let settings = instance::Entity::find_by_id(1)
+            .one(&transaction)
+            .await?
+            .ok_or_else(|| ApiError::internal("instance settings row is missing"))?;
+        ensure_admin_login_available(
+            &transaction,
+            settings.password_login_enabled,
+            settings.passkey_login_enabled,
+        )
+        .await?;
+    }
     state
-        .audit(
+        .audit_on(
+            &transaction,
             Some(actor.user.id),
             "admin.oidc_provider.update",
             Some(provider.id.to_string()),
         )
         .await?;
+    transaction.commit().await?;
     Ok(Json(admin_provider(&state, provider)?))
 }
 
@@ -589,50 +743,35 @@ pub async fn delete_provider(
     jar: CookieJar,
 ) -> Result<axum::http::StatusCode, ApiError> {
     let actor = super::admin::require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    ensure_provider_removal_is_safe(&state, provider_id).await?;
+    let transaction = state.database().begin().await?;
     let deleted = oidc_provider::Entity::delete_by_id(provider_id)
-        .exec(state.database())
+        .exec(&transaction)
         .await?;
     if deleted.rows_affected == 0 {
         return Err(ApiError::bad_request(
             "The identity provider does not exist.",
         ));
     }
+    let settings = instance::Entity::find_by_id(1)
+        .one(&transaction)
+        .await?
+        .ok_or_else(|| ApiError::internal("instance settings row is missing"))?;
+    ensure_admin_login_available(
+        &transaction,
+        settings.password_login_enabled,
+        settings.passkey_login_enabled,
+    )
+    .await?;
     state
-        .audit(
+        .audit_on(
+            &transaction,
             Some(actor.user.id),
             "admin.oidc_provider.delete",
             Some(provider_id.to_string()),
         )
         .await?;
+    transaction.commit().await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
-}
-
-async fn ensure_provider_removal_is_safe(
-    state: &IdentityState,
-    provider_id: Uuid,
-) -> Result<(), ApiError> {
-    let settings = instance::Entity::find_by_id(1)
-        .one(state.database())
-        .await?
-        .ok_or_else(|| ApiError::internal("instance settings row is missing"))?;
-    if settings.password_login_enabled
-        || (settings.passkey_login_enabled
-            && passkey::Entity::find().count(state.database()).await? > 0)
-    {
-        return Ok(());
-    }
-    let remaining = oidc_provider::Entity::find()
-        .filter(oidc_provider::Column::Enabled.eq(true))
-        .filter(oidc_provider::Column::Id.ne(provider_id))
-        .count(state.database())
-        .await?;
-    if remaining == 0 {
-        return Err(ApiError::bad_request(
-            "Enable another login method before removing the last identity provider.",
-        ));
-    }
-    Ok(())
 }
 
 fn validate_provider_request(
@@ -698,13 +837,24 @@ mod tests {
 
     #[test]
     fn return_targets_stay_on_the_gitadel_origin() {
+        let origin = Url::parse("https://gitadel.example").unwrap();
         assert_eq!(
-            safe_return_to(Some("/settings?view=security")),
+            safe_return_to(&origin, Some("/settings?view=security")),
             "/settings?view=security"
         );
-        assert_eq!(safe_return_to(Some("//attacker.example/path")), "/");
-        assert_eq!(safe_return_to(Some("https://attacker.example")), "/");
-        assert_eq!(safe_return_to(None), "/");
+        assert_eq!(
+            safe_return_to(&origin, Some("/\\attacker.example/path")),
+            "/"
+        );
+        assert_eq!(
+            safe_return_to(&origin, Some("//attacker.example/path")),
+            "/"
+        );
+        assert_eq!(
+            safe_return_to(&origin, Some("https://attacker.example")),
+            "/"
+        );
+        assert_eq!(safe_return_to(&origin, None), "/");
     }
 
     #[test]

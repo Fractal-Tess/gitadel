@@ -8,7 +8,7 @@ use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 use crate::entity::{
-    action_artifact_grant, action_job, action_job_token, action_run,
+    action_artifact_grant, action_job, action_job_token, action_run, action_runner,
     action_runner_registration_token, repository,
 };
 
@@ -218,6 +218,18 @@ pub(crate) async fn authenticate_job<C: ConnectionTrait>(
     if job.lease_generation != token.lease_generation
         || !matches!(job.status.as_str(), "leased" | "running")
         || !job.lease_deadline.is_some_and(|deadline| deadline > now)
+    {
+        return Ok(None);
+    }
+    let Some(runner_id) = job.runner_id else {
+        return Ok(None);
+    };
+    if action_runner::Entity::find_by_id(runner_id)
+        .filter(action_runner::Column::DeletedAt.is_null())
+        .filter(action_runner::Column::DisabledAt.is_null())
+        .one(database)
+        .await?
+        .is_none()
     {
         return Ok(None);
     }

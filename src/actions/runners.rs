@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use chrono::{Duration, Utc};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
@@ -8,6 +10,12 @@ use uuid::Uuid;
 use crate::entity::{action_job, action_run, action_runner, action_runner_fetch, repository};
 
 use super::{REQUIRED_RUNNER_VERSION, tokens};
+static RUNNER_ASSIGNMENT_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+pub(crate) async fn assignment_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    RUNNER_ASSIGNMENT_LOCK.lock().await
+}
 
 #[derive(Debug)]
 pub(crate) enum RunnerError {
@@ -176,7 +184,14 @@ pub(crate) async fn claim(
     handle: Option<i64>,
     lease_seconds: i64,
 ) -> Result<Option<ClaimedJob>, RunnerError> {
+    let _assignment_guard = assignment_guard().await;
     let transaction = database.begin().await?;
+    let runner = action_runner::Entity::find_by_id(runner.id)
+        .filter(action_runner::Column::DeletedAt.is_null())
+        .filter(action_runner::Column::DisabledAt.is_null())
+        .one(&transaction)
+        .await?
+        .ok_or(RunnerError::Unauthorized)?;
     if let Some(fetch) =
         action_runner_fetch::Entity::find_by_id((runner.id, request_key.to_string()))
             .one(&transaction)

@@ -797,7 +797,7 @@ pub(super) async fn backfill_legacy_empty_defaults(
         transaction
             .execute_raw(Statement::from_sql_and_values(
                 backend,
-                &format!(
+                format!(
                     "DELETE FROM repository_default_branch_backfills WHERE repository_id = {marker}"
                 ),
                 vec![repository_id.into()],
@@ -1111,6 +1111,7 @@ pub async fn purge_repository(
         &state.lfs_repository_path(&repository),
     )
     .await;
+    cleanup_repository(&state.source_archive_cache_directory(&repository)).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1322,7 +1323,6 @@ async fn set_head_to_branch(
             .map_err(|error| sley::GitError::Transaction(error.to_string()))
     })
     .await
-    .map_err(ApiError::from)
 }
 
 fn select_default_branch(
