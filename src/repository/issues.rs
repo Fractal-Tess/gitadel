@@ -19,7 +19,10 @@ use tokio::{fs, io::AsyncWriteExt as _};
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
-use super::{Permission, RepositoryState, render_markdown};
+use super::{
+    Permission, RepositoryState, notifications, render_markdown,
+    webhook_events::{self, ChangeAction, IssueAction},
+};
 use crate::{
     entity::{
         issue_attachment, issue_comment, issue_label, issue_label_assignment, namespace,
@@ -319,6 +322,16 @@ pub async fn create_issue(
         )
         .await?;
     transaction.commit().await?;
+    webhook_events::issue(
+        &state,
+        &repository,
+        &actor.user,
+        &issue,
+        IssueAction::Opened,
+        serde_json::json!({}),
+    )
+    .await;
+    notifications::issue_opened(&state, &repository, &actor.user, &issue);
     Ok((
         StatusCode::CREATED,
         Json(issue_response(&state, issue, Some(actor.user.id), can_write).await?),
@@ -358,9 +371,13 @@ pub async fn update_issue(
         ));
     }
     let label_ids = request.label_ids;
-    if let Some(ids) = label_ids.as_deref() {
+    let previous_labels = if let Some(ids) = label_ids.as_deref() {
         validate_label_ids(&state, repository.id, ids).await?;
-    }
+        Some(assigned_label_ids(&state, stored.id).await?)
+    } else {
+        None
+    };
+    let previous = stored.clone();
     let mut issue: repository_issue::ActiveModel = stored.into();
     if let Some(title) = request.title {
         issue.title = Set(validate_issue_title(&title)?);
@@ -404,6 +421,15 @@ pub async fn update_issue(
         )
         .await?;
     transaction.commit().await?;
+    emit_issue_update_events(
+        &state,
+        &repository,
+        &actor.user,
+        &previous,
+        &issue,
+        previous_labels.as_deref().zip(label_ids.as_deref()),
+    )
+    .await;
     Ok(Json(
         issue_response(&state, issue, Some(actor.user.id), can_write).await?,
     ))
@@ -435,6 +461,8 @@ pub async fn delete_issue(
         .filter(issue_attachment::Column::IssueId.eq(issue.id))
         .all(state.identity().database())
         .await?;
+    let deleted_event =
+        webhook_events::prepare_issue_deleted(&state, &repository, &actor.user, &issue).await;
     let transaction = state.identity().database().begin().await?;
     repository_issue::Entity::delete_by_id(issue.id)
         .exec(&transaction)
@@ -449,6 +477,7 @@ pub async fn delete_issue(
         )
         .await?;
     transaction.commit().await?;
+    webhook_events::send_prepared(&state, repository.id, "issues", deleted_event).await;
     let directory = issue_attachment_directory(&state, &repository);
     for attachment in attachments {
         let _ = fs::remove_file(directory.join(attachment.id.to_string())).await;
@@ -519,7 +548,7 @@ pub async fn create_comment(
     .await?;
     let mut active_issue: repository_issue::ActiveModel = issue.into();
     active_issue.updated_at = Set(now);
-    active_issue.update(&transaction).await?;
+    let issue = active_issue.update(&transaction).await?;
     state
         .identity()
         .audit_on(
@@ -530,6 +559,17 @@ pub async fn create_comment(
         )
         .await?;
     transaction.commit().await?;
+    webhook_events::issue_comment(
+        &state,
+        &repository,
+        &actor.user,
+        &issue,
+        &comment,
+        ChangeAction::Created,
+        None,
+    )
+    .await;
+    notifications::issue_commented(&state, &repository, &actor.user, &issue, &comment);
     Ok((
         StatusCode::CREATED,
         Json(comment_response(&state, comment, Some(actor.user.id), false).await?),
@@ -564,10 +604,23 @@ pub async fn update_comment(
     if stored.author_user_id != actor.user.id && !can_write {
         return Err(ApiError::not_found());
     }
+    let previous_body = stored.body.clone();
     let mut comment: issue_comment::ActiveModel = stored.into();
     comment.body = Set(validate_comment_body(request.body)?);
     comment.updated_at = Set(Utc::now());
     let comment = comment.update(state.identity().database()).await?;
+    if comment.body != previous_body {
+        webhook_events::issue_comment(
+            &state,
+            &repository,
+            &actor.user,
+            &issue,
+            &comment,
+            ChangeAction::Edited,
+            Some(&previous_body),
+        )
+        .await;
+    }
     Ok(Json(
         comment_response(&state, comment, Some(actor.user.id), can_write).await?,
     ))
@@ -603,6 +656,16 @@ pub async fn delete_comment(
     issue_comment::Entity::delete_by_id(comment.id)
         .exec(state.identity().database())
         .await?;
+    webhook_events::issue_comment(
+        &state,
+        &repository,
+        &actor.user,
+        &issue,
+        &comment,
+        ChangeAction::Deleted,
+        None,
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1096,6 +1159,142 @@ pub async fn delete_attachment(
         let _ = fs::remove_file(trash).await;
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn assigned_label_ids(
+    state: &RepositoryState,
+    issue_id: Uuid,
+) -> Result<Vec<Uuid>, ApiError> {
+    Ok(issue_label_assignment::Entity::find()
+        .filter(issue_label_assignment::Column::IssueId.eq(issue_id))
+        .all(state.identity().database())
+        .await?
+        .into_iter()
+        .map(|assignment| assignment.label_id)
+        .collect())
+}
+
+/// Translate one issue update into the GitHub-style `issues` actions it implies.
+async fn emit_issue_update_events(
+    state: &RepositoryState,
+    repository: &repository::Model,
+    actor: &user::Model,
+    previous: &repository_issue::Model,
+    issue: &repository_issue::Model,
+    labels: Option<(&[Uuid], &[Uuid])>,
+) {
+    let mut changes = serde_json::Map::new();
+    if previous.title != issue.title {
+        changes.insert(
+            "title".to_owned(),
+            serde_json::json!({ "from": previous.title }),
+        );
+    }
+    if previous.body != issue.body {
+        changes.insert(
+            "body".to_owned(),
+            serde_json::json!({ "from": previous.body }),
+        );
+    }
+    if !changes.is_empty() {
+        webhook_events::issue(
+            state,
+            repository,
+            actor,
+            issue,
+            IssueAction::Edited,
+            serde_json::json!({ "changes": changes }),
+        )
+        .await;
+    }
+    if previous.state != issue.state {
+        let action = if issue.state == "closed" {
+            IssueAction::Closed
+        } else {
+            IssueAction::Reopened
+        };
+        webhook_events::issue(
+            state,
+            repository,
+            actor,
+            issue,
+            action,
+            serde_json::json!({}),
+        )
+        .await;
+    }
+    if previous.assignee_user_id != issue.assignee_user_id {
+        if let Some(old) = previous.assignee_user_id {
+            emit_assignment(
+                state,
+                repository,
+                actor,
+                issue,
+                IssueAction::Unassigned,
+                old,
+            )
+            .await;
+        }
+        if let Some(new) = issue.assignee_user_id {
+            emit_assignment(state, repository, actor, issue, IssueAction::Assigned, new).await;
+            notifications::issue_assigned(state, repository, actor, issue);
+        }
+    }
+    let Some((before, after)) = labels else {
+        return;
+    };
+    let changed = before
+        .iter()
+        .filter(|id| !after.contains(id))
+        .map(|id| (IssueAction::Unlabeled, *id))
+        .chain(
+            after
+                .iter()
+                .filter(|id| !before.contains(id))
+                .map(|id| (IssueAction::Labeled, *id)),
+        )
+        .collect::<Vec<_>>();
+    for (action, label_id) in changed {
+        let label = match issue_label::Entity::find_by_id(label_id)
+            .one(state.identity().database())
+            .await
+        {
+            Ok(Some(label)) => label,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(%error, %label_id, "could not load label for webhook event");
+                continue;
+            }
+        };
+        webhook_events::issue(
+            state,
+            repository,
+            actor,
+            issue,
+            action,
+            serde_json::json!({ "label": webhook_events::label_payload(&label) }),
+        )
+        .await;
+    }
+}
+
+async fn emit_assignment(
+    state: &RepositoryState,
+    repository: &repository::Model,
+    actor: &user::Model,
+    issue: &repository_issue::Model,
+    action: IssueAction,
+    assignee_id: Uuid,
+) {
+    let assignee = user::Entity::find_by_id(assignee_id)
+        .one(state.identity().database())
+        .await
+        .ok()
+        .flatten();
+    let extra = serde_json::json!({
+        "assignee": assignee.as_ref().map(super::webhooks::user_payload),
+    });
+    webhook_events::issue(state, repository, actor, issue, action, extra).await;
 }
 
 async fn issue_context(

@@ -19,7 +19,10 @@ use tokio::{fs, io::AsyncWriteExt as _};
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
-use super::{Permission, RepositoryState, browser, render_markdown};
+use super::{
+    Permission, RepositoryState, browser, render_markdown,
+    webhook_events::{self, ChangeAction},
+};
 use crate::{
     actions::tokens,
     entity::{release_asset, repository, repository_release, user},
@@ -261,6 +264,14 @@ pub async fn create_release(
         )
         .await?;
     transaction.commit().await?;
+    webhook_events::release(
+        &state,
+        &repository,
+        actor_id,
+        &release,
+        ChangeAction::Created,
+    )
+    .await;
     let latest_id = latest_release_id(&state, repository.id).await?;
     Ok((
         StatusCode::CREATED,
@@ -334,6 +345,14 @@ pub async fn forgejo_create_release(
         )
         .await?;
     transaction.commit().await?;
+    webhook_events::release(
+        &state,
+        &repository,
+        actor_id,
+        &release,
+        ChangeAction::Created,
+    )
+    .await;
     Ok((
         StatusCode::CREATED,
         Json(forgejo_release_response(&state, &repository, release).await?),
@@ -461,6 +480,14 @@ pub async fn update_release(
             Some(format!("{namespace}/{name}/{id}")),
         )
         .await?;
+    webhook_events::release(
+        &state,
+        &repository,
+        actor.user.id,
+        &release,
+        ChangeAction::Edited,
+    )
+    .await;
     let latest_id = latest_release_id(&state, repository.id).await?;
     Ok(Json(
         release_response(&state, &repository, release, latest_id).await?,
@@ -483,7 +510,15 @@ pub async fn delete_release(
             SCOPE_WRITE,
         )
         .await?;
-    find_release(&state, repository.id, id).await?;
+    let release = find_release(&state, repository.id, id).await?;
+    let deleted_event = webhook_events::prepare_release(
+        &state,
+        &repository,
+        actor.user.id,
+        &release,
+        ChangeAction::Deleted,
+    )
+    .await;
     let transaction = state.identity().database().begin().await?;
     repository_release::Entity::delete_by_id(id)
         .exec(&transaction)
@@ -498,6 +533,7 @@ pub async fn delete_release(
         )
         .await?;
     transaction.commit().await?;
+    webhook_events::send_prepared(&state, repository.id, "release", deleted_event).await;
     if let Err(error) = fs::remove_dir_all(release_directory(&state, &repository, id)).await
         && error.kind() != std::io::ErrorKind::NotFound
     {

@@ -31,6 +31,7 @@ export class RepositoryWebhooksState {
   webhookUrl = $state("");
   webhookSecret = $state("");
   webhookActive = $state(true);
+  webhookEvents = $state<string[]>(["push"]);
   webhooksLoading = $state(false);
   webhooksLoaded = $state(false);
   webhookCreating = $state(false);
@@ -83,7 +84,7 @@ export class RepositoryWebhooksState {
         body: jsonBody({
           name: "web",
           active: this.webhookActive,
-          events: ["push"],
+          events: this.webhookEvents,
           config: {
             url: this.webhookUrl,
             content_type: "json",
@@ -97,6 +98,7 @@ export class RepositoryWebhooksState {
       this.webhookUrl = "";
       this.webhookSecret = "";
       this.webhookActive = true;
+      this.webhookEvents = ["push"];
       toast.success("Webhook created. A ping delivery has been queued.");
       this.defer(() => this.refreshWebhooks());
     } catch (caught) {
@@ -109,6 +111,7 @@ export class RepositoryWebhooksState {
     hook: Webhook,
     url: string,
     secret: string,
+    events: string[],
   ): Promise<void> {
     this.webhookUpdatingId = hook.id;
     try {
@@ -118,6 +121,7 @@ export class RepositoryWebhooksState {
         {
           method: "PATCH",
           body: jsonBody({
+            events,
             config: { url, content_type: "json", ...(secret && { secret }) },
           }),
         },

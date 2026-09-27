@@ -382,6 +382,78 @@ pub mod user {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod user_email {
+    use super::*;
+
+    /// A user's optional email address. Only verified addresses receive
+    /// password resets and notifications.
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "user_emails")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub user_id: Uuid,
+        #[sea_orm(unique)]
+        pub email: String,
+        pub verified_at: Option<DateTimeUtc>,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod email_token {
+    use super::*;
+
+    /// Single-use token sent by email; only its hash is stored.
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "email_tokens")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub token_hash: String,
+        pub user_id: Uuid,
+        /// `verify` or `reset`.
+        pub purpose: String,
+        /// The address being verified, for `verify` tokens.
+        pub email: Option<String>,
+        pub expires_at: DateTimeUtc,
+        pub used_at: Option<DateTimeUtc>,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod user_notification_preferences {
+    use super::*;
+
+    /// Email notification switches; a missing row means all are enabled.
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "user_notification_preferences")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub user_id: Uuid,
+        /// Issues opened in owned repositories, and issues assigned to the user.
+        pub issues: bool,
+        /// Comments on issues the user owns, authored, or is assigned to.
+        pub issue_comments: bool,
+        /// Failed Actions runs the user triggered.
+        pub action_failures: bool,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod user_avatar {
     use super::*;
 
@@ -1023,6 +1095,8 @@ pub mod repository_webhook {
         pub last_delivery_at: Option<DateTimeUtc>,
         pub last_response_status: Option<i32>,
         pub last_response_message: Option<String>,
+        /// Comma-separated subscribed event names.
+        pub events: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

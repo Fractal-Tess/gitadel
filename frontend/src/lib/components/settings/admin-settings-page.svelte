@@ -8,6 +8,7 @@
   import AdminUserSettings from "$lib/components/settings/admin-user-settings.svelte";
   import ActionsSettings from "$lib/components/settings/actions-settings.svelte";
   import BackupSettings from "$lib/components/settings/backup-settings.svelte";
+  import EmailSettings from "$lib/components/settings/email-settings.svelte";
   import LfsSettings from "$lib/components/settings/lfs-settings.svelte";
   import RegistrySettings from "$lib/components/settings/registry-settings.svelte";
   import IntegritySettings from "$lib/components/settings/integrity-settings.svelte";
@@ -28,6 +29,7 @@
   const view = $derived<AdminSettingsView>(
     requestedView === "users" ||
       requestedView === "access" ||
+      requestedView === "email" ||
       requestedView === "runners" ||
       requestedView === "storage" ||
       requestedView === "lfs" ||
@@ -45,7 +47,9 @@
         ? "Users"
         : view === "access"
         ? "Access"
-        : view === "runners"
+        : view === "email"
+          ? "Email"
+          : view === "runners"
           ? "Runners"
           : view === "storage"
             ? "Storage"
@@ -66,7 +70,9 @@
         ? "Find accounts, disable or re-enable access, and remove accounts that are no longer needed."
         : view === "access"
         ? "Control account access, login methods, and identity providers."
-        : view === "runners"
+        : view === "email"
+          ? "Check outgoing mail used for password resets and notifications."
+          : view === "runners"
           ? "Provide runners that can execute workflows for every repository."
           : view === "storage"
             ? "Define reusable filesystem and S3-compatible destinations."
@@ -120,6 +126,8 @@
   </header>
   {#if view === "users"}
     <AdminUserSettings />
+  {:else if view === "email"}
+    <EmailSettings />
   {:else if view === "runners"}
     <ActionsSettings state={actionsState} scope={systemRunnerScope} />
   {:else if view === "storage"}

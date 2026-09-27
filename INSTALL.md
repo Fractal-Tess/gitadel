@@ -433,6 +433,48 @@ Gitadel checks every active repository once a day at 03:00 UTC by default. Nativ
 
 Administrators can enable or disable the job and edit its UTC cron expression under **Administration → Maintenance**. Five-, six-, and seven-field cron expressions are accepted. The page also shows the timestamp and result of the last completed pass.
 
+### Email (SMTP)
+
+Outgoing email is optional. Without an `[smtp]` section, password reset,
+email verification, and email settings are hidden. To enable them:
+
+```toml
+[smtp]
+host = "smtp.example.com"
+# port defaults to 587 for starttls, 465 for tls, and 25 for none.
+port = 587
+# starttls (default), tls (implicit TLS), or none (trusted local relay only).
+tls = "starttls"
+username = "gitadel@example.com"
+# Set password or password_file, not both. The file's trailing newline is ignored.
+password_file = "/run/secrets/gitadel-smtp-password"
+from = "Gitadel <gitadel@example.com>"
+```
+
+`username` and a password are set together or not at all. Each key has a
+`GITADEL__SMTP__*` environment variable, for example `GITADEL__SMTP__HOST` and
+`GITADEL__SMTP__PASSWORD_FILE`. Invalid settings or an unreadable password file
+stop startup; an unreachable server does not.
+
+Mail is queued and sent by a background task, so requests never wait for the
+server. Check the configuration under **Administration → Email**, which sends a
+test message and shows the server's answer, or with `gtd admin smtp test --to
+you@example.com`.
+
+Users add an address under **Account settings → Profile** (or `gtd me email set
+you@example.com`) and confirm it through an emailed link, valid for 24 hours.
+Only verified addresses receive mail. The sign-in page then offers **Forgot
+password?**: a reset link is sent to the account's verified address, expires
+after an hour, and works once. The request form answers the same way whether or
+not an account exists, and completing a reset signs out every session.
+
+Verified addresses also receive notifications: new issues in repositories the
+user owns (personally or as an organization owner), issues assigned to them,
+comments on issues they own, opened, or are assigned to, and failed Actions runs
+they triggered. Nobody is emailed about their own actions or about repositories
+they can no longer read. Each kind can be switched off under **Account settings
+→ Profile → Notifications** or with `gtd me notifications set --issues false`.
+
 ### Local HTTPS for passkeys
 
 Passkeys require a secure browser origin. Gitadel can terminate HTTPS directly

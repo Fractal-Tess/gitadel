@@ -121,6 +121,7 @@ export type AdminSettingsView =
   | "appearance"
   | "users"
   | "access"
+  | "email"
   | "runners"
   | "storage"
   | "lfs"

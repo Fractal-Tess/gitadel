@@ -17,6 +17,7 @@ mod maintenance;
 mod mirror_scheduler;
 mod mirrors;
 mod native_remote;
+pub(crate) mod notifications;
 mod protection;
 mod registry;
 mod releases;
@@ -24,6 +25,7 @@ mod resources;
 mod ssh;
 mod statuses;
 mod topics;
+pub(crate) mod webhook_events;
 mod webhooks;
 pub(crate) use browser::{read_git, render_markdown};
 

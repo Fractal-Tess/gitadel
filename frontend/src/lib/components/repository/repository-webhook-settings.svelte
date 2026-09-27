@@ -14,15 +14,18 @@
   import * as Alert from "$lib/components/ui/alert/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Card from "$lib/components/ui/card/index.js";
+  import { Checkbox } from "$lib/components/ui/checkbox/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
   import { Switch } from "$lib/components/ui/switch/index.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
+  import { webhookEventLabel, webhookEvents } from "$lib/api/webhooks.js";
 
   let { state: repository }: { state: RepositoryPageState } = $props();
   let editingId = $state<string | null>(null);
   let editUrl = $state("");
   let editSecret = $state("");
+  let editEvents = $state<string[]>([]);
   let openDeliveryId = $state<string | null>(null);
   // Long-lived hooks accumulate up to 50 recorded deliveries, so the history
   // opens on the newest few and reveals the rest on request.
@@ -62,15 +65,30 @@
     await repository.webhooks.toggleWebhookDeliveries(hookId);
   }
 
-  function startEditing(id: string, url: string) {
+  function startEditing(id: string, url: string, events: string[]) {
     editingId = id;
     editUrl = url;
     editSecret = "";
+    editEvents = [...events];
+  }
+
+  // Keeps the server's canonical order regardless of click order.
+  function toggleEvent(selected: string[], id: string, checked: boolean) {
+    return webhookEvents
+      .map((event) => event.id)
+      .filter((event) =>
+        event === id ? checked : selected.includes(event),
+      );
   }
 
   async function saveEdit(hook: (typeof repository.webhooks.webhooks)[number]) {
     try {
-      await repository.webhooks.updateWebhook(hook, editUrl, editSecret);
+      await repository.webhooks.updateWebhook(
+        hook,
+        editUrl,
+        editSecret,
+        editEvents,
+      );
       editingId = null;
       editSecret = "";
     } catch {
@@ -92,6 +110,35 @@
   }
 </script>
 
+{#snippet eventPicker(
+  selected: string[],
+  idPrefix: string,
+  onchange: (events: string[]) => void,
+)}
+  <Field.Set>
+    <Field.Legend variant="label">Events</Field.Legend>
+    <div class="grid gap-2">
+      {#each webhookEvents as event (event.id)}
+        <label class="flex items-start gap-2.5 rounded-md border p-2.5">
+          <Checkbox
+            id={`${idPrefix}-${event.id}`}
+            class="mt-0.5"
+            checked={selected.includes(event.id)}
+            onCheckedChange={(checked) =>
+              onchange(toggleEvent(selected, event.id, checked === true))}
+          />
+          <span class="grid gap-0.5">
+            <span class="text-sm font-medium">{event.label}</span>
+            <span class="text-xs leading-4 text-foreground/70"
+              >{event.description}</span
+            >
+          </span>
+        </label>
+      {/each}
+    </div>
+  </Field.Set>
+{/snippet}
+
 <Card.Root class="self-start">
   <Card.Header class="border-b">
     <div class="flex items-start gap-3">
@@ -99,7 +146,8 @@
       <div>
         <h2 class="text-base font-medium leading-snug">Webhooks</h2>
         <Card.Description class="text-foreground/70">
-          Send GitHub-style payloads when this repository receives a push.
+          Send GitHub-style payloads for pushes, releases, issues, and
+          workflow runs in this repository.
         </Card.Description>
       </div>
     </div>
@@ -141,7 +189,9 @@
                 class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-foreground/70"
               >
                 <span class="inline-flex items-center gap-1.5">
-                  <Activity class="size-3.5" />Push event
+                  <Activity class="size-3.5" />{hook.events
+                    .map(webhookEventLabel)
+                    .join(", ")}
                 </span>
                 <span
                   class={[
@@ -192,7 +242,8 @@
                 class="max-sm:size-11"
                 disabled={repository.webhooks.webhookActionPending}
                 aria-label={`Edit webhook for ${hook.config.url}`}
-                onclick={() => startEditing(hook.id, hook.config.url)}
+                onclick={() =>
+                  startEditing(hook.id, hook.config.url, hook.events)}
               >
                 <Pencil class="size-3.5" />
               </Button>
@@ -256,6 +307,13 @@
                     maxlength={256}
                   />
                 </Field.Field>
+                <div class="sm:col-span-2">
+                  {@render eventPicker(
+                    editEvents,
+                    `edit-webhook-event-${hook.id}`,
+                    (events) => (editEvents = events),
+                  )}
+                </div>
                 <div class="flex justify-end gap-2 sm:col-span-2">
                   <Button
                     type="button"
@@ -268,7 +326,8 @@
                   <Button
                     type="submit"
                     class="max-sm:h-11"
-                    disabled={repository.webhooks.webhookActionPending}
+                    disabled={repository.webhooks.webhookActionPending ||
+                      editEvents.length === 0}
                   >
                     {repository.webhooks.webhookUpdatingId === hook.id
                       ? "Saving…"
@@ -323,23 +382,27 @@
                           <span
                             class={[
                               "size-2 shrink-0 rounded-full",
-                              delivery.status === "ok"
-                                ? "bg-emerald-500"
-                                : "bg-destructive",
+                              delivery.status === "ok" && "bg-emerald-500",
+                              delivery.status === "failed" && "bg-destructive",
+                              delivery.status === "pending" &&
+                                "bg-foreground/30",
                             ]}
                             aria-hidden="true"
                           ></span>
                           <span
                             class={[
                               "font-mono text-xs",
-                              delivery.status === "ok"
-                                ? "text-emerald-500"
-                                : "text-destructive",
+                              delivery.status === "ok" && "text-emerald-500",
+                              delivery.status === "failed" && "text-destructive",
+                              delivery.status === "pending" &&
+                                "text-foreground/70",
                             ]}
                           >
                             {delivery.status_code
                               ? `HTTP ${delivery.status_code}`
-                              : "Failed"}
+                              : delivery.status === "pending"
+                                ? "Pending"
+                                : "Failed"}
                           </span>
                           <span class="font-medium text-xs"
                             >{delivery.event}</span
@@ -441,7 +504,7 @@
             <p class="text-sm font-medium">No webhooks configured</p>
             <p class="max-w-sm text-xs leading-5 text-foreground/70">
               Add an endpoint to notify deployments and other external services
-              after a successful push.
+              about pushes, releases, issues, and workflow runs.
             </p>
           </li>
         {/each}
@@ -490,18 +553,27 @@
           Sent in X-Hub-Signature-256. Redirects are not followed.
         </Field.Description>
       </Field.Field>
+      {@render eventPicker(
+        repository.webhooks.webhookEvents,
+        "webhook-event",
+        (events) => (repository.webhooks.webhookEvents = events),
+      )}
       <label
         class="flex items-center justify-between gap-4 rounded-md border p-3"
       >
         <span>
           <span class="block text-sm font-medium">Active</span>
           <span class="mt-0.5 block text-xs text-foreground/70"
-            >Deliver push events immediately.</span
+            >Deliver selected events immediately.</span
           >
         </span>
         <Switch bind:checked={repository.webhooks.webhookActive} />
       </label>
-      <Button type="submit" disabled={repository.webhooks.webhookCreating}>
+      <Button
+        type="submit"
+        disabled={repository.webhooks.webhookCreating ||
+          repository.webhooks.webhookEvents.length === 0}
+      >
         {repository.webhooks.webhookCreating ? "Adding webhook…" : "Add webhook"}
       </Button>
     </form>

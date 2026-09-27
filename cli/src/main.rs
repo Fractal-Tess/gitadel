@@ -14,6 +14,7 @@ use uuid::Uuid;
 mod accounts;
 mod auth;
 mod deploy_keys;
+mod email;
 mod imports;
 mod input;
 mod issues;
@@ -213,6 +214,16 @@ enum MeCommand {
         #[command(subcommand)]
         command: SshKeyCommand,
     },
+    /// Manage the account email address.
+    Email {
+        #[command(subcommand)]
+        command: email::EmailCommand,
+    },
+    /// Choose which notification emails to receive.
+    Notifications {
+        #[command(subcommand)]
+        command: email::NotificationsCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -322,6 +333,11 @@ enum AdminCommand {
     Registry {
         #[command(subcommand)]
         command: registry::AdminRegistryCommand,
+    },
+    /// Inspect and test outgoing email.
+    Smtp {
+        #[command(subcommand)]
+        command: email::SmtpCommand,
     },
     /// Read administrator audit history.
     Audit {
@@ -1193,6 +1209,8 @@ async fn run_repo(api: &ApiClient, command: RepoCommand) -> Result<Value> {
 async fn run_me(api: &ApiClient, command: MeCommand) -> Result<Value> {
     match command {
         MeCommand::Profile => api.request(Method::GET, "user", None).await,
+        MeCommand::Email { command } => email::run_email(api, command).await,
+        MeCommand::Notifications { command } => email::run_notifications(api, command).await,
         MeCommand::SshKeys { command } => match command {
             SshKeyCommand::List => api.request(Method::GET, "me/ssh-keys", None).await,
             SshKeyCommand::Add { name, public_key } => {
@@ -1346,6 +1364,7 @@ async fn run_admin(api: &ApiClient, command: AdminCommand) -> Result<Value> {
         AdminCommand::Registry { .. } => {
             unreachable!("registry commands are handled by the top-level dispatcher")
         }
+        AdminCommand::Smtp { command } => email::run_smtp(api, command).await,
         AdminCommand::Audit { limit } => {
             api.request(
                 Method::GET,

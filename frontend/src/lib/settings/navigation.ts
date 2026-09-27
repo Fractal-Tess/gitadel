@@ -6,6 +6,7 @@ import Database from "@lucide/svelte/icons/database";
 import HardDrive from "@lucide/svelte/icons/hard-drive";
 import KeySquare from "@lucide/svelte/icons/key-square";
 import LockKeyhole from "@lucide/svelte/icons/lock-keyhole";
+import Mail from "@lucide/svelte/icons/mail";
 import Palette from "@lucide/svelte/icons/palette";
 import ShieldCheck from "@lucide/svelte/icons/shield-check";
 import Terminal from "@lucide/svelte/icons/terminal";
@@ -36,6 +37,7 @@ export const adminSettingsSections = [
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "users", label: "Users", icon: Users },
   { id: "access", label: "Access", icon: UserPlus },
+  { id: "email", label: "Email", icon: Mail },
   { id: "runners", label: "Runners", icon: Workflow },
   { id: "storage", label: "Storage", icon: Database },
   { id: "lfs", label: "Git LFS", icon: HardDrive },

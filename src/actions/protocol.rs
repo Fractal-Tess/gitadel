@@ -236,7 +236,7 @@ async fn update_task(
             let sent_outputs = outputs.keys().cloned().collect();
             let steps_json = serde_json::to_string(&task_state.steps)
                 .map_err(|error| ConnectError::internal(error.to_string()))?;
-            let job = runs::update_task(
+            let (job, completed) = runs::update_task(
                 state.repository().identity().database(),
                 authenticated.id,
                 task_state.id,
@@ -247,6 +247,9 @@ async fn update_task(
             )
             .await
             .map_err(map_state_error)?;
+            if let Some(run_id) = completed {
+                super::events::spawn_run_completed(state.repository(), run_id);
+            }
             let mut response_state = task_state;
             if job.status == "cancelled" {
                 response_state.result = runner::Result::Cancelled as i32;

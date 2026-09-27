@@ -59,6 +59,9 @@ mod m20260927_000057_two_factor_authentication;
 mod m20260927_000063_repository_protection_rules;
 mod m20260927_000064_repository_deploy_keys;
 mod m20260927_000065_repository_commit_statuses;
+mod m20260927_000066_webhook_events;
+mod m20260927_000067_user_email;
+mod m20260927_000068_notification_preferences;
 
 #[cfg(test)]
 mod tests;
@@ -131,6 +134,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20260927_000063_repository_protection_rules::Migration),
             Box::new(m20260927_000064_repository_deploy_keys::Migration),
             Box::new(m20260927_000065_repository_commit_statuses::Migration),
+            Box::new(m20260927_000066_webhook_events::Migration),
+            Box::new(m20260927_000067_user_email::Migration),
+            Box::new(m20260927_000068_notification_preferences::Migration),
         ]
     }
 }

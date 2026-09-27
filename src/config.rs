@@ -191,6 +191,92 @@ pub struct Settings {
     pub backup: BackupSettings,
     #[serde(default)]
     pub actions: ActionsSettings,
+    /// Outgoing mail. Email features stay hidden when this is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smtp: Option<SmtpSettings>,
+}
+
+/// How the SMTP connection is secured.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SmtpTls {
+    /// Plain connection upgraded with STARTTLS (required). Default port 587.
+    #[default]
+    Starttls,
+    /// Implicit TLS from the first byte. Default port 465.
+    Tls,
+    /// Unencrypted. Only for a relay on localhost or a trusted network.
+    None,
+}
+
+impl SmtpTls {
+    pub const fn default_port(self) -> u16 {
+        match self {
+            Self::Starttls => 587,
+            Self::Tls => 465,
+            Self::None => 25,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Starttls => "starttls",
+            Self::Tls => "tls",
+            Self::None => "none",
+        }
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct SmtpSettings {
+    pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub tls: SmtpTls,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// File holding the password, for secret managers. Trailing newlines are
+    /// ignored. Mutually exclusive with `password`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_file: Option<PathBuf>,
+    /// Sender mailbox, such as `Gitadel <gitadel@example.com>`.
+    pub from: String,
+}
+
+impl SmtpSettings {
+    pub fn port(&self) -> u16 {
+        self.port.unwrap_or_else(|| self.tls.default_port())
+    }
+
+    /// Resolve the password from `password` or `password_file`.
+    pub fn resolve_password(&self) -> Result<Option<String>> {
+        if let Some(path) = &self.password_file {
+            let value = std::fs::read_to_string(path)
+                .with_context(|| format!("could not read smtp.password_file {}", path.display()))?;
+            let value = value.trim_end_matches(['\r', '\n']).to_owned();
+            ensure!(!value.is_empty(), "smtp.password_file is empty");
+            return Ok(Some(value));
+        }
+        Ok(self.password.clone())
+    }
+}
+
+impl fmt::Debug for SmtpSettings {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SmtpSettings")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("tls", &self.tls)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("password_file", &self.password_file)
+            .field("from", &self.from)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -351,6 +437,7 @@ impl Default for Settings {
             },
             backup: BackupSettings::default(),
             actions: ActionsSettings::default(),
+            smtp: None,
         }
     }
 }
@@ -438,6 +525,9 @@ impl Settings {
         }
         validate_server_settings(&settings.server)?;
         validate_actions_settings(&settings.actions)?;
+        if let Some(smtp) = &settings.smtp {
+            validate_smtp_settings(smtp)?;
+        }
 
         Ok(settings)
     }
@@ -525,6 +615,37 @@ fn validate_http_origin(value: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn validate_smtp_settings(settings: &SmtpSettings) -> Result<()> {
+    let host = settings.host.trim();
+    ensure!(
+        !host.is_empty()
+            && host == settings.host
+            && !host.contains(['/', ' ', '@'])
+            && host.len() <= 253,
+        "smtp.host must be a hostname or IP address"
+    );
+    ensure!(settings.port() != 0, "smtp.port must not be 0");
+    ensure!(
+        settings.from.parse::<lettre::message::Mailbox>().is_ok(),
+        "smtp.from must be an email address, optionally with a display name"
+    );
+    ensure!(
+        !(settings.password.is_some() && settings.password_file.is_some()),
+        "set only one of smtp.password and smtp.password_file"
+    );
+    let has_password = settings.password.is_some() || settings.password_file.is_some();
+    ensure!(
+        settings.username.is_some() == has_password,
+        "smtp.username and a password must be set together"
+    );
+    if let Some(username) = &settings.username {
+        ensure!(!username.is_empty(), "smtp.username must not be empty");
+    }
+    // Surface an unreadable password file at startup rather than on first send.
+    settings.resolve_password()?;
+    Ok(())
+}
+
 pub fn validate_s3_settings(settings: &S3Settings) -> Result<()> {
     ensure!(
         matches!(settings.endpoint.scheme(), "http" | "https")
@@ -597,6 +718,71 @@ mod tests {
                 .to_string()
                 .contains("server.public_url must use https")
         );
+    }
+
+    fn smtp(from: &str) -> SmtpSettings {
+        SmtpSettings {
+            host: "smtp.example.com".to_owned(),
+            port: None,
+            tls: SmtpTls::default(),
+            username: None,
+            password: None,
+            password_file: None,
+            from: from.to_owned(),
+        }
+    }
+
+    #[test]
+    fn smtp_ports_default_by_tls_mode() {
+        let mut settings = smtp("gitadel@example.com");
+        assert_eq!(settings.port(), 587);
+        settings.tls = SmtpTls::Tls;
+        assert_eq!(settings.port(), 465);
+        settings.port = Some(2525);
+        assert_eq!(settings.port(), 2525);
+    }
+
+    #[test]
+    fn smtp_settings_are_validated() {
+        validate_smtp_settings(&smtp("Gitadel <gitadel@example.com>")).unwrap();
+        assert!(validate_smtp_settings(&smtp("not an address")).is_err());
+
+        let mut credentials = smtp("gitadel@example.com");
+        credentials.username = Some("mailer".to_owned());
+        assert!(
+            validate_smtp_settings(&credentials).is_err(),
+            "a username needs a password"
+        );
+        credentials.password = Some("secret".to_owned());
+        validate_smtp_settings(&credentials).unwrap();
+        credentials.password_file = Some(PathBuf::from("/nonexistent"));
+        assert!(validate_smtp_settings(&credentials).is_err());
+
+        let mut host = smtp("gitadel@example.com");
+        host.host = "smtp.example.com/path".to_owned();
+        assert!(validate_smtp_settings(&host).is_err());
+    }
+
+    #[test]
+    fn smtp_password_file_is_trimmed() {
+        let path = std::env::temp_dir().join(format!("gitadel-smtp-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "hunter2\n").unwrap();
+        let mut settings = smtp("gitadel@example.com");
+        settings.username = Some("mailer".to_owned());
+        settings.password_file = Some(path.clone());
+        assert_eq!(
+            settings.resolve_password().unwrap().as_deref(),
+            Some("hunter2")
+        );
+        validate_smtp_settings(&settings).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn smtp_debug_output_redacts_the_password() {
+        let mut settings = smtp("gitadel@example.com");
+        settings.password = Some("hunter2".to_owned());
+        assert!(!format!("{settings:?}").contains("hunter2"));
     }
 
     #[test]
