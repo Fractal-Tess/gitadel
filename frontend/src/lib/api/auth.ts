@@ -32,5 +32,33 @@ export const webauthnRequestSchema = z.object({
   options: z.object({ publicKey: z.record(z.string(), z.unknown()) }),
 });
 
+export const twoFactorChallengeSchema = z.object({
+  two_factor_required: z.literal(true),
+  challenge_id: z.string(),
+});
+
+export const passwordLoginResponseSchema = z.union([
+  authResponseSchema,
+  twoFactorChallengeSchema,
+]);
+
+export const twoFactorStatusSchema = z.object({
+  enabled: z.boolean(),
+  confirmed_at: z.string().nullable(),
+  recovery_codes_remaining: z.number().int().nonnegative(),
+});
+
+export const twoFactorEnrollmentSchema = z.object({
+  secret: z.string(),
+  otpauth_uri: z.string(),
+  qr_svg: z.string(),
+});
+
+export const recoveryCodesSchema = z.object({
+  recovery_codes: z.array(z.string()),
+});
+
 export type AuthStatus = z.infer<typeof authStatusSchema>;
+export type TwoFactorStatus = z.infer<typeof twoFactorStatusSchema>;
+export type TwoFactorEnrollment = z.infer<typeof twoFactorEnrollmentSchema>;
 export type User = z.infer<typeof userSchema>;

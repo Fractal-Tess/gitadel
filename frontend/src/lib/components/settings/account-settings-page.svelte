@@ -43,7 +43,7 @@
     view === "profile"
       ? "Manage your identity and repository defaults."
       : view === "authentication"
-        ? "Change your password and manage passkeys."
+        ? "Change your password, manage passkeys, and set up two-factor authentication."
         : view === "ssh-keys"
           ? "Choose which SSH keys can access your repositories."
           : view === "api-tokens"

@@ -8,6 +8,7 @@ mod mirror_identities;
 mod oauth;
 mod resources;
 mod sso;
+mod two_factor;
 
 pub(crate) use admin::require_admin;
 pub(crate) use integrations::{authorize_namespace, validate_name as validate_integration_name};
@@ -89,6 +90,7 @@ pub struct IdentityState {
     authorization_requests: Arc<Mutex<HashMap<String, oauth::AuthorizationRequest>>>,
     oidc_authorizations: Arc<sso::OidcAuthorizations>,
     auth_rate_limits: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
+    pending_logins: Arc<Mutex<HashMap<String, two_factor::PendingLogin>>>,
     runtime_settings: Option<Arc<Settings>>,
     maintenance_sender: Option<mpsc::Sender<MaintenanceAction>>,
     maintenance_pending: Arc<Mutex<bool>>,
@@ -312,6 +314,7 @@ impl IdentityState {
             authorization_requests: Arc::new(Mutex::new(HashMap::new())),
             oidc_authorizations: Arc::new(Mutex::new(HashMap::new())),
             auth_rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            pending_logins: Arc::new(Mutex::new(HashMap::new())),
             runtime_settings,
             maintenance_sender,
             maintenance_pending: Arc::new(Mutex::new(false)),
@@ -1004,6 +1007,10 @@ pub fn router() -> Router<IdentityState> {
         )
         .route("/register", post(auth::register))
         .route("/auth/login", post(auth::login))
+        .route(
+            "/auth/login/two-factor",
+            post(auth::finish_two_factor_login),
+        )
         .route("/auth/logout", post(auth::logout))
         .route("/users/{user_id}/avatar", get(avatar::public_avatar))
         .route(
@@ -1019,6 +1026,17 @@ pub fn router() -> Router<IdentityState> {
         )
         .route("/me/theme-preference", put(auth::update_theme_preference))
         .route("/me/password", put(auth::update_password))
+        .route("/me/two-factor", get(two_factor::status))
+        .route("/me/two-factor/enroll", post(two_factor::start_enrollment))
+        .route(
+            "/me/two-factor/confirm",
+            post(two_factor::confirm_enrollment),
+        )
+        .route(
+            "/me/two-factor/recovery-codes",
+            post(two_factor::regenerate_recovery_codes),
+        )
+        .route("/me/two-factor/disable", post(two_factor::disable))
         .route(
             "/auth/passkeys/login/start",
             post(auth::start_passkey_login),
