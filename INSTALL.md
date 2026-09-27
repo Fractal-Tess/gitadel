@@ -149,10 +149,10 @@ On a machine with the Gitadel SOPS token and private mesh access:
 GITADEL_USERNAME=fractal-tess \
 GITADEL_TOKEN_FILE=/run/secrets/gitadel_api_token \
 GITADEL_TLS_VERIFY=false \
-nix shell nixpkgs#skopeo --command ./scripts/publish-image.sh 0.10.0 latest
+nix shell nixpkgs#skopeo --command ./scripts/publish-image.sh 0.11.0 latest
 ```
 
-With Skopeo already installed, `just publish-image 0.10.0 latest` calls the
+With Skopeo already installed, `just publish-image 0.11.0 latest` calls the
 same script; keep the environment variables above. No tag argument means
 `latest`. The build targets the Docker daemon's native platform, not a
 multi-platform image.

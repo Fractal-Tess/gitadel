@@ -4,8 +4,12 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-27
+
 ### Added
 
+- Added a GitHub workflow that builds the container image for every `vX.Y.Z` tag and publishes it to GitHub Container Registry, and to Docker Hub when credentials are configured.
+- Added `just publish-image` for publishing a local build to GHCR, a Gitadel registry, and Docker Hub.
 - Added a dedicated Git LFS file preview with human-readable object sizes, an exact-byte toggle, a copyable SHA-256 object ID, and the original pointer text.
 - Added durable webhook delivery queuing with restart recovery, bounded dispatch, and visible pending state.
 - Added bounded source-archive caching and attachment quotas, expiry cleanup, and authenticated deletion.
@@ -22,6 +26,9 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 - Made the selected repository visibility clearly visible with a contrasting border, including the initial Private selection.
 - Hardened authentication state and password work, OIDC callbacks and redirects, administrator bootstrap, webhook egress, uploaded attachments, backups, Actions state transitions, registry tags, browser headers, audit addresses, and affected dependencies following the September security review.
+- Git over HTTP now accepts repository URLs without the `.git` suffix, so `actions/checkout` can fetch from Gitadel.
+- Fixed the Compose Actions overlay: it pins Forgejo Runner v13.0.0 again, connects the runner and its jobs to Gitadel over the Compose network, and allows commit-pinned actions from code.forgejo.org.
+- Corrected the README quick start to create the first administrator with `--bootstrap-admin`.
 
 ## [0.10.0] - 2026-09-18
 
@@ -304,7 +311,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/Fractal-Tess/gitadel/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.8.0...v0.9.0
