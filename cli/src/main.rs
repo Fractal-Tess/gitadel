@@ -12,6 +12,8 @@ use url::Url;
 use uuid::Uuid;
 
 mod auth;
+mod input;
+mod restore;
 use auth::AuthCommand;
 
 #[derive(Debug, Parser)]
@@ -349,6 +351,7 @@ enum BackupCommand {
         provider_id: String,
         key: String,
     },
+    Restore(restore::RestoreArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -876,6 +879,7 @@ fn command_uses_stdin_body(command: &Command) -> bool {
                 BackupCommand::Create { body, .. } | BackupCommand::Preflight { body, .. } => {
                     body_command_uses_stdin(body)
                 }
+                BackupCommand::Restore(args) => args.uses_stdin(),
                 _ => false,
             },
             _ => false,
@@ -1485,6 +1489,7 @@ async fn run_backup(api: &ApiClient, command: BackupCommand) -> Result<Value> {
             )
             .await
         }
+        BackupCommand::Restore(args) => restore::run(api, args).await,
     }
 }
 
