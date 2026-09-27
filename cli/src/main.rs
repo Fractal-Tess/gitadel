@@ -18,6 +18,7 @@ mod query;
 mod releases;
 mod restore;
 mod tokens;
+mod webhooks;
 use auth::AuthCommand;
 
 #[derive(Debug, Parser)]
@@ -79,6 +80,11 @@ enum Command {
     Release {
         #[command(subcommand)]
         command: releases::ReleaseCommand,
+    },
+    /// Manage repository webhooks and their deliveries.
+    Webhook {
+        #[command(subcommand)]
+        command: webhooks::WebhookCommand,
     },
     /// Manage the saved CLI login.
     Auth {
@@ -906,6 +912,7 @@ fn command_uses_stdin_body(command: &Command) -> bool {
         Command::Api(command) => optional_body_command_uses_stdin(&command.body),
         Command::Issue { command } => issues::uses_stdin(command),
         Command::Release { command } => releases::uses_stdin(command),
+        Command::Webhook { command } => webhooks::uses_stdin(command),
         Command::Auth { .. } | Command::Me { .. } | Command::Org { .. } => false,
     }
 }
@@ -981,6 +988,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Org { command } => run_org(&api, command).await?,
         Command::Issue { command } => issues::run(&api, command).await?,
         Command::Release { command } => releases::run(&api, command).await?,
+        Command::Webhook { command } => webhooks::run(&api, command).await?,
         Command::Admin {
             command:
                 AdminCommand::Storage {
