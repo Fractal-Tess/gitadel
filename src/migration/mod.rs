@@ -57,6 +57,7 @@ mod m20260921_000055_attachment_quota_indexes;
 mod m20260921_000056_webhook_outbox;
 mod m20260927_000063_repository_protection_rules;
 mod m20260927_000064_repository_deploy_keys;
+mod m20260927_000065_repository_commit_statuses;
 
 #[cfg(test)]
 mod tests;
@@ -127,6 +128,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260921_000056_webhook_outbox::Migration),
             Box::new(m20260927_000063_repository_protection_rules::Migration),
             Box::new(m20260927_000064_repository_deploy_keys::Migration),
+            Box::new(m20260927_000065_repository_commit_statuses::Migration),
         ]
     }
 }

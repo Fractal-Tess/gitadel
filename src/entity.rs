@@ -1576,6 +1576,31 @@ pub mod repository_deploy_key {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod repository_commit_status {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "repository_commit_statuses")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        pub repository_id: Uuid,
+        pub sha: String,
+        pub context: String,
+        pub state: String,
+        pub description: Option<String>,
+        pub target_url: Option<String>,
+        pub creator_id: Option<Uuid>,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod repository_protection_rule_user {
     use super::*;
 

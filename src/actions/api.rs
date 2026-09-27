@@ -368,6 +368,17 @@ struct CommitStatus {
     running: usize,
     queued: usize,
     cancelled: usize,
+    /// Statuses reported by external CI through the commit status API.
+    contexts: Vec<ExternalCommitStatus>,
+}
+
+#[derive(Serialize)]
+struct ExternalCommitStatus {
+    context: String,
+    state: String,
+    description: Option<String>,
+    target_url: Option<String>,
+    updated_at: chrono::DateTime<Utc>,
 }
 #[derive(Serialize)]
 struct StatusesResponse {
@@ -383,20 +394,33 @@ async fn statuses(
 ) -> Result<Json<StatusesResponse>, ApiError> {
     let (repository, _) = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
     let oids = parse_status_oids(&query.oids)?;
+    let database = state.repository().identity().database();
+    let mut external =
+        crate::repository::statuses_for_commits(database, repository.id, &oids).await?;
     let mut statuses = Vec::new();
     for oid in oids {
         let runs = action_run::Entity::find()
             .filter(action_run::Column::RepositoryId.eq(repository.id))
             .filter(action_run::Column::AfterSha.eq(oid))
-            .all(state.repository().identity().database())
+            .all(database)
             .await?;
-        if runs.is_empty() {
+        let contexts = external.remove(oid).unwrap_or_default();
+        if runs.is_empty() && contexts.is_empty() {
             continue;
         }
+        // External states fold into the same buckets as workflow runs so one
+        // badge summarises every check on the commit.
+        let external_states = contexts.iter().map(|status| match status.state.as_str() {
+            "success" => "success",
+            "pending" => "queued",
+            _ => "failure",
+        });
         let counts = runs
             .iter()
-            .fold(BTreeMap::<&str, usize>::new(), |mut counts, run| {
-                *counts.entry(&run.status).or_default() += 1;
+            .map(|run| run.status.as_str())
+            .chain(external_states)
+            .fold(BTreeMap::<&str, usize>::new(), |mut counts, status| {
+                *counts.entry(status).or_default() += 1;
                 counts
             });
         let status = if counts.get("failure").copied().unwrap_or(0) > 0 {
@@ -413,12 +437,22 @@ async fn statuses(
         statuses.push(CommitStatus {
             oid: oid.to_owned(),
             status: status.to_owned(),
-            total: runs.len(),
+            total: runs.len() + contexts.len(),
             success: *counts.get("success").unwrap_or(&0),
             failure: *counts.get("failure").unwrap_or(&0),
             running: *counts.get("running").unwrap_or(&0),
             queued: *counts.get("queued").unwrap_or(&0),
             cancelled: *counts.get("cancelled").unwrap_or(&0),
+            contexts: contexts
+                .into_iter()
+                .map(|status| ExternalCommitStatus {
+                    context: status.context,
+                    state: status.state,
+                    description: status.description,
+                    target_url: status.target_url,
+                    updated_at: status.updated_at,
+                })
+                .collect(),
         });
     }
     Ok(Json(StatusesResponse { statuses }))
