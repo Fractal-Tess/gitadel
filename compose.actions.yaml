@@ -38,8 +38,8 @@ services:
         condition: service_started
     environment:
       DOCKER_HOST: tcp://runner-docker:2375
-      # The runner reaches Gitadel inside the Compose network. Job containers
-      # still use GITADEL_PUBLIC_URL, so it must resolve from the Docker daemon.
+      # The runner and its jobs reach Gitadel inside the Compose network;
+      # actions.internal_url in deploy/forgejo-runner/gitadel.toml matches it.
       GITADEL_RUNNER_INSTANCE_URL: http://gitadel:3000
     volumes:
       - runner-data:/data

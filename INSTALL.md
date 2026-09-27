@@ -119,15 +119,19 @@ steps:
   - run: make test
 ```
 
+The runner also serves `actions/cache` from the `runner-data` volume; jobs
+reach it at the `runner` service name.
+
 Remove `allowed_action_origins` from that file to permit only `run:` steps
 and local `./` actions. The Docker-in-Docker daemon is privileged; run only
 workflows you trust.
 
 ### Publishing the image
 
-Pushing a `vX.Y.Z` tag to GitHub runs `.github/workflows/release-image.yml`,
-which builds the `linux/amd64` image and publishes `X.Y.Z`, `X.Y`, and
-`latest` to `ghcr.io/fractal-tess/gitadel`.
+Pushing a `vX.Y.Z` tag to GitHub runs `.github/workflows/release-image.yml`.
+It builds `linux/amd64` and `linux/arm64` images on native runners, publishes
+them as `X.Y.Z`, `X.Y`, and `latest` to `ghcr.io/fractal-tess/gitadel`, and
+creates a GitHub release from the matching `CHANGELOG.md` section.
 
 To publish by hand, including to the Gitadel registry on the private mesh,
 `scripts/publish-image.sh` builds the current checkout once, then publishes
