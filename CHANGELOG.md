@@ -4,6 +4,22 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-28
+
+### Added
+
+- Added a one-time setup link for the first administrator. While no account exists, Gitadel prints `/register?setup=…` in its log, so Docker and hosting platforms such as Coolify no longer need an interactive bootstrap command.
+- Added prebuilt `gtd` downloads to each GitHub release: statically linked Linux x86_64 and arm64 builds and macOS arm64 and x86_64 builds, with SHA-256 checksums.
+
+### Changed
+
+- `compose.yaml` now pulls the published `ghcr.io/fractal-tess/gitadel` image, so the file works on its own. `compose.actions.yaml` is a standalone stack with the Actions runner and inline configuration, and `compose.build.yaml` builds from a checkout.
+- Rewrote the Docker installation guide around the setup link, a settings table, and hosting platforms.
+
+### Fixed
+
+- Gitadel no longer exits when `GITADEL_PUBLIC_URL` is an IP address. Passkeys are disabled with a warning in that case, and passwords and TOTP keep working.
+
 ## [0.12.0] - 2026-09-28
 
 ### Added
@@ -341,7 +357,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.9.1...v0.10.0
