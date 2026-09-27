@@ -159,6 +159,9 @@
             {#if check && check.total > 0}
               <button
                 type="button"
+                title={check.contexts
+                  .map((status) => `${status.context}: ${status.state}`)
+                  .join("\n") || undefined}
                 onclick={() =>
                   repository.navigate("actions", { commit: item.oid })}
               >
