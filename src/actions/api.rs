@@ -89,11 +89,12 @@ struct RunsQuery {
 }
 
 #[derive(Serialize)]
-struct RunSummary {
+pub(crate) struct RunSummary {
     id: Uuid,
     number: i64,
     workflow_name: String,
     workflow_path: String,
+    event: String,
     status: String,
     failure_kind: Option<String>,
     failure_summary: Option<String>,
@@ -112,6 +113,7 @@ impl From<action_run::Model> for RunSummary {
             number: run.number,
             workflow_name: run.workflow_name,
             workflow_path: run.workflow_path,
+            event: run.event,
             status: run.status,
             failure_kind: run.failure_kind,
             failure_summary: run.failure_summary,

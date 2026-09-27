@@ -41,6 +41,28 @@ pub(crate) enum ActionsCommand {
         #[arg(long)]
         job: Option<i64>,
     },
+    /// List workflows at a ref and the inputs of those that can be run manually.
+    Workflows {
+        #[command(flatten)]
+        repository: RepositoryArg,
+        /// Branch or tag; defaults to the default branch.
+        #[arg(long = "ref", value_name = "REF")]
+        reference: Option<String>,
+    },
+    /// Start a workflow that declares `workflow_dispatch`.
+    Run {
+        #[command(flatten)]
+        repository: RepositoryArg,
+        /// Workflow path (such as .forgejo/workflows/deploy.yml) or file name.
+        #[arg(long)]
+        workflow: String,
+        /// Branch or tag; defaults to the default branch.
+        #[arg(long = "ref", value_name = "REF")]
+        reference: Option<String>,
+        /// Workflow input as KEY=VALUE; repeat for several inputs.
+        #[arg(long = "input", value_name = "KEY=VALUE", value_parser = parse_input)]
+        inputs: Vec<(String, String)>,
+    },
     /// Cancel a queued or running workflow run.
     Cancel {
         #[command(flatten)]
@@ -156,6 +178,36 @@ pub(crate) async fn run(api: &ApiClient, command: ActionsCommand) -> Result<Opti
         } => {
             print_logs(api, &repository, &run_id, job).await?;
             Ok(None)
+        }
+        ActionsCommand::Workflows {
+            repository,
+            reference,
+        } => {
+            let mut path = repository.route(&["workflows"])?;
+            if let Some(reference) = reference {
+                let mut query = url::form_urlencoded::Serializer::new(String::new());
+                query.append_pair("ref", &reference);
+                path = format!("{path}?{}", query.finish());
+            }
+            api.request(Method::GET, &path, None).await.map(Some)
+        }
+        ActionsCommand::Run {
+            repository,
+            workflow,
+            reference,
+            inputs,
+        } => {
+            let inputs: serde_json::Map<String, Value> = inputs
+                .into_iter()
+                .map(|(key, value)| (key, Value::String(value)))
+                .collect();
+            api.request(
+                Method::POST,
+                &repository.route(&["workflows", "dispatch"])?,
+                Some(json!({ "workflow": workflow, "ref": reference, "inputs": inputs })),
+            )
+            .await
+            .map(Some)
         }
         ActionsCommand::Secret { command } => run_value(api, "secrets", command).await.map(Some),
         ActionsCommand::Variable { command } => {
@@ -282,6 +334,13 @@ fn read_stdin_value() -> Result<String> {
     Ok(value)
 }
 
+fn parse_input(value: &str) -> Result<(String, String), String> {
+    match value.split_once('=') {
+        Some((key, value)) if !key.is_empty() => Ok((key.to_owned(), value.to_owned())),
+        _ => Err("inputs must use KEY=VALUE".to_owned()),
+    }
+}
+
 /// Whether the command reads a value from stdin (which conflicts with `--token-stdin`).
 pub(crate) fn uses_stdin(command: &ActionsCommand) -> bool {
     match command {
@@ -291,5 +350,24 @@ pub(crate) fn uses_stdin(command: &ActionsCommand) -> bool {
                 if value_file.as_ref().is_none_or(|file| file.as_os_str() == "-")
         ),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inputs_split_on_the_first_equals_sign() {
+        assert_eq!(
+            parse_input("query=a=b").unwrap(),
+            ("query".to_owned(), "a=b".to_owned())
+        );
+        assert_eq!(
+            parse_input("empty=").unwrap(),
+            ("empty".to_owned(), String::new())
+        );
+        assert!(parse_input("=x").is_err());
+        assert!(parse_input("novalue").is_err());
     }
 }

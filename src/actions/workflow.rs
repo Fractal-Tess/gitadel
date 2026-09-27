@@ -37,10 +37,10 @@ const MAX_EXPANDED_JOBS: usize = 256;
 const MAX_EXPANDED_EDGES: usize = 4_096;
 
 #[derive(Debug)]
-struct WorkflowPlan {
-    path: String,
-    name: String,
-    root: Mapping,
+pub(crate) struct WorkflowPlan {
+    pub(crate) path: String,
+    pub(crate) name: String,
+    pub(crate) root: Mapping,
     jobs: Vec<JobPlan>,
 }
 
@@ -61,10 +61,34 @@ struct JobPlan {
 }
 
 #[derive(Debug)]
-struct WorkflowDiagnostic {
-    path: String,
-    kind: &'static str,
-    summary: String,
+pub(crate) struct WorkflowDiagnostic {
+    pub(crate) path: String,
+    pub(crate) kind: &'static str,
+    pub(crate) summary: String,
+}
+
+/// What caused a run; stored on the run and exposed as the `github` context.
+pub(crate) struct RunTrigger<'a> {
+    pub(crate) event: &'static str,
+    pub(crate) reference: &'a str,
+    pub(crate) before: &'a str,
+    pub(crate) after: &'a str,
+    pub(crate) actor: Option<&'a user::Model>,
+    pub(crate) event_json: serde_json::Value,
+}
+
+impl WorkflowPlan {
+    /// Whether the workflow's `on` declares `event`.
+    pub(crate) fn has_trigger(&self, event: &str) -> bool {
+        has_trigger(&self.root, event)
+    }
+
+    /// The `on.<event>` configuration, when `on` is a mapping.
+    pub(crate) fn trigger_config(&self, event: &str) -> Option<&Value> {
+        get(&self.root, "on")
+            .and_then(Value::as_mapping)
+            .and_then(|triggers| get(triggers, event))
+    }
 }
 
 #[expect(
@@ -96,13 +120,23 @@ pub(crate) async fn ingest_push(
         match discovered {
             Ok(plan) => {
                 if matches_push(&plan.root, reference, &changed_paths).unwrap_or(false) {
+                    let trigger = RunTrigger {
+                        event: "push",
+                        reference,
+                        before,
+                        after: &after,
+                        actor: Some(&actor),
+                        event_json: json!({
+                            "ref": reference,
+                            "before": before,
+                            "after": after,
+                            "actor": actor.username,
+                        }),
+                    };
                     enqueue_plan(
                         state.repository().identity().database(),
                         repository,
-                        &actor,
-                        reference,
-                        before,
-                        &after,
+                        &trigger,
                         plan,
                     )
                     .await?;
@@ -121,6 +155,14 @@ pub(crate) async fn ingest_push(
                 .await?;
             }
         }
+    }
+    if repository
+        .default_branch
+        .as_deref()
+        .is_some_and(|branch| reference.strip_prefix("refs/heads/") == Some(branch))
+        && let Err(error) = super::schedule::sync_repository(state, repository).await
+    {
+        tracing::warn!(%error, repository_id = %repository.id, "could not refresh Actions schedules");
     }
     Ok(())
 }
@@ -143,7 +185,8 @@ async fn workflow_commit_oid(
     .await
 }
 
-async fn discover(
+/// Reads and validates every workflow file at `revision`.
+pub(crate) async fn discover(
     state: &ActionsState,
     repository: &repository::Model,
     revision: String,
@@ -386,15 +429,43 @@ fn validate_trigger(root: &Mapping) -> Result<(), String> {
     let Some(trigger) = get(root, "on") else {
         return Err("workflow must declare an `on` trigger".to_owned());
     };
+    const SIMPLE: [&str; 2] = ["push", "workflow_dispatch"];
+    const CONFIGURABLE: [&str; 3] = ["push", "workflow_dispatch", "schedule"];
     match trigger {
-        Value::String(value) if value == "push" => Ok(()),
-        Value::Sequence(values) if values.iter().all(|value| value.as_str() == Some("push")) => {
+        Value::String(value) if SIMPLE.contains(&value.as_str()) => Ok(()),
+        Value::Sequence(values)
+            if values
+                .iter()
+                .all(|value| value.as_str().is_some_and(|value| SIMPLE.contains(&value))) =>
+        {
             Ok(())
         }
-        Value::Mapping(map) if map.keys().all(|key| key.as_str() == Some("push")) => {
-            validate_push_filters(get(map, "push"))
+        Value::Mapping(map)
+            if map
+                .keys()
+                .all(|key| key.as_str().is_some_and(|key| CONFIGURABLE.contains(&key))) =>
+        {
+            validate_push_filters(get(map, "push"))?;
+            if let Some(dispatch) = get(map, "workflow_dispatch") {
+                super::dispatch::parse_inputs(Some(dispatch))?;
+            }
+            if let Some(schedule) = get(map, "schedule") {
+                super::schedule::parse_crons(schedule)?;
+            }
+            Ok(())
         }
-        _ => Err("only the push trigger is supported".to_owned()),
+        _ => {
+            Err("only the push, workflow_dispatch, and schedule triggers are supported".to_owned())
+        }
+    }
+}
+
+fn has_trigger(root: &Mapping, event: &str) -> bool {
+    match get(root, "on") {
+        Some(Value::String(value)) => value == event,
+        Some(Value::Sequence(values)) => values.iter().any(|value| value.as_str() == Some(event)),
+        Some(Value::Mapping(map)) => map.contains_key(event),
+        _ => false,
     }
 }
 
@@ -443,6 +514,9 @@ fn validate_push_filters(push: Option<&Value>) -> Result<(), String> {
 }
 
 fn matches_push(root: &Mapping, reference: &str, changed_paths: &[String]) -> Result<bool, String> {
+    if !has_trigger(root, "push") {
+        return Ok(false);
+    }
     let trigger = get(root, "on").ok_or_else(|| "missing trigger".to_owned())?;
     let Value::Mapping(triggers) = trigger else {
         return Ok(true);
@@ -642,15 +716,12 @@ fn detect_cycle(graph: &BTreeMap<String, Vec<String>>) -> Result<(), String> {
     }
 }
 
-async fn enqueue_plan(
+pub(crate) async fn enqueue_plan(
     database: &DatabaseConnection,
     repository: &repository::Model,
-    actor: &user::Model,
-    reference: &str,
-    before: &str,
-    after: &str,
+    trigger: &RunTrigger<'_>,
     plan: WorkflowPlan,
-) -> Result<(), ApiError> {
+) -> Result<action_run::Model, ApiError> {
     let transaction = database.begin().await?;
     let number = action_run::Entity::find()
         .filter(action_run::Column::RepositoryId.eq(repository.id))
@@ -660,25 +731,22 @@ async fn enqueue_plan(
         .map_or(1, |run| run.number + 1);
     let run_id = Uuid::new_v4();
     let now = Utc::now();
-    action_run::ActiveModel {
+    let run = action_run::ActiveModel {
         id: Set(run_id),
         repository_id: Set(repository.id),
         number: Set(number),
         workflow_path: Set(plan.path.clone()),
         workflow_name: Set(plan.name),
-        event: Set("push".to_owned()),
-        ref_name: Set(reference.to_owned()),
-        before_sha: Set(before.to_owned()),
-        after_sha: Set(after.to_owned()),
-        actor_id: Set(Some(actor.id)),
+        event: Set(trigger.event.to_owned()),
+        ref_name: Set(trigger.reference.to_owned()),
+        before_sha: Set(trigger.before.to_owned()),
+        after_sha: Set(trigger.after.to_owned()),
+        actor_id: Set(trigger.actor.map(|actor| actor.id)),
         status: Set("queued".to_owned()),
         failure_kind: Set(None),
         failure_summary: Set(None),
         diagnostic: Set(None),
-        event_json: Set(
-            json!({"ref":reference,"before":before,"after":after,"actor":actor.username})
-                .to_string(),
-        ),
+        event_json: Set(trigger.event_json.to_string()),
         cancel_requested_at: Set(None),
         cancelled_by: Set(None),
         created_at: Set(now),
@@ -752,7 +820,7 @@ async fn enqueue_plan(
         }
     }
     transaction.commit().await?;
-    Ok(())
+    Ok(run)
 }
 
 async fn record_failure(
@@ -869,6 +937,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn dispatch_and_schedule_triggers_are_accepted_but_do_not_match_pushes() {
+        for source in [
+            "on: workflow_dispatch\n",
+            "on: [push, workflow_dispatch]\n",
+            "on:\n  workflow_dispatch:\n    inputs:\n      name:\n        default: x\n  schedule:\n    - cron: '0 3 * * 1'\n",
+        ] {
+            let root: Value = yaml_serde::from_str(source).unwrap();
+            validate_trigger(root.as_mapping().unwrap()).unwrap();
+        }
+        for (source, pushes) in [
+            ("on: workflow_dispatch\n", false),
+            ("on: [push, workflow_dispatch]\n", true),
+            ("on:\n  schedule:\n    - cron: '0 3 * * *'\n", false),
+            ("on:\n  push:\n  schedule:\n    - cron: '0 3 * * *'\n", true),
+        ] {
+            let root: Value = yaml_serde::from_str(source).unwrap();
+            assert_eq!(
+                matches_push(root.as_mapping().unwrap(), "refs/heads/main", &[]).unwrap(),
+                pushes,
+                "{source}"
+            );
+        }
+        for source in [
+            "on: schedule\n",
+            "on: pull_request\n",
+            "on:\n  schedule:\n    - cron: 'every day'\n",
+            "on:\n  workflow_dispatch:\n    inputs:\n      x:\n        type: environment\n",
+        ] {
+            let root: Value = yaml_serde::from_str(source).unwrap();
+            assert!(
+                validate_trigger(root.as_mapping().unwrap()).is_err(),
+                "{source}"
+            );
+        }
+    }
+
     const MATRIX_WORKFLOW: &str = "name: CI\non: push\njobs:\n  build:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      max-parallel: 1\n      matrix:\n        os: [docker, podman]\n        node: [18, 20]\n        exclude:\n          - os: podman\n            node: 18\n    steps:\n      - run: echo ${{ matrix.node }}\n  report:\n    needs: build\n    runs-on: docker\n    steps:\n      - run: echo done\n";
 
     fn plan(source: &str) -> WorkflowPlan {
@@ -931,17 +1036,19 @@ mod tests {
         let database = test_support::database().await;
         let owner = test_support::owner(&database, "alice").await;
         let repository = test_support::repository(&database, &owner, "project").await;
-        enqueue_plan(
-            &database,
-            &repository,
-            &owner,
-            "refs/heads/main",
-            &"0".repeat(40),
-            &"1".repeat(40),
-            plan(MATRIX_WORKFLOW),
-        )
-        .await
-        .unwrap();
+        let before = "0".repeat(40);
+        let after = "1".repeat(40);
+        let trigger = RunTrigger {
+            event: "push",
+            reference: "refs/heads/main",
+            before: &before,
+            after: &after,
+            actor: Some(&owner),
+            event_json: json!({}),
+        };
+        enqueue_plan(&database, &repository, &trigger, plan(MATRIX_WORKFLOW))
+            .await
+            .unwrap();
         let jobs = action_job::Entity::find()
             .order_by_asc(action_job::Column::Id)
             .all(&database)

@@ -331,7 +331,7 @@ async fn task_message(
             .map_err(database_error)?
             .map(|actor| actor.username)
             .unwrap_or_default(),
-        None => String::new(),
+        None => repository.namespace.clone(),
     };
     let ref_name = run
         .ref_name
@@ -349,7 +349,7 @@ async fn task_message(
     let context_json = json!({
         "action": "", "action_path": "", "action_ref": "", "action_repository": "",
         "actor": actor, "api_url": format!("{server_url}/api/v1"), "base_ref": "",
-        "event": event, "event_name": "push", "event_path": "", "graphql_url": "",
+        "event": event, "event_name": run.event, "event_path": "", "graphql_url": "",
         "head_ref": "", "job": matrix::base_job_key(&claimed.job.job_key), "ref": run.ref_name, "ref_name": ref_name,
         "ref_protected": false, "ref_type": ref_type, "repository": format!("{}/{}", repository.namespace, repository.name),
         "repository_id": repository.id.to_string(), "repository_owner": repository.namespace,

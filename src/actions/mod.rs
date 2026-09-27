@@ -1,10 +1,12 @@
 pub(crate) mod api;
 pub(crate) mod artifacts;
+pub(crate) mod dispatch;
 pub(crate) mod logs;
 pub(crate) mod matrix;
 pub(crate) mod protocol;
 pub(crate) mod runners;
 pub(crate) mod runs;
+pub(crate) mod schedule;
 pub(crate) mod secrets;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -82,6 +84,7 @@ impl ActionsState {
     pub(crate) fn api_router(&self) -> Router {
         api::router()
             .merge(secrets::router())
+            .merge(dispatch::router())
             .with_state(self.clone())
     }
 
@@ -128,8 +131,12 @@ pub(crate) async fn bootstrap_system_runner(state: &ActionsState) -> anyhow::Res
     Ok(())
 }
 
+/// Scheduler ticks between full schedule scans (15 s x 20 = 5 minutes).
+const SCHEDULE_SCAN_TICKS: u32 = 20;
+
 pub(crate) async fn serve_actions_scheduler(state: ActionsState) -> anyhow::Result<()> {
     let mut interval = tokio::time::interval(Duration::from_secs(15));
+    let mut ticks = 0u32;
     loop {
         tokio::select! {
             () = state.shutdown.cancelled() => return Ok(()),
@@ -137,6 +144,17 @@ pub(crate) async fn serve_actions_scheduler(state: ActionsState) -> anyhow::Resu
                 runs::maintain(&state).await?;
                 if let Err(error) = artifacts::cleanup(&state).await {
                     tracing::warn!(%error, "actions artifact cleanup failed");
+                }
+                // Default branches can also move without a push (settings,
+                // mirrors, restores), so rescan periodically.
+                if ticks.is_multiple_of(SCHEDULE_SCAN_TICKS)
+                    && let Err(error) = schedule::sync_all(&state).await
+                {
+                    tracing::warn!(%error, "actions schedule scan failed");
+                }
+                ticks = ticks.wrapping_add(1);
+                if let Err(error) = schedule::fire_due(&state).await {
+                    tracing::warn!(%error, "actions schedule dispatch failed");
                 }
             }
         }

@@ -4,13 +4,15 @@ import {
   actionRunDetailSchema,
   actionRunSummarySchema,
   actionStatusesSchema,
+  actionWorkflowsSchema,
   type ActionArtifact,
   type ActionCommitStatus,
   type ActionLogs,
   type ActionRunDetail,
   type ActionRuns,
+  type ActionWorkflows,
 } from "$lib/api/actions.js";
-import { requestJson } from "$lib/api/transport.js";
+import { jsonBody, requestJson } from "$lib/api/transport.js";
 import { loadRepositoryActionRuns } from "$lib/repository/repository-data-cache.js";
 import type { RepositoryFeatureContext } from "./shared.js";
 import { errorMessage, repositoryActionsApi } from "./shared.js";
@@ -56,6 +58,9 @@ export class RepositoryActionsState {
   actionLogsLoading = $state(false);
   actionArtifactsError = $state<string | null>(null);
   actionsPending = $state(false);
+  workflows = $state.raw<ActionWorkflows | null>(null);
+  workflowsLoading = $state(false);
+  workflowsError = $state<string | null>(null);
 
   #actionLogRequestSequence = 0;
   #actionsPollTimer: number | null = null;
@@ -269,6 +274,53 @@ export class RepositoryActionsState {
       await this.loadActions({}, true);
     } catch (caught) {
       this.setError(errorMessage(caught));
+    } finally {
+      this.actionsPending = false;
+    }
+  }
+
+  /** Lists workflows at a ref (the default branch when omitted). */
+  async loadWorkflows(reference?: string): Promise<void> {
+    this.workflowsLoading = true;
+    this.workflowsError = null;
+    try {
+      const suffix = reference
+        ? `?${new URLSearchParams({ ref: reference })}`
+        : "";
+      const workflows = await requestJson(
+        `${repositoryActionsApi(this, "/workflows")}${suffix}`,
+        actionWorkflowsSchema,
+      );
+      if (!this.#destroyed && this.isScopeCurrent()) this.workflows = workflows;
+    } catch (caught) {
+      if (!this.#destroyed) this.workflowsError = errorMessage(caught);
+    } finally {
+      this.workflowsLoading = false;
+    }
+  }
+
+  /** Starts a workflow_dispatch run and opens it. Returns false on failure. */
+  async dispatchWorkflow(
+    workflow: string,
+    reference: string,
+    inputs: Record<string, string>,
+  ): Promise<boolean> {
+    if (this.actionsPending) return false;
+    this.actionsPending = true;
+    try {
+      const run = await requestJson(
+        repositoryActionsApi(this, "/workflows/dispatch"),
+        actionRunSummarySchema,
+        {
+          method: "POST",
+          body: jsonBody({ workflow, ref: reference, inputs }),
+        },
+      );
+      this.selectActionRun(run.id);
+      return true;
+    } catch (caught) {
+      this.setError(errorMessage(caught));
+      return false;
     } finally {
       this.actionsPending = false;
     }

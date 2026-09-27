@@ -7,7 +7,9 @@
   import Workflow from "@lucide/svelte/icons/workflow";
   import { tick } from "svelte";
 
+  import { actionEventLabel } from "$lib/api/actions.js";
   import ActionStatusBadge from "$lib/components/actions/action-status-badge.svelte";
+  import RunWorkflowDialog from "$lib/components/actions/run-workflow-dialog.svelte";
   import * as Alert from "$lib/components/ui/alert/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Empty from "$lib/components/ui/empty/index.js";
@@ -55,6 +57,18 @@
     logElement?.scrollTo({ top: logElement.scrollHeight });
   }
 
+  // The run list offers "Run workflow" only to users who may dispatch.
+  $effect(() => {
+    const actions = repository.actions;
+    if (
+      !actions.actionRun &&
+      !actions.workflows &&
+      !actions.workflowsLoading &&
+      !actions.workflowsError
+    )
+      void actions.loadWorkflows();
+  });
+
   $effect.pre(() => {
     repository.actions.actionLogs?.text;
     if (!followLog) return;
@@ -98,6 +112,7 @@
           {repository.actions.actionRun.run.workflow_name}
         </h1>
         <p class="mt-1 font-mono text-xs text-muted-foreground">
+          {actionEventLabel(repository.actions.actionRun.run.event)} ·
           {repository.actions.actionRun.run.reference} · {repository.actions.actionRun.run.after_sha.slice(
             0,
             12,
@@ -289,6 +304,11 @@
         first directory that exists takes precedence.
       </Empty.Description>
     </Empty.Header>
+    {#if repository.actions.workflows?.can_dispatch && repository.actions.workflows.workflows.some((workflow) => workflow.dispatchable)}
+      <Empty.Content>
+        <RunWorkflowDialog actions={repository.actions} />
+      </Empty.Content>
+    {/if}
   </Empty.Root>
 {:else}
   <div class="mx-auto max-w-5xl">
@@ -296,17 +316,22 @@
       <div>
         <h1 class="text-xl font-semibold">Actions</h1>
         <p class="mt-1 text-sm text-muted-foreground">
-          Push-triggered repository workflows
+          Workflows triggered by pushes, schedules, and manual runs
         </p>
       </div>
-      <Button
-        variant="outline"
-        size="sm"
-        class="gap-2"
-        onclick={() => void repository.actions.loadActions()}
-      >
-        <RefreshCw data-icon="inline-start" />Refresh
-      </Button>
+      <div class="flex items-center gap-2">
+        {#if repository.actions.workflows?.can_dispatch}
+          <RunWorkflowDialog actions={repository.actions} />
+        {/if}
+        <Button
+          variant="outline"
+          size="sm"
+          class="gap-2"
+          onclick={() => void repository.actions.loadActions()}
+        >
+          <RefreshCw data-icon="inline-start" />Refresh
+        </Button>
+      </div>
     </header>
     <div class="overflow-hidden rounded-lg border">
       {#each repository.actions.actionRuns.runs as run (run.id)}
@@ -323,9 +348,9 @@
             <span
               class="mt-1 flex items-center gap-1.5 font-mono text-xs text-muted-foreground"
             >
-              <GitCommit class="size-3" />{run.after_sha.slice(0, 12)} · {formatDate(
-                run.created_at,
-              )}
+              <GitCommit class="size-3" />{run.after_sha.slice(0, 12)} · {actionEventLabel(
+                run.event,
+              )} · {formatDate(run.created_at)}
             </span>
             {#if run.failure_summary}
               <span class="mt-2 block text-sm text-destructive"

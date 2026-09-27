@@ -57,6 +57,7 @@ mod m20260921_000055_attachment_quota_indexes;
 mod m20260921_000056_webhook_outbox;
 mod m20260927_000059_action_secrets_variables;
 mod m20260927_000060_action_job_matrix;
+mod m20260927_000061_action_dispatch_schedule;
 
 #[cfg(test)]
 mod tests;
@@ -127,6 +128,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260921_000056_webhook_outbox::Migration),
             Box::new(m20260927_000059_action_secrets_variables::Migration),
             Box::new(m20260927_000060_action_job_matrix::Migration),
+            Box::new(m20260927_000061_action_dispatch_schedule::Migration),
         ]
     }
 }

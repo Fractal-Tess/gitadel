@@ -1565,3 +1565,39 @@ pub mod action_variable {
     pub enum Relation {}
     impl ActiveModelBehavior for ActiveModel {}
 }
+
+pub mod action_schedule {
+    use super::*;
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "action_schedules")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub repository_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub workflow_path: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub cron: String,
+        pub last_fired_at: Option<DateTimeUtc>,
+        pub next_fire_at: DateTimeUtc,
+        pub created_at: DateTimeUtc,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod action_schedule_scan {
+    use super::*;
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "action_schedule_scans")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub repository_id: Uuid,
+        pub default_branch: String,
+        pub head_sha: String,
+        pub scanned_at: DateTimeUtc,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}

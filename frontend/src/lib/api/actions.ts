@@ -14,6 +14,7 @@ export const actionRunSummarySchema = z.object({
   number: z.number(),
   workflow_name: z.string(),
   workflow_path: z.string(),
+  event: z.string(),
   status: actionStatusSchema,
   failure_kind: z.string().nullable(),
   failure_summary: z.string().nullable(),
@@ -155,4 +156,44 @@ export function actionValueNameError(name: string): string | null {
   );
   if (reserved) return `Names must not start with ${reserved}.`;
   return null;
+}
+
+export const actionWorkflowInputSchema = z.object({
+  name: z.string(),
+  description: z.string().nullable(),
+  required: z.boolean(),
+  type: z.enum(["string", "boolean", "choice", "number"]),
+  default: z.string().nullable(),
+  options: z.array(z.string()),
+});
+export const actionWorkflowSchema = z.object({
+  path: z.string(),
+  name: z.string(),
+  dispatchable: z.boolean(),
+  inputs: z.array(actionWorkflowInputSchema),
+  error: z.string().nullable(),
+});
+export const actionWorkflowsSchema = z.object({
+  reference: z.string(),
+  commit: z.string(),
+  can_dispatch: z.boolean(),
+  workflows: z.array(actionWorkflowSchema),
+});
+
+export type ActionWorkflowInput = z.infer<typeof actionWorkflowInputSchema>;
+export type ActionWorkflow = z.infer<typeof actionWorkflowSchema>;
+export type ActionWorkflows = z.infer<typeof actionWorkflowsSchema>;
+
+/** Human label for a run's triggering event. */
+export function actionEventLabel(event: string): string {
+  switch (event) {
+    case "push":
+      return "Push";
+    case "workflow_dispatch":
+      return "Manual";
+    case "schedule":
+      return "Scheduled";
+    default:
+      return event;
+  }
 }
