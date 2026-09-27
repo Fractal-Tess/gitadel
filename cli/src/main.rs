@@ -13,6 +13,8 @@ use uuid::Uuid;
 
 mod auth;
 mod input;
+mod issues;
+mod query;
 mod restore;
 mod tokens;
 use auth::AuthCommand;
@@ -66,6 +68,11 @@ enum Command {
     Admin {
         #[command(subcommand)]
         command: AdminCommand,
+    },
+    /// Manage repository issues, comments, and labels.
+    Issue {
+        #[command(subcommand)]
+        command: issues::IssueCommand,
     },
     /// Manage the saved CLI login.
     Auth {
@@ -891,6 +898,7 @@ fn command_uses_stdin_body(command: &Command) -> bool {
             _ => false,
         },
         Command::Api(command) => optional_body_command_uses_stdin(&command.body),
+        Command::Issue { command } => issues::uses_stdin(command),
         Command::Auth { .. } | Command::Me { .. } | Command::Org { .. } => false,
     }
 }
@@ -964,6 +972,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Repo { command } => run_repo(&api, command).await?,
         Command::Me { command } => run_me(&api, command).await?,
         Command::Org { command } => run_org(&api, command).await?,
+        Command::Issue { command } => issues::run(&api, command).await?,
         Command::Admin {
             command:
                 AdminCommand::Storage {
