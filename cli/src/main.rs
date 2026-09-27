@@ -15,6 +15,7 @@ mod auth;
 mod input;
 mod issues;
 mod query;
+mod releases;
 mod restore;
 mod tokens;
 use auth::AuthCommand;
@@ -73,6 +74,11 @@ enum Command {
     Issue {
         #[command(subcommand)]
         command: issues::IssueCommand,
+    },
+    /// Manage repository releases and release assets.
+    Release {
+        #[command(subcommand)]
+        command: releases::ReleaseCommand,
     },
     /// Manage the saved CLI login.
     Auth {
@@ -899,6 +905,7 @@ fn command_uses_stdin_body(command: &Command) -> bool {
         },
         Command::Api(command) => optional_body_command_uses_stdin(&command.body),
         Command::Issue { command } => issues::uses_stdin(command),
+        Command::Release { command } => releases::uses_stdin(command),
         Command::Auth { .. } | Command::Me { .. } | Command::Org { .. } => false,
     }
 }
@@ -973,6 +980,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Me { command } => run_me(&api, command).await?,
         Command::Org { command } => run_org(&api, command).await?,
         Command::Issue { command } => issues::run(&api, command).await?,
+        Command::Release { command } => releases::run(&api, command).await?,
         Command::Admin {
             command:
                 AdminCommand::Storage {
