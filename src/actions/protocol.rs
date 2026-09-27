@@ -20,6 +20,7 @@ use crate::entity::{action_job, action_job_need, action_run, repository, user};
 use super::{
     ActionsState,
     logs::{self, IncomingLogRow},
+    matrix,
     proto::{ping, runner},
     runners::{self, RunnerError},
     runs::{self, StateError, TaskResult},
@@ -349,7 +350,7 @@ async fn task_message(
         "action": "", "action_path": "", "action_ref": "", "action_repository": "",
         "actor": actor, "api_url": format!("{server_url}/api/v1"), "base_ref": "",
         "event": event, "event_name": "push", "event_path": "", "graphql_url": "",
-        "head_ref": "", "job": claimed.job.job_key, "ref": run.ref_name, "ref_name": ref_name,
+        "head_ref": "", "job": matrix::base_job_key(&claimed.job.job_key), "ref": run.ref_name, "ref_name": ref_name,
         "ref_protected": false, "ref_type": ref_type, "repository": format!("{}/{}", repository.namespace, repository.name),
         "repository_id": repository.id.to_string(), "repository_owner": repository.namespace,
         "retention_days": state.settings().retention_days.to_string(),
@@ -370,21 +371,26 @@ async fn task_message(
         .all(database)
         .await
         .map_err(database_error)?;
-    let mut needs = HashMap::new();
+    // A matrix job is needed as a whole: it fails if any expansion failed,
+    // and its outputs merge those of every expansion.
+    let mut needs: HashMap<String, runner::TaskNeed> = HashMap::new();
     for edge in edges {
         if let Some(job) = action_job::Entity::find_by_id(edge.needed_job_id)
             .one(database)
             .await
             .map_err(database_error)?
         {
-            let outputs = serde_json::from_str(&job.outputs).unwrap_or_default();
-            needs.insert(
-                edge.needed_job_key,
-                runner::TaskNeed {
-                    outputs,
-                    result: protocol_result(job.result.as_deref().unwrap_or(&job.status)) as i32,
-                },
-            );
+            let outputs: HashMap<String, String> =
+                serde_json::from_str(&job.outputs).unwrap_or_default();
+            let result = protocol_result(job.result.as_deref().unwrap_or(&job.status));
+            let need = needs
+                .entry(edge.needed_job_key)
+                .or_insert_with(|| runner::TaskNeed {
+                    outputs: HashMap::new(),
+                    result: result as i32,
+                });
+            need.outputs.extend(outputs);
+            need.result = merge_results(need.result, result as i32);
         }
     }
     let values = secrets::job_values(database, state.secret_cipher(), &repository)
@@ -404,6 +410,21 @@ async fn task_message(
         needs,
         vars: values.vars,
     })
+}
+
+fn merge_results(current: i32, next: i32) -> i32 {
+    let rank = |result: i32| match runner::Result::try_from(result) {
+        Ok(runner::Result::Failure) => 4,
+        Ok(runner::Result::Cancelled) => 3,
+        Ok(runner::Result::Unspecified) | Err(_) => 2,
+        Ok(runner::Result::Skipped) => 1,
+        Ok(runner::Result::Success) => 0,
+    };
+    if rank(next) > rank(current) {
+        next
+    } else {
+        current
+    }
 }
 
 fn protocol_result(result: &str) -> runner::Result {
@@ -670,6 +691,16 @@ mod tests {
         });
         let context: pbjson_types::Struct = serde_json::from_value(expected.clone()).unwrap();
         assert_eq!(serde_json::to_value(context).unwrap(), expected);
+    }
+
+    #[test]
+    fn matrix_needs_report_the_worst_result() {
+        let success = runner::Result::Success as i32;
+        let failure = runner::Result::Failure as i32;
+        let skipped = runner::Result::Skipped as i32;
+        assert_eq!(merge_results(success, failure), failure);
+        assert_eq!(merge_results(failure, success), failure);
+        assert_eq!(merge_results(skipped, success), skipped);
     }
 
     #[test]

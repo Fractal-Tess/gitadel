@@ -12,7 +12,11 @@ use crate::entity::{
     action_runner_registration_token,
 };
 
-use super::{ActionsState, tokens};
+use super::{
+    ActionsState,
+    matrix::{StoredMatrix, base_job_key},
+    tokens,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TaskResult {
@@ -85,6 +89,7 @@ pub(crate) async fn update_task(
     if result.status().is_some() {
         tokens::revoke_job(&transaction, job.id).await?;
         release_dependents(&transaction, job.id).await?;
+        fail_fast(&transaction, &job).await?;
     }
     aggregate_run(&transaction, job.run_id).await?;
     transaction.commit().await?;
@@ -133,6 +138,49 @@ pub(crate) async fn cancel_run(
     let run = active.update(&transaction).await?;
     transaction.commit().await?;
     Ok(run)
+}
+
+/// Cancels the unfinished siblings of a failed matrix job whose strategy
+/// uses `fail-fast` (the default).
+async fn fail_fast<C: sea_orm::ConnectionTrait>(
+    database: &C,
+    failed: &action_job::Model,
+) -> Result<(), sea_orm::DbErr> {
+    if failed.status != "failure" {
+        return Ok(());
+    }
+    let Some(matrix) = StoredMatrix::parse(failed.matrix_json.as_deref()) else {
+        return Ok(());
+    };
+    if !matrix.fail_fast {
+        return Ok(());
+    }
+    let base = base_job_key(&failed.job_key);
+    let siblings = action_job::Entity::find()
+        .filter(action_job::Column::RunId.eq(failed.run_id))
+        .filter(action_job::Column::Status.is_in(["waiting", "queued", "leased", "running"]))
+        .all(database)
+        .await?;
+    let now = Utc::now();
+    for sibling in siblings
+        .into_iter()
+        .filter(|sibling| sibling.id != failed.id && base_job_key(&sibling.job_key) == base)
+    {
+        let id = sibling.id;
+        let mut active = sibling.into_active_model();
+        active.status = Set("cancelled".to_owned());
+        active.result = Set(Some("cancelled".to_owned()));
+        active.failure_kind = Set(Some("fail_fast".to_owned()));
+        active.failure_summary = Set(Some(format!(
+            "Cancelled because another `{base}` matrix job failed."
+        )));
+        active.completed_at = Set(Some(now));
+        active.lease_deadline = Set(None);
+        active.update(database).await?;
+        tokens::revoke_job(database, id).await?;
+        release_dependents(database, id).await?;
+    }
+    Ok(())
 }
 
 async fn release_dependents<C: sea_orm::ConnectionTrait>(
@@ -288,6 +336,9 @@ pub(crate) async fn maintain(state: &ActionsState) -> anyhow::Result<()> {
         }
         tokens::revoke_job(&transaction, id).await?;
         release_dependents(&transaction, id).await?;
+        if let Some(failed) = action_job::Entity::find_by_id(id).one(&transaction).await? {
+            fail_fast(&transaction, &failed).await?;
+        }
         aggregate_run(&transaction, run_id).await?;
         transaction.commit().await?;
     }

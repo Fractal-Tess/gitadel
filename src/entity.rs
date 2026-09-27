@@ -1366,6 +1366,7 @@ pub mod action_job {
         pub log_truncated: bool,
         pub failure_kind: Option<String>,
         pub failure_summary: Option<String>,
+        pub matrix_json: Option<String>,
         pub created_at: DateTimeUtc,
         pub started_at: Option<DateTimeUtc>,
         pub completed_at: Option<DateTimeUtc>,

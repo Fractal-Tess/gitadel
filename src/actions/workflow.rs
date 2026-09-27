@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::Utc;
 use globset::Glob;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
+    TransactionTrait,
 };
 use serde_json::json;
 use sley::GitObjectType;
@@ -11,12 +12,16 @@ use uuid::Uuid;
 use yaml_serde::{Mapping, Value};
 
 use crate::{
+    config::ActionsSettings,
     entity::{action_job, action_job_need, action_run, repository, user},
     identity::ApiError,
     repository::read_git,
 };
 
-use super::ActionsState;
+use super::{
+    ActionsState,
+    matrix::{self, StoredMatrix},
+};
 
 const WORKFLOW_DIRECTORIES: [&str; 3] = [
     ".forgejo/workflows",
@@ -27,6 +32,9 @@ const MAX_WORKFLOWS: usize = 64;
 const MAX_WORKFLOW_BYTES: usize = 1_048_576;
 const MAX_JOBS: usize = 128;
 const MAX_EDGES: usize = 256;
+/// Limits after matrix expansion.
+const MAX_EXPANDED_JOBS: usize = 256;
+const MAX_EXPANDED_EDGES: usize = 4_096;
 
 #[derive(Debug)]
 struct WorkflowPlan {
@@ -36,12 +44,20 @@ struct WorkflowPlan {
     jobs: Vec<JobPlan>,
 }
 
+/// One schedulable job. Matrix jobs expand to one plan per combination,
+/// all sharing `base`, the job ID from the workflow file.
 #[derive(Debug)]
 struct JobPlan {
+    /// Unique within the run: `base`, or `base:N` for matrix expansions.
     key: String,
+    base: String,
     name: String,
     labels: Vec<String>,
+    /// Workflow job IDs this job needs; every expansion of each must finish.
     needs: Vec<String>,
+    /// The job body sent to the runner, with its matrix pinned.
+    body: Mapping,
+    matrix: Option<StoredMatrix>,
 }
 
 #[derive(Debug)]
@@ -80,8 +96,16 @@ pub(crate) async fn ingest_push(
         match discovered {
             Ok(plan) => {
                 if matches_push(&plan.root, reference, &changed_paths).unwrap_or(false) {
-                    enqueue_plan(state, repository, &actor, reference, before, &after, plan)
-                        .await?;
+                    enqueue_plan(
+                        state.repository().identity().database(),
+                        repository,
+                        &actor,
+                        reference,
+                        before,
+                        &after,
+                        plan,
+                    )
+                    .await?;
                 }
             }
             Err(diagnostic) => {
@@ -161,12 +185,12 @@ async fn discover(
     .await?;
     Ok(files
         .into_iter()
-        .map(|(path, bytes)| validate_workflow(state, path, bytes))
+        .map(|(path, bytes)| validate_workflow(state.settings(), path, bytes))
         .collect())
 }
 
 fn validate_workflow(
-    state: &ActionsState,
+    settings: &ActionsSettings,
     path: String,
     bytes: Vec<u8>,
 ) -> Result<WorkflowPlan, WorkflowDiagnostic> {
@@ -219,6 +243,7 @@ fn validate_workflow(
         ));
     }
     let mut jobs = Vec::with_capacity(jobs_value.len());
+    let mut graph = BTreeMap::new();
     let mut keys = BTreeSet::new();
     let mut edge_count = 0;
     for (key, body) in jobs_value {
@@ -237,18 +262,13 @@ fn validate_workflow(
         let body = body
             .as_mapping()
             .ok_or_else(|| fail("workflow_invalid", format!("job `{key}` must be a mapping")))?;
-        if get(body, "uses").is_some()
-            || get(body, "strategy")
-                .and_then(Value::as_mapping)
-                .and_then(|map| get(map, "matrix"))
-                .is_some()
-        {
+        if get(body, "uses").is_some() {
             return Err(fail(
                 "workflow_unsupported",
-                format!("job `{key}` uses a deferred reusable workflow or matrix"),
+                format!("job `{key}` uses a deferred reusable workflow"),
             ));
         }
-        let labels = static_labels(get(body, "runs-on"))
+        let strategy = matrix::parse_strategy(body)
             .map_err(|summary| fail("workflow_unsupported", format!("job `{key}` {summary}")))?;
         let needs = string_list(get(body, "needs"))
             .map_err(|summary| fail("workflow_invalid", format!("job `{key}` {summary}")))?;
@@ -259,30 +279,97 @@ fn validate_workflow(
                 format!("workflow exceeds {MAX_EDGES} dependency edges"),
             ));
         }
-        validate_execution_sources(state, body)
+        validate_execution_sources(settings, body)
             .map_err(|summary| fail("workflow_unsupported", format!("job `{key}` {summary}")))?;
-        let name = get(body, "name")
-            .and_then(Value::as_str)
-            .unwrap_or(key)
-            .to_owned();
-        jobs.push(JobPlan {
-            key: key.to_owned(),
-            name,
-            labels,
-            needs,
-        });
+        let explicit_name = get(body, "name").and_then(Value::as_str);
+        let name = explicit_name.unwrap_or(key).to_owned();
+        graph.insert(key.to_owned(), needs.clone());
+        let unsupported =
+            |summary: String| fail("workflow_unsupported", format!("job `{key}` {summary}"));
+        match strategy {
+            None => {
+                let labels = static_labels(get(body, "runs-on")).map_err(unsupported)?;
+                jobs.push(JobPlan {
+                    key: key.to_owned(),
+                    base: key.to_owned(),
+                    name,
+                    labels,
+                    needs,
+                    body: body.clone(),
+                    matrix: None,
+                });
+            }
+            Some(strategy) => {
+                let original = get(body, "strategy")
+                    .and_then(Value::as_mapping)
+                    .cloned()
+                    .unwrap_or_default();
+                for (index, combination) in strategy.combinations.iter().enumerate() {
+                    let labels = string_list(get(body, "runs-on"))
+                        .map_err(&unsupported)?
+                        .iter()
+                        .map(|label| matrix::substitute(label, combination))
+                        .collect::<Option<Vec<_>>>()
+                        .filter(|labels| {
+                            !labels.is_empty() && labels.iter().all(|label| !label.is_empty())
+                        })
+                        .ok_or_else(|| {
+                            unsupported(
+                                "must use static `runs-on` labels or matrix values".to_owned(),
+                            )
+                        })?;
+                    let expanded_name =
+                        matrix::job_name(&name, explicit_name.is_some(), combination);
+                    let mut expanded = body.clone();
+                    expanded.insert(
+                        Value::String("strategy".to_owned()),
+                        Value::Mapping(matrix::pinned_strategy(&original, combination)),
+                    );
+                    expanded.insert(
+                        Value::String("name".to_owned()),
+                        Value::String(expanded_name.clone()),
+                    );
+                    jobs.push(JobPlan {
+                        key: format!("{key}:{index}"),
+                        base: key.to_owned(),
+                        name: expanded_name,
+                        labels,
+                        needs: needs.clone(),
+                        body: expanded,
+                        matrix: Some(matrix::stored(&strategy, combination)),
+                    });
+                }
+            }
+        }
     }
-    for job in &jobs {
-        for needed in &job.needs {
+    for (key, needs) in &graph {
+        for needed in needs {
             if !keys.contains(needed) {
                 return Err(fail(
                     "workflow_invalid",
-                    format!("job `{}` needs missing job `{needed}`", job.key),
+                    format!("job `{key}` needs missing job `{needed}`"),
                 ));
             }
         }
     }
-    detect_cycle(&jobs).map_err(|summary| fail("workflow_invalid", summary))?;
+    detect_cycle(&graph).map_err(|summary| fail("workflow_invalid", summary))?;
+    if jobs.len() > MAX_EXPANDED_JOBS {
+        return Err(fail(
+            "workflow_invalid",
+            format!("workflow expands to more than {MAX_EXPANDED_JOBS} jobs"),
+        ));
+    }
+    let expanded_edges: usize = jobs
+        .iter()
+        .flat_map(|job| &job.needs)
+        .map(|needed| jobs.iter().filter(|job| &job.base == needed).count())
+        .sum();
+    if expanded_edges > MAX_EXPANDED_EDGES {
+        return Err(fail(
+            "workflow_invalid",
+            format!("workflow expands to more than {MAX_EXPANDED_EDGES} dependency edges"),
+        ));
+    }
     let name = get(&root, "name")
         .and_then(Value::as_str)
         .unwrap_or(&path)
@@ -403,7 +490,7 @@ fn matches_push(root: &Mapping, reference: &str, changed_paths: &[String]) -> Re
     Ok(true)
 }
 
-fn validate_execution_sources(state: &ActionsState, job: &Mapping) -> Result<(), String> {
+fn validate_execution_sources(settings: &ActionsSettings, job: &Mapping) -> Result<(), String> {
     if let Some(steps) = get(job, "steps") {
         let steps = steps
             .as_sequence()
@@ -419,7 +506,7 @@ fn validate_execution_sources(state: &ActionsState, job: &Mapping) -> Result<(),
                 let uses = uses
                     .as_str()
                     .ok_or_else(|| "action references must be static strings".to_owned())?;
-                validate_uses(state, uses)?;
+                validate_uses(settings, uses)?;
             }
         }
     }
@@ -468,7 +555,7 @@ fn string_list(value: Option<&Value>) -> Result<Vec<String>, String> {
     }
 }
 
-fn validate_uses(state: &ActionsState, uses: &str) -> Result<(), String> {
+fn validate_uses(settings: &ActionsSettings, uses: &str) -> Result<(), String> {
     if uses.starts_with("./") && !uses.split('/').any(|part| part == "..") {
         return Ok(());
     }
@@ -487,11 +574,10 @@ fn validate_uses(state: &ActionsState, uses: &str) -> Result<(), String> {
     {
         return Err("remote actions must be pinned to a full 40-character commit".to_owned());
     }
-    if !state
-        .settings()
+    if !settings
         .allowed_action_origins
         .iter()
-        .any(|origin| origin == &state.settings().default_actions_origin)
+        .any(|origin| origin == &settings.default_actions_origin)
     {
         return Err("remote actions are disabled by operator policy".to_owned());
     }
@@ -521,10 +607,10 @@ fn validate_image(image: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn detect_cycle(jobs: &[JobPlan]) -> Result<(), String> {
+fn detect_cycle(graph: &BTreeMap<String, Vec<String>>) -> Result<(), String> {
     fn visit<'a>(
         key: &'a str,
-        jobs: &'a [JobPlan],
+        graph: &'a BTreeMap<String, Vec<String>>,
         visiting: &mut BTreeSet<&'a str>,
         visited: &mut BTreeSet<&'a str>,
     ) -> bool {
@@ -535,10 +621,10 @@ fn detect_cycle(jobs: &[JobPlan]) -> Result<(), String> {
             return false;
         }
         visiting.insert(key);
-        let cyclic = jobs.iter().find(|job| job.key == key).is_some_and(|job| {
-            job.needs
+        let cyclic = graph.get(key).is_some_and(|needs| {
+            needs
                 .iter()
-                .any(|needed| visit(needed, jobs, visiting, visited))
+                .any(|needed| visit(needed, graph, visiting, visited))
         });
         visiting.remove(key);
         visited.insert(key);
@@ -546,9 +632,9 @@ fn detect_cycle(jobs: &[JobPlan]) -> Result<(), String> {
     }
     let mut visiting = BTreeSet::new();
     let mut visited = BTreeSet::new();
-    if jobs
-        .iter()
-        .any(|job| visit(&job.key, jobs, &mut visiting, &mut visited))
+    if graph
+        .keys()
+        .any(|key| visit(key, graph, &mut visiting, &mut visited))
     {
         Err("workflow dependency graph contains a cycle".to_owned())
     } else {
@@ -557,7 +643,7 @@ fn detect_cycle(jobs: &[JobPlan]) -> Result<(), String> {
 }
 
 async fn enqueue_plan(
-    state: &ActionsState,
+    database: &DatabaseConnection,
     repository: &repository::Model,
     actor: &user::Model,
     reference: &str,
@@ -565,7 +651,6 @@ async fn enqueue_plan(
     after: &str,
     plan: WorkflowPlan,
 ) -> Result<(), ApiError> {
-    let database = state.repository().identity().database();
     let transaction = database.begin().await?;
     let number = action_run::Entity::find()
         .filter(action_run::Column::RepositoryId.eq(repository.id))
@@ -605,15 +690,11 @@ async fn enqueue_plan(
     let mut ids = BTreeMap::new();
     for job in &plan.jobs {
         let mut root = plan.root.clone();
-        let all_jobs = get(&root, "jobs")
-            .and_then(Value::as_mapping)
-            .expect("validated jobs");
-        let selected = all_jobs
-            .get(job.key.as_str())
-            .expect("validated job")
-            .clone();
         let mut one = Mapping::new();
-        one.insert(Value::String(job.key.clone()), selected);
+        one.insert(
+            Value::String(job.base.clone()),
+            Value::Mapping(job.body.clone()),
+        );
         root.insert(Value::String("jobs".to_owned()), Value::Mapping(one));
         let payload = yaml_serde::to_string(&Value::Mapping(root))
             .map_err(ApiError::internal)?
@@ -645,6 +726,10 @@ async fn enqueue_plan(
             log_truncated: Set(false),
             failure_kind: Set(None),
             failure_summary: Set(None),
+            matrix_json: Set(job
+                .matrix
+                .as_ref()
+                .map(|matrix| serde_json::to_string(matrix).expect("matrix serializes"))),
             created_at: Set(now),
             started_at: Set(None),
             completed_at: Set(None),
@@ -655,13 +740,15 @@ async fn enqueue_plan(
     }
     for job in &plan.jobs {
         for needed in &job.needs {
-            action_job_need::ActiveModel {
-                job_id: Set(ids[&job.key]),
-                needed_job_id: Set(ids[needed]),
-                needed_job_key: Set(needed.clone()),
+            for dependency in plan.jobs.iter().filter(|other| &other.base == needed) {
+                action_job_need::ActiveModel {
+                    job_id: Set(ids[&job.key]),
+                    needed_job_id: Set(ids[&dependency.key]),
+                    needed_job_key: Set(needed.clone()),
+                }
+                .insert(&transaction)
+                .await?;
             }
-            .insert(&transaction)
-            .await?;
         }
     }
     transaction.commit().await?;
@@ -730,21 +817,16 @@ mod tests {
 
     #[test]
     fn dependency_cycles_are_rejected() {
-        let jobs = vec![
-            JobPlan {
-                key: "a".to_owned(),
-                name: "a".to_owned(),
-                labels: vec!["docker".to_owned()],
-                needs: vec!["b".to_owned()],
-            },
-            JobPlan {
-                key: "b".to_owned(),
-                name: "b".to_owned(),
-                labels: vec!["docker".to_owned()],
-                needs: vec!["a".to_owned()],
-            },
-        ];
-        assert!(detect_cycle(&jobs).is_err());
+        let graph = BTreeMap::from([
+            ("a".to_owned(), vec!["b".to_owned()]),
+            ("b".to_owned(), vec!["a".to_owned()]),
+        ]);
+        assert!(detect_cycle(&graph).is_err());
+        let graph = BTreeMap::from([
+            ("a".to_owned(), vec![]),
+            ("b".to_owned(), vec!["a".to_owned()]),
+        ]);
+        assert!(detect_cycle(&graph).is_ok());
     }
 
     #[test]
@@ -785,5 +867,135 @@ mod tests {
             let root: Value = yaml_serde::from_str(source).unwrap();
             assert!(validate_trigger(root.as_mapping().unwrap()).is_err());
         }
+    }
+
+    const MATRIX_WORKFLOW: &str = "name: CI\non: push\njobs:\n  build:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      max-parallel: 1\n      matrix:\n        os: [docker, podman]\n        node: [18, 20]\n        exclude:\n          - os: podman\n            node: 18\n    steps:\n      - run: echo ${{ matrix.node }}\n  report:\n    needs: build\n    runs-on: docker\n    steps:\n      - run: echo done\n";
+
+    fn plan(source: &str) -> WorkflowPlan {
+        validate_workflow(
+            &ActionsSettings::default(),
+            ".forgejo/workflows/ci.yml".to_owned(),
+            source.as_bytes().to_vec(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn matrix_jobs_expand_with_names_labels_and_pinned_payloads() {
+        let plan = plan(MATRIX_WORKFLOW);
+        let names: Vec<_> = plan.jobs.iter().map(|job| job.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "build (docker, 18)",
+                "build (docker, 20)",
+                "build (podman, 20)",
+                "report"
+            ]
+        );
+        assert_eq!(plan.jobs[2].key, "build:2");
+        assert_eq!(plan.jobs[2].labels, ["podman"]);
+        assert_eq!(plan.jobs[3].needs, ["build"]);
+        let pinned = plan.jobs[1]
+            .body
+            .get("strategy")
+            .and_then(Value::as_mapping)
+            .and_then(|strategy| strategy.get("matrix"))
+            .and_then(Value::as_mapping)
+            .unwrap();
+        assert_eq!(
+            yaml_serde::to_string(&Value::Mapping(pinned.clone())).unwrap(),
+            "os:\n- docker\nnode:\n- 20\n"
+        );
+        let stored = plan.jobs[0].matrix.as_ref().unwrap();
+        assert!(stored.fail_fast);
+        assert_eq!(stored.max_parallel, Some(1));
+    }
+
+    #[test]
+    fn dynamic_labels_outside_a_matrix_are_rejected() {
+        let error = validate_workflow(
+            &ActionsSettings::default(),
+            "ci.yml".to_owned(),
+            b"on: push\njobs:\n  a:\n    runs-on: ${{ matrix.os }}\n    steps: []\n".to_vec(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, "workflow_unsupported");
+    }
+
+    #[tokio::test]
+    async fn matrix_needs_wait_for_every_expansion_and_fail_fast_cancels_siblings() {
+        use crate::actions::{runs, test_support};
+        use sea_orm::ConnectionTrait as _;
+
+        let database = test_support::database().await;
+        let owner = test_support::owner(&database, "alice").await;
+        let repository = test_support::repository(&database, &owner, "project").await;
+        enqueue_plan(
+            &database,
+            &repository,
+            &owner,
+            "refs/heads/main",
+            &"0".repeat(40),
+            &"1".repeat(40),
+            plan(MATRIX_WORKFLOW),
+        )
+        .await
+        .unwrap();
+        let jobs = action_job::Entity::find()
+            .order_by_asc(action_job::Column::Id)
+            .all(&database)
+            .await
+            .unwrap();
+        assert_eq!(jobs.len(), 4);
+        let report = &jobs[3];
+        assert_eq!(report.status, "waiting");
+        let edges = action_job_need::Entity::find()
+            .filter(action_job_need::Column::JobId.eq(report.id))
+            .all(&database)
+            .await
+            .unwrap();
+        assert_eq!(edges.len(), 3);
+        assert!(edges.iter().all(|edge| edge.needed_job_key == "build"));
+
+        // Pretend a runner leased the first expansion, then fail it.
+        let mut leased: action_job::ActiveModel = jobs[0].clone().into();
+        leased.status = Set("running".to_owned());
+        leased.runner_id = Set(None);
+        let first = leased.update(&database).await.unwrap();
+        database
+            .execute_unprepared(&format!(
+                "INSERT INTO action_runners (uuid, namespace, name, token_hash, approved_labels, version, created_at) VALUES ('r', 'alice', 'r', 'h', '[]', '13.0.0', '2026-01-01T00:00:00Z'); UPDATE action_jobs SET runner_id = last_insert_rowid() WHERE id = {}",
+                first.id
+            ))
+            .await
+            .unwrap();
+        let runner_id = action_job::Entity::find_by_id(first.id)
+            .one(&database)
+            .await
+            .unwrap()
+            .unwrap()
+            .runner_id
+            .unwrap();
+        runs::update_task(
+            &database,
+            runner_id,
+            first.id,
+            runs::TaskResult::Failure,
+            BTreeMap::new(),
+            "[]".to_owned(),
+            300,
+        )
+        .await
+        .unwrap();
+
+        let jobs = action_job::Entity::find()
+            .order_by_asc(action_job::Column::Id)
+            .all(&database)
+            .await
+            .unwrap();
+        let statuses: Vec<_> = jobs.iter().map(|job| job.status.as_str()).collect();
+        assert_eq!(statuses, ["failure", "cancelled", "cancelled", "queued"]);
+        assert_eq!(jobs[1].failure_kind.as_deref(), Some("fail_fast"));
     }
 }
