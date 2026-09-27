@@ -16,6 +16,7 @@ mod maintenance;
 mod mirror_scheduler;
 mod mirrors;
 mod native_remote;
+mod protection;
 mod registry;
 mod releases;
 mod resources;
@@ -1079,6 +1080,14 @@ pub fn router() -> Router<RepositoryState> {
         .route(
             "/repositories/{namespace}/{name}/collaborators/{username}",
             delete(resources::remove_collaborator),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/protection-rules",
+            get(protection::list_rules).post(protection::create_rule),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/protection-rules/{id}",
+            axum::routing::patch(protection::update_rule).delete(protection::delete_rule),
         )
         .route(
             "/repos/{namespace}/{name}/integrations",

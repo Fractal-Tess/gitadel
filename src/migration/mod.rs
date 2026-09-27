@@ -55,6 +55,7 @@ mod m20260918_000053_repository_icon_discovery;
 mod m20260918_000054_registry_storage;
 mod m20260921_000055_attachment_quota_indexes;
 mod m20260921_000056_webhook_outbox;
+mod m20260927_000063_repository_protection_rules;
 
 #[cfg(test)]
 mod tests;
@@ -123,6 +124,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260918_000054_registry_storage::Migration),
             Box::new(m20260921_000055_attachment_quota_indexes::Migration),
             Box::new(m20260921_000056_webhook_outbox::Migration),
+            Box::new(m20260927_000063_repository_protection_rules::Migration),
         ]
     }
 }

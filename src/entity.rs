@@ -1524,3 +1524,47 @@ pub mod action_artifact_grant {
 
     impl ActiveModelBehavior for ActiveModel {}
 }
+
+pub mod repository_protection_rule {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "repository_protection_rules")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub repository_id: Uuid,
+        pub kind: String,
+        pub pattern: String,
+        pub block_force_push: bool,
+        pub block_deletion: bool,
+        pub block_update: bool,
+        pub restrict_pushes: bool,
+        pub admins_bypass: bool,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod repository_protection_rule_user {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "repository_protection_rule_users")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub rule_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub user_id: Uuid,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}

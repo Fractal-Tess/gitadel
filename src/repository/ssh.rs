@@ -15,6 +15,7 @@ use uuid::Uuid;
 use super::{
     LfsPermission, Permission, RepositoryState,
     git_service::{self, BlockingReader, BlockingWriter, BridgeCancellation},
+    protection::{RefGuard, load_guard},
     resources::{CreateRepositoryOptions, create_owned_repository, record_push},
     webhooks::{dispatch_push, snapshot_refs},
 };
@@ -280,6 +281,17 @@ impl russh::server::Handler for SshHandler {
             );
         }
 
+        let guard = if matches!(service, GitService::ReceivePack) {
+            match load_guard(&self.state, &repository, Some(actor_user_id)).await {
+                Ok(guard) => guard,
+                Err(error) => {
+                    tracing::error!(%error, "could not load repository protection rules");
+                    return reject(channel_id, session, "Could not start Git service.\n");
+                }
+            }
+        } else {
+            RefGuard::default()
+        };
         let path = self.state.repository_path(&repository);
         let format = match git_service::object_format(&repository.object_format) {
             Ok(format) => format,
@@ -320,8 +332,14 @@ impl russh::server::Handler for SshHandler {
                 BlockingWriter::new(channel_writer.make_writer(), handle, worker_cancellation);
             if receive {
                 git_service::write_advertisement(&worker_path, format, true, false, &mut writer)?;
-                git_service::serve_receive_pack(&worker_path, format, &mut reader, &mut writer)
-                    .map(|outcome| (true, outcome.landed, outcome.response_error))
+                git_service::serve_receive_pack(
+                    &worker_path,
+                    format,
+                    &guard,
+                    &mut reader,
+                    &mut writer,
+                )
+                .map(|outcome| (true, outcome.landed, outcome.response_error))
             } else if protocol_v2 {
                 git_service::serve_upload_pack(
                     &worker_path,
