@@ -5,11 +5,24 @@ RUN bun install --frozen-lockfile
 COPY frontend/ ./
 RUN bun run build
 
-FROM rust:1.98.1-slim-trixie AS backend
+FROM rust:1.98.1-slim-trixie AS chef
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends build-essential cmake libdav1d-dev libssl-dev perl pkg-config \
     && rm -rf /var/lib/apt/lists/*
+RUN cargo install cargo-chef --locked --version 0.1.78
 WORKDIR /build
+
+# The recipe only changes with manifests and the lockfile, so the dependency
+# layer below stays cached across source and frontend changes.
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY src/ ./src/
+COPY cli/ ./cli/
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS backend
+COPY --from=planner /build/recipe.json recipe.json
+RUN cargo chef cook --release --locked --package gitadel --bin gitadel --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock build.rs CHANGELOG.md ./
 COPY src/ ./src/
 COPY cli/ ./cli/
