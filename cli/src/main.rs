@@ -14,6 +14,7 @@ use uuid::Uuid;
 mod auth;
 mod input;
 mod issues;
+mod mirrors;
 mod query;
 mod releases;
 mod restore;
@@ -85,6 +86,11 @@ enum Command {
     Webhook {
         #[command(subcommand)]
         command: webhooks::WebhookCommand,
+    },
+    /// Manage pull mirrors and namespace mirror identities.
+    Mirror {
+        #[command(subcommand)]
+        command: mirrors::MirrorCommand,
     },
     /// Manage the saved CLI login.
     Auth {
@@ -913,6 +919,7 @@ fn command_uses_stdin_body(command: &Command) -> bool {
         Command::Issue { command } => issues::uses_stdin(command),
         Command::Release { command } => releases::uses_stdin(command),
         Command::Webhook { command } => webhooks::uses_stdin(command),
+        Command::Mirror { command } => mirrors::uses_stdin(command),
         Command::Auth { .. } | Command::Me { .. } | Command::Org { .. } => false,
     }
 }
@@ -989,6 +996,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Issue { command } => issues::run(&api, command).await?,
         Command::Release { command } => releases::run(&api, command).await?,
         Command::Webhook { command } => webhooks::run(&api, command).await?,
+        Command::Mirror { command } => mirrors::run(&api, command).await?,
         Command::Admin {
             command:
                 AdminCommand::Storage {
