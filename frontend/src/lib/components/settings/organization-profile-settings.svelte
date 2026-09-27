@@ -3,6 +3,7 @@
   import { resolve } from "$app/paths";
   import Building2 from "@lucide/svelte/icons/building-2";
   import Camera from "@lucide/svelte/icons/camera";
+  import TriangleAlert from "@lucide/svelte/icons/triangle-alert";
   import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
 
@@ -34,6 +35,9 @@
   let editorOpen = $state(false);
   let removeOpen = $state(false);
   let removing = $state(false);
+  let deleteOpen = $state(false);
+  let deleteConfirmation = $state("");
+  let deleting = $state(false);
   const imageUrl = $derived(
     organizationAvatarUrl(organization.slug, organization.avatar_updated_at),
   );
@@ -102,6 +106,24 @@
       );
     } finally {
       removing = false;
+    }
+  }
+
+  async function deleteOrganization(): Promise<void> {
+    deleting = true;
+    try {
+      await requestEmpty(
+        `/api/v1/organizations/${encodeURIComponent(organization.slug)}`,
+        { method: "DELETE" },
+      );
+      deleteOpen = false;
+      await app.refreshOrganizations();
+      toast.success(`${organization.slug} was deleted`);
+      await goto(resolve("/"));
+    } catch (caught) {
+      toast.error(message(caught, "The organization could not be deleted."));
+    } finally {
+      deleting = false;
     }
   }
 </script>
@@ -219,6 +241,47 @@
         </form>
       </Card.Content>
     </section>
+
+    <section
+      class="grid gap-5 border-t py-(--card-spacing) md:grid-cols-[minmax(12rem,0.72fr)_minmax(0,1.5fr)] md:gap-10"
+      aria-labelledby="organization-delete-heading"
+    >
+      <Card.Header class="flex flex-row items-start gap-3">
+        <TriangleAlert class="mt-0.5 size-4 shrink-0 text-destructive" />
+        <div>
+          <Card.Title
+            id="organization-delete-heading"
+            role="heading"
+            aria-level={3}
+          >
+            Delete organization
+          </Card.Title>
+          <Card.Description class="mt-1 max-w-xs leading-5">
+            Remove the organization, its memberships, integrations, mirror
+            credentials, and runners.
+          </Card.Description>
+        </div>
+      </Card.Header>
+      <Card.Content>
+        <div
+          class="flex max-w-2xl flex-wrap items-center justify-between gap-4 rounded-md border border-destructive/30 bg-destructive/5 p-4"
+        >
+          <p class="text-sm text-muted-foreground">
+            Move or purge every repository first, including deleted ones.
+          </p>
+          <Button
+            type="button"
+            variant="destructive"
+            onclick={() => {
+              deleteConfirmation = "";
+              deleteOpen = true;
+            }}
+          >
+            Delete organization
+          </Button>
+        </div>
+      </Card.Content>
+    </section>
   </Card.Root>
 </section>
 
@@ -240,6 +303,32 @@
         onclick={() => void removeAvatar()}
       >
         {removing ? "Removing…" : "Remove picture"}
+      </AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>
+
+<AlertDialog.Root bind:open={deleteOpen}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>Delete {organization.slug}?</AlertDialog.Title>
+      <AlertDialog.Description>
+        This cannot be undone. The name becomes available to new users and
+        organizations.
+      </AlertDialog.Description>
+    </AlertDialog.Header>
+    <label class="grid gap-1.5 text-sm font-medium">
+      <span>Type <span class="font-mono">{organization.slug}</span> to confirm</span>
+      <Input bind:value={deleteConfirmation} autocomplete="off" />
+    </label>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Action
+        variant="destructive"
+        disabled={deleting || deleteConfirmation !== organization.slug}
+        onclick={() => void deleteOrganization()}
+      >
+        {deleting ? "Deleting…" : "Delete organization"}
       </AlertDialog.Action>
     </AlertDialog.Footer>
   </AlertDialog.Content>

@@ -9,6 +9,7 @@ mod oauth;
 mod resources;
 mod sso;
 mod two_factor;
+mod users;
 
 pub(crate) use admin::require_admin;
 pub(crate) use integrations::{authorize_namespace, validate_name as validate_integration_name};
@@ -1055,7 +1056,19 @@ pub fn router() -> Router<IdentityState> {
             "/me/passkeys/register/finish",
             post(auth::finish_passkey_registration),
         )
-        .route("/invitations", post(auth::create_invitation))
+        .route(
+            "/invitations",
+            get(users::list_invitations).post(auth::create_invitation),
+        )
+        .route("/invitations/{id}", delete(users::revoke_invitation))
+        .route("/admin/users", get(users::list_users))
+        .route("/admin/users/{username}", delete(users::delete_user))
+        .route("/admin/users/{username}/disable", post(users::disable_user))
+        .route("/admin/users/{username}/enable", post(users::enable_user))
+        .route(
+            "/admin/users/{username}/two-factor",
+            delete(users::reset_two_factor),
+        )
         .route(
             "/me/ssh-keys",
             get(resources::list_ssh_keys).post(resources::create_ssh_key),
@@ -1078,7 +1091,10 @@ pub fn router() -> Router<IdentityState> {
             "/organizations",
             get(resources::list_organizations).post(resources::create_organization),
         )
-        .route("/organizations/{slug}", put(resources::update_organization))
+        .route(
+            "/organizations/{slug}",
+            put(resources::update_organization).delete(resources::delete_organization),
+        )
         .route("/namespaces/{slug}", get(resources::get_namespace))
         .route(
             "/organizations/{slug}/avatar",

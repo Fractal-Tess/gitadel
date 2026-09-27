@@ -119,6 +119,7 @@ export type AccountSettingsView =
 
 export type AdminSettingsView =
   | "appearance"
+  | "users"
   | "access"
   | "runners"
   | "storage"

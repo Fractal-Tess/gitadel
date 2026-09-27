@@ -593,6 +593,38 @@ pub async fn update_organization(
     }))
 }
 
+/// Organization owners and instance administrators may delete an organization
+/// once it owns no repositories.
+pub async fn delete_organization(
+    State(state): State<IdentityState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<StatusCode, ApiError> {
+    let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
+    let organization = if actor.user.is_admin {
+        organization::Entity::find()
+            .filter(organization::Column::Slug.eq(&slug))
+            .one(state.database())
+            .await?
+            .ok_or_else(ApiError::not_found)?
+    } else {
+        owned_organization(&state, &slug, actor.user.id).await?
+    };
+    let transaction = state.database().begin().await?;
+    super::users::delete_organization_on(&transaction, &organization).await?;
+    state
+        .audit_on(
+            &transaction,
+            Some(actor.user.id),
+            "organization.delete",
+            Some(slug),
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Serialize)]
 pub struct MemberResponse {
     username: String,

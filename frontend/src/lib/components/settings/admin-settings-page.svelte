@@ -5,6 +5,7 @@
     type ContextNavItem,
   } from "$lib/components/app/context-nav.svelte";
   import InstanceSettings from "$lib/components/settings/instance-settings.svelte";
+  import AdminUserSettings from "$lib/components/settings/admin-user-settings.svelte";
   import ActionsSettings from "$lib/components/settings/actions-settings.svelte";
   import BackupSettings from "$lib/components/settings/backup-settings.svelte";
   import LfsSettings from "$lib/components/settings/lfs-settings.svelte";
@@ -25,7 +26,8 @@
   const actionsState = accountState.actions;
   const requestedView = $derived(page.params.view ?? "appearance");
   const view = $derived<AdminSettingsView>(
-    requestedView === "access" ||
+    requestedView === "users" ||
+      requestedView === "access" ||
       requestedView === "runners" ||
       requestedView === "storage" ||
       requestedView === "lfs" ||
@@ -39,7 +41,9 @@
   const title = $derived(
     view === "appearance"
       ? "Appearance"
-      : view === "access"
+      : view === "users"
+        ? "Users"
+        : view === "access"
         ? "Access"
         : view === "runners"
           ? "Runners"
@@ -58,7 +62,9 @@
   const description = $derived(
     view === "appearance"
       ? "Manage instance identity and repository defaults."
-      : view === "access"
+      : view === "users"
+        ? "Find accounts, disable or re-enable access, and remove accounts that are no longer needed."
+        : view === "access"
         ? "Control account access, login methods, and identity providers."
         : view === "runners"
           ? "Provide runners that can execute workflows for every repository."
@@ -112,7 +118,9 @@
       {description}
     </p>
   </header>
-  {#if view === "runners"}
+  {#if view === "users"}
+    <AdminUserSettings />
+  {:else if view === "runners"}
     <ActionsSettings state={actionsState} scope={systemRunnerScope} />
   {:else if view === "storage"}
     <StorageSettings />

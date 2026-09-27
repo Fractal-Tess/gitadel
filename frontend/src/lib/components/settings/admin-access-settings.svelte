@@ -5,6 +5,7 @@
   import ShieldCheck from "@lucide/svelte/icons/shield-check";
   import UserPlus from "@lucide/svelte/icons/user-plus";
 
+  import AdminPendingInvitations from "$lib/components/settings/admin-pending-invitations.svelte";
   import * as Alert from "$lib/components/ui/alert/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Card from "$lib/components/ui/card/index.js";
@@ -25,7 +26,14 @@
     "account.password.update": "Password updated",
     "account.register": "Account registered",
     "account.username.update": "Username updated",
+    "account.two_factor.disable": "Two-factor authentication disabled",
+    "account.two_factor.enable": "Two-factor authentication enabled",
+    "account.two_factor.recovery_codes.regenerate": "Recovery codes regenerated",
     "admin.bootstrap": "Administrator created",
+    "admin.user.delete": "User deleted",
+    "admin.user.disable": "User disabled",
+    "admin.user.enable": "User enabled",
+    "admin.user.two_factor.reset": "Two-factor authentication reset",
     "api_token.create": "API token created",
     "api_token.revoke": "API token revoked",
     "auth.login.passkey": "Signed in with passkey",
@@ -33,7 +41,9 @@
     "auth.logout": "Signed out",
     "instance.settings.update": "Instance settings updated",
     "invitation.create": "Invitation created",
+    "invitation.revoke": "Invitation revoked",
     "organization.create": "Organization created",
+    "organization.delete": "Organization deleted",
     "organization.member.add": "Organization member added",
     "organization.member.remove": "Organization member removed",
     "oauth_application.authorize": "OAuth application authorized",
@@ -149,6 +159,7 @@
         </form>
       </Card.Content>
     </Card.Root>
+    <AdminPendingInvitations version={state.invitation} />
   {/if}
 
   {#if view === "activity"}
