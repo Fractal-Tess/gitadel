@@ -196,6 +196,59 @@ pub fn parse_address(value: &str) -> Option<lettre::Address> {
     value.to_ascii_lowercase().parse().ok()
 }
 
+/// Accept one SMTP session on a local port and return the first message's
+/// DATA section.
+#[cfg(test)]
+pub(crate) async fn fake_smtp_server() -> (u16, tokio::task::JoinHandle<String>) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut lines = BufReader::new(reader).lines();
+        writer.write_all(b"220 fake ESMTP\r\n").await.unwrap();
+        let mut data = String::new();
+        let mut in_data = false;
+        while let Some(line) = lines.next_line().await.unwrap() {
+            if in_data {
+                if line == "." {
+                    writer.write_all(b"250 queued\r\n").await.unwrap();
+                    break;
+                }
+                data.push_str(&line);
+                data.push('\n');
+                continue;
+            }
+            let reply: &[u8] = if line.starts_with("DATA") {
+                in_data = true;
+                b"354 go ahead\r\n"
+            } else {
+                b"250 ok\r\n"
+            };
+            writer.write_all(reply).await.unwrap();
+        }
+        data
+    });
+    (port, handle)
+}
+
+/// A mailer that talks to [`fake_smtp_server`] without TLS.
+#[cfg(test)]
+pub(crate) fn test_mailer(port: u16) -> Mailer {
+    Mailer::start(&SmtpSettings {
+        host: "127.0.0.1".to_owned(),
+        port: Some(port),
+        tls: SmtpTls::None,
+        username: None,
+        password: None,
+        password_file: None,
+        from: "Gitadel <gitadel@example.com>".to_owned(),
+    })
+    .unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,61 +275,10 @@ mod tests {
         }));
     }
 
-    /// Accept one SMTP session on a local port and return the DATA section.
-    async fn fake_smtp_server() -> (u16, tokio::task::JoinHandle<String>) {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let handle = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let (reader, mut writer) = stream.into_split();
-            let mut lines = BufReader::new(reader).lines();
-            writer.write_all(b"220 fake ESMTP\r\n").await.unwrap();
-            let mut data = String::new();
-            let mut in_data = false;
-            while let Some(line) = lines.next_line().await.unwrap() {
-                if in_data {
-                    if line == "." {
-                        in_data = false;
-                        writer.write_all(b"250 queued\r\n").await.unwrap();
-                    } else {
-                        data.push_str(&line);
-                        data.push('\n');
-                    }
-                    continue;
-                }
-                let reply: &[u8] = match line.get(..4).unwrap_or_default() {
-                    "DATA" => {
-                        in_data = true;
-                        b"354 go ahead\r\n"
-                    }
-                    "QUIT" => {
-                        writer.write_all(b"221 bye\r\n").await.unwrap();
-                        break;
-                    }
-                    _ => b"250 ok\r\n",
-                };
-                writer.write_all(reply).await.unwrap();
-            }
-            data
-        });
-        (port, handle)
-    }
-
     #[tokio::test]
     async fn messages_are_delivered_over_smtp() {
         let (port, server) = fake_smtp_server().await;
-        let mailer = Mailer::start(&SmtpSettings {
-            host: "127.0.0.1".to_owned(),
-            port: Some(port),
-            tls: SmtpTls::None,
-            username: None,
-            password: None,
-            password_file: None,
-            from: "Gitadel <gitadel@example.com>".to_owned(),
-        })
-        .unwrap();
+        let mailer = test_mailer(port);
         mailer
             .send_now(Email {
                 to: "alice@example.com".parse().unwrap(),
@@ -285,7 +287,6 @@ mod tests {
             })
             .await
             .unwrap();
-        drop(mailer);
         let data = tokio::time::timeout(Duration::from_secs(10), server)
             .await
             .unwrap()

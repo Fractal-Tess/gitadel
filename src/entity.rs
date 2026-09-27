@@ -430,6 +430,30 @@ pub mod email_token {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod user_notification_preferences {
+    use super::*;
+
+    /// Email notification switches; a missing row means all are enabled.
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "user_notification_preferences")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub user_id: Uuid,
+        /// Issues opened in owned repositories, and issues assigned to the user.
+        pub issues: bool,
+        /// Comments on issues the user owns, authored, or is assigned to.
+        pub issue_comments: bool,
+        /// Failed Actions runs the user triggered.
+        pub action_failures: bool,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod user_avatar {
     use super::*;
 

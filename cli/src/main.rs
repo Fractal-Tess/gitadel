@@ -175,6 +175,11 @@ enum MeCommand {
         #[command(subcommand)]
         command: email::EmailCommand,
     },
+    /// Choose which notification emails to receive.
+    Notifications {
+        #[command(subcommand)]
+        command: email::NotificationsCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1136,6 +1141,7 @@ async fn run_me(api: &ApiClient, command: MeCommand) -> Result<Value> {
     match command {
         MeCommand::Profile => api.request(Method::GET, "user", None).await,
         MeCommand::Email { command } => email::run_email(api, command).await,
+        MeCommand::Notifications { command } => email::run_notifications(api, command).await,
         MeCommand::SshKeys { command } => match command {
             SshKeyCommand::List => api.request(Method::GET, "me/ssh-keys", None).await,
             SshKeyCommand::Add { name, public_key } => {

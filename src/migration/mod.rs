@@ -57,6 +57,7 @@ mod m20260921_000055_attachment_quota_indexes;
 mod m20260921_000056_webhook_outbox;
 mod m20260927_000066_webhook_events;
 mod m20260927_000067_user_email;
+mod m20260927_000068_notification_preferences;
 
 #[cfg(test)]
 mod tests;
@@ -127,6 +128,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260921_000056_webhook_outbox::Migration),
             Box::new(m20260927_000066_webhook_events::Migration),
             Box::new(m20260927_000067_user_email::Migration),
+            Box::new(m20260927_000068_notification_preferences::Migration),
         ]
     }
 }

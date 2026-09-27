@@ -6,15 +6,20 @@ mod avatar;
 mod email;
 mod integrations;
 mod mirror_identities;
+mod notifications;
 mod oauth;
 mod resources;
 mod sso;
 
 pub(crate) use admin::require_admin;
+pub(crate) use email::verified_mailbox;
 pub(crate) use integrations::{authorize_namespace, validate_name as validate_integration_name};
 pub(crate) use mirror_identities::{
     load_secret as load_mirror_identity_secret, mark_identity_used as mark_repository_identity_used,
 };
+#[cfg(test)]
+pub(crate) use notifications::NotificationPreferences;
+pub(crate) use notifications::{NotificationKind, preferences as notification_preferences};
 use std::{
     collections::{HashMap, VecDeque},
     future::Future,
@@ -342,6 +347,12 @@ impl IdentityState {
     /// Outgoing mail; disabled unless `[smtp]` is configured.
     pub fn mailer(&self) -> &crate::mail::Mailer {
         &self.mailer
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_mailer(mut self, mailer: crate::mail::Mailer) -> Self {
+        self.mailer = mailer;
+        self
     }
     pub(crate) async fn initialize_lfs_storage(
         &self,
@@ -941,6 +952,10 @@ pub fn router() -> Router<IdentityState> {
         )
         .route("/me/email/verification", post(email::resend_verification))
         .route("/auth/email/verify", post(email::verify_email))
+        .route(
+            "/me/notifications",
+            get(notifications::get_notifications).put(notifications::update_notifications),
+        )
         .route("/auth/password-reset", post(email::request_password_reset))
         .route(
             "/auth/password-reset/confirm",

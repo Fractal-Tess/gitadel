@@ -1,4 +1,5 @@
-//! Email commands: `gtd me email …` and `gtd admin smtp …`.
+//! Email commands: `gtd me email …`, `gtd me notifications …`, and
+//! `gtd admin smtp …`.
 
 use std::io::{self, IsTerminal, Read};
 
@@ -26,6 +27,24 @@ pub(crate) enum EmailCommand {
     },
     /// Send a new verification link for the unverified address.
     Resend,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum NotificationsCommand {
+    /// Show which notification emails are enabled.
+    Show,
+    /// Change notification emails; omitted switches keep their value.
+    Set {
+        /// Issues opened in owned repositories and issues assigned to you.
+        #[arg(long)]
+        issues: Option<bool>,
+        /// Comments on issues you own, opened, or are assigned to.
+        #[arg(long)]
+        issue_comments: Option<bool>,
+        /// Failed Actions runs triggered by your pushes.
+        #[arg(long)]
+        action_failures: Option<bool>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -60,6 +79,32 @@ pub(crate) async fn run_email(api: &ApiClient, command: EmailCommand) -> Result<
         }
         EmailCommand::Resend => {
             api.request(Method::POST, "me/email/verification", None)
+                .await
+        }
+    }
+}
+
+pub(crate) async fn run_notifications(
+    api: &ApiClient,
+    command: NotificationsCommand,
+) -> Result<Value> {
+    match command {
+        NotificationsCommand::Show => api.request(Method::GET, "me/notifications", None).await,
+        NotificationsCommand::Set {
+            issues,
+            issue_comments,
+            action_failures,
+        } => {
+            let current = api.request(Method::GET, "me/notifications", None).await?;
+            let merged = |value: Option<bool>, key: &str| {
+                value.unwrap_or_else(|| current.get(key).and_then(Value::as_bool).unwrap_or(true))
+            };
+            let body = json!({
+                "issues": merged(issues, "issues"),
+                "issue_comments": merged(issue_comments, "issue_comments"),
+                "action_failures": merged(action_failures, "action_failures"),
+            });
+            api.request(Method::PUT, "me/notifications", Some(body))
                 .await
         }
     }

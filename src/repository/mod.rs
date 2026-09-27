@@ -16,6 +16,7 @@ mod maintenance;
 mod mirror_scheduler;
 mod mirrors;
 mod native_remote;
+pub(crate) mod notifications;
 mod registry;
 mod releases;
 mod resources;

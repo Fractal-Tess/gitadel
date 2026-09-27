@@ -20,7 +20,7 @@ use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use super::{
-    Permission, RepositoryState, render_markdown,
+    Permission, RepositoryState, notifications, render_markdown,
     webhook_events::{self, ChangeAction, IssueAction},
 };
 use crate::{
@@ -331,6 +331,7 @@ pub async fn create_issue(
         serde_json::json!({}),
     )
     .await;
+    notifications::issue_opened(&state, &repository, &actor.user, &issue);
     Ok((
         StatusCode::CREATED,
         Json(issue_response(&state, issue, Some(actor.user.id), can_write).await?),
@@ -568,6 +569,7 @@ pub async fn create_comment(
         None,
     )
     .await;
+    notifications::issue_commented(&state, &repository, &actor.user, &issue, &comment);
     Ok((
         StatusCode::CREATED,
         Json(comment_response(&state, comment, Some(actor.user.id), false).await?),
@@ -1235,6 +1237,7 @@ async fn emit_issue_update_events(
         }
         if let Some(new) = issue.assignee_user_id {
             emit_assignment(state, repository, actor, issue, IssueAction::Assigned, new).await;
+            notifications::issue_assigned(state, repository, actor, issue);
         }
     }
     let Some((before, after)) = labels else {

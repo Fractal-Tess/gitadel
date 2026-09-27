@@ -461,6 +461,13 @@ password?**: a reset link is sent to the account's verified address, expires
 after an hour, and works once. The request form answers the same way whether or
 not an account exists, and completing a reset signs out every session.
 
+Verified addresses also receive notifications: new issues in repositories the
+user owns (personally or as an organization owner), issues assigned to them,
+comments on issues they own, opened, or are assigned to, and failed Actions runs
+they triggered. Nobody is emailed about their own actions or about repositories
+they can no longer read. Each kind can be switched off under **Account settings
+→ Profile → Notifications** or with `gtd me notifications set --issues false`.
+
 ### Local HTTPS for passkeys
 
 Passkeys require a secure browser origin. Gitadel can terminate HTTPS directly

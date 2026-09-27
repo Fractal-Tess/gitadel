@@ -1,4 +1,5 @@
-//! Side effects announced when workflow runs are requested or complete.
+//! Side effects announced when workflow runs are requested or complete:
+//! `workflow_run` webhooks and failure emails to the user who pushed.
 //!
 //! Everything here runs on the repository task tracker so runner protocol
 //! responses and push handling never wait on webhook or notification work.
@@ -8,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     entity::action_run,
-    repository::{RepositoryState, webhook_events},
+    repository::{RepositoryState, notifications, webhook_events},
 };
 
 /// Announce a newly stored run.
@@ -54,6 +55,7 @@ fn spawn(state: &RepositoryState, run_id: Uuid, events: &'static [RunEvent]) {
                 }
                 RunEvent::Completed => {
                     webhook_events::workflow_run(&task_state, &run, "completed").await;
+                    notifications::run_failed(&task_state, &run).await;
                 }
             }
         }
