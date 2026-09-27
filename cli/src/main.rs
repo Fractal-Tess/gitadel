@@ -12,6 +12,8 @@ use url::Url;
 use uuid::Uuid;
 
 mod auth;
+mod deploy_keys;
+mod protection;
 use auth::AuthCommand;
 
 #[derive(Debug, Parser)]
@@ -103,6 +105,16 @@ enum RepoCommand {
     Collaborators {
         #[command(subcommand)]
         command: CollaboratorCommand,
+    },
+    /// Manage branch and tag protection rules.
+    Protection {
+        #[command(subcommand)]
+        command: protection::ProtectionCommand,
+    },
+    /// Manage repository deploy keys.
+    DeployKey {
+        #[command(subcommand)]
+        command: deploy_keys::DeployKeyCommand,
     },
 }
 
@@ -1098,6 +1110,8 @@ async fn run_repo(api: &ApiClient, command: RepoCommand) -> Result<Value> {
                 api.request(Method::DELETE, &path, None).await
             }
         },
+        RepoCommand::Protection { command } => protection::run(api, command).await,
+        RepoCommand::DeployKey { command } => deploy_keys::run(api, command).await,
     }
 }
 
