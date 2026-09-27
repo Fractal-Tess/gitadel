@@ -382,6 +382,54 @@ pub mod user {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod user_email {
+    use super::*;
+
+    /// A user's optional email address. Only verified addresses receive
+    /// password resets and notifications.
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "user_emails")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub user_id: Uuid,
+        #[sea_orm(unique)]
+        pub email: String,
+        pub verified_at: Option<DateTimeUtc>,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod email_token {
+    use super::*;
+
+    /// Single-use token sent by email; only its hash is stored.
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "email_tokens")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub token_hash: String,
+        pub user_id: Uuid,
+        /// `verify` or `reset`.
+        pub purpose: String,
+        /// The address being verified, for `verify` tokens.
+        pub email: Option<String>,
+        pub expires_at: DateTimeUtc,
+        pub used_at: Option<DateTimeUtc>,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod user_avatar {
     use super::*;
 

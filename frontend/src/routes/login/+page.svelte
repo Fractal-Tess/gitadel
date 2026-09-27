@@ -163,7 +163,15 @@
           />
         </Field.Field>
         <Field.Field>
-          <Field.Label for="login-password">Password</Field.Label>
+          <div class="flex items-baseline justify-between gap-3">
+            <Field.Label for="login-password">Password</Field.Label>
+            {#if app.authStatus?.email_enabled}
+              <a
+                class="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+                href={resolve("/reset-password")}>Forgot password?</a
+              >
+            {/if}
+          </div>
           <Input
             id="login-password"
             type="password"

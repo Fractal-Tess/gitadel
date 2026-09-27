@@ -18,6 +18,7 @@ export const authStatusSchema = z.object({
   authenticated: z.boolean(),
   user: userSchema.nullable(),
   authentication: authenticationConfigurationSchema,
+  email_enabled: z.boolean().default(false),
 });
 
 export const authResponseSchema = z.object({ user: userSchema });

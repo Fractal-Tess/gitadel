@@ -3,6 +3,7 @@ mod admin_lfs;
 mod admin_registry;
 mod auth;
 mod avatar;
+mod email;
 mod integrations;
 mod mirror_identities;
 mod oauth;
@@ -100,6 +101,7 @@ pub struct IdentityState {
     measured_storage: Arc<Mutex<HashMap<Uuid, MeasuredUsage>>>,
     integrity_settings_version: watch::Sender<u64>,
     dummy_password_hash: Arc<String>,
+    mailer: crate::mail::Mailer,
 }
 
 pub(crate) struct ValidatedBackup {
@@ -302,6 +304,13 @@ impl IdentityState {
             .hash_password(b"gitadel-invalid-login")
             .map_err(|error| anyhow::anyhow!("could not prepare password verification: {error}"))?
             .to_string();
+        let mailer = match runtime_settings
+            .as_deref()
+            .and_then(|settings| settings.smtp.as_ref())
+        {
+            Some(smtp) => crate::mail::Mailer::start(smtp)?,
+            None => crate::mail::Mailer::disabled(),
+        };
         Ok(Self {
             database,
             settings,
@@ -322,11 +331,17 @@ impl IdentityState {
             measured_storage: Arc::new(Mutex::new(HashMap::new())),
             integrity_settings_version: watch::channel(0).0,
             dummy_password_hash: Arc::new(dummy_password_hash),
+            mailer,
         })
     }
 
     pub fn database(&self) -> &DatabaseConnection {
         &self.database
+    }
+
+    /// Outgoing mail; disabled unless `[smtp]` is configured.
+    pub fn mailer(&self) -> &crate::mail::Mailer {
+        &self.mailer
     }
     pub(crate) async fn initialize_lfs_storage(
         &self,
@@ -916,6 +931,21 @@ pub fn router() -> Router<IdentityState> {
             put(sso::update_provider).delete(sso::delete_provider),
         )
         .route("/instance", get(admin::public_instance_settings))
+        .route("/admin/smtp", get(email::smtp_status))
+        .route("/admin/smtp/test", post(email::send_test_email))
+        .route(
+            "/me/email",
+            get(email::get_email)
+                .put(email::set_email)
+                .delete(email::delete_email),
+        )
+        .route("/me/email/verification", post(email::resend_verification))
+        .route("/auth/email/verify", post(email::verify_email))
+        .route("/auth/password-reset", post(email::request_password_reset))
+        .route(
+            "/auth/password-reset/confirm",
+            post(email::confirm_password_reset),
+        )
         .route(
             "/instance/favicon/{theme}",
             get(admin::public_instance_favicon),

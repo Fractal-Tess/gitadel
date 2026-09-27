@@ -12,6 +12,7 @@ use url::Url;
 use uuid::Uuid;
 
 mod auth;
+mod email;
 use auth::AuthCommand;
 
 #[derive(Debug, Parser)]
@@ -169,6 +170,11 @@ enum MeCommand {
         #[command(subcommand)]
         command: SshKeyCommand,
     },
+    /// Manage the account email address.
+    Email {
+        #[command(subcommand)]
+        command: email::EmailCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -256,6 +262,11 @@ enum AdminCommand {
     Backup {
         #[command(subcommand)]
         command: BackupCommand,
+    },
+    /// Inspect and test outgoing email.
+    Smtp {
+        #[command(subcommand)]
+        command: email::SmtpCommand,
     },
     /// Read administrator audit history.
     Audit {
@@ -1124,6 +1135,7 @@ async fn run_repo(api: &ApiClient, command: RepoCommand) -> Result<Value> {
 async fn run_me(api: &ApiClient, command: MeCommand) -> Result<Value> {
     match command {
         MeCommand::Profile => api.request(Method::GET, "user", None).await,
+        MeCommand::Email { command } => email::run_email(api, command).await,
         MeCommand::SshKeys { command } => match command {
             SshKeyCommand::List => api.request(Method::GET, "me/ssh-keys", None).await,
             SshKeyCommand::Add { name, public_key } => {
@@ -1269,6 +1281,7 @@ async fn run_admin(api: &ApiClient, command: AdminCommand) -> Result<Value> {
         },
         AdminCommand::Storage { command } => run_storage(api, command).await,
         AdminCommand::Backup { command } => run_backup(api, command).await,
+        AdminCommand::Smtp { command } => email::run_smtp(api, command).await,
         AdminCommand::Audit { limit } => {
             api.request(
                 Method::GET,

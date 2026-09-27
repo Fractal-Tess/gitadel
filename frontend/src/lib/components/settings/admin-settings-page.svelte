@@ -7,6 +7,7 @@
   import InstanceSettings from "$lib/components/settings/instance-settings.svelte";
   import ActionsSettings from "$lib/components/settings/actions-settings.svelte";
   import BackupSettings from "$lib/components/settings/backup-settings.svelte";
+  import EmailSettings from "$lib/components/settings/email-settings.svelte";
   import LfsSettings from "$lib/components/settings/lfs-settings.svelte";
   import RegistrySettings from "$lib/components/settings/registry-settings.svelte";
   import IntegritySettings from "$lib/components/settings/integrity-settings.svelte";
@@ -26,6 +27,7 @@
   const requestedView = $derived(page.params.view ?? "appearance");
   const view = $derived<AdminSettingsView>(
     requestedView === "access" ||
+      requestedView === "email" ||
       requestedView === "runners" ||
       requestedView === "storage" ||
       requestedView === "lfs" ||
@@ -41,7 +43,9 @@
       ? "Appearance"
       : view === "access"
         ? "Access"
-        : view === "runners"
+        : view === "email"
+          ? "Email"
+          : view === "runners"
           ? "Runners"
           : view === "storage"
             ? "Storage"
@@ -60,7 +64,9 @@
       ? "Manage instance identity and repository defaults."
       : view === "access"
         ? "Control account access, login methods, and identity providers."
-        : view === "runners"
+        : view === "email"
+          ? "Check outgoing mail used for password resets and notifications."
+          : view === "runners"
           ? "Provide runners that can execute workflows for every repository."
           : view === "storage"
             ? "Define reusable filesystem and S3-compatible destinations."
@@ -112,7 +118,9 @@
       {description}
     </p>
   </header>
-  {#if view === "runners"}
+  {#if view === "email"}
+    <EmailSettings />
+  {:else if view === "runners"}
     <ActionsSettings state={actionsState} scope={systemRunnerScope} />
   {:else if view === "storage"}
     <StorageSettings />

@@ -120,6 +120,7 @@ export type AccountSettingsView =
 export type AdminSettingsView =
   | "appearance"
   | "access"
+  | "email"
   | "runners"
   | "storage"
   | "lfs"

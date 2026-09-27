@@ -11,6 +11,7 @@ mod entity;
 mod filesystem;
 mod identity;
 mod integrations;
+mod mail;
 mod migration;
 mod network;
 mod registry;

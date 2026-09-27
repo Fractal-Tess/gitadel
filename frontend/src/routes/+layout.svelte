@@ -27,7 +27,13 @@
   );
   // Sign-in, registration and OAuth consent render without the app shell:
   // each is a single decision the visitor must finish before navigating.
-  const bareRoutes = new Set(["/login", "/register", "/oauth/consent"]);
+  const bareRoutes = new Set([
+    "/login",
+    "/register",
+    "/reset-password",
+    "/verify-email",
+    "/oauth/consent",
+  ]);
   let bare = $derived(bareRoutes.has(page.url.pathname));
 
   function isProtectedPath(pathname: string): boolean {

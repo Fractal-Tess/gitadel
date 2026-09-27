@@ -32,6 +32,9 @@ pub struct AuthStatusResponse {
     authenticated: bool,
     user: Option<UserResponse>,
     authentication: super::sso::AuthenticationConfiguration,
+    /// Whether outgoing email is configured; gates password reset and
+    /// email settings in the interface.
+    email_enabled: bool,
 }
 
 pub async fn status(
@@ -46,6 +49,7 @@ pub async fn status(
         authenticated: account.is_some(),
         authentication,
         user: account.map(UserResponse::from),
+        email_enabled: state.mailer().is_enabled(),
     }))
 }
 
