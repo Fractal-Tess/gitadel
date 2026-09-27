@@ -21,7 +21,7 @@ use super::{
 use crate::entity::{
     action_runner, action_runner_registration_token, api_token, audit_event, namespace,
     namespace_integration, namespace_mirror_identity, organization, organization_member,
-    repository, repository_alias, repository_import, repository_import_item,
+    repository, repository_alias, repository_deploy_key, repository_import, repository_import_item,
     ssh_key as ssh_key_entity, user,
 };
 
@@ -73,6 +73,18 @@ pub async fn create_ssh_key(
         .is_some()
     {
         return Err(ApiError::conflict("That SSH key is already registered."));
+    }
+    // One fingerprint maps to one SSH identity, so a deploy key cannot also
+    // be a user key.
+    if repository_deploy_key::Entity::find()
+        .filter(repository_deploy_key::Column::Fingerprint.eq(&fingerprint))
+        .one(state.database())
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::conflict(
+            "That SSH key is already registered as a repository deploy key.",
+        ));
     }
     let transaction = state.database().begin().await?;
     let row = ssh_key_entity::ActiveModel {

@@ -1,4 +1,5 @@
 mod browser;
+mod deploy_keys;
 mod files;
 mod git_http;
 mod git_service;
@@ -1080,6 +1081,14 @@ pub fn router() -> Router<RepositoryState> {
         .route(
             "/repositories/{namespace}/{name}/collaborators/{username}",
             delete(resources::remove_collaborator),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/deploy-keys",
+            get(deploy_keys::list_deploy_keys).post(deploy_keys::create_deploy_key),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/deploy-keys/{id}",
+            delete(deploy_keys::delete_deploy_key),
         )
         .route(
             "/repositories/{namespace}/{name}/protection-rules",
