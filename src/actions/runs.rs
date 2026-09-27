@@ -43,7 +43,7 @@ pub(crate) async fn update_task(
     outputs: BTreeMap<String, String>,
     steps_json: String,
     lease_seconds: i64,
-) -> Result<action_job::Model, StateError> {
+) -> Result<(action_job::Model, Option<Uuid>), StateError> {
     validate_outputs(&outputs)?;
     let transaction = database.begin().await?;
     let job = action_job::Entity::find_by_id(task_id)
@@ -53,12 +53,12 @@ pub(crate) async fn update_task(
         .ok_or(StateError::ForeignTask)?;
     if job.status == "cancelled" {
         transaction.commit().await?;
-        return Ok(job);
+        return Ok((job, None));
     }
     if matches!(job.status.as_str(), "success" | "failure" | "skipped") {
         if result.status() == Some(job.status.as_str()) {
             transaction.commit().await?;
-            return Ok(job);
+            return Ok((job, None));
         }
         return Err(StateError::Regression);
     }
@@ -86,24 +86,24 @@ pub(crate) async fn update_task(
         tokens::revoke_job(&transaction, job.id).await?;
         release_dependents(&transaction, job.id).await?;
     }
-    aggregate_run(&transaction, job.run_id).await?;
+    let completed = aggregate_run(&transaction, job.run_id).await?;
     transaction.commit().await?;
-    Ok(job)
+    Ok((job, completed))
 }
 
 pub(crate) async fn cancel_run(
     database: &DatabaseConnection,
     run_id: Uuid,
     actor_id: Uuid,
-) -> Result<action_run::Model, StateError> {
+) -> Result<(action_run::Model, bool), StateError> {
     let transaction = database.begin().await?;
     let run = action_run::Entity::find_by_id(run_id)
         .one(&transaction)
         .await?
         .ok_or(StateError::Missing)?;
-    if matches!(run.status.as_str(), "success" | "failure" | "cancelled") {
+    if is_terminal_run(&run.status) {
         transaction.commit().await?;
-        return Ok(run);
+        return Ok((run, false));
     }
     let now = Utc::now();
     let jobs = action_job::Entity::find()
@@ -132,7 +132,11 @@ pub(crate) async fn cancel_run(
     active.completed_at = Set(Some(now));
     let run = active.update(&transaction).await?;
     transaction.commit().await?;
-    Ok(run)
+    Ok((run, true))
+}
+
+fn is_terminal_run(status: &str) -> bool {
+    matches!(status, "success" | "failure" | "cancelled")
 }
 
 async fn release_dependents<C: sea_orm::ConnectionTrait>(
@@ -176,16 +180,20 @@ async fn release_dependents<C: sea_orm::ConnectionTrait>(
     Ok(())
 }
 
+/// Recompute a run's status from its jobs.
+///
+/// Returns the run ID when this call moved the run into a terminal state, so
+/// the caller can announce completion exactly once after committing.
 async fn aggregate_run<C: sea_orm::ConnectionTrait>(
     database: &C,
     run_id: Uuid,
-) -> Result<(), sea_orm::DbErr> {
+) -> Result<Option<Uuid>, sea_orm::DbErr> {
     let jobs = action_job::Entity::find()
         .filter(action_job::Column::RunId.eq(run_id))
         .all(database)
         .await?;
     if jobs.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let terminal = jobs.iter().all(|job| {
         matches!(
@@ -209,7 +217,11 @@ async fn aggregate_run<C: sea_orm::ConnectionTrait>(
     } else {
         "queued"
     };
+    let mut completed = None;
     if let Some(run) = action_run::Entity::find_by_id(run_id).one(database).await? {
+        if terminal && !is_terminal_run(&run.status) {
+            completed = Some(run.id);
+        }
         let now = Utc::now();
         let mut active = run.into_active_model();
         active.status = Set(status.to_owned());
@@ -221,7 +233,7 @@ async fn aggregate_run<C: sea_orm::ConnectionTrait>(
         }
         active.update(database).await?;
     }
-    Ok(())
+    Ok(completed)
 }
 
 fn validate_outputs(outputs: &BTreeMap<String, String>) -> Result<(), StateError> {
@@ -288,8 +300,11 @@ pub(crate) async fn maintain(state: &ActionsState) -> anyhow::Result<()> {
         }
         tokens::revoke_job(&transaction, id).await?;
         release_dependents(&transaction, id).await?;
-        aggregate_run(&transaction, run_id).await?;
+        let completed = aggregate_run(&transaction, run_id).await?;
         transaction.commit().await?;
+        if let Some(run_id) = completed {
+            super::events::spawn_run_completed(state.repository(), run_id);
+        }
     }
     action_runner_fetch::Entity::delete_many()
         .filter(action_runner_fetch::Column::CreatedAt.lt(now - Duration::hours(6)))

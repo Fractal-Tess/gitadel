@@ -1,5 +1,6 @@
 pub(crate) mod api;
 pub(crate) mod artifacts;
+pub(crate) mod events;
 pub(crate) mod logs;
 pub(crate) mod protocol;
 pub(crate) mod runners;

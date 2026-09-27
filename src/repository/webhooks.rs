@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    future::Future,
     path::Path,
     sync::{Arc, LazyLock},
     time::{Duration, Instant},
@@ -44,6 +45,20 @@ const WEBHOOK_DELIVERY_HISTORY_LIMIT: usize = 50;
 const WEBHOOK_DELIVERY_BODY_LIMIT: usize = 2048;
 const WEBHOOK_RESPONSE_BYTE_LIMIT: usize = WEBHOOK_DELIVERY_BODY_LIMIT * 4;
 const WEBHOOK_DELIVERY_CONCURRENCY: usize = 8;
+
+/// Event names a webhook may subscribe to, in display order.
+///
+/// `ping` is not listed: it is always delivered on creation and on request.
+pub(crate) const WEBHOOK_EVENTS: &[&str] = &[
+    "push",
+    "create",
+    "delete",
+    "release",
+    "issues",
+    "issue_comment",
+    "workflow_run",
+];
+const DEFAULT_WEBHOOK_EVENT: &str = "push";
 static WEBHOOK_DELIVERY_SLOTS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(WEBHOOK_DELIVERY_CONCURRENCY)));
 
@@ -68,7 +83,7 @@ pub struct WebhookResponse {
     type_name: &'static str,
     name: &'static str,
     active: bool,
-    events: [&'static str; 1],
+    events: Vec<String>,
     config: WebhookConfigResponse,
     url: String,
     ping_url: String,
@@ -85,6 +100,7 @@ impl WebhookResponse {
         repository: &repository::Model,
     ) -> Self {
         let url = api_hook_url(state, repository, hook.id);
+        let events = hook_events(&hook).map(str::to_owned).collect();
         let last_response = WebhookLastResponse {
             code: hook.last_response_status,
             status: match (
@@ -102,7 +118,7 @@ impl WebhookResponse {
             type_name: "Repository",
             name: "web",
             active: hook.active,
-            events: ["push"],
+            events,
             config: WebhookConfigResponse {
                 url: hook.url,
                 content_type: "json",
@@ -251,7 +267,9 @@ pub async fn create_webhook(
             SCOPE_WRITE,
         )
         .await?;
-    validate_kind(request.name.as_deref(), request.events.as_deref())?;
+    validate_kind(request.name.as_deref())?;
+    let events = normalize_events(request.events.as_deref())?
+        .unwrap_or_else(|| DEFAULT_WEBHOOK_EVENT.to_owned());
     validate_content_type(request.config.content_type.as_deref())?;
     let endpoint = validate_endpoint(&request.config.url).await?;
     let secret = validate_secret(request.config.secret)?;
@@ -268,6 +286,7 @@ pub async fn create_webhook(
         last_delivery_at: Set(None),
         last_response_status: Set(None),
         last_response_message: Set(None),
+        events: Set(events),
     }
     .insert(&transaction)
     .await?;
@@ -306,11 +325,14 @@ pub async fn update_webhook(
             SCOPE_WRITE,
         )
         .await?;
-    validate_kind(None, request.events.as_deref())?;
+    let events = normalize_events(request.events.as_deref())?;
     let stored = find_hook(state.identity().database(), repository.id, id).await?;
     let mut active: repository_webhook::ActiveModel = stored.into();
     if let Some(enabled) = request.active {
         active.active = Set(enabled);
+    }
+    if let Some(events) = events {
+        active.events = Set(events);
     }
     if let Some(config) = request.config {
         validate_content_type(config.content_type.as_deref())?;
@@ -447,7 +469,7 @@ pub async fn redeliver_webhook_delivery(
             Some(format!("{namespace}/{name}/{id}/{delivery_id}")),
         )
         .await?;
-    queue_delivery(&state, &hook, delivery.event, payload).await?;
+    queue_delivery(&state, &hook, &delivery.event, &payload).await?;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -521,11 +543,7 @@ pub(super) async fn dispatch_push(
     actor_user_id: Uuid,
     before: RefSnapshot,
 ) -> Result<(), ApiError> {
-    let hooks = repository_webhook::Entity::find()
-        .filter(repository_webhook::Column::RepositoryId.eq(repository.id))
-        .filter(repository_webhook::Column::Active.eq(true))
-        .all(state.identity().database())
-        .await?;
+    let hooks = active_hooks(state, repository.id).await?;
     let integrations_enabled = super::integrations::has_enabled(state, repository.id).await?;
     let path = state.repository_path(repository);
     let after = snapshot_refs(&path).await?;
@@ -569,8 +587,23 @@ pub(super) async fn dispatch_push(
                 "could not enqueue Actions workflows"
             );
         }
-        for hook in &hooks {
-            queue_delivery(state, hook, String::from("push"), payload.clone()).await?;
+        for hook in hooks.iter().filter(|hook| subscribes(hook, "push")) {
+            insert_delivery(state, hook, "push", &payload).await?;
+        }
+        if old_oid == zero || new_oid == zero {
+            let event = if old_oid == zero { "create" } else { "delete" };
+            let subscribed = hooks
+                .iter()
+                .filter(|hook| subscribes(hook, event))
+                .collect::<Vec<_>>();
+            if !subscribed.is_empty()
+                && let Some(ref_payload) =
+                    ref_event_payload(state, repository, &actor, reference, new_oid, event)
+            {
+                for hook in subscribed {
+                    insert_delivery(state, hook, event, &ref_payload).await?;
+                }
+            }
         }
         if integrations_enabled {
             super::integrations::dispatch_push(
@@ -582,7 +615,99 @@ pub(super) async fn dispatch_push(
             );
         }
     }
-    Ok(())
+    process_pending_deliveries(state).await
+}
+
+/// Queue `event` for every active hook of the repository subscribed to it.
+///
+/// The payload is built only when at least one hook subscribes, so callers can
+/// emit unconditionally without paying for unused payloads.
+pub(super) async fn dispatch_event<F, Fut>(
+    state: &RepositoryState,
+    repository_id: Uuid,
+    event: &str,
+    payload: F,
+) -> Result<(), ApiError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<Value, ApiError>>,
+{
+    let hooks = active_hooks(state, repository_id)
+        .await?
+        .into_iter()
+        .filter(|hook| subscribes(hook, event))
+        .collect::<Vec<_>>();
+    if hooks.is_empty() {
+        return Ok(());
+    }
+    let payload = payload().await?;
+    for hook in &hooks {
+        insert_delivery(state, hook, event, &payload).await?;
+    }
+    process_pending_deliveries(state).await
+}
+
+/// Whether any active hook of the repository subscribes to `event`.
+pub(super) async fn has_subscribers(
+    state: &RepositoryState,
+    repository_id: Uuid,
+    event: &str,
+) -> Result<bool, ApiError> {
+    Ok(active_hooks(state, repository_id)
+        .await?
+        .iter()
+        .any(|hook| subscribes(hook, event)))
+}
+
+async fn active_hooks(
+    state: &RepositoryState,
+    repository_id: Uuid,
+) -> Result<Vec<repository_webhook::Model>, ApiError> {
+    Ok(repository_webhook::Entity::find()
+        .filter(repository_webhook::Column::RepositoryId.eq(repository_id))
+        .filter(repository_webhook::Column::Active.eq(true))
+        .all(state.identity().database())
+        .await?)
+}
+
+fn hook_events(hook: &repository_webhook::Model) -> impl Iterator<Item = &str> {
+    hook.events
+        .split(',')
+        .map(str::trim)
+        .filter(|event| !event.is_empty())
+}
+
+fn subscribes(hook: &repository_webhook::Model, event: &str) -> bool {
+    hook_events(hook).any(|subscribed| subscribed == event)
+}
+
+/// Payload for the `create` and `delete` events, shaped like GitHub and Gitea.
+fn ref_event_payload(
+    state: &RepositoryState,
+    repository: &repository::Model,
+    actor: &user::Model,
+    reference: &str,
+    sha: &str,
+    event: &str,
+) -> Option<Value> {
+    let (ref_type, name) = if let Some(name) = reference.strip_prefix("refs/heads/") {
+        ("branch", name)
+    } else {
+        ("tag", reference.strip_prefix("refs/tags/")?)
+    };
+    let mut payload = json!({
+        "ref": name,
+        "ref_type": ref_type,
+        "pusher_type": "user",
+        "repository": repository_payload(state, repository),
+        "sender": user_payload(actor),
+    });
+    if event == "create" {
+        payload["sha"] = json!(sha);
+        payload["master_branch"] = json!(repository.default_branch);
+        payload["description"] = json!(repository.description);
+    }
+    Some(payload)
 }
 
 fn pushed_paths(commits: &[Value]) -> Vec<String> {
@@ -610,19 +735,30 @@ async fn queue_ping(
         "repository": repository_payload(&state, &repository),
         "sender": user_payload(&actor),
     });
-    queue_delivery(&state, &hook, String::from("ping"), payload).await
+    queue_delivery(&state, &hook, "ping", &payload).await
 }
 
 async fn queue_delivery(
     state: &RepositoryState,
     hook: &repository_webhook::Model,
-    event: String,
-    payload: Value,
+    event: &str,
+    payload: &Value,
+) -> Result<(), ApiError> {
+    insert_delivery(state, hook, event, payload).await?;
+    process_pending_deliveries(state).await
+}
+
+/// Record a pending delivery in the outbox without starting delivery.
+async fn insert_delivery(
+    state: &RepositoryState,
+    hook: &repository_webhook::Model,
+    event: &str,
+    payload: &Value,
 ) -> Result<(), ApiError> {
     repository_webhook_delivery::ActiveModel {
         id: Set(Uuid::new_v4()),
         webhook_id: Set(hook.id),
-        event: Set(event),
+        event: Set(event.to_owned()),
         payload: Set(payload.to_string()),
         response_status: Set(None),
         response_body: Set(None),
@@ -634,7 +770,7 @@ async fn queue_delivery(
     }
     .insert(state.identity().database())
     .await?;
-    process_pending_deliveries(state).await
+    Ok(())
 }
 
 pub(super) async fn process_pending_deliveries(state: &RepositoryState) -> Result<(), ApiError> {
@@ -823,16 +959,40 @@ async fn find_hook(
         .ok_or_else(ApiError::not_found)
 }
 
-fn validate_kind(name: Option<&str>, events: Option<&[String]>) -> Result<(), ApiError> {
+fn validate_kind(name: Option<&str>) -> Result<(), ApiError> {
     if name.is_some_and(|name| name != "web") {
         return Err(ApiError::bad_request("Webhook name must be web."));
     }
-    if events.is_some_and(|events| events != ["push"]) {
-        return Err(ApiError::bad_request(
-            "This version supports the push webhook event only.",
-        ));
-    }
     Ok(())
+}
+
+/// Validate requested events and return their stored, canonical form.
+///
+/// `*` subscribes to every supported event, as on GitHub.
+fn normalize_events(events: Option<&[String]>) -> Result<Option<String>, ApiError> {
+    let Some(events) = events else {
+        return Ok(None);
+    };
+    if let Some(unknown) = events
+        .iter()
+        .map(|event| event.trim())
+        .find(|event| *event != "*" && !WEBHOOK_EVENTS.contains(event))
+    {
+        return Err(ApiError::bad_request(format!(
+            "Unsupported webhook event `{unknown}`. Supported events: {}.",
+            WEBHOOK_EVENTS.join(", ")
+        )));
+    }
+    let wildcard = events.iter().any(|event| event.trim() == "*");
+    let selected = WEBHOOK_EVENTS
+        .iter()
+        .copied()
+        .filter(|supported| wildcard || events.iter().any(|event| event.trim() == *supported))
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Err(ApiError::bad_request("Select at least one webhook event."));
+    }
+    Ok(Some(selected.join(",")))
 }
 
 fn validate_content_type(content_type: Option<&str>) -> Result<(), ApiError> {
@@ -1048,7 +1208,7 @@ async fn commit_entries(path: &Path, before: &str, after: &str, zero: &str) -> V
     })
 }
 
-fn repository_payload(state: &RepositoryState, repository: &repository::Model) -> Value {
+pub(super) fn repository_payload(state: &RepositoryState, repository: &repository::Model) -> Value {
     let full_name = format!("{}/{}", repository.namespace, repository.name);
     json!({
         "id": repository.id,
@@ -1065,7 +1225,7 @@ fn repository_payload(state: &RepositoryState, repository: &repository::Model) -
     })
 }
 
-fn user_payload(actor: &user::Model) -> Value {
+pub(super) fn user_payload(actor: &user::Model) -> Value {
     json!({
         "id": actor.id,
         "login": actor.username,
@@ -1083,7 +1243,7 @@ fn api_hook_url(state: &RepositoryState, repository: &repository::Model, id: Uui
     )
 }
 
-fn public_url(state: &RepositoryState, path: &str) -> String {
+pub(super) fn public_url(state: &RepositoryState, path: &str) -> String {
     let mut url = state.public_url.as_ref().clone();
     url.set_path(path);
     url.set_query(None);
@@ -1114,6 +1274,47 @@ pub(super) fn webhook_client() -> Result<reqwest::Client, reqwest::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn events(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn webhook_events_are_validated_and_canonicalised() {
+        assert_eq!(normalize_events(None).unwrap(), None);
+        assert_eq!(
+            normalize_events(Some(&events(&["issues", "push", "issues"]))).unwrap(),
+            Some("push,issues".to_owned())
+        );
+        assert_eq!(
+            normalize_events(Some(&events(&["*"]))).unwrap(),
+            Some(WEBHOOK_EVENTS.join(","))
+        );
+        assert!(normalize_events(Some(&[])).is_err());
+        assert!(normalize_events(Some(&events(&["pull_request"]))).is_err());
+    }
+
+    #[test]
+    fn hooks_match_only_subscribed_events() {
+        let now = Utc::now();
+        let hook = repository_webhook::Model {
+            id: Uuid::new_v4(),
+            repository_id: Uuid::new_v4(),
+            url: "https://example.com/hook".to_owned(),
+            secret: None,
+            active: true,
+            created_at: now,
+            updated_at: now,
+            last_delivery_at: None,
+            last_response_status: None,
+            last_response_message: None,
+            events: "push,release".to_owned(),
+        };
+        assert!(subscribes(&hook, "push"));
+        assert!(subscribes(&hook, "release"));
+        assert!(!subscribes(&hook, "issues"));
+        assert!(!subscribes(&hook, "pus"));
+    }
 
     #[test]
     fn pending_webhook_delivery_is_visible_as_pending() {

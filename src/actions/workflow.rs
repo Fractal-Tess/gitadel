@@ -665,6 +665,7 @@ async fn enqueue_plan(
         }
     }
     transaction.commit().await?;
+    super::events::spawn_run_requested(state.repository(), run_id);
     Ok(())
 }
 
@@ -685,8 +686,9 @@ async fn record_failure(
         .await?
         .map_or(1, |run| run.number + 1);
     let now = Utc::now();
+    let run_id = Uuid::new_v4();
     action_run::ActiveModel {
-        id: Set(Uuid::new_v4()),
+        id: Set(run_id),
         repository_id: Set(repository.id),
         number: Set(number),
         workflow_path: Set(diagnostic.path.clone()),
@@ -709,6 +711,7 @@ async fn record_failure(
     }
     .insert(database)
     .await?;
+    super::events::spawn_run_requested_and_completed(state.repository(), run_id);
     Ok(())
 }
 

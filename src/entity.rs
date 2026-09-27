@@ -984,6 +984,8 @@ pub mod repository_webhook {
         pub last_delivery_at: Option<DateTimeUtc>,
         pub last_response_status: Option<i32>,
         pub last_response_message: Option<String>,
+        /// Comma-separated subscribed event names.
+        pub events: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

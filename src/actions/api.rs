@@ -258,13 +258,16 @@ async fn cancel_run(
         )
         .await?;
     owned_run(&state, repository.id, run_id).await?;
-    let run = runs::cancel_run(
+    let (run, cancelled) = runs::cancel_run(
         state.repository().identity().database(),
         run_id,
         actor.user.id,
     )
     .await
     .map_err(map_state_error)?;
+    if cancelled {
+        super::events::spawn_run_completed(state.repository(), run.id);
+    }
     state
         .repository()
         .identity()
@@ -674,9 +677,12 @@ async fn remove_runner_for_scope(
         .all(identity.database())
         .await?;
     for job in jobs {
-        runs::cancel_run(identity.database(), job.run_id, actor.user.id)
+        let (run, cancelled) = runs::cancel_run(identity.database(), job.run_id, actor.user.id)
             .await
             .map_err(map_state_error)?;
+        if cancelled {
+            super::events::spawn_run_completed(state.repository(), run.id);
+        }
     }
     let mut active = runner.into_active_model();
     active.deleted_at = Set(Some(Utc::now()));

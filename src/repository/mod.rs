@@ -21,6 +21,7 @@ mod releases;
 mod resources;
 mod ssh;
 mod topics;
+pub(crate) mod webhook_events;
 mod webhooks;
 pub(crate) use browser::{read_git, render_markdown};
 
