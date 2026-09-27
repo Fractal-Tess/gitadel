@@ -43,7 +43,8 @@ pub async fn status(
 ) -> Result<Json<AuthStatusResponse>, ApiError> {
     let setup_required = user::Entity::find().count(state.database()).await? == 0;
     let account = state.session_user(&jar).await?;
-    let authentication = super::sso::public_configuration(state.database()).await?;
+    let mut authentication = super::sso::public_configuration(state.database()).await?;
+    authentication.passkey_enabled &= state.passkeys_available();
     Ok(Json(AuthStatusResponse {
         setup_required,
         authenticated: account.is_some(),
@@ -697,7 +698,7 @@ pub async fn start_passkey_registration(
     }
     let excluded_count = excluded.len();
     let (options, registration) = state
-        .webauthn()
+        .webauthn()?
         .start_passkey_registration(
             actor.user.id,
             &actor.user.username,
@@ -764,7 +765,7 @@ pub async fn finish_passkey_registration(
         ));
     };
     let credential = state
-        .webauthn()
+        .webauthn()?
         .finish_passkey_registration(&request.credential, &challenge.state)
         .map_err(|error| {
             tracing::warn!(
@@ -850,7 +851,7 @@ pub async fn start_passkey_login(
     }
     state.enforce_auth_rate_limit("passkey-start", 30).await?;
     let (options, authentication) = state
-        .webauthn()
+        .webauthn()?
         .start_discoverable_authentication()
         .map_err(|error| {
             tracing::warn!(%error, "could not create discoverable passkey login challenge");
@@ -892,7 +893,7 @@ pub async fn finish_passkey_login(
         ));
     };
     let (user_id, credential_id) = state
-        .webauthn()
+        .webauthn()?
         .identify_discoverable_authentication(&request.credential)
         .map_err(|error| {
             tracing::warn!(%error, "could not identify discoverable passkey");
@@ -918,7 +919,7 @@ pub async fn finish_passkey_login(
         serde_json::from_str(&stored.credential).map_err(ApiError::internal)?;
     let discoverable = DiscoverableKey::from(&credential);
     let result = state
-        .webauthn()
+        .webauthn()?
         .finish_discoverable_authentication(&request.credential, challenge.state, &[discoverable])
         .map_err(|error| {
             tracing::warn!(

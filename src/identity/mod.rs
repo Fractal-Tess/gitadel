@@ -91,7 +91,8 @@ pub struct IdentityState {
     database: DatabaseConnection,
     settings: AuthSettings,
     public_url: Url,
-    webauthn: Webauthn,
+    /// Absent when the public URL is an IP address, which WebAuthn rejects.
+    webauthn: Option<Webauthn>,
     registration_challenges: Arc<Mutex<HashMap<String, RegistrationChallenge>>>,
     authentication_challenges: Arc<Mutex<HashMap<String, AuthenticationChallenge>>>,
     authorization_requests: Arc<Mutex<HashMap<String, oauth::AuthorizationRequest>>>,
@@ -303,12 +304,21 @@ impl IdentityState {
                 "public URL must be an origin without a path, query, fragment, or credentials"
             ));
         }
-        let rp_id = public_url
-            .host_str()
-            .ok_or_else(|| anyhow::anyhow!("public URL must contain a host"))?;
-        let webauthn = WebauthnBuilder::new(rp_id, &public_url)?
-            .rp_name("Gitadel")
-            .build()?;
+        let webauthn = match public_url.host() {
+            Some(url::Host::Domain(rp_id)) => Some(
+                WebauthnBuilder::new(rp_id, &public_url)?
+                    .rp_name("Gitadel")
+                    .build()?,
+            ),
+            Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) => {
+                tracing::warn!(
+                    %public_url,
+                    "passkeys are disabled because the public URL is an IP address; use a hostname to enable them"
+                );
+                None
+            }
+            None => return Err(anyhow::anyhow!("public URL must contain a host")),
+        };
 
         let dummy_password_hash = Argon2::default()
             .hash_password(b"gitadel-invalid-login")
@@ -551,8 +561,16 @@ impl IdentityState {
         Ok(())
     }
 
-    pub fn webauthn(&self) -> &Webauthn {
-        &self.webauthn
+    pub fn webauthn(&self) -> Result<&Webauthn, ApiError> {
+        self.webauthn.as_ref().ok_or_else(|| {
+            ApiError::bad_request(
+                "Passkeys need a public URL with a hostname rather than an IP address.",
+            )
+        })
+    }
+
+    pub fn passkeys_available(&self) -> bool {
+        self.webauthn.is_some()
     }
 
     pub fn session_lifetime(&self) -> ChronoDuration {
