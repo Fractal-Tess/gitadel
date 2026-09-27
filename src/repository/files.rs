@@ -13,7 +13,10 @@ use sley::{
     Repository as GitRepository, TreeEditor,
 };
 
-use super::{Permission, RepositoryState};
+use super::{
+    Permission, RepositoryState,
+    protection::{RefCheck, load_guard},
+};
 use crate::identity::{ApiError, SCOPE_WRITE};
 
 const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
@@ -61,6 +64,17 @@ pub async fn create_file(
         .strip_prefix("refs/heads/")
         .unwrap_or(request.branch.trim())
         .to_owned();
+    // commit_file only writes when the branch still matches expected_commit,
+    // and its commit always has that tip as parent, so the update is a
+    // fast-forward and only creation, push restrictions, and deletion matter.
+    let guard = load_guard(&state, &repository, Some(actor.user.id)).await?;
+    if let RefCheck::Rejected(message) = guard.check(
+        &format!("refs/heads/{branch}"),
+        request.expected_commit.is_none(),
+        false,
+    ) {
+        return Err(ApiError::forbidden(message));
+    }
     let path = state.repository_path(&repository);
     let actor_user_id = actor.user.id;
     let result = tokio::task::spawn_blocking(move || {
@@ -144,7 +158,7 @@ fn validate_request(request: &CreateFileRequest) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn commit_file(
+pub(super) fn commit_file(
     path: &Path,
     branch: &str,
     expected_commit: Option<&str>,

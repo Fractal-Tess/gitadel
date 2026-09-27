@@ -1,4 +1,5 @@
 mod browser;
+mod deploy_keys;
 mod files;
 mod git_http;
 mod git_service;
@@ -16,10 +17,12 @@ mod maintenance;
 mod mirror_scheduler;
 mod mirrors;
 mod native_remote;
+mod protection;
 mod registry;
 mod releases;
 mod resources;
 mod ssh;
+mod statuses;
 mod topics;
 mod webhooks;
 pub(crate) use browser::{read_git, render_markdown};
@@ -28,6 +31,7 @@ pub(crate) use git_http::GitHttpState;
 pub(crate) use integrity::serve_integrity_scheduler;
 pub(crate) use mirror_scheduler::serve_mirror_scheduler;
 pub(crate) use resources::purge_soft_deleted_repositories;
+pub(crate) use statuses::statuses_for_commits;
 pub(crate) fn outbound_http_client() -> Result<reqwest::Client, reqwest::Error> {
     webhooks::webhook_client()
 }
@@ -1081,6 +1085,22 @@ pub fn router() -> Router<RepositoryState> {
             delete(resources::remove_collaborator),
         )
         .route(
+            "/repositories/{namespace}/{name}/deploy-keys",
+            get(deploy_keys::list_deploy_keys).post(deploy_keys::create_deploy_key),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/deploy-keys/{id}",
+            delete(deploy_keys::delete_deploy_key),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/protection-rules",
+            get(protection::list_rules).post(protection::create_rule),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/protection-rules/{id}",
+            axum::routing::patch(protection::update_rule).delete(protection::delete_rule),
+        )
+        .route(
             "/repos/{namespace}/{name}/integrations",
             get(integrations::list_integrations).post(integrations::create_integration),
         )
@@ -1141,6 +1161,18 @@ pub fn router() -> Router<RepositoryState> {
         .route(
             "/repos/{namespace}/{name}/branches",
             get(gitea::list_branches),
+        )
+        .route(
+            "/repos/{namespace}/{name}/statuses/{sha}",
+            get(statuses::list_statuses).post(statuses::create_status),
+        )
+        .route(
+            "/repos/{namespace}/{name}/commits/{revision}/statuses",
+            get(statuses::list_statuses),
+        )
+        .route(
+            "/repos/{namespace}/{name}/commits/{revision}/status",
+            get(statuses::combined_status),
         )
 }
 

@@ -13,7 +13,9 @@
   import RepositoryCollaboratorSettings from "$lib/components/repository/repository-collaborator-settings.svelte";
   import RepositoryIntegrationSettings from "$lib/components/repository/repository-integration-settings.svelte";
   import AvatarCropDialog from "$lib/components/settings/avatar-crop-dialog.svelte";
+  import RepositoryDeployKeySettings from "$lib/components/repository/repository-deploy-key-settings.svelte";
   import RepositoryMirrorSettings from "$lib/components/repository/repository-mirror-settings.svelte";
+  import RepositoryProtectionSettings from "$lib/components/repository/repository-protection-settings.svelte";
   import RepositoryWebhookSettings from "$lib/components/repository/repository-webhook-settings.svelte";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -518,6 +520,10 @@
   <RepositoryCollaboratorSettings state={repository} />
 {:else if section === "mirror"}
   <RepositoryMirrorSettings state={repository} />
+{:else if section === "branches"}
+  <RepositoryProtectionSettings state={repository} />
+{:else if section === "deploy-keys"}
+  <RepositoryDeployKeySettings state={repository} />
 {:else if section === "webhooks"}
   <RepositoryWebhookSettings state={repository} />
 {:else if section === "integrations"}

@@ -17,6 +17,7 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use super::{
     Permission, RepositoryState,
     git_service::{self, BlockingReader, BlockingWriter, BridgeCancellation},
+    protection::load_guard,
     resources::record_push,
     webhooks::{dispatch_push, snapshot_refs},
 };
@@ -232,6 +233,10 @@ async fn receive_pack(
     if repository.archived_at.is_some() {
         return StatusCode::FORBIDDEN.into_response();
     }
+    let guard = match load_guard(&state, &repository, Some(actor_user_id)).await {
+        Ok(guard) => guard,
+        Err(error) => return error.into_response(),
+    };
     let path = state.repository_path(&repository);
     let refs_before = match snapshot_refs(&path).await {
         Ok(refs) => Some(refs),
@@ -266,7 +271,7 @@ async fn receive_pack(
         let mut reader =
             BlockingReader::new(request_reader, handle.clone(), worker_cancellation.clone());
         let mut writer = BlockingWriter::new(response_writer, handle, worker_cancellation);
-        git_service::serve_receive_pack(&worker_path, format, &mut reader, &mut writer)
+        git_service::serve_receive_pack(&worker_path, format, &guard, &mut reader, &mut writer)
     });
     let display_path = repository_path(&repository);
     let task_state = state.clone();

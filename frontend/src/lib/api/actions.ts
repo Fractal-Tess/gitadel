@@ -84,6 +84,17 @@ export const actionCommitStatusSchema = z.object({
   running: z.number(),
   queued: z.number(),
   cancelled: z.number(),
+  contexts: z
+    .array(
+      z.object({
+        context: z.string(),
+        state: z.enum(["pending", "success", "error", "failure"]),
+        description: z.string().nullable(),
+        target_url: z.string().nullable(),
+        updated_at: z.string(),
+      }),
+    )
+    .default([]),
 });
 
 export const actionStatusesSchema = z.object({

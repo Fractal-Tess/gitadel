@@ -13,6 +13,16 @@
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
 
   let { state }: { state: RepositoryPageState } = $props();
+
+  // External CI reports GitHub-style states; show them with the same badge
+  // as workflow runs.
+  function externalStatus(value: "pending" | "success" | "error" | "failure") {
+    return value === "pending"
+      ? "queued"
+      : value === "success"
+        ? "success"
+        : "failure";
+  }
   const check = $derived(
     state.browser.commit ? state.actions.actionCommitStatuses[state.browser.commit.oid] : undefined,
   );
@@ -164,6 +174,32 @@
           >
             <ActionStatusBadge status={check.status} />
           </button>
+          {#if check.contexts.length}
+            <ul class="mt-3 grid gap-2">
+              {#each check.contexts as status (status.context)}
+                <li class="grid gap-1 text-xs">
+                  <div class="flex items-center justify-between gap-2">
+                    {#if status.target_url}
+                      <a
+                        class="min-w-0 truncate font-medium hover:underline"
+                        href={status.target_url}
+                        target="_blank"
+                        rel="noopener noreferrer">{status.context}</a
+                      >
+                    {:else}
+                      <span class="min-w-0 truncate font-medium"
+                        >{status.context}</span
+                      >
+                    {/if}
+                    <ActionStatusBadge status={externalStatus(status.state)} />
+                  </div>
+                  {#if status.description}
+                    <p class="text-muted-foreground">{status.description}</p>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+          {/if}
         </div>
       {/if}
       <div>

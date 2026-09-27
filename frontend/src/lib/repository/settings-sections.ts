@@ -1,3 +1,5 @@
+import GitBranch from "@lucide/svelte/icons/git-branch";
+import KeyRound from "@lucide/svelte/icons/key-round";
 import MapPin from "@lucide/svelte/icons/map-pin";
 import Plug from "@lucide/svelte/icons/plug";
 import RefreshCw from "@lucide/svelte/icons/refresh-cw";
@@ -17,6 +19,8 @@ export const repositorySettingsSections = [
   { id: "location", label: "Location", icon: MapPin },
   { id: "collaborators", label: "Collaborators", icon: Users },
   { id: "mirror", label: "Mirror", icon: RefreshCw },
+  { id: "branches", label: "Branches", icon: GitBranch },
+  { id: "deploy-keys", label: "Deploy keys", icon: KeyRound },
   { id: "webhooks", label: "Webhooks", icon: Webhook },
   { id: "integrations", label: "Integrations", icon: Plug },
   { id: "danger", label: "Danger zone", icon: TriangleAlert },

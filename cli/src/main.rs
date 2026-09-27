@@ -13,10 +13,12 @@ use uuid::Uuid;
 
 mod accounts;
 mod auth;
+mod deploy_keys;
 mod imports;
 mod input;
 mod issues;
 mod mirrors;
+mod protection;
 mod query;
 mod registry;
 mod releases;
@@ -140,6 +142,16 @@ enum RepoCommand {
     },
     /// List the repository's container images, tags, and digests.
     Registry { repository: String },
+    /// Manage branch and tag protection rules.
+    Protection {
+        #[command(subcommand)]
+        command: protection::ProtectionCommand,
+    },
+    /// Manage repository deploy keys.
+    DeployKey {
+        #[command(subcommand)]
+        command: deploy_keys::DeployKeyCommand,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -1173,6 +1185,8 @@ async fn run_repo(api: &ApiClient, command: RepoCommand) -> Result<Value> {
             }
         },
         RepoCommand::Registry { repository } => registry::browse(api, &repository).await,
+        RepoCommand::Protection { command } => protection::run(api, command).await,
+        RepoCommand::DeployKey { command } => deploy_keys::run(api, command).await,
     }
 }
 

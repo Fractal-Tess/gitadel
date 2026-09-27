@@ -14,7 +14,9 @@ use uuid::Uuid;
 
 use super::{
     LfsPermission, Permission, RepositoryState,
+    deploy_keys::{self, DeployKeyAccess},
     git_service::{self, BlockingReader, BlockingWriter, BridgeCancellation},
+    protection::{RefGuard, load_guard},
     resources::{CreateRepositoryOptions, create_owned_repository, record_push},
     webhooks::{dispatch_push, snapshot_refs},
 };
@@ -32,8 +34,44 @@ struct SshServer {
 struct SshHandler {
     state: RepositoryState,
     actions: ActionsState,
-    actor_user_id: Option<Uuid>,
+    actor: Option<SshActor>,
     channels: HashMap<ChannelId, SshChannel>,
+}
+
+/// The identity behind an SSH login: a user key or a repository deploy key.
+#[derive(Clone, Copy)]
+enum SshActor {
+    User(Uuid),
+    DeployKey(DeployKeyAccess),
+}
+
+impl SshActor {
+    fn user(self) -> Option<Uuid> {
+        match self {
+            Self::User(id) => Some(id),
+            Self::DeployKey(_) => None,
+        }
+    }
+
+    /// The account recorded for audit events, webhooks, and LFS tokens.
+    fn attributed_user(self) -> Uuid {
+        match self {
+            Self::User(id) => id,
+            Self::DeployKey(key) => key.attributed_user,
+        }
+    }
+
+    async fn authorize(
+        self,
+        state: &RepositoryState,
+        repository: &crate::entity::repository::Model,
+        permission: Permission,
+    ) -> Result<(), crate::identity::ApiError> {
+        match self {
+            Self::User(id) => state.authorize(repository, Some(id), permission).await,
+            Self::DeployKey(key) => key.authorize(repository, permission),
+        }
+    }
 }
 
 struct SshChannel {
@@ -91,7 +129,7 @@ impl russh::server::Server for SshServer {
         SshHandler {
             state: self.state.clone(),
             actions: self.actions.clone(),
-            actor_user_id: None,
+            actor: None,
             channels: HashMap::new(),
         }
     }
@@ -120,12 +158,23 @@ impl russh::server::Handler for SshHandler {
             .await
         {
             Ok(Some(account)) => {
-                self.actor_user_id = Some(account.id);
+                self.actor = Some(SshActor::User(account.id));
+                return Ok(Auth::Accept);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(%error, "SSH public key lookup failed");
+                return Ok(Auth::reject());
+            }
+        }
+        match deploy_keys::authenticate(self.state.identity().database(), &fingerprint).await {
+            Ok(Some(key)) => {
+                self.actor = Some(SshActor::DeployKey(key));
                 Ok(Auth::Accept)
             }
             Ok(None) => Ok(Auth::reject()),
             Err(error) => {
-                tracing::error!(%error, "SSH public key lookup failed");
+                tracing::error!(%error, "SSH deploy key lookup failed");
                 Ok(Auth::reject())
             }
         }
@@ -176,9 +225,10 @@ impl russh::server::Handler for SshHandler {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let Some(actor_user_id) = self.actor_user_id else {
+        let Some(actor) = self.actor else {
             return reject(channel_id, session, "Authentication required.\n");
         };
+        let actor_user_id = actor.attributed_user();
         let Some(channel_state) = self.channels.remove(&channel_id) else {
             return reject(channel_id, session, "Invalid SSH channel.\n");
         };
@@ -211,9 +261,8 @@ impl russh::server::Handler for SshHandler {
                     LfsPermission::Read => Permission::Read,
                     LfsPermission::Write => Permission::Write,
                 };
-                if self
-                    .state
-                    .authorize(&repository, Some(actor_user_id), repository_permission)
+                if actor
+                    .authorize(&self.state, &repository, repository_permission)
                     .await
                     .is_err()
                 {
@@ -240,33 +289,27 @@ impl russh::server::Handler for SshHandler {
                 return Ok(());
             }
         };
-        let repository = match repository_for_git_service(
-            &self.state,
-            actor_user_id,
-            service,
-            &namespace,
-            &name,
-        )
-        .await
-        {
-            Ok(repository) => repository,
-            Err(error) => {
-                tracing::debug!(
-                    %error,
-                    %namespace,
-                    %name,
-                    "could not resolve repository for Git SSH service"
-                );
-                return reject(channel_id, session, "Repository not found.\n");
-            }
-        };
+        let repository =
+            match repository_for_git_service(&self.state, actor.user(), service, &namespace, &name)
+                .await
+            {
+                Ok(repository) => repository,
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        %namespace,
+                        %name,
+                        "could not resolve repository for Git SSH service"
+                    );
+                    return reject(channel_id, session, "Repository not found.\n");
+                }
+            };
         let permission = match service {
             GitService::UploadPack => Permission::Read,
             GitService::ReceivePack => Permission::Write,
         };
-        if self
-            .state
-            .authorize(&repository, Some(actor_user_id), permission)
+        if actor
+            .authorize(&self.state, &repository, permission)
             .await
             .is_err()
         {
@@ -280,6 +323,17 @@ impl russh::server::Handler for SshHandler {
             );
         }
 
+        let guard = if matches!(service, GitService::ReceivePack) {
+            match load_guard(&self.state, &repository, actor.user()).await {
+                Ok(guard) => guard,
+                Err(error) => {
+                    tracing::error!(%error, "could not load repository protection rules");
+                    return reject(channel_id, session, "Could not start Git service.\n");
+                }
+            }
+        } else {
+            RefGuard::default()
+        };
         let path = self.state.repository_path(&repository);
         let format = match git_service::object_format(&repository.object_format) {
             Ok(format) => format,
@@ -320,8 +374,14 @@ impl russh::server::Handler for SshHandler {
                 BlockingWriter::new(channel_writer.make_writer(), handle, worker_cancellation);
             if receive {
                 git_service::write_advertisement(&worker_path, format, true, false, &mut writer)?;
-                git_service::serve_receive_pack(&worker_path, format, &mut reader, &mut writer)
-                    .map(|outcome| (true, outcome.landed, outcome.response_error))
+                git_service::serve_receive_pack(
+                    &worker_path,
+                    format,
+                    &guard,
+                    &mut reader,
+                    &mut writer,
+                )
+                .map(|outcome| (true, outcome.landed, outcome.response_error))
             } else if protocol_v2 {
                 git_service::serve_upload_pack(
                     &worker_path,
@@ -419,15 +479,17 @@ impl russh::server::Handler for SshHandler {
 
 async fn repository_for_git_service(
     state: &RepositoryState,
-    actor_user_id: Uuid,
+    actor_user_id: Option<Uuid>,
     service: GitService,
     namespace: &str,
     name: &str,
 ) -> Result<crate::entity::repository::Model, crate::identity::ApiError> {
-    match state.find(namespace, name).await {
-        Ok(repository) => Ok(repository),
-        Err(error) if matches!(service, GitService::UploadPack) => Err(error),
-        Err(_) => {
+    match (state.find(namespace, name).await, actor_user_id) {
+        (Ok(repository), _) => Ok(repository),
+        (Err(error), _) if matches!(service, GitService::UploadPack) => Err(error),
+        // Deploy keys are bound to an existing repository and never create one.
+        (Err(error), None) => Err(error),
+        (Err(_), Some(actor_user_id)) => {
             let options = CreateRepositoryOptions {
                 namespace: namespace.to_owned(),
                 name: name.to_owned(),
