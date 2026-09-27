@@ -33,7 +33,10 @@
     accountSettingsSections,
     adminSettingsSections,
   } from "$lib/settings/navigation.js";
-  import { repositorySettingsSections } from "$lib/repository/settings-sections.js";
+  import {
+    repositorySettingsSectionAvailable,
+    repositorySettingsSections,
+  } from "$lib/repository/settings-sections.js";
   import { recentRepositoryPaths } from "$lib/state/recent-repositories.js";
   import {
     useShellState,
@@ -318,7 +321,9 @@
       if (current?.canManage) {
         actions.push(
           ...repositorySettingsSections
-            .filter((section) => section.id !== "mirror" || current.mirrored)
+            .filter((section) =>
+              repositorySettingsSectionAvailable(section.id, current),
+            )
             .map(
               (section) =>
                 ({

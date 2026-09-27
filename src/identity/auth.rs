@@ -4,7 +4,7 @@ use axum::{
     Json,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -60,11 +60,17 @@ pub struct AuthResponse {
     user: UserResponse,
 }
 
+#[derive(Serialize)]
+pub struct TwoFactorChallengeResponse {
+    two_factor_required: bool,
+    challenge_id: String,
+}
+
 pub async fn login(
     State(state): State<IdentityState>,
     jar: CookieJar,
     Json(request): Json<CredentialsRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<Response, ApiError> {
     if !super::sso::public_configuration(state.database())
         .await?
         .password_enabled
@@ -91,12 +97,81 @@ pub async fn login(
         return Err(invalid_credentials());
     }
 
+    // A correct password alone does not sign in an account with a second
+    // factor; the browser receives a short-lived challenge instead.
+    if super::two_factor::is_enabled(state.database(), account.id).await? {
+        let challenge_id = state.insert_pending_login(account.id).await?;
+        return Ok(Json(TwoFactorChallengeResponse {
+            two_factor_required: true,
+            challenge_id,
+        })
+        .into_response());
+    }
+
     let transaction = state.database().begin().await?;
     let (_, cookie) = state.create_session_on(&transaction, account.id).await?;
     state
         .audit_on(&transaction, Some(account.id), "auth.login.password", None)
         .await?;
     transaction.commit().await?;
+    Ok((
+        jar.add(cookie),
+        Json(AuthResponse {
+            user: account.into(),
+        }),
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+pub struct TwoFactorLoginRequest {
+    challenge_id: String,
+    code: String,
+}
+
+pub async fn finish_two_factor_login(
+    State(state): State<IdentityState>,
+    jar: CookieJar,
+    Json(request): Json<TwoFactorLoginRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    state
+        .enforce_auth_rate_limit("two-factor-source", 20)
+        .await?;
+    let Some(user_id) = state.pending_login_user(&request.challenge_id).await else {
+        return Err(ApiError::bad_request(
+            "The sign-in attempt expired. Sign in again.",
+        ));
+    };
+    state
+        .enforce_account_auth_rate_limit(&format!("two-factor:{user_id}"), 8)
+        .await?;
+
+    let transaction = state.database().begin().await?;
+    let Some(factor) =
+        super::two_factor::verify_second_factor(&transaction, user_id, &request.code).await?
+    else {
+        drop(transaction);
+        state
+            .record_pending_login_failure(&request.challenge_id)
+            .await;
+        return Err(super::two_factor::invalid_code());
+    };
+    let account = user::Entity::find_by_id(user_id)
+        .filter(user::Column::DisabledAt.is_null())
+        .one(&transaction)
+        .await?
+        .ok_or_else(invalid_credentials)?;
+    let (_, cookie) = state.create_session_on(&transaction, account.id).await?;
+    state
+        .audit_on(
+            &transaction,
+            Some(account.id),
+            "auth.login.password",
+            Some(format!("two_factor:{}", factor.label())),
+        )
+        .await?;
+    transaction.commit().await?;
+    state.finish_pending_login(&request.challenge_id).await;
     Ok((
         jar.add(cookie),
         Json(AuthResponse {
@@ -300,7 +375,7 @@ async fn verify_current_password(
     Ok(())
 }
 
-fn require_browser_session(via_api_token: bool) -> Result<(), ApiError> {
+pub(super) fn require_browser_session(via_api_token: bool) -> Result<(), ApiError> {
     if via_api_token {
         return Err(ApiError::forbidden(
             "Update account credentials from a browser session.",

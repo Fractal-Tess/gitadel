@@ -10,6 +10,7 @@
   import TriangleAlert from "@lucide/svelte/icons/triangle-alert";
 
   import RepositoryIcon from "$lib/components/repository/repository-icon.svelte";
+  import RepositoryCollaboratorSettings from "$lib/components/repository/repository-collaborator-settings.svelte";
   import RepositoryIntegrationSettings from "$lib/components/repository/repository-integration-settings.svelte";
   import AvatarCropDialog from "$lib/components/settings/avatar-crop-dialog.svelte";
   import RepositoryMirrorSettings from "$lib/components/repository/repository-mirror-settings.svelte";
@@ -21,9 +22,14 @@
   import * as Select from "$lib/components/ui/select/index.js";
   import { Switch } from "$lib/components/ui/switch/index.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
-  import { isRepositorySettingsSection } from "$lib/repository/settings-sections.js";
+  import {
+    isRepositorySettingsSection,
+    repositorySettingsSectionAvailable,
+  } from "$lib/repository/settings-sections.js";
+  import { useAppState } from "$lib/state/app-state.svelte.js";
 
   let { state: repository }: { state: RepositoryPageState } = $props();
+  const app = useAppState();
 
   let visibility = $state<"public" | "private">("private");
   let defaultBranch = $state("");
@@ -47,7 +53,12 @@
   // the first page rather than rendering nothing.
   const section = $derived(
     isRepositorySettingsSection(repository.settingsTab) &&
-      (repository.settingsTab !== "mirror" || repository.repository?.mirrored)
+      repositorySettingsSectionAvailable(repository.settingsTab, {
+        mirrored: Boolean(repository.repository?.mirrored),
+        personal:
+          Boolean(repository.repository) &&
+          repository.repository?.namespace === app.authStatus?.user?.username,
+      })
       ? repository.settingsTab
       : "general",
   );
@@ -503,6 +514,8 @@
       </form>
     </section>
   </div>
+{:else if section === "collaborators"}
+  <RepositoryCollaboratorSettings state={repository} />
 {:else if section === "mirror"}
   <RepositoryMirrorSettings state={repository} />
 {:else if section === "webhooks"}

@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use url::Url;
 use uuid::Uuid;
 
+mod accounts;
 mod auth;
 use auth::AuthCommand;
 
@@ -201,6 +202,13 @@ enum OrgCommand {
         #[arg(long, default_value = "")]
         query: String,
     },
+    /// Delete an organization that owns no repositories.
+    Delete {
+        slug: String,
+        /// Must repeat the organization name.
+        #[arg(long)]
+        confirmation: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -252,6 +260,16 @@ enum AdminCommand {
     Backup {
         #[command(subcommand)]
         command: BackupCommand,
+    },
+    /// List, disable, enable, or delete user accounts.
+    User {
+        #[command(subcommand)]
+        command: accounts::UserCommand,
+    },
+    /// List or revoke pending invitations.
+    Invitation {
+        #[command(subcommand)]
+        command: accounts::InvitationCommand,
     },
     /// Read administrator audit history.
     Audit {
@@ -1166,6 +1184,9 @@ async fn run_org(api: &ApiClient, command: OrgCommand) -> Result<Value> {
             );
             api.request(Method::GET, &path, None).await
         }
+        OrgCommand::Delete { slug, confirmation } => {
+            accounts::delete_organization(api, &slug, &confirmation).await
+        }
         OrgCommand::Members { command } => match command {
             OrganizationMemberCommand::List { slug } => {
                 api.request(
@@ -1249,6 +1270,8 @@ async fn run_admin(api: &ApiClient, command: AdminCommand) -> Result<Value> {
         },
         AdminCommand::Storage { command } => run_storage(api, command).await,
         AdminCommand::Backup { command } => run_backup(api, command).await,
+        AdminCommand::User { command } => accounts::run_user(api, command).await,
+        AdminCommand::Invitation { command } => accounts::run_invitation(api, command).await,
         AdminCommand::Audit { limit } => {
             api.request(
                 Method::GET,

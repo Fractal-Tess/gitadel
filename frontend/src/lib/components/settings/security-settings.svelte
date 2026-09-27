@@ -13,6 +13,7 @@
   import { toast } from "svelte-sonner";
 
   import AccountAvatarSettings from "$lib/components/settings/account-avatar-settings.svelte";
+  import TwoFactorSettings from "$lib/components/settings/two-factor-settings.svelte";
   import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -427,6 +428,8 @@
         </form>
       </Card.Content>
     </section>
+
+    <TwoFactorSettings />
   {/if}
 
   {#if view === "ssh-keys"}

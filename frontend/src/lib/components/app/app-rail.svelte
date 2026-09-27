@@ -25,7 +25,10 @@
   import * as Avatar from "$lib/components/ui/avatar/index.js";
   import * as Sidebar from "$lib/components/ui/sidebar/index.js";
   import { preloadExplore } from "$lib/navigation-cache.js";
-  import { repositorySettingsSections } from "$lib/repository/settings-sections.js";
+  import {
+    repositorySettingsSectionAvailable,
+    repositorySettingsSections,
+  } from "$lib/repository/settings-sections.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
   import {
     useShellState,
@@ -150,8 +153,8 @@
               icon: Settings2,
               active: view === "settings" || view === "integrations",
               items: repositorySettingsSections
-                .filter(
-                  (section) => section.id !== "mirror" || current.mirrored,
+                .filter((section) =>
+                  repositorySettingsSectionAvailable(section.id, current),
                 )
                 .map((section) => ({
                   label: section.label,

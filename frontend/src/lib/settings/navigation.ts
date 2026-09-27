@@ -11,6 +11,7 @@ import ShieldCheck from "@lucide/svelte/icons/shield-check";
 import Terminal from "@lucide/svelte/icons/terminal";
 import UserPlus from "@lucide/svelte/icons/user-plus";
 import UserRound from "@lucide/svelte/icons/user-round";
+import Users from "@lucide/svelte/icons/users";
 import Workflow from "@lucide/svelte/icons/workflow";
 
 import type { ShellIcon } from "$lib/state/shell-state.svelte.js";
@@ -33,6 +34,7 @@ export const accountSettingsSections = [
 
 export const adminSettingsSections = [
   { id: "appearance", label: "Appearance", icon: Palette },
+  { id: "users", label: "Users", icon: Users },
   { id: "access", label: "Access", icon: UserPlus },
   { id: "runners", label: "Runners", icon: Workflow },
   { id: "storage", label: "Storage", icon: Database },

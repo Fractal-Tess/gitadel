@@ -52,6 +52,8 @@
             canManage: repository.can_manage,
             canWrite: repository.can_write,
             mirrored: repository.mirrored,
+            personal:
+              repository.namespace === app.authStatus?.user?.username,
           }
         : null,
     );
