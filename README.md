@@ -46,7 +46,7 @@ Press **Ctrl+K** to search repositories or find commands for creation, imports, 
 
 `gtd` manages a running instance with an API token. It is separate from the `gitadel` server and uses the same permissions as the web API.
 
-Download it from the [latest release](https://github.com/Fractal-Tess/gitadel/releases/latest) for Linux or macOS, or install it with Nix:
+Download it from the [latest release](https://github.com/Fractal-Tess/gitadel/releases/latest) for Linux, macOS, or Windows, or install it with Nix:
 
 ```bash
 nix profile install github:Fractal-Tess/gitadel#gitadel-cli

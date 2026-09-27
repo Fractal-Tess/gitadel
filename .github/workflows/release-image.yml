@@ -155,6 +155,11 @@ jobs:
             runner: macos-15
           - target: x86_64-apple-darwin
             runner: macos-15
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -172,9 +177,15 @@ jobs:
 
       - name: Package
         run: |
-          archive="gtd-${GITHUB_REF_NAME#v}-${TARGET}.tar.gz"
-          tar -czf "$archive" -C "target/${TARGET}/release" gtd
-          shasum -a 256 "$archive" > "$archive.sha256"
+          name="gtd-${GITHUB_REF_NAME#v}-${TARGET}"
+          if [[ $RUNNER_OS == Windows ]]; then
+            archive="$name.zip"
+            7z a -tzip "$archive" "./target/${TARGET}/release/gtd.exe" >/dev/null
+          else
+            archive="$name.tar.gz"
+            tar -czf "$archive" -C "target/${TARGET}/release" gtd
+          fi
+          sha256sum "$archive" 2>/dev/null > "$archive.sha256" || shasum -a 256 "$archive" > "$archive.sha256"
           mkdir -p dist && mv "$archive" "$archive.sha256" dist/
         env:
           TARGET: ${{ matrix.target }}

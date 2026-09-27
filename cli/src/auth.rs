@@ -449,6 +449,8 @@ fn load_saved() -> Result<Option<SavedAuth>> {
             bail!("saved login is accessible to other users; set its permissions to 0600");
         }
     }
+    #[cfg(not(unix))]
+    let _ = metadata;
     let text = fs::read_to_string(&path).context("could not read saved login")?;
     Ok(Some(parse_saved(&text)?))
 }

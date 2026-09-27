@@ -4,6 +4,10 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+### Added
+
+- Added a Windows x86_64 build of `gtd` to GitHub releases.
+
 ## [0.13.0] - 2026-09-28
 
 ### Added

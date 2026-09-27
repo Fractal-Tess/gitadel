@@ -300,7 +300,7 @@ Install the client on a machine without enabling the server:
 
 ## Command-line client
 
-`gtd` talks to a running Gitadel server over HTTP(S). It does not open the server's database or repository directories. Download a prebuilt binary for Linux (x86_64 or arm64, statically linked) or macOS from the [latest release](https://github.com/Fractal-Tess/gitadel/releases/latest):
+`gtd` talks to a running Gitadel server over HTTP(S). It does not open the server's database or repository directories. Download a prebuilt binary for Linux (x86_64 or arm64, statically linked), macOS, or Windows (x86_64, `.zip`) from the [latest release](https://github.com/Fractal-Tess/gitadel/releases/latest):
 
 ```bash
 curl -fsSL https://github.com/Fractal-Tess/gitadel/releases/latest/download/gtd-VERSION-x86_64-unknown-linux-musl.tar.gz | tar -xz
