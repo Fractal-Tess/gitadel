@@ -3,6 +3,7 @@ import Plug from "@lucide/svelte/icons/plug";
 import RefreshCw from "@lucide/svelte/icons/refresh-cw";
 import Settings2 from "@lucide/svelte/icons/settings-2";
 import TriangleAlert from "@lucide/svelte/icons/triangle-alert";
+import Users from "@lucide/svelte/icons/users";
 import Webhook from "@lucide/svelte/icons/webhook";
 
 import type { ShellIcon } from "$lib/state/shell-state.svelte.js";
@@ -14,6 +15,7 @@ import type { ShellIcon } from "$lib/state/shell-state.svelte.js";
 export const repositorySettingsSections = [
   { id: "general", label: "General", icon: Settings2 },
   { id: "location", label: "Location", icon: MapPin },
+  { id: "collaborators", label: "Collaborators", icon: Users },
   { id: "mirror", label: "Mirror", icon: RefreshCw },
   { id: "webhooks", label: "Webhooks", icon: Webhook },
   { id: "integrations", label: "Integrations", icon: Plug },
@@ -31,4 +33,17 @@ export function isRepositorySettingsSection(
   value: string,
 ): value is RepositorySettingsSection {
   return repositorySettingsSections.some((section) => section.id === value);
+}
+
+/**
+ * Mirror settings exist only for mirrors, and direct collaborators only for
+ * repositories in the viewer's own namespace; organizations use membership.
+ */
+export function repositorySettingsSectionAvailable(
+  section: RepositorySettingsSection,
+  repository: { mirrored: boolean; personal: boolean },
+): boolean {
+  if (section === "mirror") return repository.mirrored;
+  if (section === "collaborators") return repository.personal;
+  return true;
 }

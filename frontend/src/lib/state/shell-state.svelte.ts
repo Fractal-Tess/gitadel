@@ -15,6 +15,7 @@ export type ActiveRepositoryNavigation = {
   canManage: boolean;
   canWrite: boolean;
   mirrored: boolean;
+  personal: boolean;
 };
 
 export class ShellState {
