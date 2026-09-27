@@ -23,6 +23,7 @@ use super::{
     proto::{ping, runner},
     runners::{self, RunnerError},
     runs::{self, StateError, TaskResult},
+    secrets,
 };
 
 const PROTO_CONTENT_TYPE: &str = "application/proto";
@@ -386,7 +387,11 @@ async fn task_message(
             );
         }
     }
-    let mut secrets = HashMap::new();
+    let values = secrets::job_values(database, state.secret_cipher(), &repository)
+        .await
+        .map_err(database_error)?;
+    let mut secrets = values.secrets;
+    // Reserved prefixes keep user secrets from shadowing the job token.
     for name in ["GITHUB_TOKEN", "GITEA_TOKEN", "FORGEJO_TOKEN"] {
         secrets.insert(name.to_owned(), claimed.checkout_token.clone());
     }
@@ -397,7 +402,7 @@ async fn task_message(
         secrets,
         machine: String::new(),
         needs,
-        vars: HashMap::new(),
+        vars: values.vars,
     })
 }
 

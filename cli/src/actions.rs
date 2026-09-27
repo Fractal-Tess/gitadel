@@ -1,9 +1,15 @@
-//! `gtd actions`: workflow runs, logs, and cancellation.
+//! `gtd actions`: workflow runs, logs, cancellation, secrets, and variables.
 
-use anyhow::{Result, bail};
-use clap::{Args, Subcommand};
+use std::{
+    fs,
+    io::{self, IsTerminal as _, Read as _},
+    path::PathBuf,
+};
+
+use anyhow::{Context as _, Result, bail};
+use clap::{ArgGroup, Args, Subcommand};
 use reqwest::Method;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::{ApiClient, parse_repo, route_path};
 
@@ -41,6 +47,69 @@ pub(crate) enum ActionsCommand {
         repository: RepositoryArg,
         run_id: String,
     },
+    /// Manage write-only Actions secrets of a repository or namespace.
+    Secret {
+        #[command(subcommand)]
+        command: ValueCommand,
+    },
+    /// Manage Actions variables of a repository or namespace.
+    Variable {
+        #[command(subcommand)]
+        command: ValueCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ValueCommand {
+    /// Create or replace a value. Without --value or --value-file, stdin is read.
+    Set {
+        name: String,
+        #[command(flatten)]
+        scope: ScopeArg,
+        /// The value. Prefer --value-file or stdin for secrets to keep them
+        /// out of shell history.
+        #[arg(long, conflicts_with = "value_file")]
+        value: Option<String>,
+        /// Read the value from this file (`-` for stdin).
+        #[arg(long, value_name = "FILE", conflicts_with = "value")]
+        value_file: Option<PathBuf>,
+    },
+    /// List names (and, for variables, values).
+    List {
+        #[command(flatten)]
+        scope: ScopeArg,
+    },
+    /// Delete a value.
+    Delete {
+        name: String,
+        #[command(flatten)]
+        scope: ScopeArg,
+    },
+}
+
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("scope").required(true).args(["repo", "namespace"])))]
+pub(crate) struct ScopeArg {
+    /// Repository in namespace/name form.
+    #[arg(long, value_name = "NAMESPACE/NAME")]
+    repo: Option<String>,
+    /// User or organization namespace; every repository in it inherits the value.
+    #[arg(long)]
+    namespace: Option<String>,
+}
+
+impl ScopeArg {
+    fn route(&self, segments: &[&str]) -> Result<String> {
+        match (&self.repo, &self.namespace) {
+            (Some(repo), None) => RepositoryArg { repo: repo.clone() }.route(segments),
+            (None, Some(namespace)) => {
+                let mut all = vec![namespace.as_str(), "actions"];
+                all.extend_from_slice(segments);
+                route_path("namespaces", &all)
+            }
+            _ => bail!("provide exactly one of --repo or --namespace"),
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -87,6 +156,10 @@ pub(crate) async fn run(api: &ApiClient, command: ActionsCommand) -> Result<Opti
         } => {
             print_logs(api, &repository, &run_id, job).await?;
             Ok(None)
+        }
+        ActionsCommand::Secret { command } => run_value(api, "secrets", command).await.map(Some),
+        ActionsCommand::Variable { command } => {
+            run_value(api, "variables", command).await.map(Some)
         }
         ActionsCommand::Cancel { repository, run_id } => api
             .request(
@@ -160,7 +233,63 @@ async fn print_logs(
     Ok(())
 }
 
+async fn run_value(api: &ApiClient, kind: &str, command: ValueCommand) -> Result<Value> {
+    match command {
+        ValueCommand::List { scope } => {
+            api.request(Method::GET, &scope.route(&[kind])?, None).await
+        }
+        ValueCommand::Delete { name, scope } => {
+            api.request(Method::DELETE, &scope.route(&[kind, &name])?, None)
+                .await
+        }
+        ValueCommand::Set {
+            name,
+            scope,
+            value,
+            value_file,
+        } => {
+            let value = match (value, value_file) {
+                (Some(value), _) => value,
+                (None, Some(file)) if file.as_os_str() != "-" => fs::read_to_string(&file)
+                    .with_context(|| format!("could not read {}", file.display()))?,
+                (None, _) => read_stdin_value()?,
+            };
+            api.request(
+                Method::PUT,
+                &scope.route(&[kind, &name])?,
+                Some(json!({ "value": value })),
+            )
+            .await
+        }
+    }
+}
+
+fn read_stdin_value() -> Result<String> {
+    if io::stdin().is_terminal() {
+        eprintln!("Reading the value from stdin; finish with Ctrl-D.");
+    }
+    let mut value = String::new();
+    io::stdin()
+        .read_to_string(&mut value)
+        .context("could not read the value from stdin")?;
+    // A trailing newline from `echo` or a heredoc is almost never intended.
+    if value.ends_with('\n') {
+        value.pop();
+        if value.ends_with('\r') {
+            value.pop();
+        }
+    }
+    Ok(value)
+}
+
 /// Whether the command reads a value from stdin (which conflicts with `--token-stdin`).
-pub(crate) fn uses_stdin(_command: &ActionsCommand) -> bool {
-    false
+pub(crate) fn uses_stdin(command: &ActionsCommand) -> bool {
+    match command {
+        ActionsCommand::Secret { command } | ActionsCommand::Variable { command } => matches!(
+            command,
+            ValueCommand::Set { value: None, value_file, .. }
+                if value_file.as_ref().is_none_or(|file| file.as_os_str() == "-")
+        ),
+        _ => false,
+    }
 }

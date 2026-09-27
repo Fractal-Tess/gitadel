@@ -4,6 +4,7 @@ import RefreshCw from "@lucide/svelte/icons/refresh-cw";
 import Settings2 from "@lucide/svelte/icons/settings-2";
 import TriangleAlert from "@lucide/svelte/icons/triangle-alert";
 import Webhook from "@lucide/svelte/icons/webhook";
+import Workflow from "@lucide/svelte/icons/workflow";
 
 import type { ShellIcon } from "$lib/state/shell-state.svelte.js";
 
@@ -16,6 +17,7 @@ export const repositorySettingsSections = [
   { id: "location", label: "Location", icon: MapPin },
   { id: "mirror", label: "Mirror", icon: RefreshCw },
   { id: "webhooks", label: "Webhooks", icon: Webhook },
+  { id: "actions", label: "Actions", icon: Workflow },
   { id: "integrations", label: "Integrations", icon: Plug },
   { id: "danger", label: "Danger zone", icon: TriangleAlert },
 ] as const satisfies readonly {

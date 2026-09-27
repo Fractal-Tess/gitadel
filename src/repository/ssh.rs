@@ -497,7 +497,7 @@ fn reject(channel: ChannelId, session: &mut Session, message: &str) -> Result<()
     Ok(())
 }
 
-fn load_or_create_host_key(path: &Path) -> Result<PrivateKey> {
+pub(super) fn load_or_create_host_key(path: &Path) -> Result<PrivateKey> {
     if path.exists() {
         protect_file_sync(path)
             .with_context(|| format!("could not protect SSH host key {}", path.display()))?;

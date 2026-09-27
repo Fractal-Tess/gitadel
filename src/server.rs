@@ -217,7 +217,14 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
     repository::purge_soft_deleted_repositories(&repository_state)
         .await
         .context("could not remove previously deleted repositories")?;
-    let actions_state = ActionsState::new(repository_state.clone(), settings.actions.clone());
+    let host_key = repository::load_ssh_host_key(&settings.ssh.host_key)?;
+    let secret_cipher = actions::secrets::SecretCipher::from_host_key(&host_key)
+        .context("could not derive the Actions secret key")?;
+    let actions_state = ActionsState::new(
+        repository_state.clone(),
+        settings.actions.clone(),
+        secret_cipher,
+    );
     actions::bootstrap_system_runner(&actions_state)
         .await
         .context("could not prepare the configured system runner")?;

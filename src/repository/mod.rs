@@ -1148,6 +1148,11 @@ pub fn git_http_router() -> Router<git_http::GitHttpState> {
     git_http::router().merge(lfs::router())
 }
 
+/// Loads the SSH host key, creating it on first start.
+pub fn load_ssh_host_key(path: &std::path::Path) -> Result<russh::keys::PrivateKey, anyhow::Error> {
+    ssh::load_or_create_host_key(path)
+}
+
 pub async fn serve_ssh(
     settings: crate::config::SshSettings,
     state: RepositoryState,

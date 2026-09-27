@@ -4,6 +4,9 @@ pub(crate) mod logs;
 pub(crate) mod protocol;
 pub(crate) mod runners;
 pub(crate) mod runs;
+pub(crate) mod secrets;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub(crate) mod tokens;
 pub(crate) mod workflow;
 
@@ -24,16 +27,26 @@ pub(crate) const REQUIRED_RUNNER_VERSION: &str = "13.0.0";
 pub(crate) struct ActionsState {
     repository: RepositoryState,
     settings: Arc<ActionsSettings>,
+    secret_cipher: Arc<secrets::SecretCipher>,
     shutdown: CancellationToken,
 }
 
 impl ActionsState {
-    pub(crate) fn new(repository: RepositoryState, settings: ActionsSettings) -> Self {
+    pub(crate) fn new(
+        repository: RepositoryState,
+        settings: ActionsSettings,
+        secret_cipher: secrets::SecretCipher,
+    ) -> Self {
         Self {
             repository,
             settings: Arc::new(settings),
+            secret_cipher: Arc::new(secret_cipher),
             shutdown: CancellationToken::new(),
         }
+    }
+
+    pub(crate) fn secret_cipher(&self) -> &secrets::SecretCipher {
+        &self.secret_cipher
     }
 
     pub(crate) fn repository(&self) -> &RepositoryState {
@@ -66,7 +79,9 @@ impl ActionsState {
     }
 
     pub(crate) fn api_router(&self) -> Router {
-        api::router().with_state(self.clone())
+        api::router()
+            .merge(secrets::router())
+            .with_state(self.clone())
     }
 
     pub(crate) fn cancel(&self) {

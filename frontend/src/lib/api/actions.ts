@@ -123,3 +123,36 @@ export type ActionArtifact = z.infer<typeof actionArtifactSchema>;
 export type ActionCommitStatus = z.infer<typeof actionCommitStatusSchema>;
 export type ActionRunner = z.infer<typeof actionRunnerSchema>;
 export type ActionRegistration = z.infer<typeof actionRegistrationSchema>;
+
+export const actionSecretSchema = z.object({
+  name: z.string(),
+  created_at: z.string(),
+  updated_at: z.string(),
+});
+export const actionSecretsSchema = z.object({
+  secrets: z.array(actionSecretSchema),
+});
+export const actionVariableSchema = actionSecretSchema.extend({
+  value: z.string(),
+});
+export const actionVariablesSchema = z.object({
+  variables: z.array(actionVariableSchema),
+});
+
+export type ActionSecret = z.infer<typeof actionSecretSchema>;
+export type ActionVariable = z.infer<typeof actionVariableSchema>;
+
+/** Mirrors the server's GitHub-compatible secret and variable name rules. */
+export function actionValueNameError(name: string): string | null {
+  const value = name.trim().toUpperCase();
+  if (!value) return "Enter a name.";
+  if (value.length > 100) return "Names must not exceed 100 characters.";
+  if (!/^[A-Z0-9_]+$/.test(value))
+    return "Use only letters, digits, and underscores.";
+  if (/^[0-9]/.test(value)) return "Names must not start with a digit.";
+  const reserved = ["GITHUB_", "GITEA_", "FORGEJO_"].find((prefix) =>
+    value.startsWith(prefix),
+  );
+  if (reserved) return `Names must not start with ${reserved}.`;
+  return null;
+}

@@ -1524,3 +1524,43 @@ pub mod action_artifact_grant {
 
     impl ActiveModelBehavior for ActiveModel {}
 }
+
+pub mod action_secret {
+    use super::*;
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "action_secrets")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        pub repository_id: Option<Uuid>,
+        pub namespace: Option<String>,
+        pub name: String,
+        pub sealed: Vec<u8>,
+        pub updated_by: Option<Uuid>,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod action_variable {
+    use super::*;
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "action_variables")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        pub repository_id: Option<Uuid>,
+        pub namespace: Option<String>,
+        pub name: String,
+        pub value: String,
+        pub updated_by: Option<Uuid>,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}

@@ -2438,6 +2438,7 @@ dependencies = [
 name = "gitadel"
 version = "0.11.0"
 dependencies = [
+ "aes-gcm",
  "ammonia",
  "anyhow",
  "argon2",
