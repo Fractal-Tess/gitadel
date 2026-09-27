@@ -82,6 +82,48 @@ remote manually. The service still listens on port `2222` inside Compose.
 Actions runners are optional. The `compose.actions.yaml` overlay adds a
 privileged Docker-in-Docker daemon and a Forgejo Runner.
 
+### Publishing the image
+
+`scripts/publish-image.sh` builds the current checkout once, then publishes
+each requested tag to these repositories:
+
+- `ghcr.io/fractal-tess/gitadel`
+- `neo.netbird.cloud:3030/fractal-tess/gitadel`
+- `docker.io/vgfractal/gitadel`
+
+It requires Docker and Skopeo and reuses your Docker logins. When `gh` is
+installed, it supplies the GHCR token. Authorize package writes once with
+`gh auth refresh --hostname github.com --scopes write:packages`. Otherwise,
+use `docker login ghcr.io` with a token that has `write:packages`.
+Use `docker login --username vgfractal` for Docker Hub.
+
+On a machine with the Gitadel SOPS token and private mesh access:
+
+```bash
+GITADEL_USERNAME=fractal-tess \
+GITADEL_TOKEN_FILE=/run/secrets/gitadel_api_token \
+GITADEL_TLS_VERIFY=false \
+nix shell nixpkgs#skopeo --command ./scripts/publish-image.sh 0.10.0 latest
+```
+
+With Skopeo already installed, `just publish-image 0.10.0 latest` calls the
+same script; keep the environment variables above. No tag argument means
+`latest`. The build targets the Docker daemon's native platform, not a
+multi-platform image.
+
+Only use `GITADEL_TLS_VERIFY=false` for the HTTP registry on the private
+mesh. It does not change Docker's daemon settings or TLS verification for
+GHCR and Docker Hub. Gitadel tokens need `read` and `write` scopes.
+Automatically acquired credentials are stored in a temporary file and
+removed when the script exits.
+
+Override destinations with `GHCR_IMAGE`, `GITADEL_IMAGE`, and
+`DOCKERHUB_IMAGE`; values are repository paths without tags or URL schemes.
+`LOCAL_IMAGE` changes the local build tag. The script prints each published
+digest, continues to the remaining destinations if a push fails, and exits
+nonzero if any push or verification failed. Successful pushes are not
+rolled back; rerunning reuses Docker's build cache and existing layers.
+
 ## NixOS
 
 Add the flake and enable its module:

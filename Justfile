@@ -43,6 +43,10 @@ frontend-test:
 release-build:
     ./scripts/build-release.sh
 
+# Build and publish the container to GHCR, Gitadel, and Docker Hub.
+publish-image *tags="latest":
+    ./scripts/publish-image.sh {{tags}}
+
 # Refresh the pinned frontend dependency hash.
 frontend-hash:
     ./scripts/update-frontend-hash.sh
