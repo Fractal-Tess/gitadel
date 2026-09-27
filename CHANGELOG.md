@@ -4,10 +4,35 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-28
+
+### Added
+
+- Added Actions secrets and variables for repositories and namespaces. Secrets are encrypted at rest and cannot be read back; repository values override namespace ones. Manage them under **Settings → Actions** or with `gtd actions secret` and `gtd actions variable`.
+- Added `workflow_dispatch` triggers with string, boolean, choice, and number inputs, a **Run workflow** dialog, and `gtd actions run`. Added `schedule` triggers that run on the default branch in UTC and never fire twice across restarts.
+- Added `strategy.matrix` with `include`, `exclude`, `fail-fast`, and `max-parallel`. Jobs that need a matrix job wait for all of its combinations.
+- Added **Re-run all jobs** and **Re-run failed jobs**, also available as `gtd actions rerun [--failed]`. Each rerun is a new run with an incremented `github.run_attempt`.
+- Added `actions.internal_url` for the URLs handed to jobs. The Compose runner overlay sets it, so checkouts and artifacts work without the public URL being reachable from Docker, and the overlay's runner now serves `actions/cache`.
+- Added branch and tag protection with exact or glob rules that block force-pushes, deletions, tag moves, or pushes outside an allow list. Rules are enforced over HTTP, SSH, and web commits.
+- Added read-only or read-write deploy keys that reach only their repository.
+- Added GitHub- and Gitea-compatible commit status APIs for external CI, shown beside commit checks.
+- Added webhook subscriptions for `create`, `delete`, `release`, `issues`, `issue_comment`, and `workflow_run` events in addition to `push`.
+- Added optional SMTP email with an administrator test page, verified account addresses, password reset from the sign-in page, and notifications for new, assigned, and commented issues and failed Actions runs, with per-user preferences.
+- Added TOTP two-factor authentication for password sign-in, with QR enrollment, single-use recovery codes, and an administrator reset.
+- Added **Administration → Users** to search, disable, re-enable, and delete accounts. Disabling an account ends its sessions and revokes its tokens. Added pending-invitation revocation and organization deletion.
+- Added a **Collaborators** section to personal repository settings.
+- Added `gtd` commands for Actions runs and logs, issues and labels, releases and assets, webhooks and deliveries, pull mirrors and mirror identities, repository imports, container registry browsing and storage, protection rules, deploy keys, user and invitation administration, organization deletion, email, and notification preferences.
+- Release tags now publish `linux/amd64` and `linux/arm64` images to GHCR and create a GitHub release from this changelog.
+
 ### Changed
 
 - Deleting a repository is now immediate and permanent: its Git data, LFS objects, container images, and archive cache are removed, and the confirmation dialog requires typing the repository name. Repositories soft-deleted by earlier releases are removed at startup. The restore and purge endpoints and the `gtd repo restore` and `gtd repo purge` commands are gone; `gtd repo delete` now requires `--confirm OWNER/NAME`.
 - The release workflow publishes only to GitHub Container Registry.
+- Container builds cache compiled Rust dependencies, so source changes no longer rebuild every crate.
+
+### Fixed
+
+- Fixed `gtd` failing on successful responses without a body, such as webhook redelivery.
 
 ## [0.11.0] - 2026-09-27
 
@@ -316,7 +341,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/Fractal-Tess/gitadel/compare/v0.9.0...v0.9.1
