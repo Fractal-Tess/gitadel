@@ -344,9 +344,7 @@ async fn authorized_repository(
     namespace: &str,
     repository_segment: &str,
 ) -> Result<repository::Model, AuthorizationError> {
-    let Some(name) = repository_segment.strip_suffix(".git") else {
-        return Err(AuthorizationError::Status(StatusCode::NOT_FOUND));
-    };
+    let name = repository_name(repository_segment);
     let repository = match state.find(namespace, name).await {
         Ok(repository) => repository,
         Err(_) if headers.get(header::AUTHORIZATION).is_none() => {
@@ -383,9 +381,7 @@ async fn writable_repository(
     namespace: &str,
     repository_segment: &str,
 ) -> Result<(repository::Model, uuid::Uuid), AuthorizationError> {
-    let Some(name) = repository_segment.strip_suffix(".git") else {
-        return Err(AuthorizationError::Status(StatusCode::NOT_FOUND));
-    };
+    let name = repository_name(repository_segment);
     let token = token_from_headers(headers).ok_or(AuthorizationError::AuthenticationRequired)?;
     let actor = state
         .identity()
@@ -403,13 +399,24 @@ async fn writable_repository(
     Ok((repository, actor.user.id))
 }
 
-fn token_from_headers(headers: &HeaderMap) -> Option<String> {
+/// Accepts both `owner/name.git` and `owner/name`, as GitHub and Forgejo do;
+/// `actions/checkout` fetches without the suffix. Names never end in `.git`.
+fn repository_name(segment: &str) -> &str {
+    segment.strip_suffix(".git").unwrap_or(segment)
+}
+
+/// Reads a Bearer token or the password of Basic credentials. Schemes are
+/// case-insensitive; `actions/checkout` sends `basic`.
+pub(super) fn token_from_headers(headers: &HeaderMap) -> Option<String> {
     let authorization = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    if let Some(token) = authorization.strip_prefix("Bearer ") {
-        return Some(token.to_owned());
+    let (scheme, credentials) = authorization.split_once(' ')?;
+    if scheme.eq_ignore_ascii_case("bearer") {
+        return (!credentials.is_empty()).then(|| credentials.to_owned());
     }
-    let encoded = authorization.strip_prefix("Basic ")?;
-    let decoded = STANDARD.decode(encoded).ok()?;
+    if !scheme.eq_ignore_ascii_case("basic") {
+        return None;
+    }
+    let decoded = STANDARD.decode(credentials).ok()?;
     let decoded = String::from_utf8(decoded).ok()?;
     let (_, token) = decoded.split_once(':')?;
     (!token.is_empty()).then(|| token.to_owned())
@@ -438,4 +445,39 @@ fn authentication_required() -> Response {
 
 fn repository_path(repository: &repository::Model) -> String {
     format!("{}/{}", repository.namespace, repository.name)
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{HeaderMap, HeaderValue, header};
+
+    use super::{repository_name, token_from_headers};
+
+    fn authorization(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_str(value).unwrap());
+        headers
+    }
+
+    #[test]
+    fn repository_name_accepts_optional_git_suffix() {
+        assert_eq!(repository_name("project.git"), "project");
+        assert_eq!(repository_name("project"), "project");
+    }
+
+    #[test]
+    fn token_from_headers_accepts_case_insensitive_schemes() {
+        // "x-access-token:secret"
+        let basic = "eC1hY2Nlc3MtdG9rZW46c2VjcmV0";
+        for scheme in ["Basic", "basic", "BASIC"] {
+            let headers = authorization(&format!("{scheme} {basic}"));
+            assert_eq!(token_from_headers(&headers).as_deref(), Some("secret"));
+        }
+        for scheme in ["Bearer", "bearer"] {
+            let headers = authorization(&format!("{scheme} secret"));
+            assert_eq!(token_from_headers(&headers).as_deref(), Some("secret"));
+        }
+        assert_eq!(token_from_headers(&authorization("Digest secret")), None);
+        assert_eq!(token_from_headers(&authorization("Bearer ")), None);
+    }
 }

@@ -8,7 +8,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_util::TryStreamExt as _;
 use sea_orm::{
     ActiveModelTrait as _, ColumnTrait as _, Condition, EntityTrait as _, QueryFilter as _,
@@ -18,7 +17,10 @@ use serde::{Deserialize, Serialize};
 use tokio_util::io::{ReaderStream, StreamReader};
 use uuid::Uuid;
 
-use super::{LfsPermission, Permission, RepositoryState, git_http::GitHttpState};
+use super::{
+    LfsPermission, Permission, RepositoryState,
+    git_http::{GitHttpState, token_from_headers},
+};
 use crate::{
     blob_store::{BlobDigest, DigestMismatch},
     entity::{lfs_lock, lfs_object, repository, user},
@@ -486,18 +488,6 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
         .ok()?
         .strip_prefix("Bearer ")
         .map(str::to_owned)
-}
-
-fn token_from_headers(headers: &HeaderMap) -> Option<String> {
-    let authorization = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    if let Some(token) = authorization.strip_prefix("Bearer ") {
-        return Some(token.to_owned());
-    }
-    let encoded = authorization.strip_prefix("Basic ")?;
-    let decoded = STANDARD.decode(encoded).ok()?;
-    let decoded = String::from_utf8(decoded).ok()?;
-    let (_, token) = decoded.split_once(':')?;
-    (!token.is_empty()).then(|| token.to_owned())
 }
 
 async fn create_lock(
