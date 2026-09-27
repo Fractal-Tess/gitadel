@@ -87,16 +87,12 @@ enum RepoCommand {
     Archive { repository: String },
     /// Remove the archived state from a repository.
     Unarchive { repository: String },
-    /// Soft-delete a repository.
-    Delete { repository: String },
-    /// Restore a soft-deleted repository during its recovery period.
-    Restore { repository: String },
-    /// Permanently purge a soft-deleted repository after confirmation.
-    Purge {
+    /// Permanently delete a repository and all of its data. This cannot be undone.
+    Delete {
         repository: String,
-        /// Must be exactly `purge`.
+        /// Must repeat the repository as OWNER/NAME.
         #[arg(long)]
-        confirmation: String,
+        confirm: String,
     },
     /// Add or remove the authenticated user's favorite marker.
     Favorite {
@@ -1048,33 +1044,17 @@ async fn run_repo(api: &ApiClient, command: RepoCommand) -> Result<Value> {
             )
             .await
         }
-        RepoCommand::Delete { repository } => {
+        RepoCommand::Delete {
+            repository,
+            confirm,
+        } => {
+            if confirm != repository {
+                bail!("--confirm must repeat {repository} to permanently delete it");
+            }
             api.request(
                 Method::POST,
                 &(route_repo("repositories", &repository)? + "/delete"),
                 None,
-            )
-            .await
-        }
-        RepoCommand::Restore { repository } => {
-            api.request(
-                Method::POST,
-                &(route_repo("repositories", &repository)? + "/restore"),
-                None,
-            )
-            .await
-        }
-        RepoCommand::Purge {
-            repository,
-            confirmation,
-        } => {
-            if confirmation != "purge" {
-                bail!("--confirmation must be exactly purge");
-            }
-            api.request(
-                Method::DELETE,
-                &(route_repo("repositories", &repository)? + "/purge"),
-                Some(json!({"confirmation":"purge"})),
             )
             .await
         }

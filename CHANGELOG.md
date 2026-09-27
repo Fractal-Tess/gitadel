@@ -4,6 +4,10 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+### Changed
+
+- Deleting a repository is now immediate and permanent: its Git data, LFS objects, container images, and archive cache are removed, and the confirmation dialog requires typing the repository name. Repositories soft-deleted by earlier releases are removed at startup. The restore and purge endpoints and the `gtd repo restore` and `gtd repo purge` commands are gone; `gtd repo delete` now requires `--confirm OWNER/NAME`.
+
 ## [0.11.0] - 2026-09-27
 
 ### Added

@@ -544,9 +544,9 @@ available. A failed or interrupted migration leaves the previous target
 selected. Source copies are retained; selecting an old target again removes
 payloads that were deleted from the current target before cutover.
 
-Renaming or transferring a repository keeps its images. Soft deletion hides
-them, and restoration makes them available again. Permanent purge removes
-registry data from local storage and reachable configured targets.
+Renaming or transferring a repository keeps its images. Deleting a repository
+is permanent and removes its registry data from local storage and reachable
+configured targets.
 
 ## Git LFS storage
 

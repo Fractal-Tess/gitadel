@@ -27,6 +27,7 @@ pub(crate) use browser::{read_git, render_markdown};
 pub(crate) use git_http::GitHttpState;
 pub(crate) use integrity::serve_integrity_scheduler;
 pub(crate) use mirror_scheduler::serve_mirror_scheduler;
+pub(crate) use resources::purge_soft_deleted_repositories;
 pub(crate) fn outbound_http_client() -> Result<reqwest::Client, reqwest::Error> {
     webhooks::webhook_client()
 }
@@ -904,15 +905,7 @@ pub fn router() -> Router<RepositoryState> {
         )
         .route(
             "/repositories/{namespace}/{name}/delete",
-            axum::routing::post(resources::soft_delete_repository),
-        )
-        .route(
-            "/repositories/{namespace}/{name}/restore",
-            axum::routing::post(resources::restore_repository),
-        )
-        .route(
-            "/repositories/{namespace}/{name}/purge",
-            delete(resources::purge_repository),
+            axum::routing::post(resources::delete_repository),
         )
         .route(
             "/repositories/{namespace}/{name}/favorite",

@@ -214,6 +214,9 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
     repository::recover_imports(&repository_state)
         .await
         .context("could not recover interrupted repository imports")?;
+    repository::purge_soft_deleted_repositories(&repository_state)
+        .await
+        .context("could not remove previously deleted repositories")?;
     let actions_state = ActionsState::new(repository_state.clone(), settings.actions.clone());
     actions::bootstrap_system_runner(&actions_state)
         .await

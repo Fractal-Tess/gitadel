@@ -288,11 +288,11 @@ export class RepositorySettingsState {
         : "Repository unarchived.",
     );
   }
-  async softDelete(): Promise<void> {
+  async deleteRepository(): Promise<void> {
     await this.lifecycleRequest(
       "/delete",
       "POST",
-      "Repository deleted. You can restore it during the recovery period.",
+      "Repository permanently deleted.",
     );
     window.location.assign("/");
   }

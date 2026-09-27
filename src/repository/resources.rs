@@ -19,7 +19,7 @@ use axum::{
     response::IntoResponse,
 };
 use axum_extra::extract::cookie::CookieJar;
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, IntoActiveModel,
@@ -995,98 +995,47 @@ pub async fn unarchive_repository(
     update_archive_state(&state, &headers, &jar, &namespace, &name, false).await
 }
 
-pub async fn soft_delete_repository(
+pub async fn delete_repository(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<StatusCode, ApiError> {
-    let (actor, repository) =
-        managed_repository(&state, &headers, &jar, &namespace, &name, false).await?;
-    let transaction = state.identity().database().begin().await?;
-    let mut active: repository::ActiveModel = repository.clone().into();
-    active.deleted_at = Set(Some(Utc::now()));
-    active.updated_at = Set(Utc::now());
-    active.update(&transaction).await?;
-    state
-        .identity()
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "repository.delete",
-            Some(format!("{namespace}/{name}")),
-        )
-        .await?;
-    transaction.commit().await?;
+    let (actor, repository) = managed_repository(&state, &headers, &jar, &namespace, &name).await?;
+    remove_repository(&state, Some(actor.user.id), repository).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub async fn restore_repository(
-    State(state): State<RepositoryState>,
-    AxumPath((namespace, name)): AxumPath<(String, String)>,
-    headers: HeaderMap,
-    jar: CookieJar,
-) -> Result<StatusCode, ApiError> {
-    let (actor, repository) =
-        managed_repository(&state, &headers, &jar, &namespace, &name, true).await?;
-    let deleted_at = repository
-        .deleted_at
-        .ok_or_else(|| ApiError::bad_request("This repository is not deleted."))?;
-    if deleted_at < Utc::now() - Duration::days(30) {
-        return Err(ApiError::bad_request(
-            "This repository’s 30-day recovery period has ended.",
-        ));
-    }
-    let transaction = state.identity().database().begin().await?;
-    let mut active: repository::ActiveModel = repository.clone().into();
-    active.deleted_at = Set(None);
-    active.updated_at = Set(Utc::now());
-    active.update(&transaction).await?;
-    state
-        .identity()
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "repository.restore",
-            Some(format!("{}/{}", repository.namespace, repository.name)),
-        )
+/// Permanently removes repositories that earlier releases soft-deleted, since
+/// deletion no longer has a recovery period.
+pub(crate) async fn purge_soft_deleted_repositories(
+    state: &RepositoryState,
+) -> Result<(), ApiError> {
+    let deleted = repository::Entity::find()
+        .filter(repository::Column::DeletedAt.is_not_null())
+        .all(state.identity().database())
         .await?;
-    transaction.commit().await?;
-    Ok(StatusCode::NO_CONTENT)
+    for repository in deleted {
+        remove_repository(state, None, repository).await?;
+    }
+    Ok(())
 }
 
-#[derive(Deserialize)]
-pub struct PurgeRepositoryRequest {
-    confirmation: String,
-}
-
-pub async fn purge_repository(
-    State(state): State<RepositoryState>,
-    AxumPath((namespace, name)): AxumPath<(String, String)>,
-    headers: HeaderMap,
-    jar: CookieJar,
-    Json(request): Json<PurgeRepositoryRequest>,
-) -> Result<StatusCode, ApiError> {
-    if request.confirmation != "purge" {
-        return Err(ApiError::bad_request(
-            "Confirm permanent deletion with confirmation: purge.",
-        ));
-    }
-    let (actor, repository) =
-        managed_repository(&state, &headers, &jar, &namespace, &name, true).await?;
-    if repository.deleted_at.is_none() {
-        return Err(ApiError::bad_request(
-            "Soft-delete the repository before permanently purging it.",
-        ));
-    }
+/// Deletes the repository record, then its Git data, LFS objects, registry
+/// objects, and archive cache. Nothing is kept for recovery.
+async fn remove_repository(
+    state: &RepositoryState,
+    actor_user_id: Option<Uuid>,
+    repository: repository::Model,
+) -> Result<(), ApiError> {
     let _registry_operation = state.registry_storage().lock_operation().await;
     let transaction = state.identity().database().begin().await?;
     state
         .identity()
         .audit_on(
             &transaction,
-            Some(actor.user.id),
-            "repository.purge",
+            actor_user_id,
+            "repository.delete",
             Some(format!("{}/{}", repository.namespace, repository.name)),
         )
         .await?;
@@ -1094,7 +1043,7 @@ pub async fn purge_repository(
         .exec(&transaction)
         .await?;
     transaction.commit().await?;
-    cleanup_lfs_blobs(&state, repository.storage_key).await;
+    cleanup_lfs_blobs(state, repository.storage_key).await;
     let registry_prefix = ObjectPrefix::new(format!("registry/{}", repository.storage_key))
         .map_err(ApiError::internal)?;
     if let Err(error) = targets::delete_prefix_from_all(
@@ -1112,7 +1061,7 @@ pub async fn purge_repository(
     )
     .await;
     cleanup_repository(&state.source_archive_cache_directory(&repository)).await;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
 }
 
 async fn update_archive_state(
@@ -1123,8 +1072,7 @@ async fn update_archive_state(
     name: &str,
     archived: bool,
 ) -> Result<StatusCode, ApiError> {
-    let (actor, repository) =
-        managed_repository(state, headers, jar, namespace, name, false).await?;
+    let (actor, repository) = managed_repository(state, headers, jar, namespace, name).await?;
     let transaction = state.identity().database().begin().await?;
     let mut active: repository::ActiveModel = repository.into();
     active.archived_at = Set(archived.then(Utc::now));
@@ -1153,20 +1101,12 @@ async fn managed_repository(
     jar: &CookieJar,
     namespace: &str,
     name: &str,
-    include_deleted: bool,
 ) -> Result<(crate::identity::AuthenticatedUser, repository::Model), ApiError> {
     let actor = state
         .identity()
         .authenticate(headers, jar, SCOPE_WRITE)
         .await?;
-    let repository = if include_deleted {
-        state.find_including_deleted(namespace, name).await?
-    } else {
-        state.find(namespace, name).await?
-    };
-    if repository.deleted_at.is_some() && !include_deleted {
-        return Err(ApiError::not_found());
-    }
+    let repository = state.find(namespace, name).await?;
     let owner = namespace::Entity::find_by_id(&repository.namespace)
         .one(state.identity().database())
         .await?

@@ -39,6 +39,10 @@
   let initializedIconSelection = $state("");
   let moveDialogOpen = $state(false);
   let deleteDialogOpen = $state(false);
+  let deleteConfirmation = $state("");
+  const deleteTarget = $derived(
+    `${repository.repository?.namespace ?? ""}/${repository.repository?.name ?? ""}`,
+  );
   // Sections are pages reached from the rail, so an unknown one falls back to
   // the first page rather than rendering nothing.
   const section = $derived(
@@ -139,7 +143,7 @@
 
   async function confirmDeleteRepository() {
     try {
-      await repository.settings.softDelete();
+      await repository.settings.deleteRepository();
       deleteDialogOpen = false;
     } catch {
       // The repository settings state owns mutation error toasts.
@@ -554,8 +558,7 @@
             Delete repository
           </h2>
           <p class="mt-1 max-w-xs text-sm leading-5 text-muted-foreground">
-            Hide it from browsing and cloning. Data stays recoverable until a
-            separate permanent purge.
+            Permanently remove the repository and all of its data.
           </p>
         </div>
       </header>
@@ -564,7 +567,7 @@
         class="flex max-w-2xl flex-wrap items-center justify-between gap-4 rounded-md border border-destructive/30 bg-destructive/5 p-4"
       >
         <p class="text-sm text-muted-foreground">
-          This cannot be undone once the recovery period lapses.
+          Deletion is permanent and cannot be recovered.
         </p>
         <Button
           type="button"
@@ -599,24 +602,40 @@
   </AlertDialog.Content>
 </AlertDialog.Root>
 
-<AlertDialog.Root bind:open={deleteDialogOpen}>
+<AlertDialog.Root
+  bind:open={deleteDialogOpen}
+  onOpenChange={(open) => {
+    if (!open) deleteConfirmation = "";
+  }}
+>
   <AlertDialog.Content>
     <AlertDialog.Header>
-      <AlertDialog.Title
-        >Delete {repository.repository?.namespace ?? ""}/{repository.repository
-          ?.name ?? ""}?</AlertDialog.Title
-      >
+      <AlertDialog.Title>Permanently delete {deleteTarget}?</AlertDialog.Title>
       <AlertDialog.Description>
-        This will soft-delete the repository. It can be restored during the
-        recovery period, but will be hidden from browsing and cloning.
+        This deletes the repository immediately and permanently, including its
+        Git history, issues, releases, LFS objects, container images, and
+        Actions data. It cannot be recovered.
       </AlertDialog.Description>
     </AlertDialog.Header>
+    <Field.Field>
+      <Field.Label for="repository-delete-confirmation">
+        Type <span class="font-mono">{deleteTarget}</span> to confirm
+      </Field.Label>
+      <Input
+        id="repository-delete-confirmation"
+        bind:value={deleteConfirmation}
+        autocomplete="off"
+        spellcheck={false}
+      />
+    </Field.Field>
     <AlertDialog.Footer>
       <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
       <AlertDialog.Action
         variant="destructive"
+        disabled={deleteConfirmation !== deleteTarget ||
+          repository.settings.lifecyclePending}
         onclick={() => void confirmDeleteRepository()}
-        >Delete repository</AlertDialog.Action
+        >Delete permanently</AlertDialog.Action
       >
     </AlertDialog.Footer>
   </AlertDialog.Content>
