@@ -362,7 +362,16 @@ gtd admin instance update --body-file instance-settings.json
 gtd api user
 ```
 
-JSON commands write JSON to stdout and errors to stderr, with a nonzero exit status on failure. `--body-file -` accepts JSON from stdin, but cannot share stdin with a token source. Typed commands cover repositories, organizations, SSH keys, instance and authentication settings, OIDC, storage, backups, and audit records; `gtd --help` lists them. The `api` command exposes other token-authorized endpoints. Browser-only account-security and restore flows keep their existing authentication requirements.
+JSON commands write JSON to stdout and errors to stderr, with a nonzero exit status on failure. `--body-file -` accepts JSON from stdin, but cannot share stdin with a token source. Typed commands cover repositories, issues, releases and their assets, webhooks, pull mirrors and mirror identities, repository imports, container registry images and storage, organizations, SSH keys, instance and authentication settings, OIDC, storage, backups, and audit records; `gtd --help` lists them. The `api` command exposes other token-authorized endpoints. API tokens and backup restores require a browser session, or `gitadel backup restore` on the server host.
+
+```bash
+gtd issue create alice/demo --title "Crash on start" --body-file notes.md --label bug
+gtd release create alice/demo --target v1.2.0 --body-file CHANGES.md
+gtd release asset upload alice/demo v1.2.0 dist/demo.tar.gz
+gtd webhook create alice/demo --url https://ci.example.com/hook --secret-file hook.secret
+```
+
+Commands accept an ID or a readable name: a label name, a release tag or title, or an asset file name.
 
 Backup downloads stream into a private temporary file and replace the requested output only after a complete transfer:
 

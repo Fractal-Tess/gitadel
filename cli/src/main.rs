@@ -13,6 +13,14 @@ use uuid::Uuid;
 
 mod accounts;
 mod auth;
+mod imports;
+mod input;
+mod issues;
+mod mirrors;
+mod query;
+mod registry;
+mod releases;
+mod webhooks;
 use auth::AuthCommand;
 
 #[derive(Debug, Parser)]
@@ -50,7 +58,7 @@ enum Command {
         #[command(subcommand)]
         command: RepoCommand,
     },
-    /// Show the authenticated user's profile and manage SSH keys.
+    /// Show the authenticated user's profile and manage SSH keys and API tokens.
     Me {
         #[command(subcommand)]
         command: MeCommand,
@@ -64,6 +72,31 @@ enum Command {
     Admin {
         #[command(subcommand)]
         command: AdminCommand,
+    },
+    /// Manage repository issues, comments, and labels.
+    Issue {
+        #[command(subcommand)]
+        command: issues::IssueCommand,
+    },
+    /// Manage repository releases and release assets.
+    Release {
+        #[command(subcommand)]
+        command: releases::ReleaseCommand,
+    },
+    /// Manage repository webhooks and their deliveries.
+    Webhook {
+        #[command(subcommand)]
+        command: webhooks::WebhookCommand,
+    },
+    /// Manage pull mirrors and namespace mirror identities.
+    Mirror {
+        #[command(subcommand)]
+        command: mirrors::MirrorCommand,
+    },
+    /// Import repositories from other forges or clone URLs.
+    Import {
+        #[command(subcommand)]
+        command: imports::ImportCommand,
     },
     /// Manage the saved CLI login.
     Auth {
@@ -105,6 +138,8 @@ enum RepoCommand {
         #[command(subcommand)]
         command: CollaboratorCommand,
     },
+    /// List the repository's container images, tags, and digests.
+    Registry { repository: String },
 }
 
 #[derive(Debug, Args)]
@@ -270,6 +305,11 @@ enum AdminCommand {
     Invitation {
         #[command(subcommand)]
         command: accounts::InvitationCommand,
+    },
+    /// Inspect container registry storage and migrate it between targets.
+    Registry {
+        #[command(subcommand)]
+        command: registry::AdminRegistryCommand,
     },
     /// Read administrator audit history.
     Audit {
@@ -505,6 +545,10 @@ impl ApiClient {
             .bytes()
             .await
             .context("could not read Gitadel response")?;
+        if status.is_success() && bytes.is_empty() {
+            // Accepted-style responses (for example webhook redelivery) have no body.
+            return Ok(json!({"status": status.as_u16()}));
+        }
         let parsed = serde_json::from_slice::<Value>(&bytes);
         if !status.is_success() {
             let parsed = parsed.unwrap_or_else(
@@ -561,11 +605,7 @@ impl ApiClient {
             let mut file = options
                 .open(&temporary)
                 .with_context(|| format!("could not create {}", temporary.display()))?;
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .context("could not read backup download")?
-            {
+            while let Some(chunk) = response.chunk().await.context("could not read download")? {
                 file.write_all(&chunk)
                     .with_context(|| format!("could not write {}", temporary.display()))?;
             }
@@ -573,7 +613,7 @@ impl ApiClient {
                 .with_context(|| format!("could not flush {}", temporary.display()))?;
             drop(file);
             fs::rename(&temporary, output)
-                .with_context(|| format!("could not publish backup to {}", output.display()))?;
+                .with_context(|| format!("could not publish download to {}", output.display()))?;
             Ok::<(), anyhow::Error>(())
         }
         .await;
@@ -895,6 +935,11 @@ fn command_uses_stdin_body(command: &Command) -> bool {
             _ => false,
         },
         Command::Api(command) => optional_body_command_uses_stdin(&command.body),
+        Command::Issue { command } => issues::uses_stdin(command),
+        Command::Release { command } => releases::uses_stdin(command),
+        Command::Webhook { command } => webhooks::uses_stdin(command),
+        Command::Mirror { command } => mirrors::uses_stdin(command),
+        Command::Import { .. } => false,
         Command::Auth { .. } | Command::Me { .. } | Command::Org { .. } => false,
     }
 }
@@ -968,6 +1013,11 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Repo { command } => run_repo(&api, command).await?,
         Command::Me { command } => run_me(&api, command).await?,
         Command::Org { command } => run_org(&api, command).await?,
+        Command::Issue { command } => issues::run(&api, command).await?,
+        Command::Release { command } => releases::run(&api, command).await?,
+        Command::Webhook { command } => webhooks::run(&api, command).await?,
+        Command::Mirror { command } => mirrors::run(&api, command).await?,
+        Command::Import { command } => imports::run(&api, command).await?,
         Command::Admin {
             command:
                 AdminCommand::Storage {
@@ -990,6 +1040,12 @@ async fn run(cli: Cli) -> Result<()> {
             api.progress(&path, operation_id).await?;
             return Ok(());
         }
+        Command::Admin {
+            command: AdminCommand::Registry { command },
+        } => match registry::run_admin(&api, command).await? {
+            Some(value) => value,
+            None => return Ok(()),
+        },
         Command::Admin { command } => run_admin(&api, command).await?,
         Command::Api(command) => {
             let body = optional_body_value(&command.body)?;
@@ -1116,6 +1172,7 @@ async fn run_repo(api: &ApiClient, command: RepoCommand) -> Result<Value> {
                 api.request(Method::DELETE, &path, None).await
             }
         },
+        RepoCommand::Registry { repository } => registry::browse(api, &repository).await,
     }
 }
 
@@ -1272,6 +1329,9 @@ async fn run_admin(api: &ApiClient, command: AdminCommand) -> Result<Value> {
         AdminCommand::Backup { command } => run_backup(api, command).await,
         AdminCommand::User { command } => accounts::run_user(api, command).await,
         AdminCommand::Invitation { command } => accounts::run_invitation(api, command).await,
+        AdminCommand::Registry { .. } => {
+            unreachable!("registry commands are handled by the top-level dispatcher")
+        }
         AdminCommand::Audit { limit } => {
             api.request(
                 Method::GET,
