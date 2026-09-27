@@ -20,6 +20,9 @@ cache:
   enabled: false
 
 container:
+  # Share the Docker-in-Docker network namespace so jobs resolve Compose
+  # service names, including the runner instance URL http://gitadel:3000.
+  network: host
   privileged: false
   valid_volumes: []
   docker_host: "-"

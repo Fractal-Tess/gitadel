@@ -1,3 +1,7 @@
+[actions]
+# Allow commit-pinned actions such as actions/checkout from the default origin.
+allowed_action_origins = ["https://code.forgejo.org"]
+
 [actions.system_runner]
 name = "gitadel-system"
 labels = ["docker"]

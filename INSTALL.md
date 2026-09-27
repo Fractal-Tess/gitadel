@@ -79,8 +79,47 @@ SSH port `2222` if you want generated SSH clone URLs to work as shown. If you
 map SSH to another host port, edit the port in each SSH clone URL or Git
 remote manually. The service still listens on port `2222` inside Compose.
 
+### Actions runner
+
 Actions runners are optional. The `compose.actions.yaml` overlay adds a
-privileged Docker-in-Docker daemon and a Forgejo Runner.
+privileged Docker-in-Docker daemon and a Forgejo Runner v13.0.0 that
+registers itself as the instance-wide `gitadel-system` runner with the
+`docker` label. Gitadel writes a one-time registration token into a shared
+volume at startup, so no manual registration is needed:
+
+```bash
+export COMPOSE_FILE=compose.yaml:compose.actions.yaml
+export GITADEL_PUBLIC_URL=https://git.example.com
+docker compose up -d --build
+docker compose logs runner   # "runner: gitadel-system ... declared successfully"
+```
+
+`GITADEL_PUBLIC_URL` is required and must contain a hostname, not a bare IP
+address. With `COMPOSE_FILE` exported, the bootstrap command above and every
+later `docker compose` command include the runner.
+
+The runner connects to Gitadel over the Compose network at
+`http://gitadel:3000`, and jobs clone from the same address. Job containers
+share the Docker-in-Docker network namespace, so they resolve Compose
+service names. Artifact uploads and downloads use signed URLs on
+`GITADEL_PUBLIC_URL`, so that URL must also be reachable from inside Docker
+for workflows that use artifacts.
+
+Workflows in `.forgejo/workflows`, `.gitea/workflows`, or
+`.github/workflows` run on push with `runs-on: docker`. Jobs use the pinned
+`node` image from `deploy/forgejo-runner/config.yml`. Remote actions must be
+pinned to a full commit and are fetched from `https://code.forgejo.org`, which
+the overlay allows in `deploy/forgejo-runner/gitadel.toml`:
+
+```yaml
+steps:
+  - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+  - run: make test
+```
+
+Remove `allowed_action_origins` from that file to permit only `run:` steps
+and local `./` actions. The Docker-in-Docker daemon is privileged; run only
+workflows you trust.
 
 ### Publishing the image
 

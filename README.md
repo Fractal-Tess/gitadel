@@ -28,10 +28,13 @@ Repository operations run in-process through [Sley](https://github.com/Fractal-T
 ```bash
 git clone https://github.com/Fractal-Tess/gitadel.git
 cd gitadel
-docker compose up --build
+docker compose build
+printf '%s' 'choose-a-strong-password' \
+  | docker compose run --rm -T gitadel --bootstrap-admin archivist --password-stdin
+docker compose up -d
 ```
 
-Open [http://localhost:3000/register](http://localhost:3000/register) to create the first administrator. HTTP listens on `3000`, SSH listens on `2222`, and persistent state is stored in the `gitadel-data` volume.
+Open [http://localhost:3000/login](http://localhost:3000/login) and sign in as the administrator. HTTP listens on `3000`, SSH listens on `2222`, and persistent state is stored in the `gitadel-data` volume. Add `compose.actions.yaml` for a built-in [Actions runner](INSTALL.md#actions-runner).
 
 Use **New repository** in the web UI, add your SSH key under **Account settings**, and push:
 

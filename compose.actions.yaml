@@ -29,7 +29,7 @@ services:
     restart: unless-stopped
 
   runner:
-    image: data.forgejo.org/forgejo/runner@sha256:ca3d5eea46004789a175d1369eec6829d3ea9bfbe2011a06625b4bdaa55f7552
+    image: data.forgejo.org/forgejo/runner@sha256:7fb853bfe73c229be6349398359c0a7bd01fadfd17c106607b2221150b799ed2 # v13.0.0, matching REQUIRED_RUNNER_VERSION
     user: "10001:10001"
     depends_on:
       gitadel:
@@ -38,7 +38,9 @@ services:
         condition: service_started
     environment:
       DOCKER_HOST: tcp://runner-docker:2375
-      GITADEL_RUNNER_INSTANCE_URL: ${GITADEL_PUBLIC_URL:?Set GITADEL_PUBLIC_URL when using the Actions overlay}
+      # The runner reaches Gitadel inside the Compose network. Job containers
+      # still use GITADEL_PUBLIC_URL, so it must resolve from the Docker daemon.
+      GITADEL_RUNNER_INSTANCE_URL: http://gitadel:3000
     volumes:
       - runner-data:/data
       - ./deploy/forgejo-runner/config.yml:/data/config.yml:ro
