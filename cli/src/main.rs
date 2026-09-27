@@ -12,6 +12,7 @@ use url::Url;
 use uuid::Uuid;
 
 mod auth;
+mod imports;
 mod input;
 mod issues;
 mod mirrors;
@@ -91,6 +92,11 @@ enum Command {
     Mirror {
         #[command(subcommand)]
         command: mirrors::MirrorCommand,
+    },
+    /// Import repositories from other forges or clone URLs.
+    Import {
+        #[command(subcommand)]
+        command: imports::ImportCommand,
     },
     /// Manage the saved CLI login.
     Auth {
@@ -920,6 +926,7 @@ fn command_uses_stdin_body(command: &Command) -> bool {
         Command::Release { command } => releases::uses_stdin(command),
         Command::Webhook { command } => webhooks::uses_stdin(command),
         Command::Mirror { command } => mirrors::uses_stdin(command),
+        Command::Import { .. } => false,
         Command::Auth { .. } | Command::Me { .. } | Command::Org { .. } => false,
     }
 }
@@ -997,6 +1004,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Release { command } => releases::run(&api, command).await?,
         Command::Webhook { command } => webhooks::run(&api, command).await?,
         Command::Mirror { command } => mirrors::run(&api, command).await?,
+        Command::Import { command } => imports::run(&api, command).await?,
         Command::Admin {
             command:
                 AdminCommand::Storage {
