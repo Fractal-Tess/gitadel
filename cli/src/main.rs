@@ -491,6 +491,10 @@ impl ApiClient {
             .bytes()
             .await
             .context("could not read Gitadel response")?;
+        if status.is_success() && bytes.is_empty() {
+            // Accepted-style responses (for example webhook redelivery) have no body.
+            return Ok(json!({"status": status.as_u16()}));
+        }
         let parsed = serde_json::from_slice::<Value>(&bytes);
         if !status.is_success() {
             let parsed = parsed.unwrap_or_else(
@@ -547,11 +551,7 @@ impl ApiClient {
             let mut file = options
                 .open(&temporary)
                 .with_context(|| format!("could not create {}", temporary.display()))?;
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .context("could not read backup download")?
-            {
+            while let Some(chunk) = response.chunk().await.context("could not read download")? {
                 file.write_all(&chunk)
                     .with_context(|| format!("could not write {}", temporary.display()))?;
             }
@@ -559,7 +559,7 @@ impl ApiClient {
                 .with_context(|| format!("could not flush {}", temporary.display()))?;
             drop(file);
             fs::rename(&temporary, output)
-                .with_context(|| format!("could not publish backup to {}", output.display()))?;
+                .with_context(|| format!("could not publish download to {}", output.display()))?;
             Ok::<(), anyhow::Error>(())
         }
         .await;
