@@ -1,0 +1,11 @@
+# Build the image from this checkout instead of pulling it:
+#
+#   docker compose -f compose.yaml -f compose.build.yaml up -d --build
+#
+# It combines with compose.actions.yaml the same way.
+services:
+  gitadel:
+    image: gitadel:local
+    build:
+      context: .
+    pull_policy: build

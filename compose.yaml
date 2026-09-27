@@ -1,7 +1,14 @@
+# Gitadel as a single service. This file is all you need:
+#
+#   docker compose up -d
+#   docker compose logs gitadel    # open the one-time setup link it prints
+#
+# Set GITADEL_PUBLIC_URL to the address people open in a browser, and
+# GITADEL_LISTEN_ADDRESS=0.0.0.0 to accept connections from other hosts.
+# compose.actions.yaml is the same stack with a built-in Actions runner.
 services:
   gitadel:
-    build:
-      context: .
+    image: ghcr.io/fractal-tess/gitadel:${GITADEL_VERSION:-latest}
     restart: unless-stopped
     environment:
       GITADEL_PUBLIC_URL: ${GITADEL_PUBLIC_URL:-http://localhost:3000}

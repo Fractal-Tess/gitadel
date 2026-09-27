@@ -26,17 +26,14 @@ Repository operations run in-process through [Sley](https://github.com/Fractal-T
 ## Quick start
 
 ```bash
-git clone https://github.com/Fractal-Tess/gitadel.git
-cd gitadel
-docker compose build
-printf '%s' 'choose-a-strong-password' \
-  | docker compose run --rm -T gitadel --bootstrap-admin archivist --password-stdin
+curl -fsSLO https://raw.githubusercontent.com/Fractal-Tess/gitadel/main/compose.yaml
 docker compose up -d
+docker compose logs gitadel
 ```
 
-Open [http://localhost:3000/login](http://localhost:3000/login) and sign in as the administrator. HTTP listens on `3000`, SSH listens on `2222`, and persistent state is stored in the `gitadel-data` volume. Add `compose.actions.yaml` for a built-in [Actions runner](INSTALL.md#actions-runner).
+Open the one-time setup link from the log to create the administrator. HTTP listens on `3000`, SSH on `2222`, and everything persists in the `gitadel-data` volume. Use [`compose.actions.yaml`](compose.actions.yaml) instead for a built-in Actions runner. See [INSTALL.md](INSTALL.md) for settings, hosting platforms such as Coolify, NixOS, and backups.
 
-Use **New repository** in the web UI, add your SSH key under **Account settings**, and push:
+Add your SSH key under **Account settings**, create a repository, and push:
 
 ```bash
 git remote add archive ssh://git@localhost:2222/archivist/old-project.git
@@ -45,11 +42,11 @@ git push archive main
 
 Press **Ctrl+K** to search repositories or find commands for creation, imports, and settings.
 
-See [INSTALL.md](INSTALL.md) for Docker, NixOS, configuration, reverse-proxy, and backup instructions.
-
 ## Command-line client
 
 `gtd` manages a running instance with an API token. It is separate from the `gitadel` server and uses the same permissions as the web API.
+
+Download it from the [latest release](https://github.com/Fractal-Tess/gitadel/releases/latest) for Linux or macOS, or install it with Nix:
 
 ```bash
 nix profile install github:Fractal-Tess/gitadel#gitadel-cli

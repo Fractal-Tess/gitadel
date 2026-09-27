@@ -4,114 +4,81 @@ Gitadel can run from Docker Compose or as a NixOS service. In both cases, put in
 
 ## Docker Compose
 
-Clone the repository, build the image, and create the first administrator
-before starting the server:
+Images for `linux/amd64` and `linux/arm64` are published to
+`ghcr.io/fractal-tess/gitadel`. The compose files pull them, so you only need
+the file itself:
 
 ```bash
-git clone https://github.com/Fractal-Tess/gitadel.git
-cd gitadel
-docker compose build
-read -rsp "Administrator password: " GITADEL_ADMIN_PASSWORD; echo
-printf '%s' "$GITADEL_ADMIN_PASSWORD" \
-  | docker compose run --rm -T gitadel --bootstrap-admin admin --password-stdin
-unset GITADEL_ADMIN_PASSWORD
+curl -fsSLO https://raw.githubusercontent.com/Fractal-Tess/gitadel/main/compose.yaml
 docker compose up -d
+docker compose logs gitadel
 ```
 
-The default setup binds HTTP to `127.0.0.1:3000` and SSH to
-`127.0.0.1:2222`. Check the container and its health endpoint:
+The log contains a one-time link to create the first administrator:
+
+```text
+No administrator exists yet. Open this one-time link to create one: http://localhost:3000/register?setup=...
+```
+
+Open it and choose a username and password. The link stops working once the
+administrator exists, and a restart prints a fresh one until then. HTTP
+listens on `127.0.0.1:3000`, SSH on `127.0.0.1:2222`, and the `gitadel-data`
+volume keeps the database, repositories, LFS objects, Actions artifacts, and
+SSH host key.
+
+### Settings
+
+Configure the stack with environment variables, either exported or in an
+`.env` file next to the compose file:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `GITADEL_PUBLIC_URL` | `http://localhost:3000` | The address people open in a browser. Used for clone links, cookies, OAuth callbacks, and webhooks. |
+| `GITADEL_LISTEN_ADDRESS` | `127.0.0.1` | Host address for the published ports. Use `0.0.0.0` to accept connections from other machines. |
+| `GITADEL_HTTP_PORT` | `3000` | Host port for HTTP. |
+| `GITADEL_SSH_PORT` | `2222` | Host port for Git over SSH. |
+| `GITADEL_VERSION` | `latest` | Image tag, such as `0.13.0`. |
+
+For example, to reach an instance on your network at `http://192.168.1.10:3000`:
 
 ```bash
-docker compose ps
-curl --fail http://127.0.0.1:3000/healthz
+GITADEL_LISTEN_ADDRESS=0.0.0.0 GITADEL_PUBLIC_URL=http://192.168.1.10:3000 docker compose up -d
 ```
 
-Open [http://localhost:3000/login](http://localhost:3000/login) and sign in
-with the administrator created above. The first administrator can only be
-created through the local command, never through the public HTTP service. The
-`gitadel-data` named volume keeps the database, repositories, LFS objects,
-Actions artifacts, and SSH host key when the container is recreated.
+Passkeys need a hostname in `GITADEL_PUBLIC_URL`, so they are turned off for
+IP addresses; passwords and TOTP still work. Put public traffic behind a
+TLS-terminating reverse proxy and use its `https://` address as the public
+URL. SSH clone URLs always show port `2222`; if you publish SSH on another
+host port, adjust the remote by hand.
 
-The image runs Gitadel as the non-root user with UID and GID `10001`. Docker
-creates the named volume with the image's `/data` ownership, so the normal
-deployment does not need a permission fix. If you replace the named volume
-with a host bind mount, make the mounted directory writable by that identity:
+### Hosting platforms
 
-```bash
-sudo chown -R 10001:10001 /path/to/gitadel-data
-```
-
-The runtime image includes Gitadel and its shared libraries, but does not
-install a system `git` executable. Git operations are handled by Gitadel.
-
-To stop and restart without removing data:
-
-```bash
-docker compose stop
-docker compose start
-```
-
-`docker compose down` removes containers but keeps `gitadel-data`. Do not use
-`docker compose down -v` for an instance that contains data. That command
-deletes the named volume.
-
-For access from another host, bind the published ports on all interfaces and
-set the browser-visible URL. Put public HTTP traffic behind a
-TLS-terminating reverse proxy:
-
-```bash
-GITADEL_LISTEN_ADDRESS=0.0.0.0 \
-GITADEL_PUBLIC_URL=https://git.example.com \
-GITADEL_HTTP_PORT=3000 \
-GITADEL_SSH_PORT=2222 \
-docker compose up -d --build
-```
-
-`GITADEL_PUBLIC_URL` defaults to `http://localhost:3000` and must be the
-origin that users open in their browsers. Gitadel uses it for clone links,
-cookies, passkey verification, OAuth callbacks, and webhook payloads. Include
-the public HTTP port in the URL when it is not the standard port for its
-scheme.
-
-`GITADEL_HTTP_PORT` and `GITADEL_SSH_PORT` change the host ports. Gitadel
-currently has no separate advertised SSH-port setting. Keep the default host
-SSH port `2222` if you want generated SSH clone URLs to work as shown. If you
-map SSH to another host port, edit the port in each SSH clone URL or Git
-remote manually. The service still listens on port `2222` inside Compose.
+Coolify, CapRover, Dokploy, and Portainer can deploy `compose.yaml` or
+`compose.actions.yaml` as a single stack. Set `GITADEL_PUBLIC_URL` to the
+domain the platform assigns, route that domain to container port `3000`,
+optionally expose port `2222` for SSH, and open the setup link from the
+service log.
 
 ### Actions runner
 
-Actions runners are optional. The `compose.actions.yaml` overlay adds a
-privileged Docker-in-Docker daemon and a Forgejo Runner v13.0.0 that
-registers itself as the instance-wide `gitadel-system` runner with the
-`docker` label. Gitadel writes a one-time registration token into a shared
-volume at startup, so no manual registration is needed:
+`compose.actions.yaml` is the same stack plus a Forgejo Runner and the
+privileged Docker daemon that runs its jobs. It needs no other files:
 
 ```bash
-export COMPOSE_FILE=compose.yaml:compose.actions.yaml
-export GITADEL_PUBLIC_URL=https://git.example.com
-docker compose up -d --build
-docker compose logs runner   # "runner: gitadel-system ... declared successfully"
+curl -fsSLO https://raw.githubusercontent.com/Fractal-Tess/gitadel/main/compose.actions.yaml
+docker compose -f compose.actions.yaml up -d
+docker compose -f compose.actions.yaml logs gitadel   # setup link
 ```
 
-`GITADEL_PUBLIC_URL` is required and must contain a hostname, not a bare IP
-address. With `COMPOSE_FILE` exported, the bootstrap command above and every
-later `docker compose` command include the runner.
+The runner registers itself as the instance-wide `gitadel-system` runner with
+the `docker` label, using a one-time token Gitadel writes to a shared volume.
+Jobs reach Gitadel at `http://gitadel:3000` inside the stack, so checkouts,
+artifacts, and `actions/cache` work whatever the public URL is.
 
-The runner connects to Gitadel over the Compose network at
-`http://gitadel:3000`. Job containers share the Docker-in-Docker network
-namespace, so they resolve Compose service names. The overlay sets
-`actions.internal_url = "http://gitadel:3000"` in
-`deploy/forgejo-runner/gitadel.toml`, so the server, API, clone, and signed
-artifact URLs handed to jobs use that address instead of `GITADEL_PUBLIC_URL`.
-Without `internal_url`, jobs receive the public URL.
-
-Workflows in `.forgejo/workflows`, `.gitea/workflows`, or
-`.github/workflows` run with `runs-on: docker` on push, `workflow_dispatch`,
-or `schedule` (UTC cron on the default branch). Jobs use the pinned
-`node` image from `deploy/forgejo-runner/config.yml`. Remote actions must be
-pinned to a full commit and are fetched from `https://code.forgejo.org`, which
-the overlay allows in `deploy/forgejo-runner/gitadel.toml`:
+Workflows in `.forgejo/workflows`, `.gitea/workflows`, or `.github/workflows`
+run with `runs-on: docker` on push, `workflow_dispatch`, or `schedule` (UTC
+cron on the default branch), in the pinned `node` image. Remote actions must
+be pinned to a full commit and come from `https://code.forgejo.org`:
 
 ```yaml
 steps:
@@ -119,12 +86,44 @@ steps:
   - run: make test
 ```
 
-The runner also serves `actions/cache` from the `runner-data` volume; jobs
-reach it at the `runner` service name.
-
-Remove `allowed_action_origins` from that file to permit only `run:` steps
-and local `./` actions. The Docker-in-Docker daemon is privileged; run only
+The Gitadel and runner settings are inline in the `configs` section of
+`compose.actions.yaml`. Remove `allowed_action_origins` there to permit only
+`run:` steps and local `./` actions. The job daemon is privileged; run only
 workflows you trust.
+
+### Operating the stack
+
+```bash
+docker compose ps                  # health
+docker compose pull && docker compose up -d   # upgrade
+docker compose stop                # stop without removing data
+```
+
+`docker compose down` keeps the `gitadel-data` volume; `docker compose down -v`
+deletes it along with every repository. The container runs as UID and GID
+`10001`. If you replace the named volume with a bind mount, make the directory
+writable by that user:
+
+```bash
+sudo chown -R 10001:10001 /path/to/gitadel-data
+```
+
+To create the administrator from the command line instead of the setup link,
+stop the server and run:
+
+```bash
+docker compose stop gitadel
+read -rsp "Password: " password; echo
+printf '%s' "$password" | docker compose run --rm -T gitadel --bootstrap-admin admin --password-stdin
+docker compose start gitadel
+```
+
+To build the image from a checkout instead of pulling it, add
+`compose.build.yaml`:
+
+```bash
+docker compose -f compose.yaml -f compose.build.yaml up -d --build
+```
 
 ### Publishing the image
 
@@ -301,7 +300,14 @@ Install the client on a machine without enabling the server:
 
 ## Command-line client
 
-`gtd` talks to a running Gitadel server over HTTP(S). It does not open the server's database or repository directories. Install it with `nix profile install github:Fractal-Tess/gitadel#gitadel-cli`, or build it from source with `cargo build --release -p gitadel-cli`. The executable is `gtd`; the Cargo package, Nix flake outputs, and NixOS options retain the name `gitadel-cli`.
+`gtd` talks to a running Gitadel server over HTTP(S). It does not open the server's database or repository directories. Download a prebuilt binary for Linux (x86_64 or arm64, statically linked) or macOS from the [latest release](https://github.com/Fractal-Tess/gitadel/releases/latest):
+
+```bash
+curl -fsSL https://github.com/Fractal-Tess/gitadel/releases/latest/download/gtd-VERSION-x86_64-unknown-linux-musl.tar.gz | tar -xz
+sudo install gtd /usr/local/bin/
+```
+
+Replace `VERSION` with the release number shown on the page. You can also install it with `nix profile install github:Fractal-Tess/gitadel#gitadel-cli`, or build it with `cargo build --release -p gitadel-cli`. The executable is `gtd`; the Cargo package, Nix flake outputs, and NixOS options retain the name `gitadel-cli`.
 
 Create an API token under **Account settings → Access**. Reads require `read`; repository, organization, and administrator mutations require `write`. Adding or removing your SSH keys requires `ssh_keys`. Administrator commands also require an administrator account. A token does not bypass repository or organization permissions.
 
