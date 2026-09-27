@@ -202,6 +202,15 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
         .initialize_registry_storage()
         .await
         .context("could not initialize registry storage")?;
+    if let Some(link) = identity_state
+        .prepare_setup_link()
+        .await
+        .context("could not prepare the first-run setup link")?
+    {
+        tracing::warn!(
+            "No administrator exists yet. Open this one-time link to create one: {link}"
+        );
+    }
     let ssh_port = settings.ssh.bind.port();
     let repository_state = RepositoryState::new(
         identity_state.clone(),

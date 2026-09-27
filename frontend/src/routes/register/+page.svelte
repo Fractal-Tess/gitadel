@@ -20,6 +20,7 @@
   const app = useAppState();
   const setupRequired = $derived(app.authStatus?.setup_required ?? false);
   const invitationToken = $derived(page.url.searchParams.get("token") ?? "");
+  const setupToken = $derived(page.url.searchParams.get("setup") ?? "");
   let username = $state("");
   let password = $state("");
   let confirmation = $state("");
@@ -34,10 +35,18 @@
     }
     working = true;
     try {
-      await requestJson("/api/v1/register", authResponseSchema, {
-        method: "POST",
-        body: jsonBody({ token: invitationToken, username, password }),
-      });
+      await requestJson(
+        setupRequired ? "/api/v1/setup" : "/api/v1/register",
+        authResponseSchema,
+        {
+          method: "POST",
+          body: jsonBody({
+            token: setupRequired ? setupToken : invitationToken,
+            username,
+            password,
+          }),
+        },
+      );
       await app.refreshAuth();
       await goto(resolve("/"));
     } catch (caught) {
@@ -79,15 +88,20 @@
       {setupRequired ? "Create the administrator" : "Create your account"}
     </h1>
     <p class="mt-2 text-sm leading-6 text-muted-foreground">
-      {setupRequired
-        ? "Create the first administrator from the Gitadel host. The public setup endpoint is disabled."
-        : "This private invitation grants access to this Gitadel instance."}
+      {#if !setupRequired}
+        This private invitation grants access to this Gitadel instance.
+      {:else if setupToken}
+        This one-time setup link creates the first administrator.
+      {:else}
+        Open the one-time setup link that Gitadel printed in its log at
+        startup. With Docker Compose, run <code>docker compose logs gitadel</code>.
+      {/if}
     </p>
 
-    {#if setupRequired}
+    {#if setupRequired && !setupToken}
       <pre
         class="mt-6 overflow-x-auto rounded-md border bg-muted/40 p-4 text-xs leading-5"
-      ><code>printf '%s\n' 'choose-a-strong-password' | gitadel --bootstrap-admin admin --password-stdin</code></pre>
+      ><code>docker compose logs gitadel | grep register?setup=</code></pre>
     {:else}
       <form
         class="mt-6 grid gap-4"
@@ -135,9 +149,9 @@
         <Button
           class="mt-2"
           type="submit"
-          disabled={working || !invitationToken}
+          disabled={working || !(setupRequired ? setupToken : invitationToken)}
         >
-          Create account
+          {setupRequired ? "Create administrator" : "Create account"}
         </Button>
       </form>
     {/if}

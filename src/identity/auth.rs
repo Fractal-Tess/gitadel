@@ -437,6 +437,49 @@ async fn rename_account(
 }
 
 #[derive(Deserialize)]
+pub struct SetupRequest {
+    token: String,
+    username: String,
+    password: String,
+}
+
+/// Creates the first administrator from the one-time link printed at startup.
+pub async fn setup(
+    State(state): State<IdentityState>,
+    jar: CookieJar,
+    Json(request): Json<SetupRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    if !state.setup_token_matches(&request.token).await {
+        return Err(ApiError::bad_request(
+            "The setup link is invalid or was already used. Restart Gitadel to print a new one.",
+        ));
+    }
+    // bootstrap_admin refuses once any account exists, so concurrent
+    // submissions cannot create a second administrator.
+    let account =
+        super::bootstrap_admin(state.database(), &request.username, request.password).await?;
+    state.clear_setup_token().await;
+    let transaction = state.database().begin().await?;
+    state
+        .audit_on(
+            &transaction,
+            Some(account.id),
+            "account.setup",
+            Some(account.username.clone()),
+        )
+        .await?;
+    let (_, cookie) = state.create_session_on(&transaction, account.id).await?;
+    transaction.commit().await?;
+    Ok((
+        StatusCode::CREATED,
+        jar.add(cookie),
+        Json(AuthResponse {
+            user: account.into(),
+        }),
+    ))
+}
+
+#[derive(Deserialize)]
 pub struct InvitationRegistrationRequest {
     token: String,
     username: String,

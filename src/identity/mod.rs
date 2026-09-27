@@ -98,6 +98,8 @@ pub struct IdentityState {
     oidc_authorizations: Arc<sso::OidcAuthorizations>,
     auth_rate_limits: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
     pending_logins: Arc<Mutex<HashMap<String, two_factor::PendingLogin>>>,
+    /// One-time first-run setup token, printed to the log while no account exists.
+    setup_token: Arc<Mutex<Option<String>>>,
     runtime_settings: Option<Arc<Settings>>,
     maintenance_sender: Option<mpsc::Sender<MaintenanceAction>>,
     maintenance_pending: Arc<Mutex<bool>>,
@@ -330,6 +332,7 @@ impl IdentityState {
             oidc_authorizations: Arc::new(Mutex::new(HashMap::new())),
             auth_rate_limits: Arc::new(Mutex::new(HashMap::new())),
             pending_logins: Arc::new(Mutex::new(HashMap::new())),
+            setup_token: Arc::new(Mutex::new(None)),
             runtime_settings,
             maintenance_sender,
             maintenance_pending: Arc::new(Mutex::new(false)),
@@ -394,6 +397,42 @@ impl IdentityState {
 
     pub fn public_url(&self) -> &Url {
         &self.public_url
+    }
+
+    /// Issues a first-run setup link when the instance has no accounts yet.
+    /// The token lives only in memory, so every restart prints a fresh link.
+    pub(crate) async fn prepare_setup_link(&self) -> Result<Option<Url>, ApiError> {
+        if user::Entity::find().count(&self.database).await? != 0 {
+            return Ok(None);
+        }
+        let token = random_secret(32);
+        let mut link = self
+            .public_url
+            .join("register")
+            .map_err(ApiError::internal)?;
+        link.query_pairs_mut().append_pair("setup", &token);
+        *self.setup_token.lock().await = Some(token);
+        Ok(Some(link))
+    }
+
+    pub(crate) async fn setup_token_matches(&self, candidate: &str) -> bool {
+        use subtle::ConstantTimeEq as _;
+        self.setup_token
+            .lock()
+            .await
+            .as_deref()
+            .is_some_and(|expected| {
+                bool::from(
+                    hash_secret(expected)
+                        .as_bytes()
+                        .ct_eq(hash_secret(candidate).as_bytes()),
+                )
+            })
+    }
+
+    /// Retires the setup link once the first administrator exists.
+    pub(crate) async fn clear_setup_token(&self) {
+        *self.setup_token.lock().await = None;
     }
 
     fn oidc_authorizations(&self) -> &sso::OidcAuthorizations {
@@ -1052,6 +1091,7 @@ pub fn router() -> Router<IdentityState> {
             get(admin::storage_progress),
         )
         .route("/register", post(auth::register))
+        .route("/setup", post(auth::setup))
         .route("/auth/login", post(auth::login))
         .route(
             "/auth/login/two-factor",
