@@ -4,6 +4,7 @@
   import GitCommit from "@lucide/svelte/icons/git-commit";
   import PackageOpen from "@lucide/svelte/icons/package-open";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+  import RotateCcw from "@lucide/svelte/icons/rotate-ccw";
   import Workflow from "@lucide/svelte/icons/workflow";
   import { tick } from "svelte";
 
@@ -105,7 +106,10 @@
         <div class="flex items-center gap-2">
           <ActionStatusBadge status={repository.actions.actionRun.run.status} />
           <span class="text-sm text-muted-foreground"
-            >Run #{repository.actions.actionRun.run.number}</span
+            >Run #{repository.actions.actionRun.run.number}{repository.actions
+              .actionRun.run.run_attempt > 1
+              ? ` · attempt ${repository.actions.actionRun.run.run_attempt}`
+              : ""}</span
           >
         </div>
         <h1 class="mt-3 text-xl font-semibold">
@@ -119,15 +123,35 @@
           )}
         </p>
       </div>
-      {#if repository.actions.actionRun.can_cancel}
-        <Button
-          variant="destructive"
-          disabled={repository.actions.actionsPending}
-          onclick={() => void repository.actions.cancelActionRun()}
-        >
-          {repository.actions.actionsPending ? "Cancelling…" : "Cancel run"}
-        </Button>
-      {/if}
+      <div class="flex flex-wrap gap-2">
+        {#if repository.actions.actionRun.can_rerun_failed}
+          <Button
+            variant="outline"
+            disabled={repository.actions.actionsPending}
+            onclick={() => void repository.actions.rerunActionRun(true)}
+          >
+            <RotateCcw data-icon="inline-start" />Re-run failed jobs
+          </Button>
+        {/if}
+        {#if repository.actions.actionRun.can_rerun}
+          <Button
+            variant="outline"
+            disabled={repository.actions.actionsPending}
+            onclick={() => void repository.actions.rerunActionRun(false)}
+          >
+            <RefreshCw data-icon="inline-start" />Re-run all jobs
+          </Button>
+        {/if}
+        {#if repository.actions.actionRun.can_cancel}
+          <Button
+            variant="destructive"
+            disabled={repository.actions.actionsPending}
+            onclick={() => void repository.actions.cancelActionRun()}
+          >
+            {repository.actions.actionsPending ? "Cancelling…" : "Cancel run"}
+          </Button>
+        {/if}
+      </div>
     </header>
 
     {#if repository.actions.actionRun.diagnostic}
@@ -154,7 +178,9 @@
             <span class="min-w-0">
               <span class="block truncate text-sm font-medium">{job.name}</span>
               <span class="mt-1 block truncate text-xs text-muted-foreground"
-                >{job.labels.join(", ")}</span
+                >{job.copied_from_job_id === null
+                  ? job.labels.join(", ")
+                  : "Kept from the previous attempt"}</span
               >
             </span>
             <ActionStatusBadge status={job.status} />

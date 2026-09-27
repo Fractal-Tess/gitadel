@@ -166,6 +166,27 @@ fn valid_name(name: &str, max_bytes: usize) -> Result<(), ApiError> {
     }
     Ok(())
 }
+/// Artifacts visible to a run: its own, plus those uploaded by the original
+/// jobs that a "re-run failed jobs" run kept instead of running again.
+pub(crate) async fn run_scope(
+    database: &sea_orm::DatabaseConnection,
+    run_id: Uuid,
+) -> Result<Condition, sea_orm::DbErr> {
+    let kept: Vec<i64> = action_job::Entity::find()
+        .filter(action_job::Column::RunId.eq(run_id))
+        .filter(action_job::Column::CopiedFromJobId.is_not_null())
+        .all(database)
+        .await?
+        .into_iter()
+        .filter_map(|job| job.copied_from_job_id)
+        .collect();
+    let mut scope = Condition::any().add(action_artifact::Column::RunId.eq(run_id));
+    if !kept.is_empty() {
+        scope = scope.add(action_artifact::Column::CreatingJobId.is_in(kept));
+    }
+    Ok(scope)
+}
+
 fn job_url(state: &ActionsState, path: &str) -> String {
     format!("{}/{}", state.job_origin(), path.trim_start_matches('/'))
 }
@@ -409,7 +430,7 @@ async fn list(
     parse_job(&request.workflow_job_run_backend_id)?;
     check_run(run, &auth)?;
     let mut select = action_artifact::Entity::find()
-        .filter(action_artifact::Column::RunId.eq(run))
+        .filter(run_scope(database(&state), run).await?)
         .filter(action_artifact::Column::RepositoryId.eq(auth.repository.id))
         .filter(action_artifact::Column::Status.eq("finalized"))
         .filter(action_artifact::Column::DeletedAt.is_null())
@@ -449,11 +470,14 @@ async fn signed_download(
     let run = parse_run(&request.workflow_run_backend_id)?;
     parse_job(&request.workflow_job_run_backend_id)?;
     check_run(run, &auth)?;
+    // Prefer this run's own artifact over one inherited from a kept job.
     let row = action_artifact::Entity::find()
-        .filter(action_artifact::Column::RunId.eq(run))
+        .filter(run_scope(database(&state), run).await?)
         .filter(action_artifact::Column::RepositoryId.eq(auth.repository.id))
         .filter(action_artifact::Column::Name.eq(&request.name))
         .filter(action_artifact::Column::Status.eq("finalized"))
+        .order_by_desc(Expr::col(action_artifact::Column::RunId).eq(run))
+        .order_by_desc(action_artifact::Column::Id)
         .filter(action_artifact::Column::DeletedAt.is_null())
         .filter(action_artifact::Column::ExpiresAt.gt(Utc::now()))
         .one(database(&state))
@@ -546,7 +570,17 @@ async fn grant(
         .await?
         .ok_or_else(ApiError::not_found)?;
     if issued_job.run_id != row.run_id {
-        return Err(ApiError::unauthorized());
+        // Downloads may target artifacts inherited from kept jobs.
+        let inherited = scope == "download"
+            && action_job::Entity::find()
+                .filter(action_job::Column::RunId.eq(issued_job.run_id))
+                .filter(action_job::Column::CopiedFromJobId.eq(row.creating_job_id))
+                .one(database(state))
+                .await?
+                .is_some();
+        if !inherited {
+            return Err(ApiError::unauthorized());
+        }
     }
     Ok((row, grant))
 }

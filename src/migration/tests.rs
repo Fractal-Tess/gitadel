@@ -158,11 +158,27 @@ async fn action_run_event_migration_preserves_runs_and_job_references() {
         event_json: Set("{}".to_owned()),
         cancel_requested_at: Set(None),
         cancelled_by: Set(None),
+        rerun_of: Set(None),
+        run_attempt: Set(1),
         created_at: Set(now),
         started_at: Set(None),
         completed_at: Set(None),
     };
-    run(run_id, 1, "push").insert(&database).await.unwrap();
+    // The entity tracks the latest schema, so the old table is written with SQL.
+    let insert_old = |id: Uuid, number: i64, event: &str| {
+        format!(
+            "INSERT INTO action_runs (id, repository_id, number, workflow_path, workflow_name, event, \
+             ref_name, before_sha, after_sha, status, event_json, created_at) \
+             VALUES (x'{}', x'{}', {number}, 'ci.yml', 'CI', '{event}', 'refs/heads/main', '', '', \
+             'queued', '{{}}', '2026-01-01 00:00:00')",
+            id.simple(),
+            repository_id.simple()
+        )
+    };
+    database
+        .execute_unprepared(&insert_old(run_id, 1, "push"))
+        .await
+        .unwrap();
     database
         .execute_unprepared(
             "INSERT INTO action_jobs (run_id, job_key, name, required_labels, workflow_payload, status, created_at) \
@@ -171,13 +187,13 @@ async fn action_run_event_migration_preserves_runs_and_job_references() {
         .await
         .unwrap();
     assert!(
-        run(Uuid::new_v4(), 2, "schedule")
-            .insert(&database)
+        database
+            .execute_unprepared(&insert_old(Uuid::new_v4(), 2, "schedule"))
             .await
             .is_err()
     );
 
-    super::Migrator::up(&database, Some(1)).await.unwrap();
+    super::Migrator::up(&database, None).await.unwrap();
 
     run(Uuid::new_v4(), 2, "schedule")
         .insert(&database)

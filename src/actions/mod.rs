@@ -4,6 +4,7 @@ pub(crate) mod dispatch;
 pub(crate) mod logs;
 pub(crate) mod matrix;
 pub(crate) mod protocol;
+pub(crate) mod rerun;
 pub(crate) mod runners;
 pub(crate) mod runs;
 pub(crate) mod schedule;

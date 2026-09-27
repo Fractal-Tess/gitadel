@@ -15,6 +15,8 @@ export const actionRunSummarySchema = z.object({
   workflow_name: z.string(),
   workflow_path: z.string(),
   event: z.string(),
+  run_attempt: z.number().int().positive(),
+  rerun_of: z.uuid().nullable(),
   status: actionStatusSchema,
   failure_kind: z.string().nullable(),
   failure_summary: z.string().nullable(),
@@ -42,6 +44,7 @@ export const actionJobSchema = z.object({
   labels: z.array(z.string()),
   runner_id: z.number().nullable(),
   attempt: z.number(),
+  copied_from_job_id: z.number().nullable(),
   failure_kind: z.string().nullable(),
   failure_summary: z.string().nullable(),
   created_at: z.string(),
@@ -53,6 +56,8 @@ export const actionRunDetailSchema = z.object({
   run: actionRunSummarySchema,
   jobs: z.array(actionJobSchema),
   can_cancel: z.boolean(),
+  can_rerun: z.boolean(),
+  can_rerun_failed: z.boolean(),
   diagnostic: z.string().nullable(),
 });
 

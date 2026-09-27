@@ -224,7 +224,7 @@ async fn release_dependents<C: sea_orm::ConnectionTrait>(
     Ok(())
 }
 
-async fn aggregate_run<C: sea_orm::ConnectionTrait>(
+pub(crate) async fn aggregate_run<C: sea_orm::ConnectionTrait>(
     database: &C,
     run_id: Uuid,
 ) -> Result<(), sea_orm::DbErr> {

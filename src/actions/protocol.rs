@@ -354,7 +354,7 @@ async fn task_message(
         "ref_protected": false, "ref_type": ref_type, "repository": format!("{}/{}", repository.namespace, repository.name),
         "repository_id": repository.id.to_string(), "repository_owner": repository.namespace,
         "retention_days": state.settings().retention_days.to_string(),
-        "run_attempt": claimed.job.attempt.to_string(), "run_id": run.id.to_string(),
+        "run_attempt": run.run_attempt.to_string(), "run_id": run.id.to_string(),
         "run_number": run.number.to_string(), "runtime_token": claimed.checkout_token,
         "server_url": server_url, "sha": run.after_sha,
         "token": claimed.checkout_token, "workflow": run.workflow_name,

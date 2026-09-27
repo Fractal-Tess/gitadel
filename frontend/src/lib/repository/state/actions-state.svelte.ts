@@ -279,6 +279,25 @@ export class RepositoryActionsState {
     }
   }
 
+  /** Starts a new run repeating the selected one and opens it. */
+  async rerunActionRun(failedOnly: boolean): Promise<void> {
+    const runId = this.getActionSelection().runId;
+    if (!runId || this.actionsPending) return;
+    this.actionsPending = true;
+    try {
+      const run = await requestJson(
+        repositoryActionsApi(this, `/runs/${encodeURIComponent(runId)}/rerun`),
+        actionRunSummarySchema,
+        { method: "POST", body: jsonBody({ failed_only: failedOnly }) },
+      );
+      this.selectActionRun(run.id);
+    } catch (caught) {
+      this.setError(errorMessage(caught));
+    } finally {
+      this.actionsPending = false;
+    }
+  }
+
   /** Lists workflows at a ref (the default branch when omitted). */
   async loadWorkflows(reference?: string): Promise<void> {
     this.workflowsLoading = true;

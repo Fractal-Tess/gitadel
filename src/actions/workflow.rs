@@ -749,6 +749,8 @@ pub(crate) async fn enqueue_plan(
         event_json: Set(trigger.event_json.to_string()),
         cancel_requested_at: Set(None),
         cancelled_by: Set(None),
+        rerun_of: Set(None),
+        run_attempt: Set(1),
         created_at: Set(now),
         started_at: Set(None),
         completed_at: Set(None),
@@ -798,6 +800,7 @@ pub(crate) async fn enqueue_plan(
                 .matrix
                 .as_ref()
                 .map(|matrix| serde_json::to_string(matrix).expect("matrix serializes"))),
+            copied_from_job_id: Set(None),
             created_at: Set(now),
             started_at: Set(None),
             completed_at: Set(None),
@@ -858,6 +861,8 @@ async fn record_failure(
         event_json: Set("{}".to_owned()),
         cancel_requested_at: Set(None),
         cancelled_by: Set(None),
+        rerun_of: Set(None),
+        run_attempt: Set(1),
         created_at: Set(now),
         started_at: Set(None),
         completed_at: Set(Some(now)),

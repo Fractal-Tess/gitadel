@@ -63,6 +63,15 @@ pub(crate) enum ActionsCommand {
         #[arg(long = "input", value_name = "KEY=VALUE", value_parser = parse_input)]
         inputs: Vec<(String, String)>,
     },
+    /// Start a new run that repeats a finished run (all jobs, or only failed ones).
+    Rerun {
+        #[command(flatten)]
+        repository: RepositoryArg,
+        run_id: String,
+        /// Keep jobs that succeeded and re-run only failed jobs and their dependents.
+        #[arg(long)]
+        failed: bool,
+    },
     /// Cancel a queued or running workflow run.
     Cancel {
         #[command(flatten)]
@@ -209,6 +218,18 @@ pub(crate) async fn run(api: &ApiClient, command: ActionsCommand) -> Result<Opti
             .await
             .map(Some)
         }
+        ActionsCommand::Rerun {
+            repository,
+            run_id,
+            failed,
+        } => api
+            .request(
+                Method::POST,
+                &repository.route(&["runs", &run_id, "rerun"])?,
+                Some(json!({ "failed_only": failed })),
+            )
+            .await
+            .map(Some),
         ActionsCommand::Secret { command } => run_value(api, "secrets", command).await.map(Some),
         ActionsCommand::Variable { command } => {
             run_value(api, "variables", command).await.map(Some)
