@@ -1,10 +1,17 @@
 pub(crate) mod api;
 pub(crate) mod artifacts;
+pub(crate) mod dispatch;
 pub(crate) mod events;
 pub(crate) mod logs;
+pub(crate) mod matrix;
 pub(crate) mod protocol;
+pub(crate) mod rerun;
 pub(crate) mod runners;
 pub(crate) mod runs;
+pub(crate) mod schedule;
+pub(crate) mod secrets;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub(crate) mod tokens;
 pub(crate) mod workflow;
 
@@ -25,16 +32,26 @@ pub(crate) const REQUIRED_RUNNER_VERSION: &str = "13.0.0";
 pub(crate) struct ActionsState {
     repository: RepositoryState,
     settings: Arc<ActionsSettings>,
+    secret_cipher: Arc<secrets::SecretCipher>,
     shutdown: CancellationToken,
 }
 
 impl ActionsState {
-    pub(crate) fn new(repository: RepositoryState, settings: ActionsSettings) -> Self {
+    pub(crate) fn new(
+        repository: RepositoryState,
+        settings: ActionsSettings,
+        secret_cipher: secrets::SecretCipher,
+    ) -> Self {
         Self {
             repository,
             settings: Arc::new(settings),
+            secret_cipher: Arc::new(secret_cipher),
             shutdown: CancellationToken::new(),
         }
+    }
+
+    pub(crate) fn secret_cipher(&self) -> &secrets::SecretCipher {
+        &self.secret_cipher
     }
 
     pub(crate) fn repository(&self) -> &RepositoryState {
@@ -43,6 +60,19 @@ impl ActionsState {
 
     pub(crate) fn settings(&self) -> &ActionsSettings {
         &self.settings
+    }
+
+    /// Origin used for every URL handed to jobs, without a trailing slash.
+    ///
+    /// Runners and job containers often reach Gitadel over a private network,
+    /// so `actions.internal_url` takes precedence over the public URL.
+    pub(crate) fn job_origin(&self) -> String {
+        self.settings
+            .internal_url
+            .as_deref()
+            .unwrap_or_else(|| self.repository.public_url().as_str())
+            .trim_end_matches('/')
+            .to_owned()
     }
 
     pub(crate) fn protocol_router(&self) -> Router {
@@ -54,7 +84,10 @@ impl ActionsState {
     }
 
     pub(crate) fn api_router(&self) -> Router {
-        api::router().with_state(self.clone())
+        api::router()
+            .merge(secrets::router())
+            .merge(dispatch::router())
+            .with_state(self.clone())
     }
 
     pub(crate) fn cancel(&self) {
@@ -100,8 +133,12 @@ pub(crate) async fn bootstrap_system_runner(state: &ActionsState) -> anyhow::Res
     Ok(())
 }
 
+/// Scheduler ticks between full schedule scans (15 s x 20 = 5 minutes).
+const SCHEDULE_SCAN_TICKS: u32 = 20;
+
 pub(crate) async fn serve_actions_scheduler(state: ActionsState) -> anyhow::Result<()> {
     let mut interval = tokio::time::interval(Duration::from_secs(15));
+    let mut ticks = 0u32;
     loop {
         tokio::select! {
             () = state.shutdown.cancelled() => return Ok(()),
@@ -109,6 +146,17 @@ pub(crate) async fn serve_actions_scheduler(state: ActionsState) -> anyhow::Resu
                 runs::maintain(&state).await?;
                 if let Err(error) = artifacts::cleanup(&state).await {
                     tracing::warn!(%error, "actions artifact cleanup failed");
+                }
+                // Default branches can also move without a push (settings,
+                // mirrors, restores), so rescan periodically.
+                if ticks.is_multiple_of(SCHEDULE_SCAN_TICKS)
+                    && let Err(error) = schedule::sync_all(&state).await
+                {
+                    tracing::warn!(%error, "actions schedule scan failed");
+                }
+                ticks = ticks.wrapping_add(1);
+                if let Err(error) = schedule::fire_due(&state).await {
+                    tracing::warn!(%error, "actions schedule dispatch failed");
                 }
             }
         }

@@ -9,7 +9,11 @@ use uuid::Uuid;
 
 use crate::entity::{action_job, action_run, action_runner, action_runner_fetch, repository};
 
-use super::{REQUIRED_RUNNER_VERSION, tokens};
+use super::{
+    REQUIRED_RUNNER_VERSION,
+    matrix::{StoredMatrix, base_job_key},
+    tokens,
+};
 static RUNNER_ASSIGNMENT_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 
@@ -275,10 +279,27 @@ pub(crate) async fn claim(
         let labels: Vec<String> = serde_json::from_str(&job.required_labels).map_err(|_| {
             RunnerError::InvalidRegistration("stored job labels are invalid".to_owned())
         })?;
-        if labels.iter().all(|label| approved.contains(label)) {
-            selected = Some(job);
-            break;
+        if !labels.iter().all(|label| approved.contains(label)) {
+            continue;
         }
+        if let Some(limit) =
+            StoredMatrix::parse(job.matrix_json.as_deref()).and_then(|matrix| matrix.max_parallel)
+        {
+            let base = base_job_key(&job.job_key);
+            let active = action_job::Entity::find()
+                .filter(action_job::Column::RunId.eq(job.run_id))
+                .filter(action_job::Column::Status.is_in(["leased", "running"]))
+                .all(&transaction)
+                .await?
+                .iter()
+                .filter(|other| base_job_key(&other.job_key) == base)
+                .count();
+            if active >= limit as usize {
+                continue;
+            }
+        }
+        selected = Some(job);
+        break;
     }
     let Some(job) = selected else {
         transaction.commit().await?;
@@ -433,6 +454,8 @@ mod tests {
             event_json: Set("{}".to_owned()),
             cancel_requested_at: Set(None),
             cancelled_by: Set(None),
+            rerun_of: Set(None),
+            run_attempt: Set(1),
             created_at: Set(created_at),
             started_at: Set(None),
             completed_at: Set(None),
@@ -462,6 +485,8 @@ mod tests {
             log_truncated: Set(false),
             failure_kind: Set(None),
             failure_summary: Set(None),
+            matrix_json: Set(None),
+            copied_from_job_id: Set(None),
             created_at: Set(created_at),
             started_at: Set(None),
             completed_at: Set(None),

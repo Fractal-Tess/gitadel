@@ -4,6 +4,7 @@
   import Trash2 from "@lucide/svelte/icons/trash-2";
   import UserRound from "@lucide/svelte/icons/user-round";
 
+  import ActionsSecretsVariables from "$lib/components/actions/actions-secrets-variables.svelte";
   import ActionsSettings from "$lib/components/settings/actions-settings.svelte";
   import IntegrationsSettings from "$lib/components/settings/integrations-settings.svelte";
   import MirroringSettings from "$lib/components/settings/mirroring-settings.svelte";
@@ -253,7 +254,13 @@
         </section>
       {:else if view === "runners"}
         {#key `${scopeKey}:${runnerScope.key}`}
-          <ActionsSettings state={actionsState} scope={runnerScope} />
+          <div class="grid gap-6">
+            <ActionsSettings state={actionsState} scope={runnerScope} />
+            <ActionsSecretsVariables
+              base={`/api/v1/namespaces/${encodeURIComponent(slug)}/actions`}
+              description="Every repository in this namespace receives them; repository values with the same name take precedence."
+            />
+          </div>
         {/key}
       {:else if view === "integrations"}
         <IntegrationsSettings {namespace} />

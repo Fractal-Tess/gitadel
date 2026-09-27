@@ -619,6 +619,8 @@ mod tests {
             event_json: "{}".to_owned(),
             cancel_requested_at: None,
             cancelled_by: None,
+            rerun_of: None,
+            run_attempt: 1,
             created_at: now,
             started_at: None,
             completed_at: Some(now),

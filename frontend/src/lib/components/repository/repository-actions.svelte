@@ -4,10 +4,13 @@
   import GitCommit from "@lucide/svelte/icons/git-commit";
   import PackageOpen from "@lucide/svelte/icons/package-open";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+  import RotateCcw from "@lucide/svelte/icons/rotate-ccw";
   import Workflow from "@lucide/svelte/icons/workflow";
   import { tick } from "svelte";
 
+  import { actionEventLabel } from "$lib/api/actions.js";
   import ActionStatusBadge from "$lib/components/actions/action-status-badge.svelte";
+  import RunWorkflowDialog from "$lib/components/actions/run-workflow-dialog.svelte";
   import * as Alert from "$lib/components/ui/alert/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Empty from "$lib/components/ui/empty/index.js";
@@ -55,6 +58,18 @@
     logElement?.scrollTo({ top: logElement.scrollHeight });
   }
 
+  // The run list offers "Run workflow" only to users who may dispatch.
+  $effect(() => {
+    const actions = repository.actions;
+    if (
+      !actions.actionRun &&
+      !actions.workflows &&
+      !actions.workflowsLoading &&
+      !actions.workflowsError
+    )
+      void actions.loadWorkflows();
+  });
+
   $effect.pre(() => {
     repository.actions.actionLogs?.text;
     if (!followLog) return;
@@ -91,28 +106,52 @@
         <div class="flex items-center gap-2">
           <ActionStatusBadge status={repository.actions.actionRun.run.status} />
           <span class="text-sm text-muted-foreground"
-            >Run #{repository.actions.actionRun.run.number}</span
+            >Run #{repository.actions.actionRun.run.number}{repository.actions
+              .actionRun.run.run_attempt > 1
+              ? ` · attempt ${repository.actions.actionRun.run.run_attempt}`
+              : ""}</span
           >
         </div>
         <h1 class="mt-3 text-xl font-semibold">
           {repository.actions.actionRun.run.workflow_name}
         </h1>
         <p class="mt-1 font-mono text-xs text-muted-foreground">
+          {actionEventLabel(repository.actions.actionRun.run.event)} ·
           {repository.actions.actionRun.run.reference} · {repository.actions.actionRun.run.after_sha.slice(
             0,
             12,
           )}
         </p>
       </div>
-      {#if repository.actions.actionRun.can_cancel}
-        <Button
-          variant="destructive"
-          disabled={repository.actions.actionsPending}
-          onclick={() => void repository.actions.cancelActionRun()}
-        >
-          {repository.actions.actionsPending ? "Cancelling…" : "Cancel run"}
-        </Button>
-      {/if}
+      <div class="flex flex-wrap gap-2">
+        {#if repository.actions.actionRun.can_rerun_failed}
+          <Button
+            variant="outline"
+            disabled={repository.actions.actionsPending}
+            onclick={() => void repository.actions.rerunActionRun(true)}
+          >
+            <RotateCcw data-icon="inline-start" />Re-run failed jobs
+          </Button>
+        {/if}
+        {#if repository.actions.actionRun.can_rerun}
+          <Button
+            variant="outline"
+            disabled={repository.actions.actionsPending}
+            onclick={() => void repository.actions.rerunActionRun(false)}
+          >
+            <RefreshCw data-icon="inline-start" />Re-run all jobs
+          </Button>
+        {/if}
+        {#if repository.actions.actionRun.can_cancel}
+          <Button
+            variant="destructive"
+            disabled={repository.actions.actionsPending}
+            onclick={() => void repository.actions.cancelActionRun()}
+          >
+            {repository.actions.actionsPending ? "Cancelling…" : "Cancel run"}
+          </Button>
+        {/if}
+      </div>
     </header>
 
     {#if repository.actions.actionRun.diagnostic}
@@ -139,7 +178,9 @@
             <span class="min-w-0">
               <span class="block truncate text-sm font-medium">{job.name}</span>
               <span class="mt-1 block truncate text-xs text-muted-foreground"
-                >{job.labels.join(", ")}</span
+                >{job.copied_from_job_id === null
+                  ? job.labels.join(", ")
+                  : "Kept from the previous attempt"}</span
               >
             </span>
             <ActionStatusBadge status={job.status} />
@@ -289,6 +330,11 @@
         first directory that exists takes precedence.
       </Empty.Description>
     </Empty.Header>
+    {#if repository.actions.workflows?.can_dispatch && repository.actions.workflows.workflows.some((workflow) => workflow.dispatchable)}
+      <Empty.Content>
+        <RunWorkflowDialog actions={repository.actions} />
+      </Empty.Content>
+    {/if}
   </Empty.Root>
 {:else}
   <div class="mx-auto max-w-5xl">
@@ -296,17 +342,22 @@
       <div>
         <h1 class="text-xl font-semibold">Actions</h1>
         <p class="mt-1 text-sm text-muted-foreground">
-          Push-triggered repository workflows
+          Workflows triggered by pushes, schedules, and manual runs
         </p>
       </div>
-      <Button
-        variant="outline"
-        size="sm"
-        class="gap-2"
-        onclick={() => void repository.actions.loadActions()}
-      >
-        <RefreshCw data-icon="inline-start" />Refresh
-      </Button>
+      <div class="flex items-center gap-2">
+        {#if repository.actions.workflows?.can_dispatch}
+          <RunWorkflowDialog actions={repository.actions} />
+        {/if}
+        <Button
+          variant="outline"
+          size="sm"
+          class="gap-2"
+          onclick={() => void repository.actions.loadActions()}
+        >
+          <RefreshCw data-icon="inline-start" />Refresh
+        </Button>
+      </div>
     </header>
     <div class="overflow-hidden rounded-lg border">
       {#each repository.actions.actionRuns.runs as run (run.id)}
@@ -323,9 +374,9 @@
             <span
               class="mt-1 flex items-center gap-1.5 font-mono text-xs text-muted-foreground"
             >
-              <GitCommit class="size-3" />{run.after_sha.slice(0, 12)} · {formatDate(
-                run.created_at,
-              )}
+              <GitCommit class="size-3" />{run.after_sha.slice(0, 12)} · {actionEventLabel(
+                run.event,
+              )} · {formatDate(run.created_at)}
             </span>
             {#if run.failure_summary}
               <span class="mt-2 block text-sm text-destructive"

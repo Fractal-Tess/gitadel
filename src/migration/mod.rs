@@ -56,6 +56,10 @@ mod m20260918_000054_registry_storage;
 mod m20260921_000055_attachment_quota_indexes;
 mod m20260921_000056_webhook_outbox;
 mod m20260927_000057_two_factor_authentication;
+mod m20260927_000059_action_secrets_variables;
+mod m20260927_000060_action_job_matrix;
+mod m20260927_000061_action_dispatch_schedule;
+mod m20260927_000062_action_reruns;
 mod m20260927_000063_repository_protection_rules;
 mod m20260927_000064_repository_deploy_keys;
 mod m20260927_000065_repository_commit_statuses;
@@ -137,6 +141,10 @@ impl MigratorTrait for Migrator {
             Box::new(m20260927_000066_webhook_events::Migration),
             Box::new(m20260927_000067_user_email::Migration),
             Box::new(m20260927_000068_notification_preferences::Migration),
+            Box::new(m20260927_000059_action_secrets_variables::Migration),
+            Box::new(m20260927_000060_action_job_matrix::Migration),
+            Box::new(m20260927_000061_action_dispatch_schedule::Migration),
+            Box::new(m20260927_000062_action_reruns::Migration),
         ]
     }
 }

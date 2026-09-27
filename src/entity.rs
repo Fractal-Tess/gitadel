@@ -1418,6 +1418,8 @@ pub mod action_run {
         pub event_json: String,
         pub cancel_requested_at: Option<DateTimeUtc>,
         pub cancelled_by: Option<Uuid>,
+        pub rerun_of: Option<Uuid>,
+        pub run_attempt: i64,
         pub created_at: DateTimeUtc,
         pub started_at: Option<DateTimeUtc>,
         pub completed_at: Option<DateTimeUtc>,
@@ -1479,6 +1481,8 @@ pub mod action_job {
         pub log_truncated: bool,
         pub failure_kind: Option<String>,
         pub failure_summary: Option<String>,
+        pub matrix_json: Option<String>,
+        pub copied_from_job_id: Option<i64>,
         pub created_at: DateTimeUtc,
         pub started_at: Option<DateTimeUtc>,
         pub completed_at: Option<DateTimeUtc>,
@@ -1729,5 +1733,81 @@ pub mod repository_protection_rule_user {
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {}
 
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod action_secret {
+    use super::*;
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "action_secrets")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        pub repository_id: Option<Uuid>,
+        pub namespace: Option<String>,
+        pub name: String,
+        pub sealed: Vec<u8>,
+        pub updated_by: Option<Uuid>,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod action_variable {
+    use super::*;
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "action_variables")]
+    pub struct Model {
+        #[sea_orm(primary_key)]
+        pub id: i64,
+        pub repository_id: Option<Uuid>,
+        pub namespace: Option<String>,
+        pub name: String,
+        pub value: String,
+        pub updated_by: Option<Uuid>,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod action_schedule {
+    use super::*;
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "action_schedules")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub repository_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub workflow_path: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub cron: String,
+        pub last_fired_at: Option<DateTimeUtc>,
+        pub next_fire_at: DateTimeUtc,
+        pub created_at: DateTimeUtc,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod action_schedule_scan {
+    use super::*;
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "action_schedule_scans")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub repository_id: Uuid,
+        pub default_branch: String,
+        pub head_sha: String,
+        pub scanned_at: DateTimeUtc,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
     impl ActiveModelBehavior for ActiveModel {}
 }

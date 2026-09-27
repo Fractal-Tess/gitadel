@@ -9,6 +9,7 @@
   import Trash2 from "@lucide/svelte/icons/trash-2";
   import TriangleAlert from "@lucide/svelte/icons/triangle-alert";
 
+  import ActionsSecretsVariables from "$lib/components/actions/actions-secrets-variables.svelte";
   import RepositoryIcon from "$lib/components/repository/repository-icon.svelte";
   import RepositoryCollaboratorSettings from "$lib/components/repository/repository-collaborator-settings.svelte";
   import RepositoryIntegrationSettings from "$lib/components/repository/repository-integration-settings.svelte";
@@ -526,6 +527,13 @@
   <RepositoryDeployKeySettings state={repository} />
 {:else if section === "webhooks"}
   <RepositoryWebhookSettings state={repository} />
+{:else if section === "actions" && repository.repository}
+  {#key `${repository.repository.namespace}/${repository.repository.name}`}
+    <ActionsSecretsVariables
+      base={`/api/v1/repositories/${encodeURIComponent(repository.repository.namespace)}/${encodeURIComponent(repository.repository.name)}/actions`}
+      description="They override namespace values with the same name."
+    />
+  {/key}
 {:else if section === "integrations"}
   <RepositoryIntegrationSettings state={repository} />
 {:else}

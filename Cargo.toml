@@ -30,6 +30,7 @@ panic = "abort"
 strip = "symbols"
 
 [dependencies]
+aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
 ammonia = "4.2.0"
 anyhow = "1.0.104"
 async-trait = "0.1.92"

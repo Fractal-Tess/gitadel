@@ -4,7 +4,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{Path, Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
@@ -24,7 +24,7 @@ use crate::{
     repository::Permission,
 };
 
-use super::{ActionsState, REQUIRED_RUNNER_VERSION, artifacts, runners, runs, tokens};
+use super::{ActionsState, REQUIRED_RUNNER_VERSION, artifacts, rerun, runners, runs, tokens};
 
 const MAX_LOG_QUERY_ROWS: u64 = 64;
 
@@ -45,6 +45,10 @@ pub(crate) fn router() -> Router<ActionsState> {
         .route(
             "/repositories/{namespace}/{name}/actions/runs/{run_id}/cancel",
             post(cancel_run),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/actions/runs/{run_id}/rerun",
+            post(rerun_run),
         )
         .route(
             "/repositories/{namespace}/{name}/actions/runs/{run_id}/jobs/{job_id}/logs",
@@ -89,11 +93,14 @@ struct RunsQuery {
 }
 
 #[derive(Serialize)]
-struct RunSummary {
+pub(crate) struct RunSummary {
     id: Uuid,
     number: i64,
     workflow_name: String,
     workflow_path: String,
+    event: String,
+    run_attempt: i64,
+    rerun_of: Option<Uuid>,
     status: String,
     failure_kind: Option<String>,
     failure_summary: Option<String>,
@@ -112,6 +119,9 @@ impl From<action_run::Model> for RunSummary {
             number: run.number,
             workflow_name: run.workflow_name,
             workflow_path: run.workflow_path,
+            event: run.event,
+            run_attempt: run.run_attempt,
+            rerun_of: run.rerun_of,
             status: run.status,
             failure_kind: run.failure_kind,
             failure_summary: run.failure_summary,
@@ -176,6 +186,7 @@ struct JobResponse {
     labels: Vec<String>,
     runner_id: Option<i64>,
     attempt: i64,
+    copied_from_job_id: Option<i64>,
     failure_kind: Option<String>,
     failure_summary: Option<String>,
     created_at: chrono::DateTime<Utc>,
@@ -188,6 +199,8 @@ struct RunDetailResponse {
     run: RunSummary,
     jobs: Vec<JobResponse>,
     can_cancel: bool,
+    can_rerun: bool,
+    can_rerun_failed: bool,
     diagnostic: Option<String>,
 }
 
@@ -201,23 +214,27 @@ async fn run_detail(
         readable_repository(&state, &headers, &jar, &namespace, &name).await?;
     let run = owned_run(&state, repository.id, run_id).await?;
     let diagnostic = run.diagnostic.clone();
-    let can_cancel = state
+    let can_write = state
         .repository()
         .can_access(&repository, user_id, Permission::Write)
         .await?
-        && matches!(run.status.as_str(), "queued" | "running");
-    let jobs = action_job::Entity::find()
+        && repository.archived_at.is_none()
+        && !repository.mirrored;
+    let can_cancel = can_write && matches!(run.status.as_str(), "queued" | "running");
+    let jobs: Vec<action_job::Model> = action_job::Entity::find()
         .filter(action_job::Column::RunId.eq(run_id))
         .order_by_asc(action_job::Column::Id)
         .all(state.repository().identity().database())
-        .await?
-        .into_iter()
-        .map(job_response)
-        .collect();
+        .await?;
+    let finished = matches!(run.status.as_str(), "success" | "failure" | "cancelled");
+    let can_rerun = can_write && finished && !jobs.is_empty();
+    let can_rerun_failed = can_rerun && jobs.iter().any(|job| job.status != "success");
     Ok(Json(RunDetailResponse {
         run: run.into(),
-        jobs,
+        jobs: jobs.into_iter().map(job_response).collect(),
         can_cancel,
+        can_rerun,
+        can_rerun_failed,
         diagnostic,
     }))
 }
@@ -232,6 +249,7 @@ fn job_response(job: action_job::Model) -> JobResponse {
         labels: serde_json::from_str(&job.required_labels).unwrap_or_default(),
         runner_id: job.runner_id,
         attempt: job.attempt,
+        copied_from_job_id: job.copied_from_job_id,
         failure_kind: job.failure_kind,
         failure_summary: job.failure_summary,
         created_at: job.created_at,
@@ -280,6 +298,67 @@ async fn cancel_run(
     Ok(Json(run.into()))
 }
 
+#[derive(Deserialize, Default)]
+struct RerunRequest {
+    #[serde(default)]
+    failed_only: bool,
+}
+
+async fn rerun_run(
+    State(state): State<ActionsState>,
+    Path((namespace, name, run_id)): Path<(String, String, Uuid)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    request: Option<Json<RerunRequest>>,
+) -> Result<(StatusCode, Json<RunSummary>), ApiError> {
+    let (actor, repository) = state
+        .repository()
+        .authenticated_repository(
+            &headers,
+            &jar,
+            &namespace,
+            &name,
+            Permission::Write,
+            SCOPE_WRITE,
+        )
+        .await?;
+    let request = request.map(|Json(request)| request).unwrap_or_default();
+    let run = rerun::rerun(
+        state.repository().identity().database(),
+        repository.id,
+        run_id,
+        actor.user.id,
+        request.failed_only,
+    )
+    .await
+    .map_err(|error| match error {
+        rerun::RerunError::Missing => ApiError::not_found(),
+        rerun::RerunError::NotFinished => {
+            ApiError::conflict("Only finished runs can be run again.")
+        }
+        rerun::RerunError::NoJobs => {
+            ApiError::conflict("This run has no jobs to repeat; push a fixed workflow instead.")
+        }
+        rerun::RerunError::NothingFailed => ApiError::conflict("Every job in this run succeeded."),
+        rerun::RerunError::Database(error) => error.into(),
+    })?;
+    super::events::spawn_run_requested(state.repository(), run.id);
+    state
+        .repository()
+        .identity()
+        .audit(
+            Some(actor.user.id),
+            if request.failed_only {
+                "actions.run.rerun_failed"
+            } else {
+                "actions.run.rerun"
+            },
+            Some(format!("{run_id}->{}", run.id)),
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(run.into())))
+}
+
 #[derive(Deserialize)]
 struct LogsQuery {
     cursor: Option<String>,
@@ -305,10 +384,27 @@ async fn job_logs(
         .one(state.repository().identity().database())
         .await?
         .ok_or_else(ApiError::not_found)?;
+    // Jobs kept by "re-run failed jobs" show the log of the job that ran.
+    let log_job_id = match job.copied_from_job_id {
+        Some(source) => {
+            let source_run = action_job::Entity::find_by_id(source)
+                .one(state.repository().identity().database())
+                .await?
+                .map(|source| source.run_id);
+            match source_run {
+                Some(source_run) => {
+                    owned_run(&state, repository.id, source_run).await?;
+                    source
+                }
+                None => job_id,
+            }
+        }
+        None => job_id,
+    };
     let start = decode_cursor(query.cursor.as_deref()).unwrap_or(0);
     let row_limit = MAX_LOG_QUERY_ROWS;
     let rows = action_job_log::Entity::find()
-        .filter(action_job_log::Column::JobId.eq(job_id))
+        .filter(action_job_log::Column::JobId.eq(log_job_id))
         .filter(action_job_log::Column::RowIndex.gte(start))
         .order_by_asc(action_job_log::Column::RowIndex)
         .limit(row_limit)
@@ -789,9 +885,10 @@ async fn list_run_artifacts(
 ) -> Result<Json<ArtifactListResponse>, ApiError> {
     let (repository, _) = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
     let run = owned_run(&state, repository.id, run_id).await?;
+    let visible = artifacts::run_scope(state.repository().identity().database(), run.id).await?;
     let rows = action_artifact::Entity::find()
         .filter(action_artifact::Column::RepositoryId.eq(repository.id))
-        .filter(action_artifact::Column::RunId.eq(run.id))
+        .filter(visible)
         .filter(action_artifact::Column::Status.eq("finalized"))
         .filter(action_artifact::Column::DeletedAt.is_null())
         .filter(action_artifact::Column::ExpiresAt.gt(Utc::now()))
@@ -833,9 +930,10 @@ async fn download_run_artifact(
 ) -> Result<Response, ApiError> {
     let (repository, _) = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
     let _run = owned_run(&state, repository.id, run_id).await?;
+    let visible = artifacts::run_scope(state.repository().identity().database(), run_id).await?;
     let artifact = action_artifact::Entity::find_by_id(artifact_id)
         .filter(action_artifact::Column::RepositoryId.eq(repository.id))
-        .filter(action_artifact::Column::RunId.eq(run_id))
+        .filter(visible)
         .filter(action_artifact::Column::Status.eq("finalized"))
         .filter(action_artifact::Column::DeletedAt.is_null())
         .filter(action_artifact::Column::ExpiresAt.gt(Utc::now()))

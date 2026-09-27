@@ -7,6 +7,7 @@ import Settings2 from "@lucide/svelte/icons/settings-2";
 import TriangleAlert from "@lucide/svelte/icons/triangle-alert";
 import Users from "@lucide/svelte/icons/users";
 import Webhook from "@lucide/svelte/icons/webhook";
+import Workflow from "@lucide/svelte/icons/workflow";
 
 import type { ShellIcon } from "$lib/state/shell-state.svelte.js";
 
@@ -22,6 +23,7 @@ export const repositorySettingsSections = [
   { id: "branches", label: "Branches", icon: GitBranch },
   { id: "deploy-keys", label: "Deploy keys", icon: KeyRound },
   { id: "webhooks", label: "Webhooks", icon: Webhook },
+  { id: "actions", label: "Actions", icon: Workflow },
   { id: "integrations", label: "Integrations", icon: Plug },
   { id: "danger", label: "Danger zone", icon: TriangleAlert },
 ] as const satisfies readonly {

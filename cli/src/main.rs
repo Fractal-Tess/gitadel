@@ -12,6 +12,7 @@ use url::Url;
 use uuid::Uuid;
 
 mod accounts;
+mod actions;
 mod auth;
 mod deploy_keys;
 mod email;
@@ -24,6 +25,7 @@ mod query;
 mod registry;
 mod releases;
 mod webhooks;
+use actions::ActionsCommand;
 use auth::AuthCommand;
 
 #[derive(Debug, Parser)]
@@ -100,6 +102,11 @@ enum Command {
     Import {
         #[command(subcommand)]
         command: imports::ImportCommand,
+    },
+    /// Inspect, trigger, and configure Gitadel Actions.
+    Actions {
+        #[command(subcommand)]
+        command: ActionsCommand,
     },
     /// Manage the saved CLI login.
     Auth {
@@ -968,6 +975,7 @@ fn command_uses_stdin_body(command: &Command) -> bool {
         Command::Webhook { command } => webhooks::uses_stdin(command),
         Command::Mirror { command } => mirrors::uses_stdin(command),
         Command::Import { .. } => false,
+        Command::Actions { command } => actions::uses_stdin(command),
         Command::Auth { .. } | Command::Me { .. } | Command::Org { .. } => false,
     }
 }
@@ -1046,6 +1054,10 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Webhook { command } => webhooks::run(&api, command).await?,
         Command::Mirror { command } => mirrors::run(&api, command).await?,
         Command::Import { command } => imports::run(&api, command).await?,
+        Command::Actions { command } => match actions::run(&api, command).await? {
+            Some(value) => value,
+            None => return Ok(()),
+        },
         Command::Admin {
             command:
                 AdminCommand::Storage {

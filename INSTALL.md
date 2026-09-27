@@ -99,14 +99,16 @@ address. With `COMPOSE_FILE` exported, the bootstrap command above and every
 later `docker compose` command include the runner.
 
 The runner connects to Gitadel over the Compose network at
-`http://gitadel:3000`, and jobs clone from the same address. Job containers
-share the Docker-in-Docker network namespace, so they resolve Compose
-service names. Artifact uploads and downloads use signed URLs on
-`GITADEL_PUBLIC_URL`, so that URL must also be reachable from inside Docker
-for workflows that use artifacts.
+`http://gitadel:3000`. Job containers share the Docker-in-Docker network
+namespace, so they resolve Compose service names. The overlay sets
+`actions.internal_url = "http://gitadel:3000"` in
+`deploy/forgejo-runner/gitadel.toml`, so the server, API, clone, and signed
+artifact URLs handed to jobs use that address instead of `GITADEL_PUBLIC_URL`.
+Without `internal_url`, jobs receive the public URL.
 
 Workflows in `.forgejo/workflows`, `.gitea/workflows`, or
-`.github/workflows` run on push with `runs-on: docker`. Jobs use the pinned
+`.github/workflows` run with `runs-on: docker` on push, `workflow_dispatch`,
+or `schedule` (UTC cron on the default branch). Jobs use the pinned
 `node` image from `deploy/forgejo-runner/config.yml`. Remote actions must be
 pinned to a full commit and are fetched from `https://code.forgejo.org`, which
 the overlay allows in `deploy/forgejo-runner/gitadel.toml`:
