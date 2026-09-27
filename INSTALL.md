@@ -125,9 +125,7 @@ workflows you trust.
 
 Pushing a `vX.Y.Z` tag to GitHub runs `.github/workflows/release-image.yml`,
 which builds the `linux/amd64` image and publishes `X.Y.Z`, `X.Y`, and
-`latest` to `ghcr.io/fractal-tess/gitadel`. It also publishes to Docker Hub
-when the repository has a `DOCKERHUB_USERNAME` variable and a
-`DOCKERHUB_TOKEN` secret.
+`latest` to `ghcr.io/fractal-tess/gitadel`.
 
 To publish by hand, including to the Gitadel registry on the private mesh,
 `scripts/publish-image.sh` builds the current checkout once, then publishes
