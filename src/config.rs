@@ -262,6 +262,10 @@ pub struct ActionsSettings {
     pub max_artifact_name_bytes: usize,
     pub artifact_grant_lifetime_seconds: i64,
     pub lfs_read: bool,
+    /// Origin handed to jobs for server, API, clone, and artifact URLs.
+    /// Defaults to `server.public_url` when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_runner: Option<SystemRunnerBootstrapSettings>,
 }
@@ -285,6 +289,7 @@ impl Default for ActionsSettings {
             max_artifact_name_bytes: 255,
             artifact_grant_lifetime_seconds: 3_600,
             lfs_read: true,
+            internal_url: None,
             system_runner: None,
         }
     }
@@ -508,6 +513,9 @@ fn validate_actions_settings(settings: &ActionsSettings) -> Result<()> {
     for origin in &settings.allowed_action_origins {
         validate_http_origin(origin, "allowed Actions origin")?;
     }
+    if let Some(internal_url) = &settings.internal_url {
+        validate_http_origin(internal_url, "Actions internal URL")?;
+    }
     Ok(())
 }
 
@@ -597,6 +605,19 @@ mod tests {
                 .to_string()
                 .contains("server.public_url must use https")
         );
+    }
+
+    #[test]
+    fn actions_internal_url_must_be_an_origin() {
+        let mut settings = ActionsSettings {
+            internal_url: Some("http://gitadel:3000".to_owned()),
+            ..ActionsSettings::default()
+        };
+        validate_actions_settings(&settings).expect("an HTTP origin is valid");
+        for invalid in ["http://gitadel:3000/path", "ftp://gitadel", "not a url"] {
+            settings.internal_url = Some(invalid.to_owned());
+            assert!(validate_actions_settings(&settings).is_err(), "{invalid}");
+        }
     }
 
     #[test]

@@ -44,6 +44,19 @@ impl ActionsState {
         &self.settings
     }
 
+    /// Origin used for every URL handed to jobs, without a trailing slash.
+    ///
+    /// Runners and job containers often reach Gitadel over a private network,
+    /// so `actions.internal_url` takes precedence over the public URL.
+    pub(crate) fn job_origin(&self) -> String {
+        self.settings
+            .internal_url
+            .as_deref()
+            .unwrap_or_else(|| self.repository.public_url().as_str())
+            .trim_end_matches('/')
+            .to_owned()
+    }
+
     pub(crate) fn protocol_router(&self) -> Router {
         protocol::router(self.settings.max_log_request_bytes).with_state(self.clone())
     }

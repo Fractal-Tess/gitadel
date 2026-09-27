@@ -166,16 +166,8 @@ fn valid_name(name: &str, max_bytes: usize) -> Result<(), ApiError> {
     }
     Ok(())
 }
-fn public_url(state: &ActionsState, path: &str) -> String {
-    format!(
-        "{}/{}",
-        state
-            .repository()
-            .public_url()
-            .as_str()
-            .trim_end_matches('/'),
-        path.trim_start_matches('/')
-    )
+fn job_url(state: &ActionsState, path: &str) -> String {
+    format!("{}/{}", state.job_origin(), path.trim_start_matches('/'))
 }
 
 async fn create(
@@ -254,7 +246,7 @@ async fn create(
     .await?;
     Ok(axum::Json(artifact::CreateArtifactResponse {
         ok: true,
-        signed_upload_url: public_url(
+        signed_upload_url: job_url(
             &state,
             &format!(
                 "twirp/github.actions.results.api.v1.ArtifactService/UploadArtifact?token={grant_token}"
@@ -487,7 +479,7 @@ async fn signed_download(
     .insert(database(&state))
     .await?;
     Ok(axum::Json(artifact::GetSignedArtifactUrlResponse {
-        signed_url: public_url(
+        signed_url: job_url(
             &state,
             &format!(
                 "twirp/github.actions.results.api.v1.ArtifactService/DownloadArtifact?token={grant_token}"

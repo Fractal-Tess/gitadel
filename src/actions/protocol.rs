@@ -343,12 +343,7 @@ async fn task_message(
     };
     let event =
         serde_json::from_str::<serde_json::Value>(&run.event_json).unwrap_or_else(|_| json!({}));
-    let server_url = state
-        .repository()
-        .public_url()
-        .to_string()
-        .trim_end_matches('/')
-        .to_owned();
+    let server_url = state.job_origin();
     let context_json = json!({
         "action": "", "action_path": "", "action_ref": "", "action_repository": "",
         "actor": actor, "api_url": format!("{server_url}/api/v1"), "base_ref": "",
@@ -365,7 +360,7 @@ async fn task_message(
         "workflow_sha": run.after_sha, "workspace": "",
         "forgejo_default_actions_url": state.settings().default_actions_origin,
         "forgejo_server_version": env!("CARGO_PKG_VERSION"),
-        "clone_url": state.repository().http_clone_url(&repository),
+        "clone_url": format!("{server_url}/{}/{}.git", repository.namespace, repository.name),
     });
     let context = serde_json::from_value(context_json)
         .map_err(|error| ConnectError::internal(error.to_string()))?;
