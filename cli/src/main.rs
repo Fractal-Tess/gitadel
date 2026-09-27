@@ -14,6 +14,7 @@ use uuid::Uuid;
 mod auth;
 mod input;
 mod restore;
+mod tokens;
 use auth::AuthCommand;
 
 #[derive(Debug, Parser)]
@@ -51,7 +52,7 @@ enum Command {
         #[command(subcommand)]
         command: RepoCommand,
     },
-    /// Show the authenticated user's profile and manage SSH keys.
+    /// Show the authenticated user's profile and manage SSH keys and API tokens.
     Me {
         #[command(subcommand)]
         command: MeCommand,
@@ -170,6 +171,11 @@ enum MeCommand {
     SshKeys {
         #[command(subcommand)]
         command: SshKeyCommand,
+    },
+    /// Manage personal API tokens.
+    Token {
+        #[command(subcommand)]
+        command: tokens::TokenCommand,
     },
 }
 
@@ -1156,6 +1162,7 @@ async fn run_me(api: &ApiClient, command: MeCommand) -> Result<Value> {
                 .await
             }
         },
+        MeCommand::Token { command } => tokens::run(api, command).await,
     }
 }
 
