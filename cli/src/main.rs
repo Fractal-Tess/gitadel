@@ -17,6 +17,7 @@ mod input;
 mod issues;
 mod mirrors;
 mod query;
+mod registry;
 mod releases;
 mod restore;
 mod tokens;
@@ -142,6 +143,8 @@ enum RepoCommand {
         #[command(subcommand)]
         command: CollaboratorCommand,
     },
+    /// List the repository's container images, tags, and digests.
+    Registry { repository: String },
 }
 
 #[derive(Debug, Args)]
@@ -295,6 +298,11 @@ enum AdminCommand {
     Backup {
         #[command(subcommand)]
         command: BackupCommand,
+    },
+    /// Inspect container registry storage and migrate it between targets.
+    Registry {
+        #[command(subcommand)]
+        command: registry::AdminRegistryCommand,
     },
     /// Read administrator audit history.
     Audit {
@@ -1027,6 +1035,12 @@ async fn run(cli: Cli) -> Result<()> {
             api.progress(&path, operation_id).await?;
             return Ok(());
         }
+        Command::Admin {
+            command: AdminCommand::Registry { command },
+        } => match registry::run_admin(&api, command).await? {
+            Some(value) => value,
+            None => return Ok(()),
+        },
         Command::Admin { command } => run_admin(&api, command).await?,
         Command::Api(command) => {
             let body = optional_body_value(&command.body)?;
@@ -1169,6 +1183,7 @@ async fn run_repo(api: &ApiClient, command: RepoCommand) -> Result<Value> {
                 api.request(Method::DELETE, &path, None).await
             }
         },
+        RepoCommand::Registry { repository } => registry::browse(api, &repository).await,
     }
 }
 
@@ -1321,6 +1336,9 @@ async fn run_admin(api: &ApiClient, command: AdminCommand) -> Result<Value> {
         },
         AdminCommand::Storage { command } => run_storage(api, command).await,
         AdminCommand::Backup { command } => run_backup(api, command).await,
+        AdminCommand::Registry { .. } => {
+            unreachable!("registry commands are handled by the top-level dispatcher")
+        }
         AdminCommand::Audit { limit } => {
             api.request(
                 Method::GET,
