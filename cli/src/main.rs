@@ -11,7 +11,9 @@ use serde_json::{Value, json};
 use url::Url;
 use uuid::Uuid;
 
+mod actions;
 mod auth;
+use actions::ActionsCommand;
 use auth::AuthCommand;
 
 #[derive(Debug, Parser)]
@@ -63,6 +65,11 @@ enum Command {
     Admin {
         #[command(subcommand)]
         command: AdminCommand,
+    },
+    /// Inspect, trigger, and configure Gitadel Actions.
+    Actions {
+        #[command(subcommand)]
+        command: ActionsCommand,
     },
     /// Manage the saved CLI login.
     Auth {
@@ -877,6 +884,7 @@ fn command_uses_stdin_body(command: &Command) -> bool {
             _ => false,
         },
         Command::Api(command) => optional_body_command_uses_stdin(&command.body),
+        Command::Actions { command } => actions::uses_stdin(command),
         Command::Auth { .. } | Command::Me { .. } | Command::Org { .. } => false,
     }
 }
@@ -950,6 +958,10 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Repo { command } => run_repo(&api, command).await?,
         Command::Me { command } => run_me(&api, command).await?,
         Command::Org { command } => run_org(&api, command).await?,
+        Command::Actions { command } => match actions::run(&api, command).await? {
+            Some(value) => value,
+            None => return Ok(()),
+        },
         Command::Admin {
             command:
                 AdminCommand::Storage {
