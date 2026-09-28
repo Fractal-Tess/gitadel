@@ -4,6 +4,8 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-09-28
+
 ### Added
 
 - Added a Windows x86_64 build of `gtd` to GitHub releases.
@@ -361,7 +363,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/Fractal-Tess/gitadel/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.10.0...v0.11.0
