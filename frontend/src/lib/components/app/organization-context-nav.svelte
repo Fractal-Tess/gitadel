@@ -13,7 +13,6 @@
   const organization = $derived(
     app.organizations.find((candidate) => candidate.slug === slug) ?? null,
   );
-  const personal = $derived(slug === app.authStatus?.user?.username);
   const active = $derived.by<OrganizationView>(() => {
     const view = page.url.pathname.split("/").at(-1);
     return view === "members" ||
@@ -26,20 +25,13 @@
   });
 </script>
 
+<!-- Personal namespaces get no tab bar: their runners, integrations, and
+     mirror identities are reached from the account menu instead. -->
 {#if organization}
   <OrganizationNav
     {slug}
     label={organization.display_name || organization.slug}
     {active}
     canManage={organization.role === "owner"}
-  />
-{:else if personal}
-  <OrganizationNav
-    {slug}
-    label={slug}
-    {active}
-    showMembers={false}
-    canManage
-    scope="personal"
   />
 {/if}

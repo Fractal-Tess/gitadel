@@ -32,14 +32,12 @@
     active,
     showMembers = true,
     canManage = false,
-    scope = "organization",
   }: {
     slug: string;
     label: string;
     active: OrganizationView;
     showMembers?: boolean;
     canManage?: boolean;
-    scope?: "organization" | "personal";
   } = $props();
 
   const app = useAppState();
@@ -104,7 +102,7 @@
           },
         ]
       : []),
-    ...(canManage && scope === "organization"
+    ...(canManage
       ? [
           {
             id: "settings",
@@ -119,6 +117,6 @@
 </script>
 
 <ContextNav
-  label={`${label} ${scope === "personal" ? "personal namespace" : "organization"}`}
+  label={`${label} organization`}
   items={navigation}
 />

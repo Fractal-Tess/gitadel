@@ -2,7 +2,10 @@
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
   import { resolve } from "$app/paths";
+  import KeyRound from "@lucide/svelte/icons/key-round";
   import LogOut from "@lucide/svelte/icons/log-out";
+  import Rocket from "@lucide/svelte/icons/rocket";
+  import Server from "@lucide/svelte/icons/server";
   import Settings2 from "@lucide/svelte/icons/settings-2";
 
   import * as Avatar from "$lib/components/ui/avatar/index.js";
@@ -46,7 +49,7 @@
           {...props}
           variant="ghost"
           size="icon"
-          class="shrink-0"
+          class="shrink-0 cursor-pointer"
           aria-label="Account menu"
         >
           <Avatar.Root class="size-6">
@@ -71,6 +74,31 @@
           void goto(resolve("/-/account/[view]", { view: "profile" }))}
       >
         <Settings2 />Account settings
+      </DropdownMenu.Item>
+      <DropdownMenu.Separator />
+      <!-- The personal namespace's management pages live here rather than in
+           a tab bar over the profile. -->
+      <DropdownMenu.Item
+        onclick={() =>
+          void goto(resolve("/[namespace]/runners", { namespace: username }))}
+      >
+        <Server />Runners
+      </DropdownMenu.Item>
+      <DropdownMenu.Item
+        onclick={() =>
+          void goto(
+            resolve("/[namespace]/integrations", { namespace: username }),
+          )}
+      >
+        <Rocket />Integrations
+      </DropdownMenu.Item>
+      <DropdownMenu.Item
+        onclick={() =>
+          void goto(
+            resolve("/[namespace]/mirror-credentials", { namespace: username }),
+          )}
+      >
+        <KeyRound />Mirror identities
       </DropdownMenu.Item>
       <DropdownMenu.Separator />
       <DropdownMenu.Item disabled={working} onclick={() => void logout()}>
