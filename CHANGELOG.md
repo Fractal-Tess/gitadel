@@ -4,6 +4,14 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+### Changed
+
+- Redesigned the sign-in and registration pages: a centered card over an animated WebGL canyon background, with passkey and single sign-on buttons above the password form and a show/hide password toggle. The background pauses when hidden and stays still with reduced motion.
+
+### Fixed
+
+- Full HTTP clones of repositories with many refs no longer fail with "expected 'packfile'". Gitadel now accepts the gzip-compressed request bodies Git sends for large negotiations.
+
 ## [0.15.0] - 2026-09-29
 
 ### Added
