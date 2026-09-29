@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use futures_util::stream;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set,
-    Statement, TransactionTrait,
+    TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use tokio_util::io::ReaderStream;
@@ -28,12 +28,9 @@ use crate::{
         self, BackupProvider, BackupProviderConfig, BackupProviderKind, BackupProviderSource,
         FilesystemSettings, RUNTIME_S3_PROVIDER_ID,
     },
-    blob_store::{
-        manager,
-        targets::{self, MeasuredUsage, StorageTargetConfiguration, StorageTargetView},
-    },
+    blob_store::targets::{self, MeasuredUsage, StorageTargetConfiguration, StorageTargetView},
     config::S3Settings,
-    entity::{audit_event, instance, instance_asset, storage_migration},
+    entity::{audit_event, instance, instance_asset},
 };
 
 pub const MAX_FAVICON_BYTES: usize = 512 * 1024;
@@ -537,24 +534,6 @@ pub struct StorageTargetTestResponse {
     message: &'static str,
 }
 
-#[derive(Deserialize)]
-pub struct StorageMigrationRequest {
-    target_id: Uuid,
-    #[serde(default = "default_storage_migration_batch_size")]
-    batch_size: usize,
-}
-
-fn default_storage_migration_batch_size() -> usize {
-    100
-}
-
-#[derive(Serialize)]
-pub struct StorageMigrationScheduledResponse {
-    operation_id: Uuid,
-    target_id: Uuid,
-    message: &'static str,
-}
-
 pub async fn list_storage_targets(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -597,40 +576,6 @@ pub async fn measure_storage_target(
         .map_err(|error| ApiError::bad_request(format!("Could not measure storage: {error:#}")))?;
     state.record_measured_storage(target_id, usage).await;
     Ok(Json(usage))
-}
-
-#[derive(Serialize)]
-pub struct LfsStorageStatusResponse {
-    object_count: u64,
-    total_bytes: u64,
-}
-
-pub async fn lfs_storage_status(
-    State(state): State<IdentityState>,
-    headers: HeaderMap,
-    jar: CookieJar,
-) -> Result<Json<LfsStorageStatusResponse>, ApiError> {
-    require_admin(&state, &headers, &jar, SCOPE_READ).await?;
-    let statement = Statement::from_string(
-        state.database().get_database_backend(),
-        "SELECT COUNT(*) AS object_count, COALESCE(SUM(size), 0) AS total_bytes FROM lfs_objects",
-    );
-    let row = state
-        .database()
-        .query_one_raw(statement)
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| ApiError::internal(anyhow::anyhow!("LFS usage query returned no row")))?;
-    let object_count = row
-        .try_get::<i64>("", "object_count")
-        .map_err(ApiError::internal)?;
-    let total_bytes = row
-        .try_get::<i64>("", "total_bytes")
-        .map_err(ApiError::internal)?;
-    Ok(Json(LfsStorageStatusResponse {
-        object_count: u64::try_from(object_count).map_err(ApiError::internal)?,
-        total_bytes: u64::try_from(total_bytes).map_err(ApiError::internal)?,
-    }))
 }
 
 pub async fn test_storage_target(
@@ -714,153 +659,6 @@ pub async fn delete_storage_target(
         )
         .await?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-pub async fn migrate_storage(
-    State(state): State<IdentityState>,
-    headers: HeaderMap,
-    jar: CookieJar,
-    Json(request): Json<StorageMigrationRequest>,
-) -> Result<(StatusCode, Json<StorageMigrationScheduledResponse>), ApiError> {
-    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    if request.batch_size == 0 {
-        return Err(ApiError::bad_request(
-            "The storage migration batch size must be greater than zero.",
-        ));
-    }
-    if !request.target_id.is_nil() {
-        targets::find(state.database(), request.target_id)
-            .await
-            .map_err(|_| ApiError::bad_request("The storage target does not exist."))?;
-    }
-    let storage = state
-        .lfs_storage()
-        .await
-        .ok_or_else(|| ApiError::internal("LFS storage is unavailable"))?;
-    let migration_guard = storage.try_lock_migration().ok_or_else(|| {
-        ApiError::conflict("Another LFS storage migration is already in progress.")
-    })?;
-    let operation_id = Uuid::new_v4();
-    storage
-        .reserve_migration(state.database(), request.target_id, operation_id)
-        .await
-        .map_err(|error| ApiError::bad_request(format!("Could not start migration: {error:#}")))?;
-    if let Err(error) = state
-        .audit(
-            Some(actor.user.id),
-            "storage.migration.start",
-            Some(request.target_id.to_string()),
-        )
-        .await
-    {
-        manager::mark_failed(state.database(), operation_id, &anyhow::anyhow!("{error}")).await;
-        return Err(error);
-    }
-    let database = state.database().clone();
-    let batch_size = request.batch_size;
-    tokio::spawn(async move {
-        if let Err(error) = storage
-            .migrate_online(&database, operation_id, batch_size, migration_guard)
-            .await
-        {
-            tracing::error!(%error, %operation_id, "online LFS storage migration failed");
-        }
-    });
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(StorageMigrationScheduledResponse {
-            operation_id,
-            target_id: request.target_id,
-            message: "LFS storage migration started without restarting Gitadel.",
-        }),
-    ))
-}
-
-pub async fn storage_progress(
-    State(state): State<IdentityState>,
-    headers: HeaderMap,
-    jar: CookieJar,
-    Path(operation_id): Path<Uuid>,
-) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    storage_migration::Entity::find_by_id(operation_id)
-        .one(state.database())
-        .await?
-        .filter(|migration| migration.domain == "lfs")
-        .ok_or_else(ApiError::not_found)?;
-    let database = state.database().clone();
-    let events = stream::unfold(
-        (database, operation_id, false),
-        |(database, operation_id, done)| async move {
-            if done {
-                return None;
-            }
-            let lookup = storage_migration::Entity::find_by_id(operation_id)
-                .one(&database)
-                .await;
-            let (migration, database_error) = match lookup {
-                Ok(migration) => (migration, None),
-                Err(error) => (None, Some(error.to_string())),
-            };
-            let terminal = database_error.is_some()
-                || migration.as_ref().is_some_and(|migration| {
-                    matches!(migration.state.as_str(), "completed" | "failed")
-                });
-            let payload = if let Some(error) = database_error {
-                serde_json::json!({
-                    "operation_id": operation_id,
-                    "key": "",
-                    "operation": "lfs_migrate",
-                    "phase": "failed",
-                    "state": "failed",
-                    "message": "Could not read LFS migration progress.",
-                    "processed_bytes": 0,
-                    "total_bytes": null,
-                    "error": error,
-                })
-            } else {
-                migration.map_or_else(
-                    || {
-                        serde_json::json!({
-                            "operation_id": operation_id,
-                            "key": "",
-                            "operation": "lfs_migrate",
-                            "phase": "scheduled",
-                            "state": "pending",
-                            "message": "LFS storage migration is starting.",
-                            "processed_bytes": 0,
-                            "total_bytes": null,
-                        })
-                    },
-                    |migration| {
-                        serde_json::json!({
-                            "operation_id": migration.id,
-                            "key": "",
-                            "operation": "lfs_migrate",
-                            "phase": manager::progress_phase(&migration),
-                            "state": migration.state,
-                            "message": if migration.state == "failed" {
-                                migration.error.as_deref().unwrap_or("LFS storage migration failed.")
-                            } else if migration.state == "completed" {
-                                "LFS storage migration completed."
-                            } else {
-                                "Migrating Git LFS objects."
-                            },
-                            "processed_bytes": migration.copied_bytes.max(0),
-                            "total_bytes": null,
-                            "error": migration.error,
-                        })
-                    },
-                )
-            };
-            let event = Event::default().data(payload.to_string());
-            if !terminal {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-            Some((Ok(event), (database, operation_id, terminal)))
-        },
-    );
-    Ok(Sse::new(events))
 }
 
 pub async fn list_backup_providers(

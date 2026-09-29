@@ -100,6 +100,11 @@ impl DomainStorage {
         self.domain.as_ref()
     }
 
+    /// Where the domain stores objects when no storage target is selected.
+    pub fn local_root(&self) -> &std::path::Path {
+        &self.local_root
+    }
+
     pub fn active(&self) -> ActiveStore {
         self.active
             .read()

@@ -16,11 +16,13 @@ mod filesystem;
 pub mod manager;
 mod s3;
 pub mod targets;
+mod usage;
 
 pub use domain::StorageDomain;
 pub use filesystem::FilesystemBlobStore;
 pub use manager::DomainStorage;
 pub use s3::S3BlobStore;
+pub use usage::{DomainUsage, RepositoryUsage, UsageContext, UsageDetail, UsageUnit};
 
 pub type BlobReader = Pin<Box<dyn AsyncRead + Send>>;
 
