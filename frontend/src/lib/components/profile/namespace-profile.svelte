@@ -1,9 +1,13 @@
 <!--
   What sits above a namespace's repository list: its profile README, pinned
-  repositories, and a year of commit activity. Each part stays out of the way
+  repositories, and a year of commit activity. With a day picked from the
+  graph, the README and pins give way to that day's commits. Each part stays out of the way
   until it has something to show.
 -->
 <script lang="ts">
+  import { resolve } from "$app/paths";
+  import ArrowLeft from "@lucide/svelte/icons/arrow-left";
+
   import {
     namespaceActivitySchema,
     pinnedRepositoriesSchema,
@@ -11,14 +15,26 @@
     type PinnedRepositories,
   } from "$lib/api/profile.js";
   import { requestJson } from "$lib/api/transport.js";
+  import ActivityDay from "$lib/components/profile/activity-day.svelte";
   import ContributionGraph from "$lib/components/profile/contribution-graph.svelte";
   import PinnedRepositoriesSection from "$lib/components/profile/pinned-repositories.svelte";
   import ProfileReadme from "$lib/components/profile/profile-readme.svelte";
   import { Skeleton } from "$lib/components/ui/skeleton/index.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
-  let { namespace, canManage }: { namespace: string; canManage: boolean } =
-    $props();
+  let {
+    namespace,
+    canManage,
+    date = null,
+  }: {
+    namespace: string;
+    canManage: boolean;
+    /** A day picked from the graph, shown in place of the README and pins. */
+    date?: string | null;
+  } = $props();
+
+  const profileHref = $derived(resolve("/[namespace]", { namespace }));
+  const dayHref = (day: string) => `${profileHref}?date=${day}`;
 
   const app = useAppState();
   let activity = $state<NamespaceActivity | null>(null);
@@ -50,9 +66,18 @@
 <div
   class="mx-auto grid max-w-5xl grid-cols-[minmax(0,1fr)] gap-6 px-5 pt-8 lg:px-8"
 >
-  <ProfileReadme {namespace} />
+  {#if date}
+    <a
+      class="flex w-fit items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+      href={profileHref}
+    >
+      <ArrowLeft class="size-4" />Back to {namespace}
+    </a>
+  {:else}
+    <ProfileReadme {namespace} />
+  {/if}
 
-  {#if pins}
+  {#if pins && !date}
     <PinnedRepositoriesSection
       {namespace}
       {pins}
@@ -80,11 +105,15 @@
               : "ies"}
           </span>
         </h2>
-        <ContributionGraph {activity} />
+        <ContributionGraph {activity} selected={date} href={dayHref} />
       {:else}
         <Skeleton class="mb-4 h-4 w-56" />
         <Skeleton class="h-28 w-full" />
       {/if}
     </section>
+  {/if}
+
+  {#if date}
+    <ActivityDay {namespace} {date} />
   {/if}
 </div>

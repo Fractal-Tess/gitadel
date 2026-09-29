@@ -1,11 +1,22 @@
 <!--
   A year of commit activity as a week-by-week grid, one cell per day, shaded
-  by how busy the day was relative to the busiest one.
+  by how busy the day was relative to the busiest one. Days with commits link
+  to a list of them.
 -->
 <script lang="ts">
   import type { NamespaceActivity } from "$lib/api/profile.js";
 
-  let { activity }: { activity: NamespaceActivity } = $props();
+  let {
+    activity,
+    selected = null,
+    href,
+  }: {
+    activity: NamespaceActivity;
+    /** The day being shown in detail, outlined in the grid. */
+    selected?: string | null;
+    /** Where a day with commits links to. */
+    href: (date: string) => string;
+  } = $props();
 
   const DAY = 86_400_000;
   const CELL = 11;
@@ -91,9 +102,13 @@
     return `${cell.count} commit${cell.count === 1 ? "" : "s"} on ${day}`;
   }
 
-  // Start scrolled to the present when the year is wider than the card.
+  // When the year is wider than the card, start scrolled to the selected day,
+  // or else to the present.
   function scrollToLatest(node: HTMLElement): void {
-    node.scrollLeft = node.scrollWidth;
+    const current = node.querySelector<HTMLElement>("[aria-current]");
+    node.scrollLeft = current
+      ? current.offsetLeft - node.clientWidth / 2
+      : node.scrollWidth;
   }
 </script>
 
@@ -127,12 +142,25 @@
         style:grid-template-rows={`repeat(7, ${CELL}px)`}
         style:grid-auto-columns={`${CELL}px`}
         style:gap={`${GAP}px`}
-        role="img"
+        role="group"
         aria-label={`${activity.total_commits} commits in the last year`}
       >
         {#each grid.weeks as week, column (column)}
           {#each week as cell, row (row)}
-            {#if cell}
+            {#if cell && cell.count > 0}
+              <a
+                class={[
+                  "rounded-[3px] outline-offset-1 hover:outline-2 hover:outline-foreground/60 focus-visible:outline-2 focus-visible:outline-ring",
+                  LEVEL_CLASSES[cell.level],
+                  cell.date === selected && "outline-2 outline-foreground",
+                ]}
+                href={href(cell.date)}
+                title={describe(cell)}
+                aria-label={describe(cell)}
+                aria-current={cell.date === selected ? "date" : undefined}
+                data-sveltekit-noscroll
+              ></a>
+            {:else if cell}
               <span
                 class={["rounded-[3px]", LEVEL_CLASSES[cell.level]]}
                 title={describe(cell)}

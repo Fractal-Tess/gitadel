@@ -30,6 +30,10 @@
         : resolve("/[namespace]/runners", { namespace })
       : null,
   );
+  const activityDate = $derived.by(() => {
+    const date = page.url.searchParams.get("date");
+    return date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : null;
+  });
   let namespaceStatus = $state<"loading" | "ready" | "not-found" | "error">(
     "loading",
   );
@@ -92,10 +96,13 @@
   </Alert.Root>
 {:else}
   {#key namespace}
-    <!-- A search narrows the list, so the profile steps aside for it. -->
-    {#if !page.url.searchParams.get("q")?.trim()}
-      <NamespaceProfile {namespace} {canManage} />
+    <!-- A search narrows the list, so the profile steps aside for it. A day
+         picked from the activity graph takes the page on its own. -->
+    {#if activityDate || !page.url.searchParams.get("q")?.trim()}
+      <NamespaceProfile {namespace} {canManage} date={activityDate} />
     {/if}
-    <RepositoryList {namespace} {manageHref} />
+    {#if !activityDate}
+      <RepositoryList {namespace} {manageHref} />
+    {/if}
   {/key}
 {/if}
