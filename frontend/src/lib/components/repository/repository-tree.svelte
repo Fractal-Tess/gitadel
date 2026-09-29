@@ -45,7 +45,8 @@
     {@const tree = state.browser.repositoryTree}
     <!-- The branch scopes everything in this column, so it heads the column
          rather than the repository toolbar. The commit chip beside it keeps the
-         old jump to history. -->
+         old jump to history, and gives up its age before the picker gives up
+         the branch name when the column is narrow. -->
     <div class="flex h-12 shrink-0 items-center gap-1 border-b pr-2 pl-1">
       <Select.Root
         type="single"
@@ -55,7 +56,7 @@
         }}
       >
         <Select.Trigger
-          class="h-8 min-w-0 flex-1 border-0 bg-transparent px-2 font-medium shadow-none hover:bg-accent/45"
+          class="h-8 min-w-24 flex-1 border-0 bg-transparent px-2 font-medium shadow-none hover:bg-accent/45"
           aria-label="Switch branch"
         >
           <span class="flex min-w-0 items-center gap-2">
@@ -71,13 +72,14 @@
       </Select.Root>
       <button
         type="button"
-        class="flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent/45 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        class="flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent/45 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         aria-label={`View commit history for ${tree.revision}, updated ${formatCommitAge(tree.commit_timestamp)}`}
         onclick={() => state.navigate("history")}
       >
-        <code>{tree.commit_oid.slice(0, 8)}</code>
-        <span aria-hidden="true">·</span>
+        <code class="shrink-0">{tree.commit_oid.slice(0, 8)}</code>
+        <span class="shrink-0" aria-hidden="true">·</span>
         <time
+          class="truncate"
           datetime={new Date(tree.commit_timestamp * 1000).toISOString()}
           title={formatDate(tree.commit_timestamp)}
         >
