@@ -39,6 +39,7 @@ let
     storage = {
       repository_root = "${cfg.dataDir}/repositories";
       lfs_root = "${cfg.dataDir}/lfs";
+      registry_root = "${cfg.dataDir}/registry";
       actions_artifact_root = "${cfg.dataDir}/actions-artifacts";
     };
     ssh = {

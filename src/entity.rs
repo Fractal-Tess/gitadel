@@ -1769,3 +1769,138 @@ pub mod action_schedule_scan {
     pub enum Relation {}
     impl ActiveModelBehavior for ActiveModel {}
 }
+
+/// One container image of a repository, named by the suffix after
+/// `<namespace>/<repository>` (empty for the repository's own image).
+pub mod registry_image {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "registry_images")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub repository_id: Uuid,
+        pub name: String,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// A registry payload a repository holds in the active registry store.
+pub mod registry_object {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "registry_objects")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub repository_id: Uuid,
+        /// `blob` or `manifest`.
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub kind: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub digest: String,
+        pub size: i64,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// A blob an image exposes.
+pub mod registry_image_blob {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "registry_image_blobs")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub image_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub digest: String,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// A manifest an image holds.
+pub mod registry_manifest {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "registry_manifests")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub image_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub digest: String,
+        pub media_type: String,
+        pub size: i64,
+        pub subject_digest: Option<String>,
+        pub artifact_type: Option<String>,
+        /// The manifest's `annotations` object as JSON.
+        pub annotations: Option<String>,
+        pub created_at: DateTimeUtc,
+        /// The last push; unknown for manifests imported from older versions.
+        pub pushed_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// A digest a manifest references through its config, layers, or manifests.
+pub mod registry_manifest_reference {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "registry_manifest_references")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub image_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub manifest_digest: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub referenced_digest: String,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// A tag pointing at one of an image's manifests.
+pub mod registry_tag {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "registry_tags")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub image_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub name: String,
+        pub digest: String,
+        pub updated_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}

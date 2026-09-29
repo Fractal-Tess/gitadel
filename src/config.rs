@@ -59,6 +59,10 @@ pub struct Cli {
     #[arg(long, env = "GITADEL_LFS_ROOT", value_name = "PATH")]
     lfs_root: Option<PathBuf>,
 
+    /// Root directory containing container registry payloads and uploads.
+    #[arg(long, env = "GITADEL_REGISTRY_ROOT", value_name = "PATH")]
+    registry_root: Option<PathBuf>,
+
     /// Address on which the embedded SSH server listens.
     #[arg(long, env = "GITADEL_SSH_BIND", value_name = "ADDRESS")]
     ssh_bind: Option<SocketAddr>,
@@ -302,7 +306,15 @@ pub struct DatabaseSettings {
 pub struct StorageSettings {
     pub repository_root: PathBuf,
     pub lfs_root: PathBuf,
+    /// Container registry payloads when no storage target is selected, and
+    /// resumable upload sessions in every case.
+    #[serde(default = "default_registry_root")]
+    pub registry_root: PathBuf,
     pub actions_artifact_root: PathBuf,
+}
+
+fn default_registry_root() -> PathBuf {
+    PathBuf::from("registry")
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -430,6 +442,7 @@ impl Default for Settings {
             storage: StorageSettings {
                 repository_root: PathBuf::from("repositories"),
                 lfs_root: PathBuf::from("lfs"),
+                registry_root: default_registry_root(),
                 actions_artifact_root: PathBuf::from("actions-artifacts"),
             },
             ssh: SshSettings {
@@ -465,6 +478,14 @@ impl Settings {
             .set_default(
                 "storage.lfs_root",
                 defaults.storage.lfs_root.to_string_lossy().into_owned(),
+            )?
+            .set_default(
+                "storage.registry_root",
+                defaults
+                    .storage
+                    .registry_root
+                    .to_string_lossy()
+                    .into_owned(),
             )?
             .set_default(
                 "storage.actions_artifact_root",
@@ -517,6 +538,9 @@ impl Settings {
         }
         if let Some(lfs_root) = &cli.lfs_root {
             settings.storage.lfs_root.clone_from(lfs_root);
+        }
+        if let Some(registry_root) = &cli.registry_root {
+            settings.storage.registry_root.clone_from(registry_root);
         }
         if let Some(ssh_bind) = cli.ssh_bind {
             settings.ssh.bind = ssh_bind;
@@ -810,5 +834,26 @@ mod tests {
     fn local_tls_accepts_an_https_public_url() {
         validate_server_settings(&tls_settings("https://localhost:3000"))
             .expect("HTTPS is valid with local TLS");
+    }
+
+    #[test]
+    fn registry_root_has_a_default_and_follows_the_command_line() {
+        let config =
+            std::env::temp_dir().join(format!("gitadel-missing-{}.toml", uuid::Uuid::new_v4()));
+        let config = config.to_str().expect("temporary path is UTF-8");
+        let defaults = Settings::load(&Cli::parse_from(["gitadel", "--config", config])).unwrap();
+        assert_eq!(defaults.storage.registry_root, PathBuf::from("registry"));
+        let configured = Settings::load(&Cli::parse_from([
+            "gitadel",
+            "--config",
+            config,
+            "--registry-root",
+            "/srv/registry",
+        ]))
+        .unwrap();
+        assert_eq!(
+            configured.storage.registry_root,
+            PathBuf::from("/srv/registry")
+        );
     }
 }

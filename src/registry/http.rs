@@ -48,6 +48,10 @@ enum Resource<'a> {
 }
 
 pub fn router(repositories: RepositoryState) -> Router {
+    let store = RegistryStore::new(
+        repositories.identity().database().clone(),
+        repositories.registry_root(),
+    );
     Router::new()
         .route("/v2/", any(ping))
         .route("/v2/token", any(token))
@@ -56,7 +60,7 @@ pub fn router(repositories: RepositoryState) -> Router {
         .layer(middleware::map_response(protocol_headers))
         .with_state(RegistryState {
             repositories,
-            store: RegistryStore::new(),
+            store,
             auth: RegistryAuth::new(),
         })
 }
@@ -308,8 +312,7 @@ async fn context(
             }
         })?;
     let store = state.store.image(
-        repository.storage_key,
-        state.repositories.repository_path(&repository),
+        &repository,
         name.suffix,
         state.repositories.registry_storage().store(),
     );
@@ -805,8 +808,7 @@ async fn tags(
     let parameters = parameters(query)?;
     let size = page_size(&parameters)?;
     let last = parameter(&parameters, "last").unwrap_or("");
-    let mut tags = store.tags().await?;
-    tags.retain(|tag| tag.as_str() > last);
+    let mut tags = store.tags_page(last, size as u64 + 1).await?;
     let more = tags.len() > size;
     tags.truncate(size);
     let mut response = Json(serde_json::json!({"name": image, "tags": tags})).into_response();
@@ -857,11 +859,7 @@ async fn catalog(
             {
                 continue;
             }
-            for suffix in state
-                .store
-                .list_images(&state.repositories.repository_path(&repository))
-                .await?
-            {
+            for suffix in state.store.list_images(repository.id).await? {
                 let name = if suffix.is_empty() {
                     format!("{}/{}", repository.namespace, repository.name)
                 } else {

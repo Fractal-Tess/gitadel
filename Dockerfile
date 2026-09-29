@@ -50,6 +50,7 @@ ENV \
     GITADEL_DATABASE_URL=sqlite:///data/gitadel.db?mode=rwc \
     GITADEL_REPOSITORY_ROOT=/data/repositories \
     GITADEL_LFS_ROOT=/data/lfs \
+    GITADEL_REGISTRY_ROOT=/data/registry \
     GITADEL_SSH_BIND=0.0.0.0:2222 \
     GITADEL_SSH_HOST_KEY=/data/ssh-host-ed25519
 ENTRYPOINT ["gitadel"]

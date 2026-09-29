@@ -37,8 +37,8 @@ finite production build after each relevant source change. See
 and `/healthz`, so backend routes are unreachable through it.
 
 Bare defaults are `127.0.0.1:3000` with SSH on `2222`, a `gitadel.db` in the
-repository root, and `repositories/`, `lfs/`, and an SSH host key beside it -
-all gitignored. Those ports collide with any Gitadel already running on the
+repository root, and `repositories/`, `lfs/`, `registry/`, and an SSH host key
+beside it - all gitignored. Those ports collide with any Gitadel already running on the
 machine, so give a dev instance its own ports and paths through a gitignored
 `gitadel.toml` in the root, which is read automatically, or through the CLI
 flags and their `GITADEL_*` environment variables. See [AGENTS.md](AGENTS.md).

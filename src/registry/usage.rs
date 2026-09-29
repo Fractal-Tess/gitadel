@@ -68,7 +68,7 @@ impl DomainUsage for RegistryUsageProvider {
     ) -> Result<HashMap<Uuid, RepositoryUsage>> {
         let rows = storage::usage_by_repository(
             context.database,
-            &context.settings.repository_root,
+            &context.settings.registry_root,
             context.storage,
         )
         .await?;

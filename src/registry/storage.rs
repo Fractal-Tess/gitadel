@@ -1,31 +1,34 @@
-//! Container registry payload storage: the registry [`StorageDomain`] and the
-//! local store that keeps payloads inside repository directories.
+//! Container registry payload storage: the registry [`StorageDomain`], rooted
+//! at `storage.registry_root` when no storage target is selected.
 
 use std::{
-    collections::HashMap,
-    ops::Range,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use sea_orm::{DatabaseConnection, EntityTrait as _};
 use uuid::Uuid;
 
-use super::store::{RegistryStore, RegistryUsage};
+use super::store::{RegistryUsage, usage_by_repository_id};
 use crate::{
     blob_store::{
-        BlobDigest, BlobMetadata, BlobReader, BlobStore, DomainStorage, FilesystemBlobStore,
-        ObjectKey, ObjectPrefix, PutOutcome, StorageDomain,
+        BlobDigest, BlobStore, DomainStorage, FilesystemBlobStore, ObjectKey, ObjectPrefix,
+        StorageDomain,
     },
     config::StorageSettings,
     entity::repository,
 };
 
-/// Container registry blobs and manifests, keyed
-/// `registry/<storage-key>/<image-hash>/{blobs/aa/bb/<digest>,manifests/objects/<digest>}`.
-/// Tags, manifest media types, and uploads stay in the repository directory.
+/// Container registry blobs and manifest bytes, keyed
+/// `registry/<storage-key>/{blobs,manifests}/<aa>/<bb>/<digest>` and shared by
+/// the images of one repository. Tags and manifest records live in the
+/// database, so the payloads are all a storage target has to hold.
+///
+/// The local root drops the `registry/` prefix, so it holds one directory per
+/// repository storage key like the LFS root, plus `uploads/` for resumable
+/// upload sessions.
 pub(crate) struct RegistryDomain;
 
 #[async_trait]
@@ -43,7 +46,7 @@ impl StorageDomain for RegistryDomain {
     }
 
     fn repository_storage_key(&self, key: &ObjectKey) -> Option<Uuid> {
-        key_parts(key.as_str()).map(|(storage_key, ..)| storage_key)
+        parse_key(key.as_str()).map(|parsed| parsed.storage_key)
     }
 
     fn repository_prefix(&self, storage_key: Uuid) -> Result<ObjectPrefix> {
@@ -51,243 +54,135 @@ impl StorageDomain for RegistryDomain {
     }
 
     fn local_root(&self, settings: &StorageSettings) -> PathBuf {
-        settings.repository_root.clone()
+        settings.registry_root.clone()
     }
 
     async fn open_local(&self, root: PathBuf) -> Result<Arc<dyn BlobStore>> {
-        Ok(Arc::new(RegistryLocalStore::new(root).await?))
+        Ok(Arc::new(
+            FilesystemBlobStore::with_namespace(root, self.key_prefix()).await?,
+        ))
     }
 }
 
+/// The two kinds of registry payload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ObjectKind {
+    Blob,
+    Manifest,
+}
+
+impl ObjectKind {
+    /// The value stored in `registry_objects.kind`.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Blob => "blob",
+            Self::Manifest => "manifest",
+        }
+    }
+
+    fn directory(self) -> &'static str {
+        match self {
+            Self::Blob => "blobs",
+            Self::Manifest => "manifests",
+        }
+    }
+}
+
+/// The canonical key of a payload with SHA-256 `hex`.
+pub(crate) fn object_key(storage_key: Uuid, kind: ObjectKind, hex: &str) -> Result<ObjectKey> {
+    let hex = hex.parse::<BlobDigest>()?.to_hex();
+    ObjectKey::new(format!(
+        "registry/{storage_key}/{}/{}/{}/{hex}",
+        kind.directory(),
+        &hex[..2],
+        &hex[2..4]
+    ))
+}
+
+/// A recognized registry payload key.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ParsedKey<'a> {
+    pub storage_key: Uuid,
+    pub kind: ObjectKind,
+    pub hex: &'a str,
+    /// The image hash of the per-image layout 0.13 used, which the startup
+    /// import rewrites to the shared layout.
+    pub legacy_image: Option<&'a str>,
+}
+
+/// Parses a canonical registry key in the current layout or the per-image
+/// layout earlier versions wrote
+/// (`registry/<storage-key>/<image-hash>/{blobs/aa/bb/<digest>,manifests/objects/<digest>}`),
+/// so leftovers of the old layout are still recognized and cleaned up.
+pub(crate) fn parse_key(key: &str) -> Option<ParsedKey<'_>> {
+    let (repository, rest) = key.strip_prefix("registry/")?.split_once('/')?;
+    let storage_key = Uuid::parse_str(repository).ok()?;
+    let parts = rest.split('/').collect::<Vec<_>>();
+    let sharded = |kind, first: &str, second: &str, hex: &'_ str| {
+        (hex.parse::<BlobDigest>().is_ok() && first == &hex[..2] && second == &hex[2..4])
+            .then_some(kind)
+    };
+    let (kind, hex, legacy_image) = match parts.as_slice() {
+        ["blobs", first, second, hex] => {
+            (sharded(ObjectKind::Blob, first, second, hex)?, *hex, None)
+        }
+        ["manifests", first, second, hex] => (
+            sharded(ObjectKind::Manifest, first, second, hex)?,
+            *hex,
+            None,
+        ),
+        [image, "blobs", first, second, hex] if image.parse::<BlobDigest>().is_ok() => (
+            sharded(ObjectKind::Blob, first, second, hex)?,
+            *hex,
+            Some(*image),
+        ),
+        [image, "manifests", "objects", hex]
+            if image.parse::<BlobDigest>().is_ok() && hex.parse::<BlobDigest>().is_ok() =>
+        {
+            (ObjectKind::Manifest, *hex, Some(*image))
+        }
+        _ => return None,
+    };
+    Some(ParsedKey {
+        storage_key,
+        kind,
+        hex,
+        legacy_image,
+    })
+}
+
 /// Opens the registry storage for a running server, failing any online
-/// migration a restart interrupted.
+/// migration a restart interrupted. Registry data earlier versions left in
+/// repository directories is moved to the registry root first, and its
+/// file-based metadata is imported into the database.
 pub(crate) async fn start(
     database: &DatabaseConnection,
     settings: &StorageSettings,
 ) -> Result<Arc<DomainStorage>> {
+    super::upgrade::relocate(database, settings).await?;
     let local_root = RegistryDomain.local_root(settings);
-    DomainStorage::start(database, Arc::new(RegistryDomain), local_root).await
+    let storage = DomainStorage::start(database, Arc::new(RegistryDomain), local_root).await?;
+    super::upgrade::import(database, settings, &storage).await?;
+    Ok(storage)
 }
 
-/// Canonical registry keys are independent of the selected storage target.
-fn key_parts(key: &str) -> Option<(Uuid, &str, &str, bool)> {
-    let (repository, rest) = key.strip_prefix("registry/")?.split_once('/')?;
-    let storage_key = Uuid::parse_str(repository).ok()?;
-    let (image, payload) = rest.split_once('/')?;
-    image.parse::<BlobDigest>().ok()?;
-    let mut parts = payload.split('/');
-    let manifest = match parts.next()? {
-        "blobs" => {
-            let first = parts.next()?;
-            let second = parts.next()?;
-            let digest = parts.next()?;
-            digest.parse::<BlobDigest>().ok()?;
-            if first != &digest[..2] || second != &digest[2..4] {
-                return None;
-            }
-            false
-        }
-        "manifests" => {
-            if parts.next()? != "objects" {
-                return None;
-            }
-            parts.next()?.parse::<BlobDigest>().ok()?;
-            true
-        }
-        _ => return None,
-    };
-    if parts.next().is_some() {
-        return None;
-    }
-    Some((storage_key, image, payload, manifest))
-}
-
-/// The canonical key of a payload path relative to the repository root, or
-/// `None` for registry metadata and every other file.
-pub(crate) fn registry_object_key(local: &str) -> Option<ObjectKey> {
-    let (repository, rest) = local.split_once("/gitadel-registry/images/")?;
-    let storage_key = Uuid::parse_str(repository.strip_suffix(".git")?).ok()?;
-    let key = ObjectKey::new(format!("registry/{storage_key}/{rest}")).ok()?;
-    key_parts(key.as_str())?;
-    Some(key)
-}
-
-/// The path of a canonical key relative to the repository root.
-pub(crate) fn local_object_key(key: &ObjectKey) -> Result<ObjectKey> {
-    let (storage_key, image, payload, _) =
-        key_parts(key.as_str()).context("invalid registry payload key")?;
-    ObjectKey::new(format!(
-        "{storage_key}.git/gitadel-registry/images/{image}/{payload}"
-    ))
-}
-
-/// Presents payloads stored inside `<root>/<storage-key>.git/gitadel-registry`
-/// under their canonical keys, so the local root behaves like any other
-/// store.
-pub(crate) struct RegistryLocalStore {
-    root: PathBuf,
-    files: FilesystemBlobStore,
-}
-
-impl RegistryLocalStore {
-    pub(crate) async fn new(root: PathBuf) -> Result<Self> {
-        Ok(Self {
-            files: FilesystemBlobStore::new(root.clone()).await?,
-            root,
-        })
-    }
-
-    /// Repository directories under the root, by storage key.
-    async fn repositories(&self) -> Result<Vec<Uuid>> {
-        let mut result = Vec::new();
-        let mut entries = match tokio::fs::read_dir(&self.root).await {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(result),
-            Err(error) => return Err(error.into()),
-        };
-        while let Some(entry) = entries.next_entry().await? {
-            if !entry.file_type().await?.is_dir() {
-                continue;
-            }
-            if let Some(storage_key) = entry
-                .file_name()
-                .to_str()
-                .and_then(|name| name.strip_suffix(".git"))
-                .and_then(|name| Uuid::parse_str(name).ok())
-            {
-                result.push(storage_key);
-            }
-        }
-        Ok(result)
-    }
-
-    /// The local directories a canonical listing prefix covers.
-    async fn local_prefixes(&self, prefix: &ObjectPrefix) -> Result<Vec<String>> {
-        let images = |storage_key: Uuid| format!("{storage_key}.git/gitadel-registry/images");
-        let value = prefix.as_str();
-        if value.is_empty() || value == "registry" {
-            return Ok(self.repositories().await?.into_iter().map(images).collect());
-        }
-        let Some(rest) = value.strip_prefix("registry/") else {
-            return Ok(Vec::new());
-        };
-        let (repository, tail) = match rest.split_once('/') {
-            Some((repository, tail)) => (repository, Some(tail)),
-            None => (rest, None),
-        };
-        let Ok(storage_key) = Uuid::parse_str(repository) else {
-            return Ok(Vec::new());
-        };
-        Ok(vec![match tail {
-            Some(tail) => format!("{}/{tail}", images(storage_key)),
-            None => images(storage_key),
-        }])
-    }
-}
-
-#[async_trait]
-impl BlobStore for RegistryLocalStore {
-    async fn stat(&self, key: &ObjectKey) -> Result<Option<BlobMetadata>> {
-        Ok(self
-            .files
-            .stat(&local_object_key(key)?)
-            .await?
-            .map(|metadata| BlobMetadata {
-                key: key.clone(),
-                ..metadata
-            }))
-    }
-
-    async fn read(&self, key: &ObjectKey) -> Result<BlobReader> {
-        self.files.read(&local_object_key(key)?).await
-    }
-
-    async fn read_range(&self, key: &ObjectKey, range: Range<u64>) -> Result<BlobReader> {
-        self.files.read_range(&local_object_key(key)?, range).await
-    }
-
-    async fn put_verified(
-        &self,
-        key: &ObjectKey,
-        expected: BlobDigest,
-        body: BlobReader,
-    ) -> Result<PutOutcome> {
-        self.files
-            .put_verified(&local_object_key(key)?, expected, body)
-            .await
-    }
-
-    async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<BlobMetadata>> {
-        let mut objects = Vec::new();
-        for local in self.local_prefixes(prefix).await? {
-            for mut object in self.files.list(&ObjectPrefix::new(local)?).await? {
-                if let Some(key) = registry_object_key(object.key.as_str()) {
-                    object.key = key;
-                    objects.push(object);
-                }
-            }
-        }
-        objects.sort_by(|left, right| left.key.as_str().cmp(right.key.as_str()));
-        Ok(objects)
-    }
-
-    async fn delete(&self, key: &ObjectKey) -> Result<()> {
-        self.files.delete(&local_object_key(key)?).await
-    }
-
-    async fn put_file(
-        &self,
-        key: &ObjectKey,
-        expected: BlobDigest,
-        path: &Path,
-    ) -> Result<PutOutcome> {
-        self.files
-            .put_file(&local_object_key(key)?, expected, path)
-            .await
-    }
-
-    async fn duplicate(&self, source: &ObjectKey, destination: &ObjectKey) -> Result<PutOutcome> {
-        self.files
-            .duplicate(&local_object_key(source)?, &local_object_key(destination)?)
-            .await
-    }
-}
-
-/// Registry usage per repository: payloads from the active store, and tags,
-/// images, and uploads from each repository directory under `repository_root`.
+/// Registry usage per repository. Payload counts and bytes, tags, and images
+/// come from the database; staged uploads from `<registry_root>/uploads`.
+/// `_storage` is kept for callers; usage no longer lists the active store.
 pub(crate) async fn usage_by_repository(
     database: &DatabaseConnection,
-    repository_root: &Path,
-    storage: &DomainStorage,
+    registry_root: &Path,
+    _storage: &DomainStorage,
 ) -> Result<Vec<(repository::Model, RegistryUsage)>> {
     let repositories = repository::Entity::find().all(database).await?;
-    let mut payload_usage = HashMap::<Uuid, RegistryUsage>::new();
-    for object in storage.inventory(database).await? {
-        let (owner, _, _, manifest) =
-            key_parts(object.key.as_str()).context("invalid inventoried registry key")?;
-        let usage = payload_usage.entry(owner).or_default();
-        usage.object_count += 1;
-        usage.total_bytes = usage
-            .total_bytes
-            .checked_add(object.size)
-            .context("registry usage overflow")?;
-        if manifest {
-            usage.manifest_count += 1;
-        } else {
-            usage.blob_count += 1;
-        }
-    }
-    let registry = RegistryStore::new();
-    let mut result = Vec::with_capacity(repositories.len());
-    for repository in repositories {
-        let path = repository_root.join(format!("{}.git", repository.storage_key));
-        let mut usage = registry.metadata_usage(&path).await?;
-        usage += payload_usage
-            .remove(&repository.storage_key)
-            .unwrap_or_default();
-        result.push((repository, usage));
-    }
-    Ok(result)
+    let mut usage = usage_by_repository_id(database, registry_root, &repositories).await?;
+    Ok(repositories
+        .into_iter()
+        .map(|repository| {
+            let usage = usage.remove(&repository.id).unwrap_or_default();
+            (repository, usage)
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -295,25 +190,52 @@ mod tests {
     use super::*;
     use sha2::{Digest as _, Sha256};
 
-    fn blob_key(storage_key: Uuid, payload: &[u8]) -> (ObjectKey, BlobDigest) {
+    #[test]
+    fn keys_in_both_layouts_are_recognized() {
+        let storage_key = Uuid::new_v4();
+        let hex = hex::encode(Sha256::digest(b"layer"));
         let image = hex::encode(Sha256::digest(b""));
-        let digest = BlobDigest::from_bytes(Sha256::digest(payload).into());
-        let hex = digest.to_hex();
-        let key = ObjectKey::new(format!(
-            "registry/{storage_key}/{image}/blobs/{}/{}/{hex}",
-            &hex[..2],
-            &hex[2..4]
-        ))
-        .unwrap();
-        (key, digest)
+        let blob = object_key(storage_key, ObjectKind::Blob, &hex).unwrap();
+        assert_eq!(
+            blob.as_str(),
+            format!(
+                "registry/{storage_key}/blobs/{}/{}/{hex}",
+                &hex[..2],
+                &hex[2..4]
+            )
+        );
+        assert_eq!(
+            parse_key(blob.as_str()),
+            Some(ParsedKey {
+                storage_key,
+                kind: ObjectKind::Blob,
+                hex: &hex,
+                legacy_image: None
+            })
+        );
+        let legacy = format!("registry/{storage_key}/{image}/manifests/objects/{hex}");
+        assert_eq!(
+            parse_key(&legacy).map(|parsed| (parsed.kind, parsed.legacy_image)),
+            Some((ObjectKind::Manifest, Some(image.as_str())))
+        );
+        for invalid in [
+            format!("registry/{storage_key}/blobs/00/00/{hex}"),
+            format!("registry/{storage_key}/uploads/{hex}"),
+            format!("{storage_key}/blobs/{}/{}/{hex}", &hex[..2], &hex[2..4]),
+        ] {
+            assert_eq!(parse_key(&invalid), None, "{invalid}");
+        }
     }
 
     #[tokio::test]
-    async fn local_store_keeps_payloads_inside_repository_directories() {
+    async fn local_root_holds_one_directory_per_repository() {
         let root = std::env::temp_dir().join(format!("gitadel-registry-local-{}", Uuid::new_v4()));
-        let store = RegistryLocalStore::new(root.clone()).await.unwrap();
+        let store = RegistryDomain.open_local(root.clone()).await.unwrap();
         let storage_key = Uuid::new_v4();
-        let (key, digest) = blob_key(storage_key, b"layer");
+        let digest = BlobDigest::from_bytes(Sha256::digest(b"layer").into());
+        let hex = digest.to_hex();
+        let relative = format!("{storage_key}/blobs/{}/{}/{hex}", &hex[..2], &hex[2..4]);
+        let key = object_key(storage_key, ObjectKind::Blob, &hex).unwrap();
         store
             .put_verified(
                 &key,
@@ -322,17 +244,13 @@ mod tests {
             )
             .await
             .unwrap();
-        tokio::fs::write(
-            root.join(format!("{storage_key}.git/gitadel-registry/images/suffix")),
-            b"",
-        )
-        .await
-        .unwrap();
+        let upload = root.join(format!("uploads/{storage_key}/{}/data", Uuid::new_v4()));
+        tokio::fs::create_dir_all(upload.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(upload, b"staged").await.unwrap();
 
-        assert!(
-            root.join(local_object_key(&key).unwrap().as_str())
-                .is_file()
-        );
+        assert!(root.join(&relative).is_file());
         for prefix in [
             String::new(),
             "registry".to_owned(),
@@ -347,7 +265,10 @@ mod tests {
                 [&key]
             );
         }
-        assert_eq!(store.stat(&key).await.unwrap().unwrap().key, key);
+        assert_eq!(
+            RegistryDomain.repository_storage_key(&key),
+            Some(storage_key)
+        );
         store.delete(&key).await.unwrap();
         assert!(store.stat(&key).await.unwrap().is_none());
         tokio::fs::remove_dir_all(root).await.unwrap();

@@ -94,6 +94,7 @@ pub struct RepositoryState {
     mirror_syncing: Arc<Mutex<HashSet<Uuid>>>,
     github_known_hosts: Arc<Mutex<Option<(String, Instant)>>>,
     lfs_root: Arc<PathBuf>,
+    registry_root: Arc<PathBuf>,
     lfs_storage: Arc<crate::blob_store::DomainStorage>,
     registry_storage: Arc<crate::blob_store::DomainStorage>,
     public_url: Arc<Url>,
@@ -163,6 +164,7 @@ impl RepositoryState {
             None => crate::registry::storage::start(identity.database(), &settings).await?,
         };
         mirrors::cleanup_lfs_staging(&settings.lfs_root).await?;
+        create_private_directory_async(&settings.registry_root).await?;
         create_private_directory_async(&settings.actions_artifact_root).await?;
         let state = Self {
             identity,
@@ -184,6 +186,7 @@ impl RepositoryState {
             github_known_hosts: Arc::new(Mutex::new(None)),
             registry_storage,
             lfs_root: Arc::new(settings.lfs_root),
+            registry_root: Arc::new(settings.registry_root),
             lfs_storage,
             public_url: Arc::new(public_url),
             ssh_port,
@@ -240,6 +243,20 @@ impl RepositoryState {
     pub fn repository_path(&self, repository: &repository::Model) -> PathBuf {
         self.repository_root
             .join(format!("{}.git", repository.storage_key))
+    }
+
+    pub(crate) fn registry_root(&self) -> &Path {
+        self.registry_root.as_ref()
+    }
+
+    /// Where the repository's registry payloads and upload sessions live on
+    /// local disk.
+    pub(crate) fn registry_paths(&self, repository: &repository::Model) -> [PathBuf; 2] {
+        let storage_key = repository.storage_key.to_string();
+        [
+            self.registry_root.join(&storage_key),
+            crate::registry::store::uploads_root(&self.registry_root).join(storage_key),
+        ]
     }
 
     pub(super) fn source_archive_cache_path(

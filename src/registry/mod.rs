@@ -3,7 +3,11 @@ mod error;
 mod http;
 pub(crate) mod storage;
 pub(crate) mod store;
+mod upgrade;
 pub(crate) mod usage;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use http::router;
 

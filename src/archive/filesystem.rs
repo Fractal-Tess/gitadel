@@ -59,6 +59,7 @@ pub(super) fn prepare_filesystem_directory(
     for source in [
         &settings.storage.repository_root,
         &settings.storage.lfs_root,
+        &settings.storage.registry_root,
     ] {
         let source = if source.exists() {
             fs::canonicalize(source)
