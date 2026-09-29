@@ -18,7 +18,7 @@ use super::{
     Permission, RepositoryState,
     git_service::{self, BlockingReader, BlockingWriter, BridgeCancellation},
     protection::load_guard,
-    resources::record_push,
+    resources::{CreateRepositoryOptions, create_owned_repository, record_push},
     webhooks::{dispatch_push, snapshot_refs},
 };
 use crate::{
@@ -403,10 +403,29 @@ async fn writable_repository(
         .authenticate_token(&token, SCOPE_WRITE)
         .await
         .map_err(|_| AuthorizationError::AuthenticationRequired)?;
-    let repository = state
-        .find(namespace, name)
-        .await
-        .map_err(AuthorizationError::Api)?;
+    // Pushing to a repository that does not exist creates it, private unless
+    // the account prefers otherwise, exactly as over SSH. Creation is limited
+    // to the actor's own namespace or organizations they own.
+    let repository = match state.find(namespace, name).await {
+        Ok(repository) => repository,
+        Err(_) => {
+            let options = CreateRepositoryOptions {
+                namespace: namespace.to_owned(),
+                name: name.to_owned(),
+                description: None,
+                visibility: None,
+                object_format: None,
+                mirror: None,
+            };
+            match create_owned_repository(state, actor.user.id, options).await {
+                Ok(repository) => repository,
+                Err(create_error) => state
+                    .find(namespace, name)
+                    .await
+                    .map_err(|_| AuthorizationError::Api(create_error))?,
+            }
+        }
+    };
     state
         .authorize(&repository, Some(actor.user.id), Permission::Write)
         .await
