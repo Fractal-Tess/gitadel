@@ -4,6 +4,23 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-09-30
+
+### Added
+
+- Each day in a profile's activity graph links to a page listing the commits behind it, grouped by repository, with title, author, and time. Each commit opens in its repository. `GET /api/v1/namespaces/{slug}/activity/{date}` serves the list.
+
+### Changed
+
+- **Customize pins** saves each change as you make it, so the dialog no longer has Save and Cancel buttons. Clicking a repository row pins it, and Enter in the search box pins the top match.
+- Runners, integrations, and mirror identities for your own namespace moved from a tab bar over your profile into the account menu. Organizations keep their tab bar.
+- The theme choice moved from the header into the account menu, which was redesigned. The menu now opens with a link to your profile, and the active theme is shown beside the Theme item.
+- Explore no longer shows a heading above the repository list.
+
+### Fixed
+
+- The branch picker above the file tree no longer shrinks to its icon when the column is narrow. The commit age beside it gets cut short first.
+
 ## [0.18.0] - 2026-09-29
 
 ### Added
@@ -420,7 +437,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.15.0...v0.16.0
