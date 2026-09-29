@@ -535,7 +535,7 @@
             </Dialog.Description>
           </Dialog.Header>
           <form
-            class="grid gap-4"
+            class="grid min-w-0 gap-4"
             onsubmit={(event) => {
               event.preventDefault();
               void addSshKey();
@@ -555,7 +555,7 @@
               <Field.Label for="ssh-public-key">Public key</Field.Label>
               <Textarea
                 id="ssh-public-key"
-                class="font-mono text-xs"
+                class="min-w-0 font-mono text-xs [overflow-wrap:anywhere]"
                 rows={5}
                 value={credentials.sshPublicKey}
                 oninput={(event) =>
