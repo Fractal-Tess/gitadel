@@ -10,6 +10,10 @@
 <h1 align="center">Gitadel</h1>
 
 <p align="center">
+  <img src="assets/screenshots/hero.webp" alt="Gitadel showing syntax-highlighted Rust source in the gitadel repository, with a passing Actions run and its job log in front" width="100%" />
+</p>
+
+<p align="center">
   A small self-hosted Git server for projects you want to keep.
 </p>
 
@@ -22,10 +26,6 @@ Gitadel keeps the useful parts of a forge without becoming another collaboration
 Gitadel deliberately leaves out pull requests and social feeds. The browser can create files and tracked directories, but does not edit existing files.
 
 Repository operations run in-process through [Sley](https://github.com/Fractal-Tess/sley). The server does not require installed Git, Git LFS, or SSH executables.
-
-<p align="center">
-  <img src="assets/screenshots/hero.webp" alt="Gitadel showing syntax-highlighted Rust source in the gitadel repository, with a passing Actions run and its job log in front" width="100%" />
-</p>
 
 ## Quick start
 
@@ -59,7 +59,10 @@ Press **Ctrl+K** to search repositories or find commands for creation, imports, 
   </tr>
   <tr>
     <td><img src="assets/screenshots/issues.webp" alt="Issue list with colored labels and assignees" /></td>
-    <td><img src="assets/screenshots/signin.webp" alt="Sign-in page with a passkey button and username and password form over an animated canyon background" /></td>
+    <td><img src="assets/screenshots/signin.webp" alt="Sign-in page split in two: an animated misty ravine with the tagline on the left, and a passkey button and username and password form on the right" /></td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="assets/screenshots/profile.webp" alt="Profile page with a README, four pinned repositories, and a year of commit activity drawn as a contribution grid" /></td>
   </tr>
 </table>
 
