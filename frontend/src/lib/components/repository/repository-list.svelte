@@ -82,6 +82,8 @@
     page.url.searchParams.get("tab") === "favorites" ? "favorites" : "all",
   );
 
+  const explore = $derived(!namespace && filter === "all");
+
   let visibleRepositories = $derived.by(() => {
     const query = search.trim().toLowerCase();
     let filtered =
@@ -339,7 +341,13 @@
   class="mx-auto max-w-5xl px-5 py-8 lg:px-8"
   aria-labelledby="repositories-heading"
 >
-  <div class="mb-5 flex flex-wrap items-end justify-between gap-4">
+  <!-- Explore speaks for itself, so it keeps the heading for screen readers
+       only; namespaces and favorites still show theirs. -->
+  <div
+    class={explore
+      ? "sr-only"
+      : "mb-5 flex flex-wrap items-end justify-between gap-4"}
+  >
     <div>
       <h1
         id="repositories-heading"
