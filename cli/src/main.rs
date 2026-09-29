@@ -24,6 +24,7 @@ mod protection;
 mod query;
 mod registry;
 mod releases;
+mod storage_domains;
 mod webhooks;
 use actions::ActionsCommand;
 use auth::AuthCommand;
@@ -336,7 +337,7 @@ enum AdminCommand {
         #[command(subcommand)]
         command: accounts::InvitationCommand,
     },
-    /// Inspect container registry storage and migrate it between targets.
+    /// Deprecated: use `gtd admin storage domain ... registry`.
     Registry {
         #[command(subcommand)]
         command: registry::AdminRegistryCommand,
@@ -383,16 +384,23 @@ enum StorageCommand {
         #[command(subcommand)]
         command: StorageTargetCommand,
     },
+    /// Inspect and migrate storage domains such as `lfs` and `registry`.
+    Domain {
+        #[command(subcommand)]
+        command: storage_domains::DomainCommand,
+    },
+    /// Deprecated: use `gtd admin storage domain status lfs`.
     LfsStatus,
+    /// Deprecated: use `gtd admin storage domain repositories lfs`.
     LfsRepositories,
+    /// Deprecated: use `gtd admin storage domain migrate lfs`.
     Migrate {
         target_id: String,
         #[arg(long, default_value_t = 100)]
-        batch_size: usize,
+        batch_size: u64,
     },
-    Progress {
-        operation_id: String,
-    },
+    /// Deprecated: use `gtd admin storage domain progress lfs`.
+    Progress { operation_id: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1064,11 +1072,18 @@ async fn run(cli: Cli) -> Result<()> {
                     command: StorageCommand::Progress { operation_id },
                 },
         } => {
-            let operation_id = id(&operation_id)?;
-            let path = route_path("admin/storage/progress", &[&operation_id.to_string()])?;
-            api.progress(&path, operation_id).await?;
+            storage_domains::stream_progress(&api, "lfs", id(&operation_id)?).await?;
             return Ok(());
         }
+        Command::Admin {
+            command:
+                AdminCommand::Storage {
+                    command: StorageCommand::Domain { command },
+                },
+        } => match storage_domains::run(&api, command).await? {
+            Some(value) => value,
+            None => return Ok(()),
+        },
         Command::Admin {
             command:
                 AdminCommand::Backup {
@@ -1447,26 +1462,19 @@ async fn run_storage(api: &ApiClient, command: StorageCommand) -> Result<Value> 
             }
         },
         StorageCommand::LfsStatus => {
-            api.request(Method::GET, "admin/storage/lfs/status", None)
+            api.request(Method::GET, &storage_domains::status_path("lfs")?, None)
                 .await
         }
         StorageCommand::LfsRepositories => {
-            api.request(Method::GET, "admin/storage/lfs/repositories", None)
-                .await
+            let path = storage_domains::repositories_path("lfs", Default::default())?;
+            api.request(Method::GET, &path, None).await
         }
         StorageCommand::Migrate {
             target_id,
             batch_size,
-        } => {
-            api.request(
-                Method::POST,
-                "admin/storage/migrations",
-                Some(json!({"target_id":id(&target_id)?,"batch_size":batch_size})),
-            )
-            .await
-        }
-        StorageCommand::Progress { .. } => {
-            unreachable!("storage progress is handled by the top-level dispatcher")
+        } => storage_domains::migrate(api, "lfs", Some(id(&target_id)?), batch_size).await,
+        StorageCommand::Progress { .. } | StorageCommand::Domain { .. } => {
+            unreachable!("storage progress and domains are handled by the top-level dispatcher")
         }
     }
 }
