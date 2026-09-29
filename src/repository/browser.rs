@@ -55,7 +55,7 @@ const MAX_LFS_POINTER_BYTES: u64 = 1024;
 const MAX_DIFF_BYTES: usize = 5 * 1024 * 1024;
 const MAX_GITMODULES_BYTES: usize = 128 * 1024;
 const DEFAULT_REPOSITORY_ACTIVITY_DAYS: u16 = 14;
-const MAX_REPOSITORY_ACTIVITY_DAYS: u16 = 365;
+pub(super) const MAX_REPOSITORY_ACTIVITY_DAYS: u16 = 365;
 const DEFAULT_OVERVIEW_PER_PAGE: usize = 20;
 const MAX_OVERVIEW_PER_PAGE: usize = 50;
 
@@ -285,7 +285,7 @@ pub struct RepositoryOverviewResponse {
 }
 
 #[derive(Serialize)]
-struct RepositoryOverviewItemResponse {
+pub(super) struct RepositoryOverviewItemResponse {
     #[serde(flatten)]
     repository: resources::RepositoryResponse,
     branch_count: usize,
@@ -319,10 +319,10 @@ struct ActivityDayResponse {
 pub(super) struct GitOverview {
     branch_count: usize,
     head: Option<String>,
-    activity: BTreeMap<NaiveDate, usize>,
+    pub(super) activity: BTreeMap<NaiveDate, usize>,
 }
 
-async fn repository_overview_item(
+pub(super) async fn repository_overview_item(
     state: &RepositoryState,
     repository: repository::Model,
     favorited: bool,
@@ -408,6 +408,48 @@ async fn repository_overview_item(
     })
 }
 
+/// Overview cards for `repositories`, in order, analysed a few at a time so a
+/// long page cannot occupy every blocking thread.
+pub(super) async fn repository_overview_items(
+    state: &RepositoryState,
+    repositories: Vec<repository::Model>,
+    favorite_ids: &HashSet<uuid::Uuid>,
+    manageable_ids: &HashSet<uuid::Uuid>,
+    writable_ids: &HashSet<uuid::Uuid>,
+) -> Result<Vec<RepositoryOverviewItemResponse>, ApiError> {
+    let end_date = Utc::now().date_naive();
+    let start_date = activity_start_date(end_date, DEFAULT_REPOSITORY_ACTIVITY_DAYS)?;
+    let repository_count = repositories.len();
+    let mut pending = JoinSet::new();
+    for (index, repository) in repositories.into_iter().enumerate() {
+        let favorited = favorite_ids.contains(&repository.id);
+        let can_manage = manageable_ids.contains(&repository.id);
+        let can_write = writable_ids.contains(&repository.id);
+        let state = state.clone();
+        let slots = state.analysis_slots.clone();
+        pending.spawn(async move {
+            let _permit = slots.acquire_owned().await.map_err(ApiError::internal)?;
+            let item = repository_overview_item(
+                &state, repository, favorited, can_manage, can_write, start_date, end_date,
+            )
+            .await?;
+            Ok::<_, ApiError>((index, item))
+        });
+    }
+
+    let mut items = std::iter::repeat_with(|| None)
+        .take(repository_count)
+        .collect::<Vec<_>>();
+    while let Some(result) = pending.join_next().await {
+        let (index, item) = result.map_err(ApiError::internal)??;
+        items[index] = Some(item);
+    }
+    items
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| ApiError::internal("repository overview task did not return a result"))
+}
+
 pub async fn overview(
     State(state): State<RepositoryState>,
     headers: HeaderMap,
@@ -433,37 +475,14 @@ pub async fn overview(
     let has_next = page_repositories.len() > per_page;
     page_repositories.truncate(per_page);
 
-    let end_date = Utc::now().date_naive();
-    let start_date = activity_start_date(end_date, DEFAULT_REPOSITORY_ACTIVITY_DAYS)?;
-    let repository_count = page_repositories.len();
-    let mut pending = JoinSet::new();
-    for (index, repository) in page_repositories.into_iter().enumerate() {
-        let favorited = accessible.favorite_ids.contains(&repository.id);
-        let can_manage = accessible.manageable_ids.contains(&repository.id);
-        let can_write = accessible.writable_ids.contains(&repository.id);
-        let state = state.clone();
-        let slots = state.analysis_slots.clone();
-        pending.spawn(async move {
-            let _permit = slots.acquire_owned().await.map_err(ApiError::internal)?;
-            let item = repository_overview_item(
-                &state, repository, favorited, can_manage, can_write, start_date, end_date,
-            )
-            .await?;
-            Ok::<_, ApiError>((index, item))
-        });
-    }
-
-    let mut repositories = std::iter::repeat_with(|| None)
-        .take(repository_count)
-        .collect::<Vec<_>>();
-    while let Some(result) = pending.join_next().await {
-        let (index, item) = result.map_err(ApiError::internal)??;
-        repositories[index] = Some(item);
-    }
-    let repositories = repositories
-        .into_iter()
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| ApiError::internal("repository overview task did not return a result"))?;
+    let repositories = repository_overview_items(
+        &state,
+        page_repositories,
+        &accessible.favorite_ids,
+        &accessible.manageable_ids,
+        &accessible.writable_ids,
+    )
+    .await?;
 
     Ok(Json(RepositoryOverviewResponse {
         repositories,
@@ -1455,7 +1474,7 @@ pub async fn stats(
     Ok(Json(computed))
 }
 
-async fn read_repository_overview(
+pub(super) async fn read_repository_overview(
     state: &RepositoryState,
     repository: &repository::Model,
     start_date: NaiveDate,
@@ -2166,7 +2185,7 @@ const fn default_overview_per_page() -> usize {
     DEFAULT_OVERVIEW_PER_PAGE
 }
 
-fn activity_start_date(end_date: NaiveDate, days: u16) -> Result<NaiveDate, ApiError> {
+pub(super) fn activity_start_date(end_date: NaiveDate, days: u16) -> Result<NaiveDate, ApiError> {
     if !(1..=MAX_REPOSITORY_ACTIVITY_DAYS).contains(&days) {
         return Err(ApiError::bad_request(format!(
             "Activity window must be between 1 and {MAX_REPOSITORY_ACTIVITY_DAYS} days."
@@ -2175,7 +2194,7 @@ fn activity_start_date(end_date: NaiveDate, days: u16) -> Result<NaiveDate, ApiE
     Ok(end_date - Duration::days(i64::from(days - 1)))
 }
 
-fn activity_response(
+pub(super) fn activity_response(
     start_date: NaiveDate,
     end_date: NaiveDate,
     activity: BTreeMap<NaiveDate, usize>,

@@ -332,6 +332,32 @@ pub async fn create_repository(
     ))
 }
 
+/// The namespace `slug`, provided `actor_user_id` runs it: their own account,
+/// or an organization they own. Anything else looks like a missing namespace.
+pub(super) async fn owned_namespace(
+    state: &RepositoryState,
+    slug: &str,
+    actor_user_id: Uuid,
+) -> Result<namespace::Model, ApiError> {
+    let owner = namespace::Entity::find_by_id(slug)
+        .one(state.identity().database())
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    match owner.kind.as_str() {
+        "user" if owner.user_id == Some(actor_user_id) => {}
+        "organization" => {
+            let organization_id = owner.organization_id.ok_or_else(ApiError::not_found)?;
+            organization_member::Entity::find_by_id((organization_id, actor_user_id))
+                .one(state.identity().database())
+                .await?
+                .filter(|membership| membership.role == "owner")
+                .ok_or_else(ApiError::not_found)?;
+        }
+        _ => return Err(ApiError::not_found()),
+    }
+    Ok(owner)
+}
+
 pub(super) async fn create_owned_repository(
     state: &RepositoryState,
     actor_user_id: Uuid,
@@ -377,24 +403,7 @@ pub(super) async fn create_owned_repository(
         }
     };
 
-    let owner = namespace::Entity::find_by_id(&namespace_slug)
-        .one(state.identity().database())
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    match owner.kind.as_str() {
-        "user" if owner.user_id == Some(actor_user_id) => {}
-        "organization" => {
-            let organization_id = owner.organization_id.ok_or_else(ApiError::not_found)?;
-            let membership =
-                organization_member::Entity::find_by_id((organization_id, actor_user_id))
-                    .one(state.identity().database())
-                    .await?
-                    .filter(|membership| membership.role == "owner")
-                    .ok_or_else(ApiError::not_found)?;
-            drop(membership);
-        }
-        _ => return Err(ApiError::not_found()),
-    }
+    owned_namespace(state, &namespace_slug, actor_user_id).await?;
     let mirror = match options.mirror {
         Some(request) => {
             Some(mirrors::PreparedMirror::prepare(state, &namespace_slug, request).await?)

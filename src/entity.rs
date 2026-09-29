@@ -1333,6 +1333,26 @@ pub mod repository_favorite {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod namespace_pin {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "namespace_pins")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub namespace: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub repository_id: Uuid,
+        pub position: i32,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod lfs_lock {
     use super::*;
 

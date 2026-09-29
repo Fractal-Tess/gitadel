@@ -18,6 +18,7 @@ mod mirror_scheduler;
 mod mirrors;
 mod native_remote;
 pub(crate) mod notifications;
+mod profile;
 mod protection;
 mod registry;
 mod releases;
@@ -1051,6 +1052,11 @@ pub fn router() -> Router<RepositoryState> {
         .route(
             "/repositories/{namespace}/{name}/activity",
             get(browser::activity),
+        )
+        .route("/namespaces/{slug}/activity", get(profile::activity))
+        .route(
+            "/namespaces/{slug}/pins",
+            get(profile::list_pins).put(profile::set_pins),
         )
         .route("/repositories/{namespace}/{name}/tree", get(browser::tree))
         .route("/repositories/{namespace}/{name}/blob", get(browser::blob))
