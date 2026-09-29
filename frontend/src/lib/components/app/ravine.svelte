@@ -1,7 +1,10 @@
 <!--
-  A slow flight down an endless canyon. Each pixel ray-marches a ridged
-  heightfield. Walls are drawn as thin contour lines that dim with how far the
-  ray travelled, and the far end fogs into a low haze.
+  A slow descent into a ravine. Each pixel ray-marches a rippled heightfield
+  that steepens into walls, and is shaded by how many steps the march needed:
+  rays that graze a wall take many and read bright, so the creases light up
+  while open air stays dark. Distance fades everything into the void.
+
+  The shader is React Bits Pro's Ravine, ported to raw WebGL 1.
 -->
 <script lang="ts">
   import type { Snippet } from "svelte";
@@ -11,204 +14,193 @@
   } from "$lib/components/app/shader-canvas.svelte";
 
   interface Props {
-    /** Forward travel in world units per second. */
     speed?: number;
-    lineColor?: string;
-    /** Accent mixed into the ridge lines and haze, 0 for monochrome. */
-    tintColor?: string;
-    tintAmount?: number;
-    backgroundColor?: string;
-    lineStrength?: number;
-    /** Contour lines per world unit of wall height. */
-    lineDensity?: number;
-    /** Haze density; higher pulls the fog closer. */
-    fog?: number;
-    /** Vertical offset of the vanishing point, in half-heights. */
-    horizon?: number;
+    /** Ray-march iterations, 32 to 256. */
+    steps?: number;
+    /** Fraction of the distance-to-surface taken each step. */
+    stepScale?: number;
+    /** Terrain feature frequency; lower is broader. */
+    scale?: number;
+    height?: number;
+    /** How quickly the ground rises into walls away from the centre line. */
+    spread?: number;
+    wallCurve?: number;
+    /** Distance at which the picture has faded out. 0 disables the fade. */
+    fade?: number;
+    cameraHeight?: number;
+    tilt?: number;
+    roll?: number;
+    fov?: number;
+    /** Colour of open air and faded distance. */
+    nearColor?: string;
+    /** Colour of the brightest creases. */
+    farColor?: string;
+    brightness?: number;
+    contrast?: number;
+    /** Ray jitter that breaks up banding. */
+    grain?: number;
     dpr?: number;
     renderScale?: number;
+    /** Clock offset, so the still frame under reduced motion is a good one. */
+    timeOffset?: number;
     class?: string;
     children?: Snippet;
   }
 
   let {
-    speed = 0.55,
-    lineColor = "#d6d3d1",
-    tintColor = "#f97316",
-    tintAmount = 0.2,
-    backgroundColor = "#050505",
-    lineStrength = 1,
-    lineDensity = 6,
-    fog = 0.075,
-    horizon = -0.14,
+    speed = 1,
+    steps = 128,
+    stepScale = 0.5,
+    scale = 0.25,
+    height = 1,
+    spread = 34,
+    wallCurve = 2.5,
+    fade = 35,
+    cameraHeight = 6,
+    tilt = 0.05,
+    roll = 0.075,
+    fov = 1,
+    nearColor = "#000000",
+    farColor = "#ffffff",
+    brightness = 0.8,
+    contrast = 1,
+    grain = 0.005,
     dpr = 1,
     renderScale = 1,
+    timeOffset = 0,
     class: className = "",
     children,
   }: Props = $props();
 
-  const FRAGMENT_SHADER = `#extension GL_OES_standard_derivatives : enable
+  const FRAGMENT_SHADER = `
     precision highp float;
+
+    #define MAX_STEPS 256
+    #define HIT_EPSILON 0.001
+
     varying vec2 vUv;
+
     uniform vec2 uRes;
     uniform float uTime;
     uniform float uSpeed;
-    uniform float uLineStrength;
-    uniform float uLineDensity;
-    uniform float uFog;
-    uniform float uHorizon;
-    uniform float uTintAmount;
-    uniform vec3 uLine;
-    uniform vec3 uTint;
-    uniform vec3 uBg;
+    uniform float uSteps;
+    uniform float uStepScale;
+    uniform float uScale;
+    uniform float uHeight;
+    uniform float uSpread;
+    uniform float uWallCurve;
+    uniform float uFade;
+    uniform float uCameraHeight;
+    uniform float uTilt;
+    uniform float uRoll;
+    uniform float uFov;
+    uniform vec3 uNear;
+    uniform vec3 uFar;
+    uniform float uBrightness;
+    uniform float uContrast;
+    uniform float uGrain;
 
-    const int STEPS = 80;
-    const float FAR = 40.0;
+    const mat2 OCTAVE_TWIST = mat2(0.8, 0.6, -0.6, 0.8);
+
+    mat2 rotate2(float angle) {
+      float s = sin(angle);
+      float c = cos(angle);
+      return mat2(c, -s, s, c);
+    }
+
+    float ripple(vec2 p) {
+      return sin(1.5 * p.x) * sin(1.5 * p.y);
+    }
+
+    void octave(inout vec2 p, inout float sum, float amplitude, float zoom) {
+      sum += amplitude * (0.5 + 0.5 * ripple(p));
+      p = OCTAVE_TWIST * p * zoom;
+    }
+
+    float terrainNoise(vec2 p) {
+      float sum = 0.0;
+      octave(p, sum, 0.5, 2.02);
+      octave(p, sum, 0.25, 2.03);
+      octave(p, sum, 0.125, 2.01);
+      octave(p, sum, 0.0625, 2.04);
+      sum += 0.015625 * (0.5 + 0.5 * ripple(p));
+      return sum / 0.96875;
+    }
 
     float hash(vec2 p) {
-      p = fract(p * vec2(123.34, 456.21));
-      p += dot(p, p + 45.32);
-      return fract(p.x * p.y);
+      return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
     }
 
-    float noise(vec2 p) {
-      vec2 i = floor(p);
-      vec2 f = fract(p);
-      vec2 u = f * f * (3.0 - 2.0 * f);
-      return mix(
-        mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
-        mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x),
-        u.y
-      );
-    }
-
-    // Ridged noise: 1.0 along crests, falling off either side.
-    float ridge(vec2 p) {
-      return 1.0 - abs(noise(p) * 2.0 - 1.0);
-    }
-
-    float ridgedFbm(vec2 p) {
-      float sum = 0.0;
-      float amp = 0.5;
-      for (int i = 0; i < 3; i++) {
-        float r = ridge(p);
-        sum += r * r * amp;
-        p = p * 2.07 + vec2(1.7, 9.2);
-        amp *= 0.5;
-      }
-      return sum;
-    }
-
-    float pathX(float z) {
-      return sin(z * 0.07) * 0.9 + sin(z * 0.031 + 1.3) * 1.2;
-    }
-
-    // Features are stretched along z so ridges stream toward the vanishing point.
-    vec2 wallCoord(vec3 p) {
-      float x = p.x - pathX(p.z);
-      return vec2(x * 1.3, p.z * 0.11);
-    }
-
-    float height(vec3 p) {
-      float x = abs(p.x - pathX(p.z));
-      float walls = pow(x, 1.4) * 0.8;
-      float ridges = ridgedFbm(wallCoord(p)) * smoothstep(0.1, 1.4, x) * 2.4;
-      return walls + ridges - 1.0;
+    float canyon(vec3 p, float time) {
+      vec3 q = p + vec3(0.0, 0.0, time);
+      float relief = terrainNoise(q.xz * uScale) * uHeight;
+      float wall = pow(abs(q.x) * uSpread, uWallCurve) * 0.0000125;
+      return max(q.y - relief * wall, 0.0);
     }
 
     void main() {
       vec2 uv = (vUv * uRes - 0.5 * uRes) / uRes.y;
-      float z = uTime * uSpeed;
-      vec3 ro = vec3(pathX(z), -0.35, z);
+      float time = uTime * uSpeed * 2.5;
 
-      // Look ahead along the canyon so the flight follows its bends.
-      float yaw = atan(pathX(z + 6.0) - pathX(z), 6.0);
-      vec3 rd = normalize(vec3(uv.x, uv.y - uHorizon, 1.3));
-      float c = cos(yaw);
-      float s = sin(yaw);
-      rd.xz = mat2(c, s, -s, c) * rd.xz;
+      vec3 origin = vec3(uv + vec2(0.0, uCameraHeight), -1.0);
+      vec3 dir = normalize(vec3(uv * uFov, 1.0));
+      dir.zy = rotate2(uTilt) * dir.zy;
+      dir.xy = rotate2(uRoll) * dir.xy;
 
-      float t = 0.05;
-      float tPrev = t;
-      bool hit = false;
-      for (int i = 0; i < STEPS; i++) {
-        vec3 p = ro + rd * t;
-        float d = p.y - height(p);
-        if (d < 0.001 * t) {
-          hit = true;
-          break;
-        }
-        tPrev = t;
-        t += max(d * 0.45, 0.012 * t);
-        if (t > FAR) break;
-      }
-      // Bisect the last step so contour lines do not stair-step.
-      if (hit) {
-        float lo = tPrev;
-        float hi = t;
-        for (int i = 0; i < 5; i++) {
-          float mid = 0.5 * (lo + hi);
-          vec3 p = ro + rd * mid;
-          if (p.y - height(p) < 0.0) hi = mid;
-          else lo = mid;
-        }
-        t = hi;
+      vec3 p = origin;
+      float taken = 0.0;
+      for (int i = 0; i < MAX_STEPS; i++) {
+        if (float(i) >= uSteps) break;
+        taken = float(i);
+        float jitter = (hash(p.xz) - 0.5) * uGrain;
+        float d = canyon(p + vec3(jitter), time);
+        if (d < HIT_EPSILON) break;
+        p += dir * d * uStepScale;
       }
 
-      vec3 lineColor = mix(uLine, uTint, uTintAmount);
-      vec3 haze = mix(vec3(0.15), uTint * 0.3, uTintAmount * 0.5);
-      float fogMix = 1.0 - exp(-t * uFog);
-      vec3 col = uBg;
-
-      if (hit) {
-        vec3 p = ro + rd * t;
-        // Walls are drawn as their contour lines: level sets of the height
-        // field run along the canyon and converge on the vanishing point.
-        vec2 q = wallCoord(p);
-        float f = (p.y + noise(q * vec2(2.3, 3.1)) * 0.35) * uLineDensity;
-        float w = fwidth(f);
-        float nearest = abs(fract(f + 0.5) - 0.5);
-        float line = 1.0 - smoothstep(0.0, w * 1.25, nearest);
-        // Where lines crowd below a pixel apart, fade to their average.
-        float resolved = 1.0 - smoothstep(0.25, 0.6, w);
-        float ink = mix(0.07, line, resolved);
-        float floorFade = smoothstep(0.15, 0.9, abs(p.x - pathX(p.z)));
-        float shade = exp(-t * 0.07) * floorFade * uLineStrength;
-        col = uBg + lineColor * ink * shade * 0.55;
-        col = mix(col, haze, fogMix * 0.8);
-      } else {
-        // Missed rays: black sky that lifts only near the vanishing point.
-        float lift = exp(-max(rd.y + 0.02, 0.0) * 11.0);
-        col = mix(col, haze, lift * 0.7);
+      float tone = taken / float(MAX_STEPS);
+      tone = (tone - 0.5) * uContrast + 0.5;
+      tone = clamp(tone * uBrightness, 0.0, 1.0);
+      if (uFade > 0.0) {
+        float travelled = distance(origin, p) / uFade;
+        tone *= exp(-travelled * travelled);
       }
 
-      // Keep the frame edges quiet so overlaid content stays readable.
-      float vignette = smoothstep(1.4, 0.3, length(uv * vec2(0.8, 1.0)));
-      col *= mix(0.4, 1.0, vignette);
-      gl_FragColor = vec4(col, 1.0);
+      gl_FragColor = vec4(mix(uNear, uFar, tone), 1.0);
     }
   `;
 
+  const clamp = (value: number, min: number, max: number) =>
+    Math.min(max, Math.max(min, value));
+
   const uniforms = $derived({
     uSpeed: speed,
-    uLineStrength: lineStrength,
-    uLineDensity: lineDensity,
-    uFog: fog,
-    uHorizon: horizon,
-    uTintAmount: tintAmount,
-    uLine: hexToRgb(lineColor),
-    uTint: hexToRgb(tintColor),
-    uBg: hexToRgb(backgroundColor),
+    uSteps: Math.round(clamp(steps, 32, 256)),
+    uStepScale: clamp(stepScale, 0.1, 1),
+    uScale: Math.max(scale, 0.01),
+    uHeight: height,
+    uSpread: Math.max(spread, 0),
+    uWallCurve: Math.max(wallCurve, 0.5),
+    uFade: Math.max(fade, 0),
+    uCameraHeight: cameraHeight,
+    uTilt: tilt,
+    uRoll: roll,
+    uFov: Math.max(fov, 0.1),
+    uNear: hexToRgb(nearColor),
+    uFar: hexToRgb(farColor),
+    uBrightness: Math.max(brightness, 0),
+    uContrast: Math.max(contrast, 0),
+    uGrain: Math.max(grain, 0),
   });
 </script>
 
 <ShaderCanvas
   fragment={FRAGMENT_SHADER}
   {uniforms}
-  {backgroundColor}
+  backgroundColor={nearColor}
   {dpr}
   {renderScale}
-  timeOffset={40}
+  {timeOffset}
   class={className}
   {children}
 />
