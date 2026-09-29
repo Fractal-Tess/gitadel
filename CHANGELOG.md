@@ -4,6 +4,8 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-29
+
 ### Added
 
 - Container images get their own storage root, `storage.registry_root` (`/data/registry` in Docker; `--registry-root`, `GITADEL_REGISTRY_ROOT`), like Git LFS. Existing images move out of repository directories automatically on first start.
@@ -378,7 +380,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/Fractal-Tess/gitadel/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.11.0...v0.12.0
