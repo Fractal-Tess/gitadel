@@ -8,7 +8,9 @@
   import * as Select from "$lib/components/ui/select/index.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
 
-  let { state }: { state: RepositoryPageState } = $props();
+  let { state: pageState }: { state: RepositoryPageState } = $props();
+  /** Set by a click that favorites, so the heart swells once in response. */
+  let popped = $state(false);
 </script>
 
 <!-- Matches the height of the tree and content headers so the three columns
@@ -18,12 +20,12 @@
 >
   <!-- The code view heads its own file tree with the branch picker, so the
        toolbar only carries it for the views that have no tree column. -->
-  {#if state.view !== "settings" && state.view !== "overview"}
+  {#if pageState.view !== "settings" && pageState.view !== "overview"}
     <Select.Root
       type="single"
-      value={state.revision}
+      value={pageState.revision}
       onValueChange={(value) => {
-        if (value && value !== state.revision) state.changeRevision(value);
+        if (value && value !== pageState.revision) pageState.changeRevision(value);
       }}
     >
       <Select.Trigger
@@ -32,32 +34,32 @@
       >
         <span class="flex min-w-0 items-center gap-2">
           <GitBranch class="size-3.5 shrink-0 text-muted-foreground" />
-          <span class="truncate">{state.revision}</span>
+          <span class="truncate">{pageState.revision}</span>
         </span>
       </Select.Trigger>
       <Select.Content align="end">
-        {#each state.browser.refs?.branches ?? [] as branch (branch.name)}
+        {#each pageState.browser.refs?.branches ?? [] as branch (branch.name)}
           <Select.Item value={branch.name}>{branch.name}</Select.Item>
         {/each}
       </Select.Content>
     </Select.Root>
   {/if}
 
-  {#if state.repository?.mirrored}
+  {#if pageState.repository?.mirrored}
     <span
       class="inline-flex items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-sky-600 dark:text-sky-400"
     >
       <RefreshCw class="size-2.5" />Mirror
     </span>
   {/if}
-  {#if state.repository?.visibility === "private"}
+  {#if pageState.repository?.visibility === "private"}
     <span
       class="inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs font-medium text-muted-foreground"
     >
       <LockKeyhole class="size-3" />Private
     </span>
   {/if}
-  {#if state.repository?.archived_at}
+  {#if pageState.repository?.archived_at}
     <span
       class="rounded border px-2 py-1 text-xs font-medium text-muted-foreground"
     >
@@ -69,16 +71,21 @@
        headers use, so the divider under all three columns stays one line. -->
   <Button
     size="sm"
-    variant={state.repository?.favorited ? "secondary" : "outline"}
+    variant={pageState.repository?.favorited ? "secondary" : "outline"}
     class="ml-auto gap-2 max-sm:h-11"
-    aria-pressed={state.repository?.favorited ?? false}
-    disabled={state.settings.favoritePending}
-    onclick={() => void state.settings.toggleFavorite()}
+    aria-pressed={pageState.repository?.favorited ?? false}
+    disabled={pageState.settings.favoritePending}
+    onclick={() => {
+      popped = !pageState.repository?.favorited;
+      void pageState.settings.toggleFavorite();
+    }}
   >
     <Heart
-      class={state.repository?.favorited
-        ? "size-3.5 fill-current text-amber-400"
-        : "size-3.5"}
+      class={[
+        "size-3.5",
+        pageState.repository?.favorited && "fill-current text-amber-400",
+        popped && pageState.repository?.favorited && "motion-pop",
+      ]}
     />
     <!-- The longest label sizes the button so toggling never shifts the row. -->
     <span class="grid justify-items-center">
@@ -86,7 +93,7 @@
         Favorited
       </span>
       <span class="col-start-1 row-start-1">
-        {state.repository?.favorited ? "Favorited" : "Favorite"}
+        {pageState.repository?.favorited ? "Favorited" : "Favorite"}
       </span>
     </span>
   </Button>

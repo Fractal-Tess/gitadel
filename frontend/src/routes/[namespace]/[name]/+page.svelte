@@ -128,13 +128,15 @@
       <div
         class="min-w-0 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:overscroll-contain"
       >
-        <div class="mx-auto max-w-5xl px-5 py-8 lg:px-8">
+        {#key `${state.view}:${state.settingsTab}`}
+        <div class="motion-view mx-auto max-w-5xl px-5 py-8 lg:px-8">
           {#if state.view === "integrations" && state.integrationProvider}
             <RepositoryIntegrationConfigure {state} />
           {:else}
             <RepositorySettings {state} />
           {/if}
         </div>
+        {/key}
       </div>
     {:else}
       <!-- The metadata column is a property of the repository, not of one view,
@@ -143,10 +145,12 @@
         <!-- Only the overview draws its own edge-to-edge columns and scrollers;
              the other views are ordinary documents that need the page padding
              back and scroll as a single block. -->
+        <!-- Each view settles in as it replaces the last. -->
+        {#key state.view}
         <div
           class={state.view === "overview"
-            ? "min-w-0 xl:min-h-0"
-            : "min-w-0 px-5 py-6 xl:min-h-0 xl:overflow-y-auto xl:overscroll-contain"}
+            ? "motion-view min-w-0 xl:min-h-0"
+            : "motion-view min-w-0 px-5 py-6 xl:min-h-0 xl:overflow-y-auto xl:overscroll-contain"}
         >
           {#if state.view === "overview"}
             <RepositoryOverview {state} />
@@ -166,6 +170,7 @@
             <RepositoryRegistry {state} />
           {/if}
         </div>
+        {/key}
         <RepositorySidebar {state} />
       </div>
     {/if}

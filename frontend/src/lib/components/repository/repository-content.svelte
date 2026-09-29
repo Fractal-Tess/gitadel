@@ -126,8 +126,10 @@
 
 <!-- The metadata rail draws the divider on this column's right, so it only owns
      its own stacking border on narrow screens. -->
+<!-- Opening another file fades it in over the last one. -->
+{#key pageState.browser.selectedPath}
 <section
-  class="flex min-w-0 flex-col border-b xl:h-full xl:min-h-0 xl:border-b-0"
+  class="motion-fade flex min-w-0 flex-col border-b xl:h-full xl:min-h-0 xl:border-b-0"
 >
   {#if pageState.browser.submodule}
     <RepositorySubmodule state={pageState} />
@@ -406,3 +408,4 @@
     </div>
   {/if}
 </section>
+{/key}

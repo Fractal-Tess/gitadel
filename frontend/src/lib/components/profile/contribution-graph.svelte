@@ -149,8 +149,9 @@
           {#each week as cell, row (row)}
             {#if cell && cell.count > 0}
               <a
+                style:--stagger={column}
                 class={[
-                  "rounded-[3px] outline-offset-1 hover:outline-2 hover:outline-foreground/60 focus-visible:outline-2 focus-visible:outline-ring",
+                  "motion-cell rounded-[3px] outline-offset-1 hover:outline-2 hover:outline-foreground/60 focus-visible:outline-2 focus-visible:outline-ring",
                   LEVEL_CLASSES[cell.level],
                   cell.date === selected && "outline-2 outline-foreground",
                 ]}
@@ -162,7 +163,11 @@
               ></a>
             {:else if cell}
               <span
-                class={["rounded-[3px]", LEVEL_CLASSES[cell.level]]}
+                style:--stagger={column}
+                class={[
+                  "motion-cell rounded-[3px]",
+                  LEVEL_CLASSES[cell.level],
+                ]}
                 title={describe(cell)}
               ></span>
             {:else}

@@ -29,7 +29,7 @@
 </script>
 
 {#if pins.repositories.length > 0 || canManage}
-  <section aria-labelledby="pinned-heading">
+  <section class="motion-fade" aria-labelledby="pinned-heading">
     <div class="mb-3 flex items-center justify-between gap-3">
       <h2
         id="pinned-heading"
@@ -52,11 +52,11 @@
       </p>
     {:else}
       <ul class="grid gap-3 sm:grid-cols-2">
-        {#each pins.repositories as repository (repository.id)}
+        {#each pins.repositories as repository, index (repository.id)}
           {@const language = repository.languages[0]}
-          <li>
+          <li class="motion-rise" style:--stagger={index}>
             <a
-              class="flex h-full flex-col gap-2 rounded-lg border bg-card p-4 transition-colors hover:bg-accent/55"
+              class="motion-lift flex h-full flex-col gap-2 rounded-lg border bg-card p-4 hover:bg-accent/55"
               href={resolve("/[namespace]/[name]", {
                 namespace: repository.namespace,
                 name: repository.name,

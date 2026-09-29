@@ -96,7 +96,12 @@
 </aside>
 
 {#snippet entries(tree: Tree, depth: number)}
-  <ul class:border-t={depth > 0} class:divide-y={depth === 0}>
+  <!-- An opened directory's entries unfold beneath it. -->
+  <ul
+    class:border-t={depth > 0}
+    class:divide-y={depth === 0}
+    class:motion-drop={depth > 0}
+  >
     {#each tree.entries as entry (entry.oid + entry.path)}
       <li>
         <button

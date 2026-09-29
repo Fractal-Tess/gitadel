@@ -13,8 +13,11 @@
     <Tag class="size-4 text-muted-foreground" />Tags
   </header>
   <ul class="divide-y">
-    {#each state.browser.refs?.tags ?? [] as item (item.name)}
-      <li class="flex items-center justify-between gap-4 px-5 py-4">
+    {#each state.browser.refs?.tags ?? [] as item, index (item.name)}
+      <li
+        class="motion-rise flex items-center justify-between gap-4 px-5 py-4"
+        style:--stagger={index}
+      >
         <button
           class="font-mono text-sm font-medium hover:underline"
           onclick={() => state.changeRevision(item.name)}>{item.name}</button

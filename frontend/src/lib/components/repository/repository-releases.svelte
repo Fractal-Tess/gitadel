@@ -115,8 +115,11 @@
     </Alert.Root>
   {:else if repository.releases.releases.length}
     <div class="divide-y">
-      {#each repository.releases.releases as release (release.id)}
-        <article class="grid gap-5 py-7 xl:grid-cols-[10rem_minmax(0,1fr)]">
+      {#each repository.releases.releases as release, index (release.id)}
+        <article
+          class="motion-rise grid gap-5 py-7 xl:grid-cols-[10rem_minmax(0,1fr)]"
+          style:--stagger={index}
+        >
           <div class="min-w-0 space-y-2 overflow-hidden text-xs text-muted-foreground">
             <div class="flex min-w-0 items-center gap-2 font-mono text-foreground">
               <GitCommitHorizontal class="size-3.5" />

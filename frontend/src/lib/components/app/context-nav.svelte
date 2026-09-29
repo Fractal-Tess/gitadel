@@ -56,6 +56,37 @@
     });
   });
 
+  // The active tab's underline is one element that slides between tabs
+  // rather than one per tab, so switching reads as movement along the bar.
+  let indicator = $state<{ left: number; width: number } | null>(null);
+  let indicatorReady = $state(false);
+
+  function placeIndicator(): void {
+    const current = primaryList?.querySelector<HTMLElement>(
+      "[aria-current=page]",
+    );
+    indicator = current
+      ? { left: current.offsetLeft + 12, width: current.offsetWidth - 24 }
+      : null;
+  }
+
+  $effect(() => {
+    void activeItem?.id;
+    void items.length;
+    void tick().then(() => {
+      placeIndicator();
+      // The first placement lands without sliding in from the left edge.
+      requestAnimationFrame(() => (indicatorReady = true));
+    });
+  });
+
+  $effect(() => {
+    if (!primaryList) return;
+    const observer = new ResizeObserver(placeIndicator);
+    observer.observe(primaryList);
+    return () => observer.disconnect();
+  });
+
   function follow(
     event: MouseEvent,
     item: ContextNavItem | ContextNavSubItem,
@@ -74,20 +105,34 @@
   }
 </script>
 
-<nav class="border-b bg-background" aria-label={label}>
+<nav
+  class="border-b bg-background [view-transition-name:context-nav]"
+  aria-label={label}
+>
   <div class={wide ? "min-w-0" : "mx-auto max-w-5xl"}>
     <div
-      class="scrollbar-none flex overflow-x-auto px-3 sm:px-5 lg:px-8"
+      class="scrollbar-none relative flex overflow-x-auto px-3 sm:px-5 lg:px-8"
       bind:this={primaryList}
     >
+      {#if indicator}
+        <span
+          class={[
+            "pointer-events-none absolute bottom-0 left-0 h-0.5 bg-foreground",
+            indicatorReady &&
+              "transition-[transform,width] duration-300 ease-[var(--ease-out-quint)]",
+          ]}
+          style:width={`${indicator.width}px`}
+          style:transform={`translateX(${indicator.left}px)`}
+          aria-hidden="true"
+        ></span>
+      {/if}
       {#each items as item (item.id)}
         <a
           href={item.href}
           aria-current={item.active ? "page" : undefined}
           class={[
             "relative flex h-12 shrink-0 items-center gap-2 px-3 text-sm text-muted-foreground transition-colors hover:text-foreground",
-            item.active &&
-              "font-medium text-foreground after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-foreground",
+            item.active && "font-medium text-foreground",
           ]}
           onclick={(event) => follow(event, item)}
           onpointerenter={item.preload}

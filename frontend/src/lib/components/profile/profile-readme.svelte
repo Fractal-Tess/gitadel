@@ -72,7 +72,7 @@
 </script>
 
 {#if readme}
-  <section class="overflow-hidden rounded-lg border bg-card">
+  <section class="motion-rise overflow-hidden rounded-lg border bg-card">
     <header
       class="flex min-h-11 items-center gap-2 border-b px-4 py-2 text-sm font-semibold"
     >

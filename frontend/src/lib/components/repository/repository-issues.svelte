@@ -538,8 +538,11 @@
             </Alert.Root>
           </li>
         {:else}
-          {#each filteredIssues as issue (issue.id)}
-            <li class="flex gap-3 px-4 py-4 hover:bg-muted/10">
+          {#each filteredIssues as issue, index (issue.id)}
+            <li
+              class="motion-rise flex gap-3 px-4 py-4 hover:bg-muted/10"
+              style:--stagger={index}
+            >
               {#if issue.state === "open"}
                 <CircleDot class="mt-0.5 size-4 shrink-0 text-emerald-500" />
               {:else}

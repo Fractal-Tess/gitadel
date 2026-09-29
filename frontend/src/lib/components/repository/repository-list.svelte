@@ -73,6 +73,8 @@
   let loading = $state(!initialExplore);
   let error = $state<string | null>(null);
   let favoritePending = $state.raw<string[]>([]);
+  /** The repository just favorited here, whose heart swells once. */
+  let poppedFavorite = $state<string | null>(null);
   let copied = $state<string | null>(null);
 
   // Both live in the URL so the rail can link to them and so a filtered view
@@ -265,6 +267,7 @@
     }
     const favorited = !repository.favorited;
     favoritePending = [...favoritePending, repository.id];
+    poppedFavorite = favorited ? repository.id : null;
     try {
       await requestEmpty(
         `/api/v1/repositories/${encodeURIComponent(repository.namespace)}/${encodeURIComponent(repository.name)}/favorite`,
@@ -423,8 +426,8 @@
     {:else}
       <div class="overflow-hidden rounded-md border bg-card/35">
         <ul class="divide-y">
-          {#each visibleRepositories as repository (repository.id)}
-            <li class="relative">
+          {#each visibleRepositories as repository, index (repository.id)}
+            <li class="motion-rise relative" style:--stagger={index % 30}>
               <a
                 class="group grid min-h-28 grid-cols-[minmax(0,1fr)] items-center gap-x-3 px-4 pr-20 hover:bg-accent/55 sm:grid-cols-[minmax(0,1fr)_11rem] lg:grid-cols-[minmax(0,1fr)_12rem]"
                 href={resolve("/[namespace]/[name]", {
@@ -590,9 +593,11 @@
                     : "Add to favorites"}
                 >
                   <Heart
-                    class={repository.favorited
-                      ? "size-4 fill-amber-400 text-amber-400"
-                      : "size-4"}
+                    class={[
+                      "size-4",
+                      repository.favorited && "fill-amber-400 text-amber-400",
+                      poppedFavorite === repository.id && "motion-pop",
+                    ]}
                   />
                 </Button>
               </div>

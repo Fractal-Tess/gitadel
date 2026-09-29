@@ -54,7 +54,11 @@
   }
 </script>
 
-<section class="grid gap-4" aria-labelledby="activity-day-heading">
+<section
+  class="motion-rise grid gap-4"
+  style:--stagger={1}
+  aria-labelledby="activity-day-heading"
+>
   <h2 id="activity-day-heading" class="text-sm font-semibold">
     {heading}
     {#if day}
@@ -80,8 +84,11 @@
       No commits on this day.
     </p>
   {:else}
-    {#each day.repositories as repository (repository.name)}
-      <div class="overflow-hidden rounded-lg border bg-card">
+    {#each day.repositories as repository, index (repository.name)}
+      <div
+        class="motion-rise overflow-hidden rounded-lg border bg-card"
+        style:--stagger={index}
+      >
         <a
           class="flex items-center gap-2.5 border-b px-4 py-3 text-sm font-semibold hover:bg-accent/55"
           href={resolve("/[namespace]/[name]", {

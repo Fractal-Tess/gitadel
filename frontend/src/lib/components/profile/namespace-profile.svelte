@@ -87,7 +87,10 @@
   {/if}
 
   {#if !activityFailed}
-    <section class="rounded-lg border bg-card p-4 sm:p-5">
+    <section
+      class="motion-rise rounded-lg border bg-card p-4 sm:p-5"
+      style:--stagger={2}
+    >
       {#if activity}
         <h2 class="mb-4 text-sm font-semibold">
           {#if activity.total_commits === 0}
@@ -114,6 +117,9 @@
   {/if}
 
   {#if date}
-    <ActivityDay {namespace} {date} />
+    <!-- Keyed so each newly picked day settles in afresh. -->
+    {#key date}
+      <ActivityDay {namespace} {date} />
+    {/key}
   {/if}
 </div>

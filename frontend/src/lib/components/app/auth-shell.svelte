@@ -42,7 +42,7 @@
       <section
         class="relative isolate flex min-h-44 flex-col justify-between overflow-hidden rounded-[18px] bg-black p-5 ring-1 ring-white/10 text-white sm:p-7 lg:min-h-0 lg:p-9"
       >
-        <div class="absolute inset-0 -z-10" aria-hidden="true">
+        <div class="motion-fade absolute inset-0 -z-10" aria-hidden="true">
           {#if background === "squares"}
             <BlinkingSquares
               class="size-full"
@@ -77,14 +77,14 @@
         </a>
 
         <p
-          class="hidden text-[2.25rem] leading-[1.05] font-semibold tracking-[-0.035em] lg:block"
+          class="motion-rise hidden text-[2.25rem] leading-[1.05] font-semibold tracking-[-0.035em] lg:block"
         >
           Your code,<br /><span class="text-white/50">kept close.</span>
         </p>
       </section>
 
       <div class="flex items-center justify-center px-2 py-8 sm:px-8 lg:py-10">
-        <div class="w-full max-w-[380px]">
+        <div class="motion-rise w-full max-w-[380px]" style:--stagger={3}>
           {@render children()}
         </div>
       </div>

@@ -49,9 +49,10 @@
     </p>
   {:else}
     <div class="overflow-hidden rounded-xl border bg-card/30 shadow-sm">
-      {#each organizationState.organizations as organization (organization.id)}
+      {#each organizationState.organizations as organization, index (organization.id)}
         <article
-          class="flex flex-wrap items-center gap-4 border-b p-4 last:border-b-0"
+          class="motion-rise flex flex-wrap items-center gap-4 border-b p-4 last:border-b-0"
+          style:--stagger={index}
         >
           <span
             class="grid size-10 shrink-0 place-items-center rounded-lg border bg-muted"

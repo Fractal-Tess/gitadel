@@ -89,7 +89,10 @@
           <span class="h-px flex-1 bg-border"></span>
         </li>
       {/if}
-      <li class="relative border-l border-border pl-5">
+      <li
+        class="motion-rise relative border-l border-border pl-5"
+        style:--stagger={index}
+      >
         {#if released}
           <span
             class="absolute -left-[3.5px] top-[27px] size-[7px] rounded-full bg-primary"
