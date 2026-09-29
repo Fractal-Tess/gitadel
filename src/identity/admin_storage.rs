@@ -81,7 +81,7 @@ static DOMAINS: [DomainEntry; 2] = [
         kind: DomainKind::Registry,
         name: "registry",
         label: "Container registry",
-        local_label: "Repository-backed local storage",
+        local_label: "Configured local storage",
         audit_action: "registry.migration.start",
         usage: &RegistryUsageProvider,
     },
