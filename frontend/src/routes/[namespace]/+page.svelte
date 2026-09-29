@@ -4,6 +4,7 @@
   import { z } from "zod";
 
   import NotFound7 from "$lib/components/blocks/not-found-7.svelte";
+  import NamespaceProfile from "$lib/components/profile/namespace-profile.svelte";
   import RepositoryList from "$lib/components/repository/repository-list.svelte";
   import * as Alert from "$lib/components/ui/alert/index.js";
   import { ApiFailure, requestJson } from "$lib/api/transport.js";
@@ -91,6 +92,10 @@
   </Alert.Root>
 {:else}
   {#key namespace}
+    <!-- A search narrows the list, so the profile steps aside for it. -->
+    {#if !page.url.searchParams.get("q")?.trim()}
+      <NamespaceProfile {namespace} {canManage} />
+    {/if}
     <RepositoryList {namespace} {manageHref} />
   {/key}
 {/if}
