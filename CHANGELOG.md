@@ -4,6 +4,18 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-09-30
+
+### Added
+
+- The interface animates. Moving between pages fades the old page out as the new one rises in, while the header and rail stay still. Tab underlines and highlights slide between tabs. Repository views, issue and Actions run pages, file contents, tab panels, dialog steps, and setup wizards settle in as they replace each other. Lists, cards, and settings entries rise in one after another, opened folders unfold, the activity graph fills in column by column, repository sparklines draw themselves, and favoriting or copying confirms with a brief swell. Theme changes cross-fade.
+- **Reduce motion** in Account settings → Profile → Appearance turns all of this off on every device. When it is off, Gitadel follows the browser's reduced-motion setting, which also applies on the sign-in pages. With motion reduced, animations and transitions finish at once and the sign-in background holds still; loading spinners keep turning. `PUT /api/v1/me/motion-preference` stores the choice.
+- Account settings → Profile gains an Appearance section with the theme choice beside the motion switch.
+
+### Fixed
+
+- The breadcrumb on administration pages named every section "Appearance" except Appearance itself.
+
 ## [0.19.0] - 2026-09-30
 
 ### Added
@@ -437,7 +449,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.16.0...v0.17.0
