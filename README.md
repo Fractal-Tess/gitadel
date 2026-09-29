@@ -23,6 +23,10 @@ Gitadel deliberately leaves out pull requests and social feeds. The browser can 
 
 Repository operations run in-process through [Sley](https://github.com/Fractal-Tess/sley). The server does not require installed Git, Git LFS, or SSH executables.
 
+<p align="center">
+  <img src="assets/screenshots/hero.webp" alt="Gitadel showing syntax-highlighted Rust source in the gitadel repository, with a passing Actions run and its job log in front" width="100%" />
+</p>
+
 ## Quick start
 
 ```bash
@@ -41,6 +45,23 @@ git push archive main
 ```
 
 Press **Ctrl+K** to search repositories or find commands for creation, imports, and settings.
+
+## A closer look
+
+<table>
+  <tr>
+    <td><img src="assets/screenshots/dashboard.webp" alt="Explore page listing repositories with commit counts and activity sparklines" /></td>
+    <td><img src="assets/screenshots/commit.webp" alt="Commit page with message, metadata, and a side-by-side diff" /></td>
+  </tr>
+  <tr>
+    <td><img src="assets/screenshots/actions.webp" alt="Actions run with six successful jobs, including a matrix, and a job log" /></td>
+    <td><img src="assets/screenshots/registry.webp" alt="Container registry tab listing images, tags, sizes, and docker pull commands" /></td>
+  </tr>
+  <tr>
+    <td><img src="assets/screenshots/issues.webp" alt="Issue list with colored labels and assignees" /></td>
+    <td><img src="assets/screenshots/signin.webp" alt="Sign-in page with a passkey button and username and password form over an animated canyon background" /></td>
+  </tr>
+</table>
 
 ## Command-line client
 
