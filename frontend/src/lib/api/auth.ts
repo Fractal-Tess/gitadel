@@ -4,12 +4,15 @@ import { authenticationConfigurationSchema } from "$lib/api/sso.js";
 export const themePreferenceSchema = z.enum(["system", "light", "dark"]);
 export type ThemePreference = z.infer<typeof themePreferenceSchema>;
 
+export const motionPreferenceSchema = z.enum(["system", "reduce"]);
+
 const userSchema = z.object({
   id: z.guid(),
   username: z.string(),
   is_admin: z.boolean(),
   default_repository_visibility: z.enum(["public", "private"]),
   theme_preference: themePreferenceSchema,
+  motion_preference: motionPreferenceSchema.default("system"),
   avatar_updated_at: z.string().nullable(),
 });
 

@@ -26,6 +26,8 @@
 <script lang="ts">
   import { onMount, type Snippet } from "svelte";
 
+  import { motion } from "$lib/motion.svelte.js";
+
   interface Props {
     /** GLSL ES 1.0 fragment shader; receives `varying vec2 vUv`. */
     fragment: string;
@@ -150,7 +152,6 @@
       return locations.get(name) ?? null;
     };
 
-    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
     const startedAt = performance.now();
     let frame = 0;
     let onScreen = true;
@@ -171,7 +172,7 @@
       resize();
       gl.viewport(0, 0, canvas.width, canvas.height);
       gl.uniform2f(location("uRes"), canvas.width, canvas.height);
-      const elapsed = reducedMotion.matches ? 0 : (now - startedAt) / 1000;
+      const elapsed = motion.reduced ? 0 : (now - startedAt) / 1000;
       gl.uniform1f(location("uTime"), elapsed + timeOffset);
       for (const [name, value] of Object.entries(uniforms)) {
         const target = location(name);
@@ -185,7 +186,7 @@
     }
 
     const animating = () =>
-      !lost && onScreen && !document.hidden && !reducedMotion.matches;
+      !lost && onScreen && !document.hidden && !motion.reduced;
 
     function tick(now: number): void {
       draw(now);
@@ -223,8 +224,13 @@
 
     canvas.addEventListener("webglcontextlost", onContextLost);
     document.addEventListener("visibilitychange", sync);
-    reducedMotion.addEventListener("change", sync);
-    sync();
+    // Starts or stills the loop whenever the motion preference changes.
+    const stopWatchingMotion = $effect.root(() => {
+      $effect(() => {
+        void motion.reduced;
+        sync();
+      });
+    });
 
     return () => {
       requestFrame = null;
@@ -233,7 +239,7 @@
       intersectionObserver.disconnect();
       canvas.removeEventListener("webglcontextlost", onContextLost);
       document.removeEventListener("visibilitychange", sync);
-      reducedMotion.removeEventListener("change", sync);
+      stopWatchingMotion();
       gl.deleteBuffer(buffer);
       release();
     };

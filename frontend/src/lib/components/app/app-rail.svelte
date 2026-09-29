@@ -2,7 +2,7 @@
   import { page } from "$app/state";
   import { resolve } from "$app/paths";
   import { cubicOut } from "svelte/easing";
-  import { prefersReducedMotion } from "svelte/motion";
+  import { motion } from "$lib/motion.svelte.js";
   import { crossfade } from "svelte/transition";
   import Building2 from "@lucide/svelte/icons/building-2";
   import CircleDot from "@lucide/svelte/icons/circle-dot";
@@ -53,7 +53,7 @@
   const menuRow = `h-10 ${row}`;
   const subRow = `h-9 w-full justify-start text-left ${row}`;
   const [sendHighlight, receiveHighlight] = crossfade({
-    duration: () => (prefersReducedMotion.current ? 0 : 220),
+    duration: () => (motion.reduced ? 0 : 220),
     easing: cubicOut,
     fallback: () => ({ duration: 0 }),
   });

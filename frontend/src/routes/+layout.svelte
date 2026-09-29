@@ -1,7 +1,7 @@
 <script lang="ts">
   import "../app.css";
 
-  import { goto } from "$app/navigation";
+  import { goto, onNavigate } from "$app/navigation";
   import { page } from "$app/state";
   import { resolve } from "$app/paths";
   import { ModeWatcher, mode } from "mode-watcher";
@@ -14,6 +14,7 @@
   import OrganizationContextNav from "$lib/components/app/organization-context-nav.svelte";
   import * as Sidebar from "$lib/components/ui/sidebar/index.js";
   import { Toaster } from "$lib/components/ui/sonner/index.js";
+  import { motion } from "$lib/motion.svelte.js";
   import { provideAppState } from "$lib/state/app-state.svelte.js";
   import { provideShellState } from "$lib/state/shell-state.svelte.js";
 
@@ -50,6 +51,44 @@
     );
     return match?.[1] ? decodeURIComponent(match[1]) : null;
   }
+
+  // One attribute on the root lets app.css still every animation at once.
+  $effect(() => {
+    document.documentElement.dataset.motion = motion.reduced
+      ? "reduce"
+      : "full";
+  });
+
+  // Moving to another page runs inside a view transition, so the old page
+  // fades as the new one rises. Changes that only touch the query, such as a
+  // search narrowing a list, update in place instead.
+  onNavigate((navigation) => {
+    if (
+      motion.reduced ||
+      !document.startViewTransition ||
+      navigation.willUnload ||
+      !navigation.to ||
+      navigation.from?.url.pathname === navigation.to.url.pathname
+    ) {
+      return;
+    }
+    const root = document.documentElement;
+    // Only the app shell has a main column to move. Into or out of a bare
+    // page such as sign-in, the whole window cross-fades instead.
+    const withinShell =
+      !bareRoutes.has(navigation.from?.url.pathname ?? "") &&
+      !bareRoutes.has(navigation.to.url.pathname);
+    return new Promise<void>((resolveTransition) => {
+      if (withinShell) root.dataset.transition = "page";
+      const transition = document.startViewTransition(async () => {
+        resolveTransition();
+        await navigation.complete;
+      });
+      void transition.finished.finally(() => {
+        delete root.dataset.transition;
+      });
+    });
+  });
 
   $effect(() => {
     const url = page.url;
@@ -193,7 +232,7 @@
         <AppRail />
       {/if}
       <main
-        class="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+        class="min-h-0 flex-1 overflow-y-auto overscroll-contain [view-transition-name:page]"
         data-scroll-region
       >
         <OrganizationContextNav />

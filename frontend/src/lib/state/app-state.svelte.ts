@@ -8,6 +8,11 @@ import {
   type ThemePreference,
 } from "$lib/api/auth.js";
 import {
+  motion,
+  withViewTransition,
+  type MotionPreference,
+} from "$lib/motion.svelte.js";
+import {
   instanceSettingsSchema,
   type InstanceSettings,
 } from "$lib/api/instance.js";
@@ -93,6 +98,7 @@ export class AppState {
 
   #applyTheme(status: AuthStatus): void {
     setMode(status.user?.theme_preference ?? "system");
+    motion.preference = status.user?.motion_preference ?? "system";
   }
 
   async updateThemePreference(preference: ThemePreference): Promise<void> {
@@ -101,7 +107,7 @@ export class AppState {
     if (!status?.authenticated || !user) return;
 
     const previous = user.theme_preference;
-    setMode(preference);
+    await withViewTransition(() => setMode(preference));
     try {
       const response = await requestJson(
         "/api/v1/me/theme-preference",
@@ -114,6 +120,29 @@ export class AppState {
       this.#setAuthStatus({ ...status, user: response.user });
     } catch (error) {
       setMode(previous);
+      throw error;
+    }
+  }
+
+  async updateMotionPreference(preference: MotionPreference): Promise<void> {
+    const status = this.authStatus;
+    const user = status?.user;
+    if (!status?.authenticated || !user) return;
+
+    const previous = user.motion_preference;
+    motion.preference = preference;
+    try {
+      const response = await requestJson(
+        "/api/v1/me/motion-preference",
+        authResponseSchema,
+        {
+          method: "PUT",
+          body: jsonBody({ motion_preference: preference }),
+        },
+      );
+      this.#setAuthStatus({ ...status, user: response.user });
+    } catch (error) {
+      motion.preference = previous;
       throw error;
     }
   }

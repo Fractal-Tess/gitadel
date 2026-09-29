@@ -287,3 +287,156 @@
       transform 180ms ease;
   }
 }
+
+/*
+ * Motion.
+ *
+ * Entrances share one easing and a short travel, so the interface feels like
+ * one system: things settle into place rather than bounce. Lists stagger with
+ * `--stagger` (an item index, capped so long lists never wait on their tail).
+ * Every animation holds its first frame only until it starts (`backwards`),
+ * never its last, so no transform lingers to trap fixed-position children.
+ */
+:root {
+  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+}
+
+@keyframes motion-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@keyframes motion-drop {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes motion-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes motion-cell {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+}
+
+@keyframes motion-pop {
+  40% {
+    transform: scale(1.35);
+  }
+}
+
+@keyframes motion-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@layer utilities {
+  /* A block or list item settling into place, staggered by `--stagger`. */
+  .motion-rise {
+    animation: motion-rise 360ms var(--ease-out-quint) backwards;
+    animation-delay: calc(min(var(--stagger, 0), 12) * 35ms);
+  }
+
+  /* A view replacing another in the same frame, such as a repository tab. */
+  .motion-view {
+    animation: motion-rise 240ms var(--ease-out-quint) backwards;
+  }
+
+  /* Content unfolding downward from its parent, such as a directory opening. */
+  .motion-drop {
+    animation: motion-drop 200ms var(--ease-out-quint) backwards;
+  }
+
+  /* Content replacing a placeholder where movement would distract. */
+  .motion-fade {
+    animation: motion-fade 260ms ease-out backwards;
+  }
+
+  /* One cell of a grid filling in column by column. */
+  .motion-cell {
+    animation: motion-cell 320ms var(--ease-out-quint) backwards;
+    animation-delay: calc(var(--stagger, 0) * 7ms);
+  }
+
+  /* A brief swell that confirms a toggle, such as favoriting. */
+  .motion-pop {
+    animation: motion-pop 380ms var(--ease-out-quint);
+  }
+
+  /* A card that rises slightly under the pointer. */
+  .motion-lift {
+    transition:
+      transform 200ms var(--ease-out-quint),
+      box-shadow 200ms var(--ease-out-quint),
+      background-color 150ms ease-out,
+      border-color 150ms ease-out;
+  }
+  .motion-lift:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px -12px rgb(0 0 0 / 0.35);
+  }
+}
+
+/*
+ * Page transitions. Navigations between routes run inside a view transition
+ * marked `data-transition="page"` on the root. The shell stays still and only
+ * the main column moves: the old page fades out quickly while the new one
+ * rises in. The context tab bar is its own group, so its indicator slides
+ * rather than fading with the page.
+ */
+:root[data-transition="page"]::view-transition-old(root),
+:root[data-transition="page"]::view-transition-new(root) {
+  animation: none;
+}
+
+:root[data-transition="page"]::view-transition-old(page) {
+  animation: motion-fade-out 110ms ease-in both;
+}
+
+:root[data-transition="page"]::view-transition-new(page) {
+  animation: motion-rise 280ms var(--ease-out-quint) both;
+}
+
+/* A theme change cross-fades the whole window. */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 280ms;
+  animation-timing-function: var(--ease-in-out);
+}
+
+/*
+ * Reduced motion: the account preference or the browser's setting. Every CSS
+ * animation and transition finishes at once. Spinners keep turning, since a
+ * frozen spinner reads as a hang rather than as progress.
+ */
+:root[data-motion="reduce"] *:not(.animate-spin),
+:root[data-motion="reduce"] *::before,
+:root[data-motion="reduce"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-delay: 0ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  transition-delay: 0ms !important;
+  scroll-behavior: auto !important;
+}
+
+:root[data-motion="reduce"] .motion-lift:hover {
+  transform: none;
+}
+
+:root[data-motion="reduce"]::view-transition-group(*),
+:root[data-motion="reduce"]::view-transition-old(*),
+:root[data-motion="reduce"]::view-transition-new(*) {
+  animation: none !important;
+}

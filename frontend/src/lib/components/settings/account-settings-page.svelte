@@ -41,7 +41,7 @@
   );
   const description = $derived(
     view === "profile"
-      ? "Manage your identity and repository defaults."
+      ? "Manage your identity, repository defaults, and appearance."
       : view === "authentication"
         ? "Change your password, manage passkeys, and set up two-factor authentication."
         : view === "ssh-keys"

@@ -12,6 +12,7 @@
   import { onMount } from "svelte";
   import { toast } from "svelte-sonner";
 
+  import AccountAppearanceSettings from "$lib/components/settings/account-appearance-settings.svelte";
   import AccountAvatarSettings from "$lib/components/settings/account-avatar-settings.svelte";
   import TwoFactorSettings from "$lib/components/settings/two-factor-settings.svelte";
   import AccountEmailSettings from "$lib/components/settings/account-email-settings.svelte";
@@ -280,6 +281,8 @@
         </Field.Field>
       </Card.Content>
     </section>
+
+    <AccountAppearanceSettings />
 
     {#if app.authStatus?.email_enabled}
       <AccountEmailSettings />
