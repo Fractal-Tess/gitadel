@@ -4,6 +4,21 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+### Added
+
+- Container images get their own storage root, `storage.registry_root` (`/data/registry` in Docker; `--registry-root`, `GITADEL_REGISTRY_ROOT`), like Git LFS. Existing images move out of repository directories automatically on first start.
+- The whole container registry can now live on a filesystem or S3-compatible target. Tags and manifest records are stored in the database, and layers and manifests are stored through the active target, so only in-progress uploads need local disk.
+- Added one storage administration API for every storage domain: `/api/v1/admin/storage/domains` with status, per-repository usage and filters, migrations, and progress. Administration → Git LFS and → Container registry share one settings page, and `gtd admin storage domain` covers both from the command line.
+
+### Changed
+
+- Git LFS and the container registry share one storage manager, so migration, verification, crash recovery, and cleanup behave the same for both. Every migrated object is read back and SHA-256 verified, and the registry only pauses pushes for the final copy and switch-over.
+- Backups include the registry root and metadata. Backups made by 0.13 and earlier still restore and are converted on first start.
+
+### Deprecated
+
+- The `/api/v1/admin/storage/lfs/*`, `/admin/storage/migrations`, `/admin/storage/progress/*`, and `/admin/storage/registry/*` routes and the `gtd admin registry` and LFS storage commands still work but will be removed in a later release. Use the storage domain API and `gtd admin storage domain` instead.
+
 ## [0.13.1] - 2026-09-28
 
 ### Added
