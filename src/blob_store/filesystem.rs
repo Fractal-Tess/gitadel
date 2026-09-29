@@ -225,8 +225,19 @@ impl BlobStore for FilesystemBlobStore {
                 return Ok(Vec::new());
             }
             let mut objects = Vec::new();
+            // Entries removed while the walk runs, such as finished upload
+            // sessions beside registry payloads, are skipped.
+            let vanished = |error: &walkdir::Error| {
+                error
+                    .io_error()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            };
             for entry in walkdir::WalkDir::new(&base).follow_links(false) {
-                let entry = entry?;
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) if vanished(&error) => continue,
+                    Err(error) => return Err(error.into()),
+                };
                 if !entry.file_type().is_file() {
                     continue;
                 }
@@ -245,11 +256,12 @@ impl BlobStore for FilesystemBlobStore {
                 let Ok(digest) = oid.parse::<BlobDigest>() else {
                     continue;
                 };
-                objects.push(BlobMetadata {
-                    key,
-                    size: entry.metadata()?.len(),
-                    digest,
-                });
+                let size = match entry.metadata() {
+                    Ok(metadata) => metadata.len(),
+                    Err(error) if vanished(&error) => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                objects.push(BlobMetadata { key, size, digest });
             }
             objects.sort_by(|left, right| left.key.as_str().cmp(right.key.as_str()));
             Ok(objects)

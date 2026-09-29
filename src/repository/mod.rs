@@ -245,9 +245,18 @@ impl RepositoryState {
             .join(format!("{}.git", repository.storage_key))
     }
 
-    /// The repository's directory under the registry root.
-    pub(crate) fn registry_path(&self, repository: &repository::Model) -> PathBuf {
-        self.registry_root.join(repository.storage_key.to_string())
+    pub(crate) fn registry_root(&self) -> &Path {
+        self.registry_root.as_ref()
+    }
+
+    /// Where the repository's registry payloads and upload sessions live on
+    /// local disk.
+    pub(crate) fn registry_paths(&self, repository: &repository::Model) -> [PathBuf; 2] {
+        let storage_key = repository.storage_key.to_string();
+        [
+            self.registry_root.join(&storage_key),
+            crate::registry::store::uploads_root(&self.registry_root).join(storage_key),
+        ]
     }
 
     pub(super) fn source_archive_cache_path(

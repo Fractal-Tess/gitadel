@@ -5,6 +5,9 @@ pub(crate) mod storage;
 pub(crate) mod store;
 mod upgrade;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use http::router;
 
 pub(super) struct ImageName<'a> {

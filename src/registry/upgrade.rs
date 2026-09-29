@@ -17,6 +17,10 @@ use uuid::Uuid;
 
 use crate::{config::StorageSettings, filesystem::create_private_directory_async};
 
+mod import;
+
+pub(crate) use import::import;
+
 /// Moves registry data out of repository directories into the registry root.
 pub(crate) const RELOCATE: &str = "relocate_repository_registry";
 

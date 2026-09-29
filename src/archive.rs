@@ -692,20 +692,24 @@ async fn create_staged_backup(
         host_key,
         files: manifest_files(staging)?,
     };
-    let manifest_bytes =
-        serde_json::to_vec_pretty(&manifest).context("could not encode backup manifest")?;
-    let mut manifest_file = File::create(staging.join(MANIFEST_NAME))?;
-    manifest_file.write_all(&manifest_bytes)?;
-    manifest_file.sync_all()?;
     if let Some(reporter) = reporter {
         reporter.report(
             MaintenancePhase::Compressing,
             "Compressing the backup archive.",
         );
     }
+    write_archive(staging, &manifest, temporary_output)
+}
 
-    let output = open_private_file(temporary_output, true)
-        .with_context(|| format!("could not create {}", temporary_output.display()))?;
+/// Writes `manifest` into `staging` and compresses the directory into `destination`.
+fn write_archive(staging: &Path, manifest: &Manifest, destination: &Path) -> Result<()> {
+    let manifest_bytes =
+        serde_json::to_vec_pretty(manifest).context("could not encode backup manifest")?;
+    let mut manifest_file = File::create(staging.join(MANIFEST_NAME))?;
+    manifest_file.write_all(&manifest_bytes)?;
+    manifest_file.sync_all()?;
+    let output = open_private_file(destination, true)
+        .with_context(|| format!("could not create {}", destination.display()))?;
     let encoder = zstd::Encoder::new(output, 9).context("could not start Zstandard encoder")?;
     let mut archive = tar::Builder::new(encoder);
     archive
@@ -719,6 +723,7 @@ async fn create_staged_backup(
         .context("could not finish Zstandard stream")?;
     output.sync_all().context("could not sync backup archive")
 }
+
 async fn prepare_restored_snapshot(path: &Path) -> Result<()> {
     let mut options = ConnectOptions::new(format!("sqlite://{}?mode=rwc", path.display()));
     options.max_connections(1).sqlx_logging(false);
@@ -2045,6 +2050,111 @@ mod tests {
         };
 
         assert_eq!(restored, expected);
+        Ok(())
+    }
+
+    /// Pulls `latest` of a repository's image after the registry has started
+    /// on a restored instance.
+    async fn restored_manifest(
+        settings: &Settings,
+        repository: &crate::entity::repository::Model,
+    ) -> Result<Option<Vec<u8>>> {
+        let database = database::connect_and_migrate(&settings.database).await?;
+        let storage = crate::registry::storage::start(&database, &settings.storage).await?;
+        let manifest = crate::registry::store::RegistryStore::new(
+            database.clone(),
+            &settings.storage.registry_root,
+        )
+        .image(repository, "", storage.store())
+        .get_manifest("latest")
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?
+        .map(|manifest| manifest.bytes);
+        database.close().await?;
+        Ok(manifest)
+    }
+
+    #[tokio::test]
+    async fn restoring_a_0_13_archive_converts_registry_data_in_repositories() -> Result<()> {
+        use crate::registry::test_support;
+
+        let directory = TestDirectory::new()?;
+        let source_root = directory.path().join("source");
+        fs::create_dir(&source_root)?;
+        let source_settings = settings_at(&source_root);
+        let (source_database, owner) = test_support::database(&source_root).await;
+        let repository = test_support::repository(&source_database, owner, "legacy").await;
+
+        // Lay out a format 3 archive as 0.13.1 wrote it: registry files live
+        // inside the bare repository and there is no registry root.
+        let staging = directory.path().join("staging");
+        for directory in ["lfs", "actions-artifacts"] {
+            fs::create_dir_all(staging.join(directory))?;
+        }
+        let repository_dir = staging
+            .join("repositories")
+            .join(format!("{}.git", repository.storage_key));
+        fs::create_dir_all(&repository_dir)?;
+        fs::write(repository_dir.join("HEAD"), b"ref: refs/heads/main\n")?;
+        let legacy = test_support::write_legacy_image(
+            &test_support::legacy_image_dir(&repository_dir.join("gitadel-registry/images"), ""),
+            repository.storage_key,
+            "",
+            None,
+        )
+        .await;
+        snapshot_database(&source_database, &staging.join("database.sqlite")).await?;
+        source_database.close().await?;
+        prepare_restored_snapshot(&staging.join("database.sqlite")).await?;
+        fs::write(
+            staging.join(SETTINGS_NAME),
+            toml::to_string_pretty(&source_settings)?,
+        )?;
+        let manifest = Manifest {
+            format_version: 3,
+            gitadel_version: Some("0.13.1".to_owned()),
+            backup_name: None,
+            created_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            host_key: false,
+            files: manifest_files(&staging)?,
+        };
+        let backup = directory.path().join("gitadel-0.13.1.tar.zst");
+        write_archive(&staging, &manifest, &backup)?;
+
+        let restored_root = directory.path().join("restored");
+        let restored_settings = settings_at(&restored_root);
+        restore_archive(
+            &backup,
+            &restored_settings,
+            &restored_root.join("gitadel.toml"),
+        )?;
+        assert_eq!(
+            restored_manifest(&restored_settings, &repository).await?,
+            Some(legacy.manifest.clone())
+        );
+        let restored_repository = restored_settings
+            .storage
+            .repository_root
+            .join(format!("{}.git", repository.storage_key));
+        assert!(restored_repository.join("HEAD").is_file());
+        assert!(!restored_repository.join("gitadel-registry").exists());
+
+        // A backup of the converted instance carries the registry root and
+        // the metadata tables.
+        let converted = directory.path().join("converted.tar.zst");
+        create_archive(&converted, &restored_settings).await?;
+        assert_eq!(inspect_backup(&converted)?.format_version, FORMAT_VERSION);
+        let second_root = directory.path().join("second");
+        let second_settings = settings_at(&second_root);
+        restore_archive(
+            &converted,
+            &second_settings,
+            &second_root.join("gitadel.toml"),
+        )?;
+        assert_eq!(
+            restored_manifest(&second_settings, &repository).await?,
+            Some(legacy.manifest)
+        );
         Ok(())
     }
 

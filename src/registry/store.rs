@@ -1,11 +1,21 @@
+//! Container registry state. Tags, manifest records, and image membership live
+//! in the database; blobs and manifest bytes are content-addressed payloads in
+//! the registry domain's active store; resumable uploads stay on local disk
+//! under `<registry_root>/uploads/` until they are verified and published.
+
 use axum::body::Body;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
+use sea_orm::{
+    ColumnTrait as _, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait as _, PaginatorTrait,
+    QueryFilter as _, QueryOrder as _, QuerySelect as _, Set, TransactionTrait as _,
+    sea_query::OnConflict,
+};
+use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use std::{
-    collections::{HashMap, hash_map::DefaultHasher},
+    collections::{HashMap, HashSet, hash_map::DefaultHasher},
     fmt,
     hash::{Hash, Hasher},
     io::ErrorKind,
@@ -20,8 +30,13 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::blob_store::{
-    BlobDigest, BlobReader, BlobStore, DigestMismatch, ObjectKey, ObjectPrefix,
+use super::storage::{ObjectKind, object_key};
+use crate::{
+    blob_store::{BlobDigest, BlobReader, BlobStore, DigestMismatch, ObjectKey},
+    entity::{
+        registry_image, registry_image_blob, registry_manifest, registry_manifest_reference,
+        registry_object, registry_tag, repository,
+    },
 };
 
 pub(super) const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
@@ -29,8 +44,8 @@ pub(super) const MAX_BLOB_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 pub(super) const UPLOAD_TTL_SECONDS: u64 = 86_400;
 const LOCK_STRIPES: usize = 64;
 
-const OCI_IMAGE_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
-const OCI_IMAGE_INDEX_MEDIA_TYPE: &str = "application/vnd.oci.image.index.v1+json";
+pub(super) const OCI_IMAGE_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
+pub(super) const OCI_IMAGE_INDEX_MEDIA_TYPE: &str = "application/vnd.oci.image.index.v1+json";
 const DOCKER_MANIFEST_MEDIA_TYPE: &str = "application/vnd.docker.distribution.manifest.v2+json";
 const DOCKER_MANIFEST_LIST_MEDIA_TYPE: &str =
     "application/vnd.docker.distribution.manifest.list.v2+json";
@@ -79,6 +94,12 @@ impl From<std::io::Error> for StoreError {
     }
 }
 
+impl From<DbErr> for StoreError {
+    fn from(error: DbErr) -> Self {
+        Self::Io(std::io::Error::other(error))
+    }
+}
+
 impl From<anyhow::Error> for StoreError {
     fn from(error: anyhow::Error) -> Self {
         if error.downcast_ref::<DigestMismatch>().is_some() {
@@ -89,45 +110,31 @@ impl From<anyhow::Error> for StoreError {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub(crate) struct RegistryStore;
-
-/// Where an image's blobs and manifest objects live: the registry storage
-/// domain's active store, under `registry/<storage-key>/<image-hash>`.
+/// Entry point to registry metadata and upload staging.
 #[derive(Clone)]
-struct PayloadStore {
-    store: Arc<dyn BlobStore>,
-    prefix: Arc<str>,
+pub(crate) struct RegistryStore {
+    database: DatabaseConnection,
+    uploads_root: Arc<PathBuf>,
 }
 
-/// One image of a repository. Payloads go through [`PayloadStore`]; tags,
-/// manifest media types, and uploads stay in the image's directory under the
-/// registry root.
+/// One image of a repository.
 #[derive(Clone)]
-pub(super) struct ImageStore {
-    image_dir: PathBuf,
+pub(crate) struct ImageStore {
+    database: DatabaseConnection,
+    repository_id: Uuid,
+    storage_key: Uuid,
     suffix: Arc<str>,
     valid: bool,
-    payloads: PayloadStore,
+    store: Arc<dyn BlobStore>,
+    /// `<registry_root>/uploads/<storage-key>`.
+    uploads_dir: PathBuf,
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct StoredManifest {
+pub(crate) struct StoredManifest {
     pub digest: String,
     pub media_type: String,
     pub bytes: Vec<u8>,
-}
-#[derive(Debug, Serialize, Deserialize)]
-struct ManifestMeta {
-    media_type: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ReferenceMeta {
-    reference: String,
-    digest: String,
-    #[serde(default)]
-    updated_at: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -143,205 +150,6 @@ pub(crate) struct ImageMetadata {
     pub size_bytes: u64,
     pub updated_at: Option<String>,
     pub references: Vec<ImageReferenceMetadata>,
-}
-
-static IMAGE_LOCKS: LazyLock<Vec<Arc<Mutex<()>>>> = LazyLock::new(|| {
-    (0..LOCK_STRIPES)
-        .map(|_| Arc::new(Mutex::new(())))
-        .collect()
-});
-static UPLOAD_LOCKS: LazyLock<StdMutex<HashMap<PathBuf, Weak<Mutex<()>>>>> =
-    LazyLock::new(|| StdMutex::new(HashMap::new()));
-
-fn lock_index(path: &Path) -> usize {
-    let mut hasher = DefaultHasher::new();
-    path.hash(&mut hasher);
-    (hasher.finish() as usize) % LOCK_STRIPES
-}
-
-async fn image_lock(path: &Path) -> MutexGuard<'static, ()> {
-    IMAGE_LOCKS[lock_index(path)].lock().await
-}
-
-async fn image_locks(
-    first: &Path,
-    second: &Path,
-) -> (MutexGuard<'static, ()>, Option<MutexGuard<'static, ()>>) {
-    let first_index = lock_index(first);
-    let second_index = lock_index(second);
-    if first_index == second_index {
-        return (IMAGE_LOCKS[first_index].lock().await, None);
-    }
-    if first_index < second_index {
-        (
-            IMAGE_LOCKS[first_index].lock().await,
-            Some(IMAGE_LOCKS[second_index].lock().await),
-        )
-    } else {
-        (
-            IMAGE_LOCKS[second_index].lock().await,
-            Some(IMAGE_LOCKS[first_index].lock().await),
-        )
-    }
-}
-
-fn upload_mutex(path: &Path) -> Arc<Mutex<()>> {
-    let mut locks = UPLOAD_LOCKS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(lock) = locks.get(path).and_then(Weak::upgrade) {
-        return lock;
-    }
-    locks.retain(|_, lock| lock.strong_count() != 0);
-    let lock = Arc::new(Mutex::new(()));
-    locks.insert(path.to_path_buf(), Arc::downgrade(&lock));
-    lock
-}
-
-async fn upload_lock(path: &Path) -> OwnedMutexGuard<()> {
-    upload_mutex(path).lock_owned().await
-}
-
-impl RegistryStore {
-    pub fn new() -> Self {
-        Self
-    }
-
-    /// `repository_path` is the repository's directory under the registry
-    /// root, and `store` is the registry domain's active store.
-    pub(super) fn image(
-        &self,
-        repository_storage_key: Uuid,
-        repository_path: PathBuf,
-        suffix: &str,
-        store: Arc<dyn BlobStore>,
-    ) -> ImageStore {
-        let image_hash = hex_digest(suffix.as_bytes());
-        ImageStore {
-            image_dir: image_directory(&repository_path, suffix),
-            suffix: Arc::from(suffix),
-            valid: valid_suffix(suffix),
-            payloads: PayloadStore {
-                store,
-                prefix: Arc::from(format!("registry/{repository_storage_key}/{image_hash}")),
-            },
-        }
-    }
-    pub async fn list_images(&self, repository_path: &Path) -> Result<Vec<String>, StoreError> {
-        let mut result = Vec::new();
-        if existing_directory(repository_path).await?.is_none() {
-            return Ok(result);
-        }
-        let mut entries = fs::read_dir(repository_path).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            let metadata = fs::symlink_metadata(&path).await?;
-            if metadata.file_type().is_symlink() {
-                return Err(StoreError::Invalid(
-                    "image directory symlink is unsupported".to_owned(),
-                ));
-            }
-            if !metadata.file_type().is_dir() {
-                continue;
-            }
-            let suffix_path = path.join("suffix");
-            let Some(_) = existing_regular_file(&suffix_path).await? else {
-                continue;
-            };
-            let suffix = read_small_file(&suffix_path).await?;
-            if valid_suffix(&suffix) {
-                result.push(suffix);
-            }
-        }
-        result.sort();
-        Ok(result)
-    }
-    pub(crate) async fn browse_images(
-        &self,
-        repository_path: &Path,
-        repository_storage_key: Uuid,
-        store: Arc<dyn BlobStore>,
-    ) -> Result<Vec<ImageMetadata>, StoreError> {
-        let suffixes = self.list_images(repository_path).await?;
-        let mut result = Vec::with_capacity(suffixes.len());
-        let prefix = ObjectPrefix::new(format!("registry/{repository_storage_key}"))?;
-        let mut objects_by_image = HashMap::<String, Vec<_>>::new();
-        for object in store.list(&prefix).await? {
-            let Some(relative) = object
-                .key
-                .as_str()
-                .strip_prefix(prefix.as_str())
-                .and_then(|value| value.strip_prefix('/'))
-            else {
-                continue;
-            };
-            let Some((image_hash, _)) = relative.split_once('/') else {
-                continue;
-            };
-            if image_hash.len() != 64 || !image_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                continue;
-            }
-            objects_by_image
-                .entry(image_hash.to_owned())
-                .or_default()
-                .push(object);
-        }
-        for suffix in suffixes {
-            let image_hash = hex_digest(suffix.as_bytes());
-            let image = self.image(
-                repository_storage_key,
-                repository_path.to_path_buf(),
-                &suffix,
-                store.clone(),
-            );
-            let objects = objects_by_image.remove(&image_hash).unwrap_or_default();
-            let metadata = image.metadata(&objects).await?;
-            if !metadata.references.is_empty() {
-                result.push(metadata);
-            }
-        }
-        result.sort_by(|left, right| left.suffix.cmp(&right.suffix));
-        Ok(result)
-    }
-
-    pub(crate) async fn metadata_usage(
-        &self,
-        repository_path: &Path,
-    ) -> Result<RegistryUsage, StoreError> {
-        let images = self.list_images(repository_path).await?;
-        let mut usage = RegistryUsage {
-            image_count: images.len() as u64,
-            ..RegistryUsage::default()
-        };
-        for suffix in images {
-            let image_dir = image_directory(repository_path, &suffix);
-            usage.tag_count += {
-                let _guard = image_lock(&image_dir).await;
-                read_tags(&image_dir.join("refs")).await?.len() as u64
-            };
-            let mut uploads = match fs::read_dir(image_dir.join("uploads")).await {
-                Ok(uploads) => uploads,
-                Err(error) if error.kind() == ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.into()),
-            };
-            while let Some(upload) = uploads.next_entry().await? {
-                if !upload.file_type().await?.is_dir()
-                    || upload
-                        .file_name()
-                        .to_str()
-                        .and_then(|name| Uuid::parse_str(name).ok())
-                        .is_none()
-                {
-                    continue;
-                }
-                if let Some(size) = regular_file_len(&upload.path().join("data")).await? {
-                    usage.upload_count += 1;
-                    usage.upload_bytes += size;
-                }
-            }
-        }
-        Ok(usage)
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -369,259 +177,424 @@ impl std::ops::AddAssign for RegistryUsage {
     }
 }
 
-impl ImageStore {
-    async fn metadata(
-        &self,
-        objects: &[crate::blob_store::BlobMetadata],
-    ) -> Result<ImageMetadata, StoreError> {
-        let _guard = self.lock().await?;
-        let mut manifest_sizes = HashMap::<String, u64>::new();
-        let mut size_bytes = 0_u64;
-        for object in objects {
-            let Some(relative) = object
-                .key
-                .as_str()
-                .strip_prefix(self.payloads.prefix.as_ref())
-                .and_then(|value| value.strip_prefix('/'))
-            else {
-                continue;
-            };
-            if let Some(digest) = relative
-                .strip_prefix("manifests/objects/")
-                .filter(|value| !value.contains('/'))
-                .and_then(|value| value.parse::<BlobDigest>().ok())
-            {
-                let digest = format!("sha256:{}", digest.to_hex());
-                manifest_sizes.insert(digest, object.size);
-                size_bytes = size_bytes
-                    .checked_add(object.size)
-                    .ok_or_else(|| StoreError::Invalid("image size overflow".to_owned()))?;
-            } else if relative
-                .strip_prefix("blobs/")
-                .is_some_and(|value| value.split('/').count() == 3)
-            {
-                size_bytes = size_bytes
-                    .checked_add(object.size)
-                    .ok_or_else(|| StoreError::Invalid("image size overflow".to_owned()))?;
-            }
-        }
+/// What a manifest's JSON says about its relationships.
+pub(super) struct ManifestFacts {
+    pub subject_digest: Option<String>,
+    pub artifact_type: Option<String>,
+    pub annotations: Option<String>,
+    pub references: HashSet<String>,
+}
 
-        let mut references_by_digest = HashMap::<String, Vec<ReferenceMeta>>::new();
-        let mut entries = match fs::read_dir(self.refs_dir()).await {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => {
-                return Ok(ImageMetadata {
-                    suffix: self.suffix.to_string(),
-                    size_bytes,
-                    updated_at: None,
-                    references: manifest_sizes
-                        .into_keys()
-                        .map(|digest| ImageReferenceMetadata {
-                            tag: None,
-                            digest,
-                            updated_at: None,
-                        })
-                        .collect(),
-                });
-            }
-            Err(error) => return Err(error.into()),
-        };
-        while let Some(entry) = entries.next_entry().await? {
-            let metadata = fs::symlink_metadata(entry.path()).await?;
-            if !metadata.file_type().is_file() {
-                continue;
-            }
-            let bytes = read_bounded_file(&entry.path(), 4096).await?;
-            let Ok(reference) = serde_json::from_slice::<ReferenceMeta>(&bytes) else {
-                continue;
-            };
-            let Ok(digest) = normalize_digest(&reference.digest) else {
-                continue;
-            };
-            let key = if reference.reference.starts_with("sha256:") {
-                let Ok(key) = normalize_digest(&reference.reference) else {
-                    continue;
-                };
-                key
-            } else {
-                reference.reference.clone()
-            };
-            if key != digest && !valid_tag(&key) {
-                continue;
-            }
-            references_by_digest
-                .entry(digest.clone())
-                .or_default()
-                .push(ReferenceMeta {
-                    reference: key,
-                    digest,
-                    updated_at: reference.updated_at,
-                });
-        }
-
-        let mut result = Vec::new();
-        let mut latest = None::<DateTime<Utc>>;
-        for digest in manifest_sizes.keys() {
-            let references = references_by_digest
-                .get(digest)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let digest_reference = references
-                .iter()
-                .find(|reference| reference.reference == *digest);
-            update_latest(
-                &mut latest,
-                digest_reference.and_then(|reference| reference.updated_at.as_deref()),
-            );
-            let mut has_tag = false;
-            for reference in references {
-                if reference.reference == *digest || !valid_tag(&reference.reference) {
-                    continue;
+impl ManifestFacts {
+    pub(super) fn parse(value: &Value, media_type: &str) -> Self {
+        let subject_digest = value
+            .get("subject")
+            .and_then(Value::as_object)
+            .and_then(|subject| subject.get("digest"))
+            .and_then(Value::as_str)
+            .and_then(|digest| normalize_digest(digest).ok());
+        let artifact_type = value
+            .get("artifactType")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .or_else(|| match media_type {
+                OCI_IMAGE_MANIFEST_MEDIA_TYPE | DOCKER_MANIFEST_MEDIA_TYPE => {
+                    value.get("config")?.get("mediaType")?.as_str()
                 }
-                has_tag = true;
-                update_latest(&mut latest, reference.updated_at.as_deref());
-                result.push(ImageReferenceMetadata {
-                    tag: Some(reference.reference.clone()),
-                    digest: digest.clone(),
-                    updated_at: reference.updated_at.clone(),
-                });
-            }
-            if !has_tag {
-                result.push(ImageReferenceMetadata {
-                    tag: None,
-                    digest: digest.clone(),
-                    updated_at: digest_reference.and_then(|reference| reference.updated_at.clone()),
-                });
+                _ => None,
+            })
+            .map(str::to_owned);
+        let annotations = value
+            .get("annotations")
+            .filter(|annotations| annotations.is_object())
+            .map(Value::to_string);
+        let digest_of = |descriptor: &Value| {
+            descriptor
+                .get("digest")
+                .and_then(Value::as_str)
+                .and_then(|digest| normalize_digest(digest).ok())
+        };
+        let mut references = HashSet::new();
+        references.extend(value.get("config").and_then(digest_of));
+        for key in ["layers", "manifests"] {
+            if let Some(descriptors) = value.get(key).and_then(Value::as_array) {
+                references.extend(descriptors.iter().filter_map(digest_of));
             }
         }
-        result.sort_by(|left, right| {
-            left.digest
-                .cmp(&right.digest)
-                .then_with(|| left.tag.cmp(&right.tag))
-        });
-        Ok(ImageMetadata {
-            suffix: self.suffix.to_string(),
-            size_bytes,
-            updated_at: latest.map(|value| value.to_rfc3339()),
-            references: result,
-        })
+        Self {
+            subject_digest,
+            artifact_type,
+            annotations,
+            references,
+        }
     }
+}
+
+static IMAGE_LOCKS: LazyLock<Vec<Mutex<()>>> =
+    LazyLock::new(|| (0..LOCK_STRIPES).map(|_| Mutex::new(())).collect());
+/// Serializes decisions about one payload of one repository, which images of
+/// that repository share. Always taken after the image locks.
+static OBJECT_LOCKS: LazyLock<Vec<Mutex<()>>> =
+    LazyLock::new(|| (0..LOCK_STRIPES).map(|_| Mutex::new(())).collect());
+static UPLOAD_LOCKS: LazyLock<StdMutex<HashMap<PathBuf, Weak<Mutex<()>>>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+fn stripe(value: impl Hash) -> usize {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    (hasher.finish() as usize) % LOCK_STRIPES
+}
+
+/// Locks two stripes in index order, so concurrent pairs cannot deadlock.
+async fn lock_pair(
+    locks: &'static [Mutex<()>],
+    first: usize,
+    second: usize,
+) -> (MutexGuard<'static, ()>, Option<MutexGuard<'static, ()>>) {
+    if first == second {
+        return (locks[first].lock().await, None);
+    }
+    let (low, high) = (first.min(second), first.max(second));
+    (locks[low].lock().await, Some(locks[high].lock().await))
+}
+
+fn upload_mutex(path: &Path) -> Arc<Mutex<()>> {
+    let mut locks = UPLOAD_LOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(lock) = locks.get(path).and_then(Weak::upgrade) {
+        return lock;
+    }
+    locks.retain(|_, lock| lock.strong_count() != 0);
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(path.to_path_buf(), Arc::downgrade(&lock));
+    lock
+}
+
+async fn upload_lock(path: &Path) -> OwnedMutexGuard<()> {
+    upload_mutex(path).lock_owned().await
+}
+
+fn database_size(value: i64) -> Result<u64, StoreError> {
+    u64::try_from(value).map_err(|_| StoreError::Invalid("stored size is negative".to_owned()))
+}
+
+fn stored_size(value: u64) -> Result<i64, StoreError> {
+    i64::try_from(value).map_err(|_| StoreError::TooLarge)
+}
+
+impl RegistryStore {
+    pub fn new(database: DatabaseConnection, registry_root: &Path) -> Self {
+        Self {
+            database,
+            uploads_root: Arc::new(uploads_root(registry_root)),
+        }
+    }
+
+    /// `store` is the registry domain's active store.
+    pub(crate) fn image(
+        &self,
+        repository: &repository::Model,
+        suffix: &str,
+        store: Arc<dyn BlobStore>,
+    ) -> ImageStore {
+        ImageStore {
+            database: self.database.clone(),
+            repository_id: repository.id,
+            storage_key: repository.storage_key,
+            suffix: Arc::from(suffix),
+            valid: valid_suffix(suffix),
+            store,
+            uploads_dir: self.uploads_root.join(repository.storage_key.to_string()),
+        }
+    }
+
+    /// Image names of a repository, sorted.
+    pub async fn list_images(&self, repository_id: Uuid) -> Result<Vec<String>, StoreError> {
+        Ok(registry_image::Entity::find()
+            .filter(registry_image::Column::RepositoryId.eq(repository_id))
+            .order_by_asc(registry_image::Column::Name)
+            .all(&self.database)
+            .await?
+            .into_iter()
+            .map(|image| image.name)
+            .filter(|name| valid_suffix(name))
+            .collect())
+    }
+
+    /// Images of a repository that hold at least one manifest.
+    pub(crate) async fn browse_images(
+        &self,
+        repository_id: Uuid,
+    ) -> Result<Vec<ImageMetadata>, StoreError> {
+        let images = registry_image::Entity::find()
+            .filter(registry_image::Column::RepositoryId.eq(repository_id))
+            .all(&self.database)
+            .await?;
+        let blob_sizes = registry_object::Entity::find()
+            .filter(registry_object::Column::RepositoryId.eq(repository_id))
+            .filter(registry_object::Column::Kind.eq(ObjectKind::Blob.as_str()))
+            .all(&self.database)
+            .await?
+            .into_iter()
+            .map(|object| (object.digest, object.size))
+            .collect::<HashMap<_, _>>();
+        let mut result = Vec::with_capacity(images.len());
+        for image in images {
+            if !valid_suffix(&image.name) {
+                continue;
+            }
+            let manifests = registry_manifest::Entity::find()
+                .filter(registry_manifest::Column::ImageId.eq(image.id))
+                .all(&self.database)
+                .await?;
+            if manifests.is_empty() {
+                continue;
+            }
+            let blobs = registry_image_blob::Entity::find()
+                .filter(registry_image_blob::Column::ImageId.eq(image.id))
+                .all(&self.database)
+                .await?;
+            let tags = registry_tag::Entity::find()
+                .filter(registry_tag::Column::ImageId.eq(image.id))
+                .all(&self.database)
+                .await?;
+            let mut size_bytes = 0_u64;
+            for size in manifests.iter().map(|manifest| manifest.size).chain(
+                blobs
+                    .iter()
+                    .filter_map(|blob| blob_sizes.get(&blob.digest).copied()),
+            ) {
+                size_bytes = size_bytes
+                    .checked_add(database_size(size)?)
+                    .ok_or_else(|| StoreError::Invalid("image size overflow".to_owned()))?;
+            }
+            let mut tags_by_digest = HashMap::<&str, Vec<&registry_tag::Model>>::new();
+            for tag in &tags {
+                tags_by_digest.entry(&tag.digest).or_default().push(tag);
+            }
+            let mut latest = None::<DateTime<Utc>>;
+            let mut references = Vec::new();
+            for manifest in &manifests {
+                latest = latest.max(manifest.pushed_at);
+                let tagged = tags_by_digest
+                    .get(manifest.digest.as_str())
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                for tag in tagged {
+                    latest = latest.max(tag.updated_at);
+                    references.push(ImageReferenceMetadata {
+                        tag: Some(tag.name.clone()),
+                        digest: manifest.digest.clone(),
+                        updated_at: tag.updated_at.map(|value| value.to_rfc3339()),
+                    });
+                }
+                if tagged.is_empty() {
+                    references.push(ImageReferenceMetadata {
+                        tag: None,
+                        digest: manifest.digest.clone(),
+                        updated_at: manifest.pushed_at.map(|value| value.to_rfc3339()),
+                    });
+                }
+            }
+            references.sort_by(|left, right| {
+                left.digest
+                    .cmp(&right.digest)
+                    .then_with(|| left.tag.cmp(&right.tag))
+            });
+            result.push(ImageMetadata {
+                suffix: image.name,
+                size_bytes,
+                updated_at: latest.map(|value| value.to_rfc3339()),
+                references,
+            });
+        }
+        result.sort_by(|left, right| left.suffix.cmp(&right.suffix));
+        Ok(result)
+    }
+}
+
+/// Where resumable upload sessions are staged.
+pub(crate) fn uploads_root(registry_root: &Path) -> PathBuf {
+    registry_root.join("uploads")
+}
+
+/// Registry usage per repository id: payload counts and bytes, tags, and
+/// images from the database, and staged uploads from `<registry_root>/uploads`.
+pub(crate) async fn usage_by_repository_id(
+    database: &DatabaseConnection,
+    registry_root: &Path,
+    repositories: &[repository::Model],
+) -> Result<HashMap<Uuid, RegistryUsage>, StoreError> {
+    let mut usage = HashMap::<Uuid, RegistryUsage>::new();
+    for object in registry_object::Entity::find().all(database).await? {
+        let entry = usage.entry(object.repository_id).or_default();
+        entry.object_count += 1;
+        entry.total_bytes = entry
+            .total_bytes
+            .checked_add(database_size(object.size)?)
+            .ok_or_else(|| StoreError::Invalid("registry usage overflow".to_owned()))?;
+        if object.kind == ObjectKind::Manifest.as_str() {
+            entry.manifest_count += 1;
+        } else {
+            entry.blob_count += 1;
+        }
+    }
+    let images = registry_image::Entity::find()
+        .all(database)
+        .await?
+        .into_iter()
+        .map(|image| (image.id, image.repository_id))
+        .collect::<HashMap<_, _>>();
+    for repository_id in images.values() {
+        usage.entry(*repository_id).or_default().image_count += 1;
+    }
+    for tag in registry_tag::Entity::find().all(database).await? {
+        if let Some(repository_id) = images.get(&tag.image_id) {
+            usage.entry(*repository_id).or_default().tag_count += 1;
+        }
+    }
+    let uploads = uploads_root(registry_root);
+    for repository in repositories {
+        let (count, bytes) =
+            staged_uploads(&uploads.join(repository.storage_key.to_string())).await?;
+        if count > 0 {
+            let entry = usage.entry(repository.id).or_default();
+            entry.upload_count += count;
+            entry.upload_bytes += bytes;
+        }
+    }
+    Ok(usage)
+}
+
+/// Upload sessions in one repository's upload directory, and their bytes.
+async fn staged_uploads(directory: &Path) -> Result<(u64, u64), StoreError> {
+    let mut uploads = match fs::read_dir(directory).await {
+        Ok(uploads) => uploads,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok((0, 0)),
+        Err(error) => return Err(error.into()),
+    };
+    let (mut count, mut bytes) = (0, 0);
+    while let Some(upload) = uploads.next_entry().await? {
+        if !upload.file_type().await?.is_dir()
+            || upload
+                .file_name()
+                .to_str()
+                .and_then(|name| Uuid::parse_str(name).ok())
+                .is_none()
+        {
+            continue;
+        }
+        // A session finishing concurrently may disappear under us.
+        match fs::symlink_metadata(upload.path().join("data")).await {
+            Ok(metadata) if metadata.is_file() => {
+                count += 1;
+                bytes += metadata.len();
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok((count, bytes))
 }
 
 impl ImageStore {
     async fn lock(&self) -> Result<MutexGuard<'static, ()>, StoreError> {
-        if !self.valid {
-            return Err(StoreError::Invalid("image name is invalid".to_owned()));
-        }
-        Ok(image_lock(&self.image_dir).await)
+        self.check_valid()?;
+        Ok(IMAGE_LOCKS[self.image_stripe()].lock().await)
     }
 
-    fn root(&self) -> PathBuf {
-        self.image_dir.clone()
-    }
-
-    fn blobs_dir(&self) -> PathBuf {
-        self.root().join("blobs")
-    }
-
-    fn manifests_dir(&self) -> PathBuf {
-        self.root().join("manifests")
-    }
-
-    fn refs_dir(&self) -> PathBuf {
-        self.root().join("refs")
-    }
-
-    fn uploads_dir(&self) -> PathBuf {
-        self.root().join("uploads")
-    }
-
-    async fn ensure_image(&self) -> Result<(), StoreError> {
-        let repository = self
-            .image_dir
-            .parent()
-            .ok_or_else(|| StoreError::Invalid("image directory has no parent".to_owned()))?;
-        let registry_root = repository
-            .parent()
-            .ok_or_else(|| StoreError::Invalid("registry root is missing".to_owned()))?;
-        if existing_directory(registry_root).await?.is_none() {
-            return Err(StoreError::Invalid("registry root is missing".to_owned()));
-        }
-        ensure_directory(repository).await?;
-        ensure_directory(&self.image_dir).await?;
-        let suffix = self.root().join("suffix");
-        if existing_regular_file(&suffix).await?.is_some() {
-            if read_small_file(&suffix).await? != self.suffix.as_ref() {
-                return Err(StoreError::Invalid(
-                    "image suffix hash collision".to_owned(),
-                ));
-            }
+    fn check_valid(&self) -> Result<(), StoreError> {
+        if self.valid {
+            Ok(())
         } else {
-            atomic_write(&suffix, self.suffix.as_bytes()).await?;
+            Err(StoreError::Invalid("image name is invalid".to_owned()))
         }
-        ensure_directory(&self.blobs_dir()).await?;
-        ensure_directory(&self.manifests_dir()).await?;
-        ensure_directory(&self.manifests_dir().join("objects")).await?;
-        ensure_directory(&self.refs_dir()).await?;
-        ensure_directory(&self.uploads_dir()).await?;
-        Ok(())
     }
 
-    async fn blob_path(&self, digest: &str) -> Result<PathBuf, StoreError> {
-        let digest = normalize_digest(digest)?;
-        let hash = digest
+    fn image_stripe(&self) -> usize {
+        stripe((self.repository_id, self.suffix.as_ref()))
+    }
+
+    fn object_stripe(&self, kind: ObjectKind, digest: &str) -> usize {
+        stripe((self.repository_id, kind.as_str(), digest))
+    }
+
+    async fn lock_object(&self, kind: ObjectKind, digest: &str) -> MutexGuard<'static, ()> {
+        OBJECT_LOCKS[self.object_stripe(kind, digest)].lock().await
+    }
+
+    /// The payload key of a normalized `sha256:` digest.
+    fn key(&self, kind: ObjectKind, digest: &str) -> Result<ObjectKey, StoreError> {
+        let hex = digest
             .strip_prefix("sha256:")
             .ok_or(StoreError::DigestInvalid)?;
-        Ok(self
-            .blobs_dir()
-            .join(&hash[..2])
-            .join(&hash[2..4])
-            .join(hash))
+        Ok(object_key(self.storage_key, kind, hex)?)
     }
 
-    async fn manifest_object_path(&self, digest: &str) -> Result<PathBuf, StoreError> {
-        let digest = normalize_digest(digest)?;
-        Ok(self.manifests_dir().join("objects").join(
-            digest
-                .strip_prefix("sha256:")
-                .ok_or(StoreError::DigestInvalid)?,
+    async fn image_id(&self) -> Result<Option<Uuid>, StoreError> {
+        find_image(&self.database, self.repository_id, &self.suffix).await
+    }
+
+    /// The image's id, recording the image when it is new.
+    async fn ensure_image(&self) -> Result<Uuid, StoreError> {
+        ensure_image(&self.database, self.repository_id, &self.suffix).await
+    }
+
+    /// The size of a blob this image exposes.
+    async fn linked_blob_size(
+        &self,
+        image_id: Uuid,
+        digest: &str,
+    ) -> Result<Option<u64>, StoreError> {
+        if registry_image_blob::Entity::find_by_id((image_id, digest.to_owned()))
+            .one(&self.database)
+            .await?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        registry_object::Entity::find_by_id((
+            self.repository_id,
+            ObjectKind::Blob.as_str().to_owned(),
+            digest.to_owned(),
         ))
+        .one(&self.database)
+        .await?
+        .map(|object| database_size(object.size))
+        .transpose()
     }
 
-    fn reference_path(&self, reference: &str) -> PathBuf {
-        self.refs_dir()
-            .join(hex_digest(reference.as_bytes()))
-            .with_extension("json")
+    async fn manifest(
+        &self,
+        image_id: Uuid,
+        digest: &str,
+    ) -> Result<Option<registry_manifest::Model>, StoreError> {
+        Ok(
+            registry_manifest::Entity::find_by_id((image_id, digest.to_owned()))
+                .one(&self.database)
+                .await?,
+        )
     }
 
-    async fn get_reference(&self, reference: &str) -> Result<Option<ReferenceMeta>, StoreError> {
-        let path = self.reference_path(reference);
-        let metadata = match fs::symlink_metadata(&path).await {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        if !metadata.file_type().is_file() {
-            return Err(StoreError::Invalid(
-                "reference metadata is not a file".to_owned(),
-            ));
-        }
-        let bytes = read_bounded_file(&path, 4096).await?;
-        let value: ReferenceMeta = serde_json::from_slice(&bytes)
-            .map_err(|error| StoreError::Invalid(format!("invalid reference metadata: {error}")))?;
-        if value.reference != reference {
-            return Err(StoreError::Invalid(
-                "reference metadata collision".to_owned(),
-            ));
-        }
-        normalize_digest(&value.digest)?;
-        Ok(Some(value))
+    /// Whether a manifest of this image references `digest`.
+    async fn digest_referenced(&self, image_id: Uuid, digest: &str) -> Result<bool, StoreError> {
+        Ok(registry_manifest_reference::Entity::find()
+            .filter(registry_manifest_reference::Column::ImageId.eq(image_id))
+            .filter(registry_manifest_reference::Column::ReferencedDigest.eq(digest))
+            .count(&self.database)
+            .await?
+            > 0)
     }
 
     pub async fn blob_size(&self, digest: &str) -> Result<Option<u64>, StoreError> {
-        let _guard = self.lock().await?;
-        let path = self.blob_path(digest).await?;
-        self.payload_size(&path).await
+        self.check_valid()?;
+        let digest = normalize_digest(digest)?;
+        let Some(image_id) = self.image_id().await? else {
+            return Ok(None);
+        };
+        self.linked_blob_size(image_id, &digest).await
     }
 
     pub async fn blob_reader(
@@ -630,85 +603,138 @@ impl ImageStore {
         range: Option<(u64, u64)>,
     ) -> Result<Option<(BlobReader, u64)>, StoreError> {
         let _guard = self.lock().await?;
-        let path = self.blob_path(digest).await?;
-        let Some(size) = self.payload_size(&path).await? else {
+        let digest = normalize_digest(digest)?;
+        let Some(image_id) = self.image_id().await? else {
+            return Ok(None);
+        };
+        let Some(size) = self.linked_blob_size(image_id, &digest).await? else {
             return Ok(None);
         };
         let (start, end) = range.unwrap_or((0, size));
         if range.is_some() && (start >= end || end > size) {
             return Err(StoreError::RangeInvalid);
         }
-        let key = self.payload_key(&path)?;
+        let key = self.key(ObjectKind::Blob, &digest)?;
         let reader = if start == 0 && end == size {
-            self.payloads.store.read(&key).await?
+            self.store.read(&key).await?
         } else {
-            self.payloads.store.read_range(&key, start..end).await?
+            self.store.read_range(&key, start..end).await?
         };
         Ok(Some((reader, size)))
     }
+
     pub async fn delete_blob(&self, digest: &str) -> Result<bool, StoreError> {
         let _guard = self.lock().await?;
-        let path = self.blob_path(digest).await?;
-        if self.payload_size(&path).await?.is_none() {
+        let digest = normalize_digest(digest)?;
+        let Some(image_id) = self.image_id().await? else {
+            return Ok(false);
+        };
+        if self.linked_blob_size(image_id, &digest).await?.is_none() {
             return Ok(false);
         }
-        let digest = normalize_digest(digest)?;
-        if self.digest_referenced(&digest).await? {
+        if self.digest_referenced(image_id, &digest).await? {
             return Err(StoreError::Referenced);
         }
-        self.delete_payload(&path).await?;
+        let _object = self.lock_object(ObjectKind::Blob, &digest).await;
+        let transaction = self.database.begin().await?;
+        registry_image_blob::Entity::delete_by_id((image_id, digest.clone()))
+            .exec(&transaction)
+            .await?;
+        let orphaned =
+            !blob_linked_in_repository(&transaction, self.repository_id, &digest).await?;
+        if orphaned {
+            delete_object_row(&transaction, self.repository_id, ObjectKind::Blob, &digest).await?;
+        }
+        transaction.commit().await?;
+        if orphaned {
+            self.store
+                .delete(&self.key(ObjectKind::Blob, &digest)?)
+                .await?;
+        }
         Ok(true)
     }
+
+    /// Makes `digest` from `source` available in this image. Inside one
+    /// repository only a link is recorded; across repositories the payload is
+    /// duplicated through the store, which hard-links on a filesystem.
     pub async fn mount_blob(&self, source: &ImageStore, digest: &str) -> Result<bool, StoreError> {
-        if !self.valid || !source.valid {
-            return Err(StoreError::Invalid("image name is invalid".to_owned()));
-        }
-        let (_first_guard, _second_guard) = image_locks(&self.image_dir, &source.image_dir).await;
-        self.ensure_image().await?;
-        let source_path = source.blob_path(digest).await?;
-        let destination = self.blob_path(digest).await?;
-        if self.payload_size(&destination).await?.is_some() {
+        self.check_valid()?;
+        source.check_valid()?;
+        let digest = normalize_digest(digest)?;
+        let (_first, _second) =
+            lock_pair(&IMAGE_LOCKS, self.image_stripe(), source.image_stripe()).await;
+        let image_id = self.ensure_image().await?;
+        if self.linked_blob_size(image_id, &digest).await?.is_some() {
             return Ok(true);
         }
-        if source.payload_size(&source_path).await?.is_none() {
+        let Some(source_image) = source.image_id().await? else {
             return Ok(false);
+        };
+        let Some(size) = source.linked_blob_size(source_image, &digest).await? else {
+            return Ok(false);
+        };
+        let (_first_object, _second_object) = lock_pair(
+            &OBJECT_LOCKS,
+            self.object_stripe(ObjectKind::Blob, &digest),
+            source.object_stripe(ObjectKind::Blob, &digest),
+        )
+        .await;
+        if source.repository_id != self.repository_id {
+            let source_key = source.key(ObjectKind::Blob, &digest)?;
+            let destination_key = self.key(ObjectKind::Blob, &digest)?;
+            if same_store(&self.store, &source.store) {
+                self.store.duplicate(&source_key, &destination_key).await?;
+            } else {
+                let reader = source.store.read(&source_key).await?;
+                self.store
+                    .put_verified(&destination_key, blob_digest(&digest)?, reader)
+                    .await?;
+            }
         }
-        // Within one store the payload can be shared (a hard link on disk)
-        // instead of copied.
-        if same_store(&self.payloads.store, &source.payloads.store) {
-            self.payloads
-                .store
-                .duplicate(
-                    &source.payload_key(&source_path)?,
-                    &self.payload_key(&destination)?,
-                )
-                .await?;
-        } else {
-            let reader = source.read_payload(&source_path).await?;
-            self.publish_payload(&destination, digest, reader).await?;
-        }
+        self.record_blob(image_id, &digest, size).await?;
         Ok(true)
     }
+
+    /// Records that this repository holds blob `digest` and this image
+    /// exposes it.
+    async fn record_blob(&self, image_id: Uuid, digest: &str, size: u64) -> Result<(), StoreError> {
+        let now = Utc::now();
+        let transaction = self.database.begin().await?;
+        insert_object_row(
+            &transaction,
+            self.repository_id,
+            ObjectKind::Blob,
+            digest,
+            size,
+            now,
+        )
+        .await?;
+        link_blob(&transaction, image_id, digest, now).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    fn upload_path(&self, id: Uuid) -> PathBuf {
+        self.uploads_dir.join(id.to_string())
+    }
+
     pub async fn start_upload(&self, owner: Uuid) -> Result<Uuid, StoreError> {
-        if !self.valid {
-            return Err(StoreError::Invalid("image name is invalid".to_owned()));
-        }
         {
             let _guard = self.lock().await?;
             self.ensure_image().await?;
         }
-        cleanup_expired_uploads(&self.uploads_dir()).await?;
+        ensure_directory_all(&self.uploads_dir).await?;
+        cleanup_expired_uploads(&self.uploads_dir).await?;
         for _ in 0..4 {
             let id = Uuid::new_v4();
-            let directory = self.uploads_dir().join(id.to_string());
+            let directory = self.upload_path(id);
             let _upload_guard = upload_lock(&directory).await;
-            let _image_guard = self.lock().await?;
-            self.ensure_image().await?;
             match fs::create_dir(&directory).await {
                 Ok(()) => {
                     if let Err(error) = async {
                         atomic_write(&directory.join("owner"), owner.to_string().as_bytes())
                             .await?;
+                        atomic_write(&directory.join("image"), self.suffix.as_bytes()).await?;
                         atomic_write(
                             &directory.join("created"),
                             now_seconds().to_string().as_bytes(),
@@ -727,7 +753,7 @@ impl ImageStore {
                         let _ = fs::remove_dir_all(&directory).await;
                         return Err(error);
                     }
-                    sync_directory(&self.uploads_dir()).await?;
+                    sync_directory(&self.uploads_dir).await?;
                     return Ok(id);
                 }
                 Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
@@ -738,22 +764,36 @@ impl ImageStore {
             "could not allocate upload identifier".to_owned(),
         ))
     }
-    pub async fn upload_status(&self, id: Uuid, owner: Uuid) -> Result<Option<u64>, StoreError> {
-        if !self.valid {
-            return Err(StoreError::Invalid("image name is invalid".to_owned()));
-        }
-        let upload_path = self.uploads_dir().join(id.to_string());
-        let _guard = upload_lock(&upload_path).await;
+
+    /// The directory of a live upload session this owner started for this
+    /// image; expired sessions are removed.
+    async fn open_upload(&self, id: Uuid, owner: Uuid) -> Result<Option<PathBuf>, StoreError> {
         let Some(directory) = self.upload_directory(id).await? else {
-            return Err(StoreError::UploadUnknown);
+            return Ok(None);
         };
         if self.upload_expired(&directory).await? {
             let _ = fs::remove_dir_all(directory).await;
+            return Ok(None);
+        }
+        let actual = read_small_file(&directory.join("owner")).await?;
+        if actual.trim() != owner.to_string()
+            || read_small_file(&directory.join("image")).await? != self.suffix.as_ref()
+        {
             return Err(StoreError::UploadUnknown);
         }
-        self.check_upload_owner(&directory, owner).await?;
+        Ok(Some(directory))
+    }
+
+    pub async fn upload_status(&self, id: Uuid, owner: Uuid) -> Result<Option<u64>, StoreError> {
+        self.check_valid()?;
+        let _guard = upload_lock(&self.upload_path(id)).await;
+        let directory = self
+            .open_upload(id, owner)
+            .await?
+            .ok_or(StoreError::UploadUnknown)?;
         Ok(Some(self.reconcile_upload(&directory).await?))
     }
+
     pub async fn append_upload(
         &self,
         id: Uuid,
@@ -761,19 +801,12 @@ impl ImageStore {
         body: Body,
         range: Option<(u64, u64)>,
     ) -> Result<u64, StoreError> {
-        if !self.valid {
-            return Err(StoreError::Invalid("image name is invalid".to_owned()));
-        }
-        let upload_path = self.uploads_dir().join(id.to_string());
-        let _guard = upload_lock(&upload_path).await;
-        let Some(directory) = self.upload_directory(id).await? else {
-            return Err(StoreError::UploadUnknown);
-        };
-        if self.upload_expired(&directory).await? {
-            let _ = fs::remove_dir_all(directory).await;
-            return Err(StoreError::UploadUnknown);
-        }
-        self.check_upload_owner(&directory, owner).await?;
+        self.check_valid()?;
+        let _guard = upload_lock(&self.upload_path(id)).await;
+        let directory = self
+            .open_upload(id, owner)
+            .await?
+            .ok_or(StoreError::UploadUnknown)?;
         let original = self.reconcile_upload(&directory).await?;
         let expected = if let Some((start, end)) = range {
             if end < start || start != original {
@@ -829,63 +862,54 @@ impl ImageStore {
         result
     }
 
+    /// Verifies the upload against `digest`, publishes it to the active store,
+    /// and records it for this image.
     pub async fn finish_upload(
         &self,
         id: Uuid,
         owner: Uuid,
         digest: &str,
     ) -> Result<u64, StoreError> {
-        if !self.valid {
-            return Err(StoreError::Invalid("image name is invalid".to_owned()));
-        }
-        let upload_path = self.uploads_dir().join(id.to_string());
-        let _guard = upload_lock(&upload_path).await;
-        let Some(directory) = self.upload_directory(id).await? else {
-            return Err(StoreError::UploadUnknown);
-        };
-        if self.upload_expired(&directory).await? {
-            let _ = fs::remove_dir_all(directory).await;
-            return Err(StoreError::UploadUnknown);
-        }
-        self.check_upload_owner(&directory, owner).await?;
+        self.check_valid()?;
+        let _guard = upload_lock(&self.upload_path(id)).await;
+        let directory = self
+            .open_upload(id, owner)
+            .await?
+            .ok_or(StoreError::UploadUnknown)?;
         let size = self.reconcile_upload(&directory).await?;
         let digest = normalize_digest(digest)?;
-        let _image_guard = self.lock().await?;
-        self.ensure_image().await?;
-        let data = directory.join("data");
         if size > MAX_BLOB_BYTES {
             return Err(StoreError::TooLarge);
         }
-        let destination = self.blob_path(&digest).await?;
-        let expected: BlobDigest = digest["sha256:".len()..].parse()?;
+        let _image_guard = self.lock().await?;
+        let image_id = self.ensure_image().await?;
+        let _object = self.lock_object(ObjectKind::Blob, &digest).await;
         // The store verifies the upload and may move it into place.
         let published = self
-            .payloads
             .store
-            .put_file(&self.payload_key(&destination)?, expected, &data)
+            .put_file(
+                &self.key(ObjectKind::Blob, &digest)?,
+                blob_digest(&digest)?,
+                &directory.join("data"),
+            )
             .await?;
+        self.record_blob(image_id, &digest, published.size).await?;
         fs::remove_dir_all(&directory).await?;
-        sync_directory(&self.uploads_dir()).await?;
+        sync_directory(&self.uploads_dir).await?;
         Ok(published.size)
     }
+
     pub async fn cancel_upload(&self, id: Uuid, owner: Uuid) -> Result<bool, StoreError> {
-        if !self.valid {
-            return Err(StoreError::Invalid("image name is invalid".to_owned()));
-        }
-        let upload_path = self.uploads_dir().join(id.to_string());
-        let _guard = upload_lock(&upload_path).await;
-        let Some(directory) = self.upload_directory(id).await? else {
+        self.check_valid()?;
+        let _guard = upload_lock(&self.upload_path(id)).await;
+        let Some(directory) = self.open_upload(id, owner).await? else {
             return Ok(false);
         };
-        if self.upload_expired(&directory).await? {
-            let _ = fs::remove_dir_all(directory).await;
-            return Ok(false);
-        }
-        self.check_upload_owner(&directory, owner).await?;
         fs::remove_dir_all(directory).await?;
-        sync_directory(&self.uploads_dir()).await?;
+        sync_directory(&self.uploads_dir).await?;
         Ok(true)
     }
+
     pub async fn put_manifest(
         &self,
         reference: &str,
@@ -903,224 +927,248 @@ impl ImageStore {
         }
         let value: Value = serde_json::from_slice(bytes)
             .map_err(|error| StoreError::Invalid(format!("manifest is not valid JSON: {error}")))?;
-        self.validate_manifest(&value, media_type).await?;
+        let image_id = self.image_id().await?;
+        self.validate_manifest(image_id, &value, media_type).await?;
         let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
         if reference.starts_with("sha256:") && normalize_digest(reference)? != digest {
             return Err(StoreError::DigestInvalid);
         }
-        self.ensure_image().await?;
-        let object = self.manifest_object_path(&digest).await?;
-        let metadata_path = object.with_extension("meta");
-        let metadata_bytes = serde_json::to_vec(&ManifestMeta {
-            media_type: media_type.to_owned(),
-        })
-        .map_err(|error| StoreError::Invalid(error.to_string()))?;
-        if self.payload_size(&object).await?.is_some() {
-            let existing = self
-                .read_bounded_payload(&object, MAX_MANIFEST_BYTES)
-                .await?;
-            if existing != bytes {
-                return Err(StoreError::DigestInvalid);
-            }
-            if existing_regular_file(&metadata_path).await?.is_some() {
-                if self.read_manifest_media_type(&digest).await? != media_type {
-                    return Err(StoreError::Invalid(
-                        "manifest media type collision".to_owned(),
-                    ));
-                }
-            } else {
-                atomic_write(&metadata_path, &metadata_bytes).await?;
-            }
+        let tag = if reference.starts_with("sha256:") {
+            None
+        } else if valid_tag(reference) {
+            Some(reference)
         } else {
-            self.publish_payload(
-                &object,
-                &digest,
+            return Err(StoreError::Invalid(
+                "manifest reference is invalid".to_owned(),
+            ));
+        };
+        let image_id = match image_id {
+            Some(id) => id,
+            None => self.ensure_image().await?,
+        };
+        let _object = self.lock_object(ObjectKind::Manifest, &digest).await;
+        if let Some(existing) = self.manifest(image_id, &digest).await?
+            && existing.media_type != media_type
+        {
+            return Err(StoreError::Invalid(
+                "manifest media type collision".to_owned(),
+            ));
+        }
+        // Idempotent when another image of the repository holds the bytes.
+        self.store
+            .put_verified(
+                &self.key(ObjectKind::Manifest, &digest)?,
+                blob_digest(&digest)?,
                 Box::pin(std::io::Cursor::new(bytes.to_vec())),
             )
             .await?;
-            atomic_write(&metadata_path, &metadata_bytes).await?;
-        }
-        let updated_at = Some(Utc::now().to_rfc3339());
-        let digest_reference = ReferenceMeta {
-            reference: digest.clone(),
-            digest: digest.clone(),
-            updated_at: updated_at.clone(),
-        };
-        atomic_write(
-            &self.reference_path(&digest),
-            &serde_json::to_vec(&digest_reference)
-                .map_err(|error| StoreError::Invalid(error.to_string()))?,
+        let facts = ManifestFacts::parse(&value, media_type);
+        let now = Utc::now();
+        let size = bytes.len() as u64;
+        let transaction = self.database.begin().await?;
+        insert_object_row(
+            &transaction,
+            self.repository_id,
+            ObjectKind::Manifest,
+            &digest,
+            size,
+            now,
         )
         .await?;
-        if !reference.starts_with("sha256:") {
-            atomic_write(
-                &self.reference_path(reference),
-                &serde_json::to_vec(&ReferenceMeta {
-                    reference: reference.to_owned(),
-                    digest: digest.clone(),
-                    updated_at,
-                })
-                .map_err(|error| StoreError::Invalid(error.to_string()))?,
-            )
-            .await?;
+        record_manifest(
+            &transaction,
+            ManifestRecord {
+                image_id,
+                digest: &digest,
+                media_type,
+                size,
+                facts: &facts,
+                created_at: now,
+                pushed_at: Some(now),
+            },
+        )
+        .await?;
+        if let Some(tag) = tag {
+            record_tag(&transaction, image_id, tag, &digest, Some(now)).await?;
         }
+        transaction.commit().await?;
         Ok(StoredManifest {
             digest,
             media_type: media_type.to_owned(),
             bytes: bytes.to_vec(),
         })
     }
+
     pub async fn get_manifest(
         &self,
         reference: &str,
     ) -> Result<Option<StoredManifest>, StoreError> {
         let _guard = self.lock().await?;
         validate_reference(reference)?;
-        let reference = if reference.starts_with("sha256:") {
-            normalize_digest(reference)?
-        } else {
-            reference.to_owned()
-        };
-        let Some(reference_meta) = self.get_reference(&reference).await? else {
+        let Some(image_id) = self.image_id().await? else {
             return Ok(None);
         };
-        self.read_manifest(&reference_meta.digest).await.map(Some)
+        let digest = if reference.starts_with("sha256:") {
+            normalize_digest(reference)?
+        } else {
+            match registry_tag::Entity::find_by_id((image_id, reference.to_owned()))
+                .one(&self.database)
+                .await?
+            {
+                Some(tag) => tag.digest,
+                None => return Ok(None),
+            }
+        };
+        let Some(manifest) = self.manifest(image_id, &digest).await? else {
+            return Ok(None);
+        };
+        let bytes = self
+            .read_bounded(
+                &self.key(ObjectKind::Manifest, &digest)?,
+                MAX_MANIFEST_BYTES,
+            )
+            .await?;
+        if format!("sha256:{}", hex::encode(Sha256::digest(&bytes))) != digest {
+            return Err(StoreError::DigestInvalid);
+        }
+        Ok(Some(StoredManifest {
+            digest,
+            media_type: manifest.media_type,
+            bytes,
+        }))
     }
 
+    /// Deleting a tag keeps its manifest; deleting a manifest by digest
+    /// removes its tags and fails while a manifest of the image references it.
     pub async fn delete_manifest(&self, reference: &str) -> Result<bool, StoreError> {
         let _guard = self.lock().await?;
         validate_reference(reference)?;
-        let reference = if reference.starts_with("sha256:") {
-            normalize_digest(reference)?
-        } else {
-            reference.to_owned()
-        };
-        let Some(reference_meta) = self.get_reference(&reference).await? else {
+        let Some(image_id) = self.image_id().await? else {
             return Ok(false);
         };
         if !reference.starts_with("sha256:") {
-            fs::remove_file(self.reference_path(&reference)).await?;
-            sync_directory(&self.refs_dir()).await?;
-            return Ok(true);
+            let deleted = registry_tag::Entity::delete_by_id((image_id, reference.to_owned()))
+                .exec(&self.database)
+                .await?;
+            return Ok(deleted.rows_affected > 0);
         }
-        let digest = reference_meta.digest;
-        if self.digest_referenced(&digest).await? {
+        let digest = normalize_digest(reference)?;
+        if self.manifest(image_id, &digest).await?.is_none() {
+            return Ok(false);
+        }
+        if self.digest_referenced(image_id, &digest).await? {
             return Err(StoreError::Referenced);
         }
-        let mut entries = fs::read_dir(self.refs_dir()).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            let metadata = fs::symlink_metadata(&path).await?;
-            if !metadata.file_type().is_file() {
-                continue;
-            }
-            let Ok(bytes) = read_bounded_file(&path, 4096).await else {
-                continue;
-            };
-            let Ok(meta) = serde_json::from_slice::<ReferenceMeta>(&bytes) else {
-                continue;
-            };
-            if meta.digest == digest {
-                fs::remove_file(path).await?;
-            }
+        let _object = self.lock_object(ObjectKind::Manifest, &digest).await;
+        let transaction = self.database.begin().await?;
+        registry_tag::Entity::delete_many()
+            .filter(registry_tag::Column::ImageId.eq(image_id))
+            .filter(registry_tag::Column::Digest.eq(&digest))
+            .exec(&transaction)
+            .await?;
+        registry_manifest_reference::Entity::delete_many()
+            .filter(registry_manifest_reference::Column::ImageId.eq(image_id))
+            .filter(registry_manifest_reference::Column::ManifestDigest.eq(&digest))
+            .exec(&transaction)
+            .await?;
+        registry_manifest::Entity::delete_by_id((image_id, digest.clone()))
+            .exec(&transaction)
+            .await?;
+        let orphaned =
+            !manifest_held_in_repository(&transaction, self.repository_id, &digest).await?;
+        if orphaned {
+            delete_object_row(
+                &transaction,
+                self.repository_id,
+                ObjectKind::Manifest,
+                &digest,
+            )
+            .await?;
         }
-        sync_directory(&self.refs_dir()).await?;
-        let object = self.manifest_object_path(&digest).await?;
-        self.delete_payload(&object).await?;
-        fs::remove_file(object.with_extension("meta")).await?;
-        sync_directory(&self.manifests_dir().join("objects")).await?;
+        transaction.commit().await?;
+        if orphaned {
+            self.store
+                .delete(&self.key(ObjectKind::Manifest, &digest)?)
+                .await?;
+        }
         Ok(true)
     }
-    pub async fn tags(&self) -> Result<Vec<String>, StoreError> {
-        let _guard = self.lock().await?;
-        read_tags(&self.refs_dir()).await
+
+    /// Tags sorted by name, starting after `last`, at most `limit` of them.
+    pub async fn tags_page(&self, last: &str, limit: u64) -> Result<Vec<String>, StoreError> {
+        self.check_valid()?;
+        let Some(image_id) = self.image_id().await? else {
+            return Ok(Vec::new());
+        };
+        Ok(registry_tag::Entity::find()
+            .filter(registry_tag::Column::ImageId.eq(image_id))
+            .filter(registry_tag::Column::Name.gt(last))
+            .order_by_asc(registry_tag::Column::Name)
+            .limit(limit)
+            .all(&self.database)
+            .await?
+            .into_iter()
+            .map(|tag| tag.name)
+            .collect())
     }
+
     pub async fn referrers(
         &self,
         digest: &str,
         artifact_type: Option<&str>,
     ) -> Result<Vec<Value>, StoreError> {
-        let _guard = self.lock().await?;
+        self.check_valid()?;
         let digest = normalize_digest(digest)?;
-        let mut result = Vec::new();
-        let mut entries = match fs::read_dir(self.manifests_dir().join("objects")).await {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(result),
-            Err(error) => return Err(error.into()),
+        let Some(image_id) = self.image_id().await? else {
+            return Ok(Vec::new());
         };
-        while let Some(entry) = entries.next_entry().await? {
-            let metadata = fs::symlink_metadata(entry.path()).await?;
-            let name = entry.file_name();
-            let Some(hash) = name.to_str().and_then(|name| name.strip_suffix(".meta")) else {
-                continue;
-            };
-            if !metadata.file_type().is_file() {
-                continue;
-            }
-            let object_digest = format!("sha256:{hash}");
-            if normalize_digest(&object_digest).is_err()
-                || self.get_reference(&object_digest).await?.is_none()
-            {
-                continue;
-            }
-            let manifest = self.read_manifest(&object_digest).await?;
-            let bytes = manifest.bytes;
-            let value: Value = match serde_json::from_slice(&bytes) {
-                Ok(value) => value,
-                Err(_) => continue,
-            };
-            let Some(subject) = value.get("subject").and_then(Value::as_object) else {
-                continue;
-            };
-            let Some(subject_digest) = subject
-                .get("digest")
-                .and_then(Value::as_str)
-                .and_then(|value| normalize_digest(value).ok())
-            else {
-                continue;
-            };
-            if subject_digest != digest {
-                continue;
-            }
-            let media_type = manifest.media_type;
-            let value_artifact_type = value
-                .get("artifactType")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .or_else(|| match media_type.as_str() {
-                    OCI_IMAGE_MANIFEST_MEDIA_TYPE | DOCKER_MANIFEST_MEDIA_TYPE => {
-                        value.get("config")?.get("mediaType")?.as_str()
-                    }
-                    _ => None,
-                });
-            if artifact_type.is_some() && value_artifact_type != artifact_type {
-                continue;
-            }
+        let mut query = registry_manifest::Entity::find()
+            .filter(registry_manifest::Column::ImageId.eq(image_id))
+            .filter(registry_manifest::Column::SubjectDigest.eq(&digest));
+        if let Some(artifact_type) = artifact_type {
+            query = query.filter(registry_manifest::Column::ArtifactType.eq(artifact_type));
+        }
+        let manifests = query
+            .order_by_asc(registry_manifest::Column::Digest)
+            .all(&self.database)
+            .await?;
+        let mut result = Vec::with_capacity(manifests.len());
+        for manifest in manifests {
             let mut descriptor = serde_json::Map::new();
-            descriptor.insert("mediaType".to_owned(), Value::String(media_type));
-            descriptor.insert("digest".to_owned(), Value::String(object_digest));
-            descriptor.insert("size".to_owned(), Value::from(bytes.len() as u64));
-            if let Some(artifact_type) = value_artifact_type {
-                descriptor.insert(
-                    "artifactType".to_owned(),
-                    Value::String(artifact_type.to_owned()),
-                );
+            descriptor.insert("mediaType".to_owned(), Value::String(manifest.media_type));
+            descriptor.insert("digest".to_owned(), Value::String(manifest.digest));
+            descriptor.insert(
+                "size".to_owned(),
+                Value::from(database_size(manifest.size)?),
+            );
+            if let Some(artifact_type) = manifest.artifact_type {
+                descriptor.insert("artifactType".to_owned(), Value::String(artifact_type));
             }
-            if let Some(annotations) = value.get("annotations").and_then(Value::as_object) {
-                descriptor.insert("annotations".to_owned(), Value::Object(annotations.clone()));
+            if let Some(annotations) = manifest
+                .annotations
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                .filter(Value::is_object)
+            {
+                descriptor.insert("annotations".to_owned(), annotations);
             }
             result.push(Value::Object(descriptor));
         }
-        result.sort_by(|left, right| {
-            left.get("digest")
-                .and_then(Value::as_str)
-                .cmp(&right.get("digest").and_then(Value::as_str))
-        });
         Ok(result)
     }
 
+    async fn read_bounded(&self, key: &ObjectKey, limit: usize) -> Result<Vec<u8>, StoreError> {
+        let mut reader = self.store.read(key).await?.take(limit as u64 + 1);
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await?;
+        if bytes.len() > limit {
+            return Err(StoreError::TooLarge);
+        }
+        Ok(bytes)
+    }
+
     async fn upload_directory(&self, id: Uuid) -> Result<Option<PathBuf>, StoreError> {
-        let directory = self.uploads_dir().join(id.to_string());
+        let directory = self.upload_path(id);
         match fs::symlink_metadata(&directory).await {
             Ok(metadata) if metadata.file_type().is_dir() => Ok(Some(directory)),
             Ok(metadata) if metadata.file_type().is_symlink() => Err(StoreError::Invalid(
@@ -1139,7 +1187,7 @@ impl ImageStore {
         };
         let offset_path = directory.join("offset");
         let committed = match existing_regular_file(&offset_path).await? {
-            Some(_) => read_small_file(&offset_path)
+            Some(()) => read_small_file(&offset_path)
                 .await?
                 .trim()
                 .parse::<u64>()
@@ -1165,15 +1213,12 @@ impl ImageStore {
         Ok(now_seconds().saturating_sub(created) > UPLOAD_TTL_SECONDS)
     }
 
-    async fn check_upload_owner(&self, directory: &Path, owner: Uuid) -> Result<(), StoreError> {
-        let actual = read_small_file(&directory.join("owner")).await?;
-        if actual.trim() != owner.to_string() {
-            return Err(StoreError::UploadUnknown);
-        }
-        Ok(())
-    }
-
-    async fn validate_manifest(&self, value: &Value, media_type: &str) -> Result<(), StoreError> {
+    async fn validate_manifest(
+        &self,
+        image_id: Option<Uuid>,
+        value: &Value,
+        media_type: &str,
+    ) -> Result<(), StoreError> {
         let object = value
             .as_object()
             .ok_or_else(|| StoreError::Invalid("manifest must be a JSON object".to_owned()))?;
@@ -1202,7 +1247,7 @@ impl ImageStore {
                     StoreError::Invalid("index manifests must be an array".to_owned())
                 })?;
             for descriptor in manifests {
-                self.validate_descriptor(descriptor, DescriptorKind::Manifest, true)
+                self.validate_descriptor(image_id, descriptor, DescriptorKind::Manifest)
                     .await?;
             }
         } else {
@@ -1214,7 +1259,7 @@ impl ImageStore {
             let config = object.get("config").ok_or_else(|| {
                 StoreError::Invalid("image manifest config is missing".to_owned())
             })?;
-            self.validate_descriptor(config, DescriptorKind::Blob, true)
+            self.validate_descriptor(image_id, config, DescriptorKind::Blob)
                 .await?;
             let layers = object
                 .get("layers")
@@ -1223,12 +1268,12 @@ impl ImageStore {
                     StoreError::Invalid("image manifest layers must be an array".to_owned())
                 })?;
             for descriptor in layers {
-                self.validate_descriptor(descriptor, DescriptorKind::Blob, true)
+                self.validate_descriptor(image_id, descriptor, DescriptorKind::Blob)
                     .await?;
             }
         }
         if let Some(subject) = object.get("subject") {
-            self.validate_descriptor(subject, DescriptorKind::Subject, false)
+            self.validate_descriptor(image_id, subject, DescriptorKind::Subject)
                 .await?;
         }
         Ok(())
@@ -1236,9 +1281,9 @@ impl ImageStore {
 
     async fn validate_descriptor(
         &self,
+        image_id: Option<Uuid>,
         descriptor: &Value,
         kind: DescriptorKind,
-        require_local: bool,
     ) -> Result<(), StoreError> {
         let object = descriptor.as_object().ok_or_else(|| {
             StoreError::Invalid("manifest descriptor is not an object".to_owned())
@@ -1277,22 +1322,23 @@ impl ImageStore {
                 ));
             }
         }
-        if !require_local {
-            return Ok(());
-        }
         match kind {
+            // Subjects may name manifests that are not pushed (yet).
+            DescriptorKind::Subject => {}
             DescriptorKind::Manifest => {
                 if !supported_manifest_media_type(media_type) {
                     return Err(StoreError::Invalid(
                         "index descriptor is not a manifest".to_owned(),
                     ));
                 }
-                let object_path = self.manifest_object_path(&digest).await?;
-                let Some(actual) = self.payload_size(&object_path).await? else {
+                let manifest = match image_id {
+                    Some(image_id) => self.manifest(image_id, &digest).await?,
+                    None => None,
+                };
+                let Some(manifest) = manifest else {
                     return Err(StoreError::ManifestBlobUnknown(digest));
                 };
-                let manifest = self.read_manifest(&digest).await?;
-                if actual != size || manifest.media_type != media_type {
+                if database_size(manifest.size)? != size || manifest.media_type != media_type {
                     return Err(StoreError::ManifestBlobUnknown(digest));
                 }
             }
@@ -1302,144 +1348,247 @@ impl ImageStore {
                         "blob descriptor is a manifest".to_owned(),
                     ));
                 }
-                let blob = self.blob_path(&digest).await?;
-                let Some(actual) = self.payload_size(&blob).await? else {
-                    return Err(StoreError::ManifestBlobUnknown(digest));
+                let actual = match image_id {
+                    Some(image_id) => self.linked_blob_size(image_id, &digest).await?,
+                    None => None,
                 };
-                if actual != size {
+                if actual != Some(size) {
                     return Err(StoreError::ManifestBlobUnknown(digest));
                 }
             }
-            DescriptorKind::Subject => {
-                unreachable!("subject descriptors do not require local objects")
-            }
         }
         Ok(())
-    }
-
-    async fn read_manifest(&self, digest: &str) -> Result<StoredManifest, StoreError> {
-        let digest = normalize_digest(digest)?;
-        let path = self.manifest_object_path(&digest).await?;
-        let bytes = self.read_bounded_payload(&path, MAX_MANIFEST_BYTES).await?;
-        let actual = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
-        if actual != digest {
-            return Err(StoreError::DigestInvalid);
-        }
-        let media_type = self.read_manifest_media_type(&digest).await?;
-        if !supported_manifest_media_type(&media_type) {
-            return Err(StoreError::Invalid(
-                "manifest media type is unsupported".to_owned(),
-            ));
-        }
-        Ok(StoredManifest {
-            digest,
-            media_type,
-            bytes,
-        })
-    }
-
-    async fn read_manifest_media_type(&self, digest: &str) -> Result<String, StoreError> {
-        let path = self
-            .manifest_object_path(digest)
-            .await?
-            .with_extension("meta");
-        let bytes = read_bounded_file(&path, 1024).await?;
-        let metadata: ManifestMeta = serde_json::from_slice(&bytes)
-            .map_err(|error| StoreError::Invalid(format!("invalid manifest metadata: {error}")))?;
-        if !supported_manifest_media_type(&metadata.media_type) {
-            return Err(StoreError::Invalid(
-                "manifest media type is unsupported".to_owned(),
-            ));
-        }
-        Ok(metadata.media_type)
-    }
-
-    async fn digest_referenced(&self, digest: &str) -> Result<bool, StoreError> {
-        let mut entries = match fs::read_dir(self.manifests_dir().join("objects")).await {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(error.into()),
-        };
-        while let Some(entry) = entries.next_entry().await? {
-            let metadata = fs::symlink_metadata(entry.path()).await?;
-            let name = entry.file_name();
-            let Some(hash) = name.to_str().and_then(|name| name.strip_suffix(".meta")) else {
-                continue;
-            };
-            if !metadata.file_type().is_file() {
-                continue;
-            }
-            let object_digest = format!("sha256:{hash}");
-            if normalize_digest(&object_digest).is_err()
-                || self.get_reference(&object_digest).await?.is_none()
-            {
-                continue;
-            }
-            let bytes = self.read_manifest(&object_digest).await?.bytes;
-            if json_contains_digest(&bytes, digest) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 }
 
-impl ImageStore {
-    /// The canonical payload key of a path under the image directory.
-    fn payload_key(&self, path: &Path) -> Result<ObjectKey, StoreError> {
-        let relative = path
-            .strip_prefix(&self.image_dir)
-            .map_err(|error| StoreError::Invalid(error.to_string()))?
-            .to_str()
-            .ok_or_else(|| StoreError::Invalid("payload path is not UTF-8".to_owned()))?;
-        Ok(ObjectKey::new(format!(
-            "{}/{relative}",
-            self.payloads.prefix
-        ))?)
-    }
+async fn find_image(
+    connection: &impl ConnectionTrait,
+    repository_id: Uuid,
+    name: &str,
+) -> Result<Option<Uuid>, StoreError> {
+    Ok(registry_image::Entity::find()
+        .filter(registry_image::Column::RepositoryId.eq(repository_id))
+        .filter(registry_image::Column::Name.eq(name))
+        .one(connection)
+        .await?
+        .map(|image| image.id))
+}
 
-    async fn payload_size(&self, path: &Path) -> Result<Option<u64>, StoreError> {
-        Ok(self
-            .payloads
-            .store
-            .stat(&self.payload_key(path)?)
-            .await?
-            .map(|metadata| metadata.size))
+/// The id of a repository's image `name`, recording the image when it is new.
+pub(super) async fn ensure_image(
+    connection: &impl ConnectionTrait,
+    repository_id: Uuid,
+    name: &str,
+) -> Result<Uuid, StoreError> {
+    if let Some(id) = find_image(connection, repository_id, name).await? {
+        return Ok(id);
     }
+    registry_image::Entity::insert(registry_image::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        repository_id: Set(repository_id),
+        name: Set(name.to_owned()),
+        created_at: Set(Utc::now()),
+    })
+    .on_conflict_do_nothing_on([
+        registry_image::Column::RepositoryId,
+        registry_image::Column::Name,
+    ])
+    .exec_without_returning(connection)
+    .await?;
+    find_image(connection, repository_id, name)
+        .await?
+        .ok_or_else(|| StoreError::Invalid("image record disappeared".to_owned()))
+}
 
-    async fn read_payload(&self, path: &Path) -> Result<BlobReader, StoreError> {
-        Ok(self.payloads.store.read(&self.payload_key(path)?).await?)
-    }
+/// Records that `repository_id` holds a payload; a no-op when it already does.
+pub(super) async fn insert_object_row(
+    connection: &impl ConnectionTrait,
+    repository_id: Uuid,
+    kind: ObjectKind,
+    digest: &str,
+    size: u64,
+    now: DateTime<Utc>,
+) -> Result<(), StoreError> {
+    registry_object::Entity::insert(registry_object::ActiveModel {
+        repository_id: Set(repository_id),
+        kind: Set(kind.as_str().to_owned()),
+        digest: Set(digest.to_owned()),
+        size: Set(stored_size(size)?),
+        created_at: Set(now),
+    })
+    .on_conflict_do_nothing_on([
+        registry_object::Column::RepositoryId,
+        registry_object::Column::Kind,
+        registry_object::Column::Digest,
+    ])
+    .exec_without_returning(connection)
+    .await?;
+    Ok(())
+}
 
-    async fn read_bounded_payload(&self, path: &Path, limit: usize) -> Result<Vec<u8>, StoreError> {
-        let mut reader = self.read_payload(path).await?.take(limit as u64 + 1);
-        let mut bytes = Vec::new();
-        reader.read_to_end(&mut bytes).await?;
-        if bytes.len() > limit {
-            return Err(StoreError::TooLarge);
-        }
-        Ok(bytes)
-    }
+/// Lets an image expose a blob its repository holds.
+pub(super) async fn link_blob(
+    connection: &impl ConnectionTrait,
+    image_id: Uuid,
+    digest: &str,
+    now: DateTime<Utc>,
+) -> Result<(), StoreError> {
+    registry_image_blob::Entity::insert(registry_image_blob::ActiveModel {
+        image_id: Set(image_id),
+        digest: Set(digest.to_owned()),
+        created_at: Set(now),
+    })
+    .on_conflict_do_nothing_on([
+        registry_image_blob::Column::ImageId,
+        registry_image_blob::Column::Digest,
+    ])
+    .exec_without_returning(connection)
+    .await?;
+    Ok(())
+}
 
-    async fn publish_payload(
-        &self,
-        path: &Path,
-        digest: &str,
-        reader: BlobReader,
-    ) -> Result<(), StoreError> {
-        let digest = normalize_digest(digest)?;
-        let expected: BlobDigest = digest["sha256:".len()..].parse()?;
-        self.payloads
-            .store
-            .put_verified(&self.payload_key(path)?, expected, reader)
-            .await?;
-        Ok(())
-    }
+async fn delete_object_row(
+    connection: &impl ConnectionTrait,
+    repository_id: Uuid,
+    kind: ObjectKind,
+    digest: &str,
+) -> Result<(), StoreError> {
+    registry_object::Entity::delete_by_id((
+        repository_id,
+        kind.as_str().to_owned(),
+        digest.to_owned(),
+    ))
+    .exec(connection)
+    .await?;
+    Ok(())
+}
 
-    async fn delete_payload(&self, path: &Path) -> Result<(), StoreError> {
-        self.payloads.store.delete(&self.payload_key(path)?).await?;
-        Ok(())
+/// Image ids of a repository, for queries that span its images.
+async fn repository_images(
+    connection: &impl ConnectionTrait,
+    repository_id: Uuid,
+) -> Result<Vec<Uuid>, StoreError> {
+    Ok(registry_image::Entity::find()
+        .filter(registry_image::Column::RepositoryId.eq(repository_id))
+        .all(connection)
+        .await?
+        .into_iter()
+        .map(|image| image.id)
+        .collect())
+}
+
+async fn blob_linked_in_repository(
+    connection: &impl ConnectionTrait,
+    repository_id: Uuid,
+    digest: &str,
+) -> Result<bool, StoreError> {
+    let images = repository_images(connection, repository_id).await?;
+    Ok(registry_image_blob::Entity::find()
+        .filter(registry_image_blob::Column::ImageId.is_in(images))
+        .filter(registry_image_blob::Column::Digest.eq(digest))
+        .count(connection)
+        .await?
+        > 0)
+}
+
+async fn manifest_held_in_repository(
+    connection: &impl ConnectionTrait,
+    repository_id: Uuid,
+    digest: &str,
+) -> Result<bool, StoreError> {
+    let images = repository_images(connection, repository_id).await?;
+    Ok(registry_manifest::Entity::find()
+        .filter(registry_manifest::Column::ImageId.is_in(images))
+        .filter(registry_manifest::Column::Digest.eq(digest))
+        .count(connection)
+        .await?
+        > 0)
+}
+
+/// One manifest of an image, as [`record_manifest`] stores it.
+pub(super) struct ManifestRecord<'a> {
+    pub image_id: Uuid,
+    pub digest: &'a str,
+    pub media_type: &'a str,
+    pub size: u64,
+    pub facts: &'a ManifestFacts,
+    pub created_at: DateTime<Utc>,
+    /// `None` keeps an existing record's push time.
+    pub pushed_at: Option<DateTime<Utc>>,
+}
+
+/// Records a manifest of an image with its references. An existing record
+/// keeps its creation time and takes the new push time when one is given.
+pub(super) async fn record_manifest(
+    connection: &impl ConnectionTrait,
+    record: ManifestRecord<'_>,
+) -> Result<(), StoreError> {
+    let mut on_conflict = OnConflict::columns([
+        registry_manifest::Column::ImageId,
+        registry_manifest::Column::Digest,
+    ]);
+    if record.pushed_at.is_some() {
+        on_conflict.update_column(registry_manifest::Column::PushedAt);
+    } else {
+        on_conflict.do_nothing();
     }
+    registry_manifest::Entity::insert(registry_manifest::ActiveModel {
+        image_id: Set(record.image_id),
+        digest: Set(record.digest.to_owned()),
+        media_type: Set(record.media_type.to_owned()),
+        size: Set(stored_size(record.size)?),
+        subject_digest: Set(record.facts.subject_digest.clone()),
+        artifact_type: Set(record.facts.artifact_type.clone()),
+        annotations: Set(record.facts.annotations.clone()),
+        created_at: Set(record.created_at),
+        pushed_at: Set(record.pushed_at),
+    })
+    .on_conflict(on_conflict)
+    .try_insert()
+    .exec_without_returning(connection)
+    .await?;
+    for referenced in &record.facts.references {
+        registry_manifest_reference::Entity::insert(registry_manifest_reference::ActiveModel {
+            image_id: Set(record.image_id),
+            manifest_digest: Set(record.digest.to_owned()),
+            referenced_digest: Set(referenced.clone()),
+        })
+        .on_conflict_do_nothing_on([
+            registry_manifest_reference::Column::ImageId,
+            registry_manifest_reference::Column::ManifestDigest,
+            registry_manifest_reference::Column::ReferencedDigest,
+        ])
+        .exec_without_returning(connection)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Points `tag` at `digest`.
+pub(super) async fn record_tag(
+    connection: &impl ConnectionTrait,
+    image_id: Uuid,
+    tag: &str,
+    digest: &str,
+    updated_at: Option<DateTime<Utc>>,
+) -> Result<(), StoreError> {
+    registry_tag::Entity::insert(registry_tag::ActiveModel {
+        image_id: Set(image_id),
+        name: Set(tag.to_owned()),
+        digest: Set(digest.to_owned()),
+        updated_at: Set(updated_at),
+    })
+    .on_conflict(
+        OnConflict::columns([registry_tag::Column::ImageId, registry_tag::Column::Name])
+            .update_columns([
+                registry_tag::Column::Digest,
+                registry_tag::Column::UpdatedAt,
+            ])
+            .to_owned(),
+    )
+    .exec_without_returning(connection)
+    .await?;
+    Ok(())
 }
 
 /// Whether two handles point at the same store instance.
@@ -1447,42 +1596,18 @@ fn same_store(left: &Arc<dyn BlobStore>, right: &Arc<dyn BlobStore>) -> bool {
     std::ptr::addr_eq(Arc::as_ptr(left), Arc::as_ptr(right))
 }
 
-/// The directory of one image inside its repository's registry directory.
-fn image_directory(repository_path: &Path, suffix: &str) -> PathBuf {
-    repository_path.join(hex_digest(suffix.as_bytes()))
+fn blob_digest(digest: &str) -> Result<BlobDigest, StoreError> {
+    Ok(digest
+        .strip_prefix("sha256:")
+        .ok_or(StoreError::DigestInvalid)?
+        .parse()?)
 }
 
-async fn read_tags(refs_dir: &Path) -> Result<Vec<String>, StoreError> {
-    let mut result = Vec::new();
-    let mut entries = match fs::read_dir(refs_dir).await {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(result),
-        Err(error) => return Err(error.into()),
-    };
-    while let Some(entry) = entries.next_entry().await? {
-        let metadata = fs::symlink_metadata(entry.path()).await?;
-        if !metadata.file_type().is_file() {
-            continue;
-        }
-        let Ok(bytes) = read_bounded_file(&entry.path(), 4096).await else {
-            continue;
-        };
-        let Ok(meta) = serde_json::from_slice::<ReferenceMeta>(&bytes) else {
-            continue;
-        };
-        if !meta.reference.starts_with("sha256:") && valid_tag(&meta.reference) {
-            result.push(meta.reference);
-        }
-    }
-    result.sort();
-    Ok(result)
-}
-
-fn valid_suffix(value: &str) -> bool {
+pub(super) fn valid_suffix(value: &str) -> bool {
     value.is_empty() || (value.len() <= 512 && value.split('/').all(super::valid_component))
 }
 
-fn supported_manifest_media_type(value: &str) -> bool {
+pub(super) fn supported_manifest_media_type(value: &str) -> bool {
     matches!(
         value,
         OCI_IMAGE_MANIFEST_MEDIA_TYPE
@@ -1491,6 +1616,7 @@ fn supported_manifest_media_type(value: &str) -> bool {
             | DOCKER_MANIFEST_LIST_MEDIA_TYPE
     )
 }
+
 fn valid_descriptor_media_type(value: &str) -> bool {
     let Some((kind, subtype)) = value.split_once('/') else {
         return false;
@@ -1503,7 +1629,7 @@ fn valid_descriptor_media_type(value: &str) -> bool {
             .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
 }
 
-fn valid_tag(value: &str) -> bool {
+pub(super) fn valid_tag(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && (value.as_bytes()[0].is_ascii_alphanumeric() || value.as_bytes()[0] == b'_')
@@ -1524,7 +1650,7 @@ fn validate_reference(value: &str) -> Result<(), StoreError> {
     }
 }
 
-fn normalize_digest(value: &str) -> Result<String, StoreError> {
+pub(super) fn normalize_digest(value: &str) -> Result<String, StoreError> {
     let Some(hex) = value.strip_prefix("sha256:") else {
         return Err(StoreError::DigestInvalid);
     };
@@ -1534,25 +1660,12 @@ fn normalize_digest(value: &str) -> Result<String, StoreError> {
     Ok(format!("sha256:{}", hex.to_ascii_lowercase()))
 }
 
-fn hex_digest(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
-}
-
 fn now_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
 }
 
-fn update_latest(latest: &mut Option<DateTime<Utc>>, value: Option<&str>) {
-    let Some(value) = value.and_then(|value| DateTime::parse_from_rfc3339(value).ok()) else {
-        return;
-    };
-    let value = value.with_timezone(&Utc);
-    if latest.is_none_or(|current| value > current) {
-        *latest = Some(value);
-    }
-}
 async fn existing_regular_file(path: &Path) -> Result<Option<()>, StoreError> {
     match fs::symlink_metadata(path).await {
         Ok(metadata) if metadata.file_type().is_file() => Ok(Some(())),
@@ -1573,18 +1686,12 @@ async fn existing_directory(path: &Path) -> Result<Option<()>, StoreError> {
     }
 }
 
-async fn ensure_directory(path: &Path) -> Result<(), StoreError> {
+/// Creates a private directory and its parents.
+async fn ensure_directory_all(path: &Path) -> Result<(), StoreError> {
     if existing_directory(path).await?.is_some() {
         return Ok(());
     }
-    match fs::create_dir(path).await {
-        Ok(()) => {}
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error.into()),
-    }
-    if existing_directory(path).await?.is_none() {
-        return Err(StoreError::Invalid("directory disappeared".to_owned()));
-    }
+    crate::filesystem::create_private_directory_async(path).await?;
     if let Some(parent) = path.parent() {
         sync_directory(parent).await?;
     }
@@ -1609,12 +1716,12 @@ async fn regular_file_len(path: &Path) -> Result<Option<u64>, StoreError> {
     }
 }
 
-async fn read_small_file(path: &Path) -> Result<String, StoreError> {
+pub(super) async fn read_small_file(path: &Path) -> Result<String, StoreError> {
     let bytes = read_bounded_file(path, 1024).await?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-async fn read_bounded_file(path: &Path, limit: usize) -> Result<Vec<u8>, StoreError> {
+pub(super) async fn read_bounded_file(path: &Path, limit: usize) -> Result<Vec<u8>, StoreError> {
     let metadata = fs::symlink_metadata(path).await?;
     if !metadata.file_type().is_file() {
         return Err(StoreError::Invalid("expected a regular file".to_owned()));
@@ -1638,7 +1745,6 @@ async fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     let parent = path
         .parent()
         .ok_or_else(|| StoreError::Invalid("storage path has no parent".to_owned()))?;
-    ensure_directory(parent).await?;
     let temporary = parent.join(format!(".tmp-{}", Uuid::new_v4()));
     let result = async {
         let mut file = OpenOptions::new()
@@ -1692,298 +1798,5 @@ async fn cleanup_expired_uploads(root: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn json_contains_digest(bytes: &[u8], digest: &str) -> bool {
-    let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
-        return false;
-    };
-    let references = |descriptor: &Value| {
-        descriptor
-            .get("digest")
-            .and_then(Value::as_str)
-            .is_some_and(|value| normalize_digest(value).ok().as_deref() == Some(digest))
-    };
-    value.get("config").is_some_and(references)
-        || ["layers", "manifests"].into_iter().any(|key| {
-            value
-                .get(key)
-                .and_then(Value::as_array)
-                .is_some_and(|descriptors| descriptors.iter().any(references))
-        })
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::body::Bytes;
-
-    #[test]
-    fn underscore_prefixed_tags_are_valid() {
-        assert!(valid_tag("_test"));
-    }
-
-    struct Fixture {
-        root: PathBuf,
-        storage_key: Uuid,
-        payloads: Arc<dyn BlobStore>,
-        image: ImageStore,
-        owner: Uuid,
-    }
-
-    impl Fixture {
-        async fn new() -> Self {
-            let root =
-                std::env::temp_dir().join(format!("gitadel-registry-test-{}", Uuid::new_v4()));
-            let storage_key = Uuid::new_v4();
-            let payloads: Arc<dyn BlobStore> = Arc::new(
-                crate::blob_store::FilesystemBlobStore::with_namespace(root.clone(), "registry")
-                    .await
-                    .unwrap(),
-            );
-            let mut fixture = Self {
-                image: RegistryStore::new().image(storage_key, root.clone(), "", payloads.clone()),
-                root,
-                storage_key,
-                payloads,
-                owner: Uuid::new_v4(),
-            };
-            fixture.image = fixture.reopen();
-            fixture
-        }
-
-        /// A fresh handle on the same image, as a later request would get.
-        fn reopen(&self) -> ImageStore {
-            RegistryStore::new().image(
-                self.storage_key,
-                self.root.join(self.storage_key.to_string()),
-                "",
-                self.payloads.clone(),
-            )
-        }
-
-        async fn blob(&self, bytes: &'static [u8]) -> String {
-            let digest = format!("sha256:{}", hex_digest(bytes));
-            let id = self.image.start_upload(self.owner).await.unwrap();
-            self.image
-                .append_upload(id, self.owner, Body::from(bytes), None)
-                .await
-                .unwrap();
-            self.image
-                .finish_upload(id, self.owner, &digest)
-                .await
-                .unwrap();
-            digest
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.root);
-        }
-    }
-
-    #[tokio::test]
-    async fn cancelled_chunks_resume_without_blocking_other_uploads() {
-        let fixture = Fixture::new().await;
-        let id = fixture.image.start_upload(fixture.owner).await.unwrap();
-        fixture
-            .image
-            .append_upload(id, fixture.owner, Body::from("head"), None)
-            .await
-            .unwrap();
-        let (sent, received) = tokio::sync::oneshot::channel();
-        let stream = futures_util::stream::once(async {
-            Ok::<_, std::io::Error>(Bytes::from_static(b"uncommitted"))
-        })
-        .chain(futures_util::stream::once(async move {
-            let _ = sent.send(());
-            std::future::pending::<Result<Bytes, std::io::Error>>().await
-        }));
-        let image = fixture.image.clone();
-        let owner = fixture.owner;
-        let pending = tokio::spawn(async move {
-            image
-                .append_upload(id, owner, Body::from_stream(stream), None)
-                .await
-        });
-        received.await.unwrap();
-        let other = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            fixture.image.start_upload(owner),
-        )
-        .await
-        .expect("a stalled client must not block another upload")
-        .unwrap();
-        fixture.image.cancel_upload(other, owner).await.unwrap();
-        pending.abort();
-        let _ = pending.await;
-        let reopened = fixture.reopen();
-        assert_eq!(reopened.upload_status(id, owner).await.unwrap(), Some(4));
-        reopened
-            .append_upload(id, owner, Body::from("tail"), Some((4, 7)))
-            .await
-            .unwrap();
-        let digest = format!("sha256:{}", hex_digest(b"headtail"));
-        reopened.finish_upload(id, owner, &digest).await.unwrap();
-        let (mut blob, _) = reopened.blob_reader(&digest, None).await.unwrap().unwrap();
-        let mut bytes = Vec::new();
-        blob.read_to_end(&mut bytes).await.unwrap();
-        assert_eq!(bytes, b"headtail");
-    }
-
-    #[tokio::test]
-    async fn upload_owners_cannot_read_append_or_cancel_each_others_sessions() {
-        let fixture = Fixture::new().await;
-        let id = fixture.image.start_upload(fixture.owner).await.unwrap();
-        let stranger = Uuid::new_v4();
-        assert!(matches!(
-            fixture.image.upload_status(id, stranger).await,
-            Err(StoreError::UploadUnknown)
-        ));
-        assert!(matches!(
-            fixture
-                .image
-                .append_upload(id, stranger, Body::from("stolen"), None)
-                .await,
-            Err(StoreError::UploadUnknown)
-        ));
-        assert!(matches!(
-            fixture.image.cancel_upload(id, stranger).await,
-            Err(StoreError::UploadUnknown)
-        ));
-        assert_eq!(
-            fixture
-                .image
-                .upload_status(id, fixture.owner)
-                .await
-                .unwrap(),
-            Some(0)
-        );
-    }
-
-    #[tokio::test]
-    async fn referenced_manifest_deletion_preserves_pull_and_later_releases_blobs() {
-        let fixture = Fixture::new().await;
-        let config = fixture.blob(b"{}").await;
-        let bytes = serde_json::to_vec(&serde_json::json!({
-            "schemaVersion": 2, "mediaType": OCI_IMAGE_MANIFEST_MEDIA_TYPE,
-            "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": config, "size": 2},
-            "layers": []
-        })).unwrap();
-        let child = fixture
-            .image
-            .put_manifest("child", OCI_IMAGE_MANIFEST_MEDIA_TYPE, &bytes)
-            .await
-            .unwrap();
-        let index = serde_json::to_vec(&serde_json::json!({
-            "schemaVersion": 2, "mediaType": OCI_IMAGE_INDEX_MEDIA_TYPE,
-            "manifests": [{"mediaType": OCI_IMAGE_MANIFEST_MEDIA_TYPE, "digest": child.digest, "size": child.bytes.len()}]
-        })).unwrap();
-        let parent = fixture
-            .image
-            .put_manifest("index", OCI_IMAGE_INDEX_MEDIA_TYPE, &index)
-            .await
-            .unwrap();
-        assert!(matches!(
-            fixture.image.delete_manifest(&child.digest).await,
-            Err(StoreError::Referenced)
-        ));
-        assert_eq!(
-            fixture
-                .image
-                .get_manifest("child")
-                .await
-                .unwrap()
-                .unwrap()
-                .bytes,
-            bytes
-        );
-        fixture.image.delete_manifest(&parent.digest).await.unwrap();
-        fixture.image.delete_manifest(&child.digest).await.unwrap();
-        assert!(fixture.image.delete_blob(&config).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn referrers_use_config_type_when_image_artifact_type_is_empty() {
-        let fixture = Fixture::new().await;
-        let config = fixture.blob(b"{}").await;
-        let subject = format!("sha256:{}", hex_digest(b"missing"));
-        let config_type = "application/vnd.gitadel.proof.config";
-        let bytes = serde_json::to_vec(&serde_json::json!({
-            "schemaVersion": 2, "mediaType": OCI_IMAGE_MANIFEST_MEDIA_TYPE,
-            "artifactType": "",
-            "config": {"mediaType": config_type, "digest": config, "size": 2},
-            "layers": [],
-            "subject": {"mediaType": OCI_IMAGE_MANIFEST_MEDIA_TYPE, "digest": subject, "size": 7}
-        }))
-        .unwrap();
-        let manifest = fixture
-            .image
-            .put_manifest("proof", OCI_IMAGE_MANIFEST_MEDIA_TYPE, &bytes)
-            .await
-            .unwrap();
-        let referrers = fixture
-            .image
-            .referrers(&subject, Some(config_type))
-            .await
-            .unwrap();
-        assert_eq!(
-            referrers
-                .iter()
-                .map(|value| (value["digest"].as_str(), value["artifactType"].as_str()))
-                .collect::<Vec<_>>(),
-            vec![(Some(manifest.digest.as_str()), Some(config_type))]
-        );
-    }
-
-    #[tokio::test]
-    async fn referrers_allow_missing_subjects_and_ignore_uncommitted_objects() {
-        let fixture = Fixture::new().await;
-        let subject = format!("sha256:{}", hex_digest(b"missing"));
-        let bytes = serde_json::to_vec(&serde_json::json!({
-            "schemaVersion": 2, "mediaType": OCI_IMAGE_INDEX_MEDIA_TYPE,
-            "artifactType": "application/vnd.gitadel.proof", "manifests": [],
-            "subject": {"mediaType": OCI_IMAGE_MANIFEST_MEDIA_TYPE, "digest": subject, "size": 7}
-        }))
-        .unwrap();
-        let manifest = fixture
-            .image
-            .put_manifest("proof", OCI_IMAGE_INDEX_MEDIA_TYPE, &bytes)
-            .await
-            .unwrap();
-        fs::write(
-            fixture
-                .image
-                .manifests_dir()
-                .join("objects")
-                .join(".tmp-interrupted"),
-            &bytes,
-        )
-        .await
-        .unwrap();
-        let referrers = fixture
-            .image
-            .referrers(&subject, Some("application/vnd.gitadel.proof"))
-            .await
-            .unwrap();
-        assert_eq!(
-            referrers
-                .iter()
-                .map(|value| value["digest"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            vec![manifest.digest.as_str()]
-        );
-        fixture
-            .image
-            .delete_manifest(&manifest.digest)
-            .await
-            .unwrap();
-        assert!(
-            fixture
-                .image
-                .referrers(&subject, None)
-                .await
-                .unwrap()
-                .is_empty()
-        );
-    }
-}
+mod tests;

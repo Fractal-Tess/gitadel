@@ -68,6 +68,7 @@ mod m20260927_000067_user_email;
 mod m20260927_000068_notification_preferences;
 mod m20260929_000069_storage_domains;
 mod m20260929_000071_registry_upgrades;
+mod m20260929_000072_registry_metadata;
 
 #[cfg(test)]
 mod tests;
@@ -149,6 +150,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260927_000062_action_reruns::Migration),
             Box::new(m20260929_000069_storage_domains::Migration),
             Box::new(m20260929_000071_registry_upgrades::Migration),
+            Box::new(m20260929_000072_registry_metadata::Migration),
         ]
     }
 }

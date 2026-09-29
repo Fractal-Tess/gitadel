@@ -41,18 +41,13 @@ pub(crate) async fn browse(
     jar: CookieJar,
 ) -> Result<Json<RegistryResponse>, ApiError> {
     let repository = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
-    let _operation = state.registry_storage().lock_operation().await;
     let registry_host = registry_host(&state)?;
     let image_prefix = format!(
         "{registry_host}/{}/{}",
         repository.namespace, repository.name
     );
-    let images = RegistryStore::new()
-        .browse_images(
-            &state.registry_path(&repository),
-            repository.storage_key,
-            state.registry_storage().store(),
-        )
+    let images = RegistryStore::new(state.identity().database().clone(), state.registry_root())
+        .browse_images(repository.id)
         .await
         .map_err(ApiError::internal)?
         .into_iter()
