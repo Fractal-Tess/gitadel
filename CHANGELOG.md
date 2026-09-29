@@ -4,6 +4,13 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-09-29
+
+### Changed
+
+- The sign-in and registration pages are split in two: an animated panel with the instance mark and tagline on the left, and the form beside it without a card. On narrow screens the panel becomes a banner above the form.
+- The animated background is now a soft, misty ravine of faint creases around a dark void, replacing the contour-line canyon.
+
 ## [0.16.0] - 2026-09-29
 
 ### Changed
@@ -402,7 +409,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.13.1...v0.14.0
