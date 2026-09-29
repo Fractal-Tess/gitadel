@@ -527,7 +527,7 @@ copy `rootCA-key.pem` or the Gitadel private key to another device.
 ## Container registry
 
 Gitadel includes a Docker/OCI registry at `/v2/` on its existing HTTP origin.
-It needs no separate registry process, port, or data volume.
+It needs no separate registry process or port.
 
 Create a lowercase Git repository such as `archivist/my-app` first, through
 the web UI or `gtd repo create`. Under **Account settings → API tokens**, create
@@ -584,20 +584,39 @@ Unreferenced data is not garbage-collected automatically.
 Blobs use SHA-256 and are limited to 10 GiB each; manifests are limited to
 4 MiB. External descriptor URLs are not supported. Upload sessions expire
 after 24 hours; expired sessions are cleaned up during later upload
-activity for that image.
+activity for that repository.
 
-By default, registry files live under
-`repository_root/<storage-key>.git/gitadel-registry/`, outside Git's object
-database. **Administration → Container registry** reports stored bytes,
+Tags, manifest records, and image names live in the database. Blobs and
+manifest bytes are content-addressed payloads, shared by the images of one
+repository, in the selected registry storage. By default that is the local
+registry root, `storage.registry_root` (`registry` relative to the working
+directory; `--registry-root` or `GITADEL_REGISTRY_ROOT`; `/data/registry` in
+the container image and `<dataDir>/registry` with the NixOS module), which
+holds one directory per repository storage key. Resumable upload sessions
+are always staged locally under `registry_root/uploads/` and published to
+the selected storage once their digest is verified. A layer mount between
+images of one repository only records metadata; a mount from another
+repository copies the payload, as a hard link on a filesystem.
+
+Versions up to 0.13 kept registry files inside each bare repository. On its
+first start, Gitadel moves them to the registry root, using a rename when
+both are on one filesystem and otherwise a copy that is verified by size and
+SHA-256 before the source is removed. It then imports tags and manifest
+metadata into the database and rewrites payload keys in the selected
+storage. Both steps log what they moved, resume safely after an
+interruption, and run once. Unfinished upload sessions from before the
+upgrade are discarded.
+
+**Administration → Container registry** reports stored bytes,
 blob and manifest counts, tags, images, and staged uploads. Its repository
 list supports name, owner, owner type, and byte-range filters.
 
 Choose a filesystem or S3-compatible target created under
-**Administration → Storage**, or return to repository-backed local storage.
-Git LFS and the registry can share a target but select their destinations
-independently. Changing the LFS target does not move container images.
-External registry payloads use a separate `registry/` prefix; tags, manifest
-metadata, and upload staging stay beside the local bare repository.
+**Administration → Storage**, or return to the local registry root. Because
+metadata lives in the database, the whole registry can live on either kind of
+target. Git LFS and the registry can share a target but select their
+destinations independently. Changing the LFS target does not move container
+images. Registry payloads use a separate `registry/` prefix on targets.
 
 Migration waits for in-flight write requests, then pauses registry mutations
 while it copies and verifies payload sizes and SHA-256 content. Pulls remain
@@ -608,6 +627,11 @@ payloads that were deleted from the current target before cutover.
 Renaming or transferring a repository keeps its images. Deleting a repository
 is permanent and removes its registry data from local storage and reachable
 configured targets.
+
+Backups include the registry root and the registry tables. Payloads on a
+storage target are copied into the backup, so a restored instance starts on
+the local registry root. Backups made by 0.13 restore as well; the next start
+converts their registry data as described above.
 
 ## Git LFS storage
 
