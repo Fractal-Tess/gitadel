@@ -70,7 +70,7 @@
     </Alert.Root>
   {:else}
     <div
-      class="prose max-w-none prose-code:before:content-none prose-code:after:content-none dark:prose-invert"
+      class="motion-fade prose max-w-none prose-code:before:content-none prose-code:after:content-none dark:prose-invert"
       {@attach trustedHtml(html)}
     ></div>
   {/if}

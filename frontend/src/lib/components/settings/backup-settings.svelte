@@ -624,7 +624,7 @@
       <Spinner />Loading backup providers…
     </p>
   {:else}
-    <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+    <div class="motion-list grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
       <IntegrationAddCard
         title="Add backup provider"
         description="Connect another filesystem or S3 backup destination."
@@ -892,7 +892,7 @@
           No snapshots found under this prefix.
         </p>
       {:else}
-        <div class="divide-y">
+        <div class="motion-list divide-y">
           {#each snapshots as snapshot (snapshot.key)}
             <article
               class="flex flex-wrap items-center justify-between gap-4 px-5 py-4"

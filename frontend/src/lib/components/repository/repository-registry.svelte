@@ -91,7 +91,7 @@
       >
     </Alert.Root>
   {:else if images.length}
-    <div class="mt-6 flex flex-col gap-4">
+    <div class="motion-list mt-6 flex flex-col gap-4">
       {#each images as image (image.name)}
         <Card.Root>
           <Card.Header class="gap-1">

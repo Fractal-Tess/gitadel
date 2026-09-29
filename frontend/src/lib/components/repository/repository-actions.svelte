@@ -84,7 +84,8 @@
     Loading Actions…
   </div>
 {:else if repository.actions.actionRun}
-  <div class="mx-auto grid max-w-5xl gap-5">
+  {#key repository.actions.actionRun.run.id}
+  <div class="motion-view mx-auto grid max-w-5xl gap-5">
     <div>
       <Button
         type="button"
@@ -165,7 +166,7 @@
     {/if}
 
     <div class="grid gap-5 lg:grid-cols-[18rem_minmax(0,1fr)]">
-      <div class="overflow-hidden rounded-lg border">
+      <div class="motion-list overflow-hidden rounded-lg border">
         {#each repository.actions.actionRun.jobs as job (job.id)}
           <button
             type="button"
@@ -188,7 +189,9 @@
         {/each}
       </div>
 
-      <div class="grid gap-3">
+      <!-- Picking another job fades its log in over the last one. -->
+      {#key selectedJob?.id}
+      <div class="motion-fade grid gap-3">
         {#if selectedJob?.failure_summary}
           <div
             class="rounded-md border border-destructive/30 bg-destructive/5 p-3"
@@ -243,6 +246,7 @@
           {/if}
         </div>
       </div>
+      {/key}
     </div>
 
     <section class="grid gap-3" aria-labelledby="run-artifacts-heading">
@@ -290,7 +294,7 @@
           </p>
         </div>
       {:else}
-        <ul class="overflow-hidden rounded-lg border">
+        <ul class="motion-list overflow-hidden rounded-lg border">
           {#each repository.actions.actionArtifacts as artifact (artifact.id)}
             <li
               class="flex flex-col gap-3 border-b p-4 last:border-b-0 sm:flex-row sm:items-center sm:justify-between"
@@ -317,6 +321,7 @@
       {/if}
     </section>
   </div>
+  {/key}
 {:else if !repository.actions.actionRuns || repository.actions.actionRuns.runs.length === 0}
   <Empty.Root class="mx-auto max-w-xl border border-dashed">
     <Empty.Header>
@@ -337,7 +342,7 @@
     {/if}
   </Empty.Root>
 {:else}
-  <div class="mx-auto max-w-5xl">
+  <div class="motion-view mx-auto max-w-5xl">
     <header class="mb-5 flex items-center justify-between gap-4">
       <div>
         <h1 class="text-xl font-semibold">Actions</h1>
@@ -359,7 +364,7 @@
         </Button>
       </div>
     </header>
-    <div class="overflow-hidden rounded-lg border">
+    <div class="motion-list overflow-hidden rounded-lg border">
       {#each repository.actions.actionRuns.runs as run (run.id)}
         <button
           type="button"

@@ -316,7 +316,7 @@
         <Spinner class="size-4" /> Loading storage targets…
       </div>
     {:else}
-      <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+      <div class="motion-list grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         <IntegrationAddCard
           title="Add storage target"
           description="Connect a local filesystem or S3-compatible destination."

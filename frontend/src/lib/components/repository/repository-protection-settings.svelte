@@ -209,7 +209,7 @@
           No branches or tags are protected.
         </p>
       {:else}
-        <ul class="grid gap-3">
+        <ul class="motion-list grid gap-3">
           {#each rules as rule (rule.id)}
             <li class="grid gap-3 rounded-md border p-4">
               <div class="flex flex-wrap items-center justify-between gap-2">

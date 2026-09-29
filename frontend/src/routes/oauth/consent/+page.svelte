@@ -58,7 +58,9 @@
 </svelte:head>
 
 <main class="grid min-h-screen place-items-center bg-background px-5 py-12">
-  <section class="w-full max-w-md rounded-md border bg-card/25 p-6 shadow-sm">
+  <section
+    class="motion-rise w-full max-w-md rounded-md border bg-card/25 p-6 shadow-sm"
+  >
     <div class="flex items-center gap-2">
       <BrandMark />
       <span class="text-sm font-bold tracking-[-0.035em]">

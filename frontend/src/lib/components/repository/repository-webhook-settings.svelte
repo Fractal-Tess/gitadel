@@ -156,7 +156,7 @@
     class="grid gap-5 lg:grid-cols-[minmax(0,1.25fr)_minmax(18rem,0.75fr)]"
   >
     <ul
-      class="divide-y rounded-lg border"
+      class="motion-list divide-y rounded-lg border"
       aria-busy={repository.webhooks.webhooksLoading}
     >
       {#if repository.webhooks.webhooksLoading && !repository.webhooks.webhooksLoaded}
@@ -371,7 +371,7 @@
                     expandedDeliveryListId !== hook.id &&
                     deliveries.length > DELIVERY_PREVIEW_COUNT}
                   <ul
-                    class="mt-2 divide-y rounded-md border text-sm"
+                    class="motion-list mt-2 divide-y rounded-md border text-sm"
                     aria-label={`Recent deliveries for ${hook.config.url}`}
                   >
                     {#each collapsed ? deliveries.slice(0, DELIVERY_PREVIEW_COUNT) : deliveries as delivery (delivery.id)}

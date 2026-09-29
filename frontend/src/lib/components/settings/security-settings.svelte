@@ -374,7 +374,7 @@
       </Card.Header>
 
       <Card.Content class="grid max-w-2xl gap-5">
-        <ul class="grid gap-2">
+        <ul class="motion-list grid gap-2">
           {#each credentials.passkeys as passkey (passkey.id)}
             <li
               class="flex items-center justify-between gap-3 rounded-lg border bg-background/30 p-3"
@@ -444,7 +444,7 @@
 
   {#if view === "ssh-keys"}
     <section class="space-y-6">
-      <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+      <div class="motion-list grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         <IntegrationAddCard
           title="New SSH key"
           description="Add a public key for Git authentication and commit signing."
@@ -590,7 +590,7 @@
 
   {#if view === "api-tokens"}
     <section class="space-y-6">
-      <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+      <div class="motion-list grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         <IntegrationAddCard
           title="New API token"
           description="Create a scoped credential for scripts and integrations."

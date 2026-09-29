@@ -221,7 +221,7 @@
           </Button>
         {/if}
       </div>
-      <div class="divide-y">
+      <div class="motion-list divide-y">
         {#each batch.items as item (item.id)}
           <div
             class="grid gap-3 px-5 py-4 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center"

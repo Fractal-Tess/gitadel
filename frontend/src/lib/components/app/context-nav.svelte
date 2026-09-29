@@ -58,20 +58,32 @@
 
   // The active tab's underline is one element that slides between tabs
   // rather than one per tab, so switching reads as movement along the bar.
+  // The secondary row's highlighted pill slides the same way.
   let indicator = $state<{ left: number; width: number } | null>(null);
+  let pill = $state<{ left: number; width: number } | null>(null);
   let indicatorReady = $state(false);
 
-  function placeIndicator(): void {
-    const current = primaryList?.querySelector<HTMLElement>(
-      "[aria-current=page]",
-    );
-    indicator = current
-      ? { left: current.offsetLeft + 12, width: current.offsetWidth - 24 }
+  function measure(
+    list: HTMLElement | undefined,
+    inset: number,
+  ): { left: number; width: number } | null {
+    const current = list?.querySelector<HTMLElement>("[aria-current=page]");
+    return current
+      ? {
+          left: current.offsetLeft + inset,
+          width: current.offsetWidth - inset * 2,
+        }
       : null;
+  }
+
+  function placeIndicator(): void {
+    indicator = measure(primaryList, 12);
+    pill = measure(secondaryList, 0);
   }
 
   $effect(() => {
     void activeItem?.id;
+    void activeItem?.items?.find((item) => item.active)?.id;
     void items.length;
     void tick().then(() => {
       placeIndicator();
@@ -84,6 +96,7 @@
     if (!primaryList) return;
     const observer = new ResizeObserver(placeIndicator);
     observer.observe(primaryList);
+    if (secondaryList) observer.observe(secondaryList);
     return () => observer.disconnect();
   });
 
@@ -147,16 +160,28 @@
 
     {#if activeItem?.items?.length}
       <div
-        class="scrollbar-none flex overflow-x-auto border-t px-3 sm:px-5 lg:px-8"
+        class="scrollbar-none relative flex overflow-x-auto border-t px-3 sm:px-5 lg:px-8"
         bind:this={secondaryList}
       >
+        {#if pill}
+          <span
+            class={[
+              "pointer-events-none absolute top-1/2 left-0 h-10 rounded-md bg-muted",
+              indicatorReady &&
+                "transition-[translate,width] duration-300 ease-[var(--ease-out-quint)]",
+            ]}
+            style:width={`${pill.width}px`}
+            style:translate={`${pill.left}px -50%`}
+            aria-hidden="true"
+          ></span>
+        {/if}
         {#each activeItem.items as item (item.id)}
           <a
             href={item.href}
             aria-current={item.active ? "page" : undefined}
             class={[
-              "flex h-10 shrink-0 items-center gap-2 rounded-md px-3 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
-              item.active && "bg-muted text-foreground",
+              "relative flex h-10 shrink-0 items-center gap-2 rounded-md px-3 text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground",
+              item.active && "text-foreground",
             ]}
             onclick={(event) => follow(event, item)}
             onpointerenter={item.preload}

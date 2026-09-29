@@ -127,7 +127,7 @@
       {:else if keys.length === 0}
         <p class="text-sm text-muted-foreground">No deploy keys.</p>
       {:else}
-        <ul class="grid gap-3">
+        <ul class="motion-list grid gap-3">
           {#each keys as key (key.id)}
             <li
               class="flex flex-wrap items-start justify-between gap-3 rounded-md border p-4"

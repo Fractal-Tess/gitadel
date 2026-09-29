@@ -204,7 +204,7 @@
       {/if}
     </div>
   {:else if topics.length}
-    <div class="mt-3 flex flex-wrap gap-1.5">
+    <div class="motion-list mt-3 flex flex-wrap gap-1.5">
       {#each topics as topic (topic)}
         <Badge variant="secondary" class="border-border">{topic}</Badge>
       {/each}

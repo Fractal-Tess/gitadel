@@ -655,7 +655,7 @@
               <Table.Head class="text-right">Logical space</Table.Head>
             </Table.Row>
           </Table.Header>
-          <Table.Body>
+          <Table.Body class="motion-list">
             {#each usage.repositories as repository (repository.repository_id)}
               <Table.Row>
                 <Table.Cell>

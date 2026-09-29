@@ -156,13 +156,13 @@
       {id}
       {placeholder}
       {maxlength}
-      class="rounded-none border-0 font-mono text-sm focus-visible:ring-0 {className}"
+      class="motion-fade rounded-none border-0 font-mono text-sm focus-visible:ring-0 {className}"
       onpaste={onPaste}
       ondrop={onDrop}
       ondragover={onDragOver}
     />
   {:else}
-    <div class="p-4 {className}">
+    <div class="motion-fade p-4 {className}">
       {#if previewHtml}
         <div
           class="prose max-w-none text-sm prose-code:before:content-none prose-code:after:content-none dark:prose-invert"

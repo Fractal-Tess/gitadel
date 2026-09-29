@@ -160,7 +160,9 @@
   {/if}
 {/snippet}
 
-<div class="mx-auto max-w-6xl">
+<!-- Opening an issue, or going back to the list, settles the new view in. -->
+{#key repository.issueNumber}
+<div class="motion-view mx-auto max-w-6xl">
   {#if repository.issueNumber && !repository.issues.selectedIssue}
     <div class="py-20 text-center text-sm text-muted-foreground">
       {#if repository.error}
@@ -262,8 +264,11 @@
           {/if}
         </article>
 
-        {#each repository.issues.issueComments as comment (comment.id)}
-          <article class="overflow-hidden rounded-md border">
+        {#each repository.issues.issueComments as comment, index (comment.id)}
+          <article
+            class="motion-rise overflow-hidden rounded-md border"
+            style:--stagger={index + 1}
+          >
             <header
               class="flex items-center gap-3 border-b bg-muted/20 px-4 py-3 text-sm"
             >
@@ -604,6 +609,7 @@
     </div>
   {/if}
 </div>
+{/key}
 
 <IssueComposerDialog
   bind:open={composerOpen}

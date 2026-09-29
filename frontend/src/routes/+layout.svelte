@@ -224,7 +224,7 @@
     bind:open={shell.railOpen}
     onOpenChange={(open) => shell.setRailOpen(open)}
     style="--sidebar-width: 15rem; --sidebar-width-icon: 3.5rem;"
-    class="h-svh min-h-0 flex-col overflow-hidden bg-background"
+    class="motion-fade h-svh min-h-0 flex-col overflow-hidden bg-background"
   >
     <AppHeader />
     <div class="flex min-h-0 w-full flex-1">

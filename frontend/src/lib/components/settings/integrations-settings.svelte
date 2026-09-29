@@ -415,7 +415,7 @@
       <Alert.Description>{loadError}</Alert.Description>
     </Alert.Root>
   {:else}
-    <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+    <div class="motion-list grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
       <IntegrationAddCard
         description={`Connect another service to ${namespace.label}.`}
         onclick={openCreate}

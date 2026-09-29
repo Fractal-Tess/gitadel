@@ -155,7 +155,7 @@
     </section>
   {/if}
 
-  <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+  <div class="motion-list grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
     <IntegrationAddCard
       title="New application"
       description="Register a client with its exact OAuth redirect URI."

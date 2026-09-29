@@ -520,7 +520,7 @@
       <Alert.Description>{loadError}</Alert.Description>
     </Alert.Root>
   {:else}
-    <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+    <div class="motion-list grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
       <IntegrationAddCard
         description="Add another service instance or reuse an existing connection."
         onclick={openCreate}

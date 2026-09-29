@@ -155,7 +155,10 @@
   <Card.Content
     class="grid gap-5 lg:grid-cols-[minmax(0,1.25fr)_minmax(18rem,0.75fr)]"
   >
-    <ul class="divide-y rounded-lg border self-start" aria-busy={loading}>
+    <ul
+      class="motion-list divide-y self-start rounded-lg border"
+      aria-busy={loading}
+    >
       {#if loading}
         <li class="px-5 py-12 text-center text-sm text-foreground/70">
           Loading collaborators…

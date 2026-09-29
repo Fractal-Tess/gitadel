@@ -89,7 +89,7 @@
   {:else if error}
     <p class="px-5 py-6 text-sm text-destructive">{error}</p>
   {:else}
-    <ul class="divide-y px-5" aria-busy={loading}>
+    <ul class="motion-list divide-y px-5" aria-busy={loading}>
       {#each invitations as invitation (invitation.id)}
         <li class="flex flex-wrap items-center justify-between gap-3 py-3">
           <div class="min-w-0 text-sm">

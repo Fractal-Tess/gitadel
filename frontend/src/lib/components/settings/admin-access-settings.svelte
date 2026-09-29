@@ -200,7 +200,7 @@
         </p>
       {:else}
         <ul
-          class="max-h-[32rem] divide-y overflow-auto px-5"
+          class="motion-list max-h-[32rem] divide-y overflow-auto px-5"
           aria-live="polite"
         >
           {#each state.auditEvents as event (event.id)}

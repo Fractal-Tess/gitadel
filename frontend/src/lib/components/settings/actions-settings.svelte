@@ -209,7 +209,7 @@
       </Alert.Root>
     {/if}
 
-    <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+    <div class="motion-list grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
       <IntegrationAddCard
         title="Add runner"
         description={`Register a Forgejo Runner for ${scope.label}.`}

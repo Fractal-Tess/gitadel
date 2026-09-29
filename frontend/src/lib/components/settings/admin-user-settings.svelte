@@ -207,7 +207,7 @@
           >
         </Table.Row>
       </Table.Header>
-      <Table.Body>
+      <Table.Body class="motion-list">
         {#each users as user (user.id)}
           <Table.Row>
             <Table.Cell class="pl-5">

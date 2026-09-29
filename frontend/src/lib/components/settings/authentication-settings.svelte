@@ -297,7 +297,7 @@
           Each enabled provider gets its own button on the sign-in page.
         </p>
       </div>
-      <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+      <div class="motion-list grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         <IntegrationAddCard
           title="Add identity provider"
           description="Connect an OpenID Connect provider for external account access."

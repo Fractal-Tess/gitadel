@@ -362,11 +362,14 @@
       </Tabs.List>
     </Tabs.Root>
 
-    <div class="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,0.8fr)]">
+    {#key mode}
+    <div
+      class="motion-view grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,0.8fr)]"
+    >
       {#if mode === "provider"}
         <section>
           <h2 class="text-sm font-medium">1. Choose a source</h2>
-          <div class="mt-3 grid gap-3 sm:grid-cols-2">
+          <div class="motion-list mt-3 grid gap-3 sm:grid-cols-2">
             {#each providers as candidate (candidate.id)}
               {@const Icon = candidate.icon}
               <button
@@ -544,8 +547,9 @@
         </Card.Root>
       </form>
     </div>
+    {/key}
   {:else}
-    <div class="grid gap-5">
+    <div class="motion-view grid gap-5">
       <Card.Root>
         <Card.Header>
           <Card.Title>
@@ -615,7 +619,7 @@
             >{selectedCount} selected</span
           >
         </div>
-        <div class="max-h-[32rem] divide-y overflow-y-auto">
+        <div class="motion-list max-h-[32rem] divide-y overflow-y-auto">
           {#each filteredRepositories as repository (repository.id)}
             <div
               class="grid gap-3 p-4 md:grid-cols-[auto_minmax(0,1fr)_15rem_8rem] md:items-center"

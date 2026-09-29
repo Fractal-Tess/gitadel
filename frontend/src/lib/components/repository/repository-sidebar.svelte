@@ -423,7 +423,10 @@
         </span>
       </div>
       {#if repository.browser.stats.length}
-        <div class="mt-4 flex h-1.5 overflow-hidden rounded-full bg-muted">
+        <!-- The language bar sweeps out from the left as the stats arrive. -->
+        <div
+          class="motion-grow mt-4 flex h-1.5 overflow-hidden rounded-full bg-muted"
+        >
           {#each repository.browser.stats as item (item.language)}
             <span
               style:width={`${repository.browser.totalLines ? ((item.code + item.comments) / repository.browser.totalLines) * 100 : 0}%`}
@@ -431,7 +434,7 @@
             ></span>
           {/each}
         </div>
-        <ul class="mt-4 flex flex-col gap-1">
+        <ul class="motion-list mt-4 flex flex-col gap-1">
           {#each repository.browser.stats as item (item.language)}
             <li>
               <Tooltip.Root>

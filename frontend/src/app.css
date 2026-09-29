@@ -335,6 +335,12 @@
   }
 }
 
+@keyframes motion-grow {
+  from {
+    transform: scaleX(0);
+  }
+}
+
 @keyframes motion-fade-out {
   to {
     opacity: 0;
@@ -346,6 +352,50 @@
   .motion-rise {
     animation: motion-rise 360ms var(--ease-out-quint) backwards;
     animation-delay: calc(min(var(--stagger, 0), 12) * 35ms);
+  }
+
+  /*
+   * A list whose items settle in one after another by position, for lists
+   * that do not track an index themselves. Items added later rise in too.
+   */
+  .motion-list > * {
+    animation: motion-rise 360ms var(--ease-out-quint) backwards;
+  }
+  .motion-list > :nth-child(2) {
+    animation-delay: 35ms;
+  }
+  .motion-list > :nth-child(3) {
+    animation-delay: 70ms;
+  }
+  .motion-list > :nth-child(4) {
+    animation-delay: 105ms;
+  }
+  .motion-list > :nth-child(5) {
+    animation-delay: 140ms;
+  }
+  .motion-list > :nth-child(6) {
+    animation-delay: 175ms;
+  }
+  .motion-list > :nth-child(7) {
+    animation-delay: 210ms;
+  }
+  .motion-list > :nth-child(8) {
+    animation-delay: 245ms;
+  }
+  .motion-list > :nth-child(9) {
+    animation-delay: 280ms;
+  }
+  .motion-list > :nth-child(10) {
+    animation-delay: 315ms;
+  }
+  .motion-list > :nth-child(11) {
+    animation-delay: 350ms;
+  }
+  .motion-list > :nth-child(12) {
+    animation-delay: 385ms;
+  }
+  .motion-list > :nth-child(n + 13) {
+    animation-delay: 420ms;
   }
 
   /* A view replacing another in the same frame, such as a repository tab. */
@@ -367,6 +417,12 @@
   .motion-cell {
     animation: motion-cell 320ms var(--ease-out-quint) backwards;
     animation-delay: calc(var(--stagger, 0) * 7ms);
+  }
+
+  /* A bar sweeping out from its start, such as a language breakdown. */
+  .motion-grow {
+    transform-origin: left;
+    animation: motion-grow 700ms var(--ease-out-quint) backwards;
   }
 
   /* A brief swell that confirms a toggle, such as favoriting. */
