@@ -11,12 +11,12 @@ use sha2::{Digest as _, Sha256};
 use super::*;
 use crate::{
     blob_store::{
-        BlobDigest, ObjectKey, StorageDomain as _,
+        BlobDigest, StorageDomain as _,
         targets::{self, StorageTargetConfiguration},
     },
     config::Settings,
     database,
-    entity::lfs_object,
+    entity::{lfs_object, registry_object},
     identity,
 };
 
@@ -164,15 +164,14 @@ impl Fixture {
                 .await
                 .unwrap();
             }
-            // Registry usage is measured from the stored payloads.
+            // Registry usage is read from the object catalog; the payload is
+            // stored too so the store matches what the registry would write.
             "registry" => {
-                let image = hex::encode(Sha256::digest(b""));
-                let key = ObjectKey::new(format!(
-                    "registry/{}/{image}/blobs/{}/{}/{hex}",
+                let key = crate::registry::storage::object_key(
                     repository.storage_key,
-                    &hex[..2],
-                    &hex[2..4]
-                ))
+                    crate::registry::storage::ObjectKind::Blob,
+                    &hex,
+                )
                 .unwrap();
                 self.domain("registry")
                     .await
@@ -181,6 +180,16 @@ impl Fixture {
                     .put_verified(&key, digest, Box::pin(std::io::Cursor::new(payload)))
                     .await
                     .unwrap();
+                registry_object::ActiveModel {
+                    repository_id: Set(repository.id),
+                    kind: Set("blob".to_owned()),
+                    digest: Set(format!("sha256:{hex}")),
+                    size: Set(i64::try_from(size).unwrap()),
+                    created_at: Set(Utc::now()),
+                }
+                .insert(self.state.database())
+                .await
+                .unwrap();
             }
             other => panic!("no fixture layout for {other}"),
         }
