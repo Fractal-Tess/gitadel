@@ -646,6 +646,46 @@ gitadel lfs target add-s3 \
 
 The target must be empty or contain Gitadel's matching ownership marker. S3 committed-object metadata is verified before reads, listings, migration cutover, and backup creation. Restores always materialize LFS data into the running instance's configured local `lfs_root`; restored database-backed targets remain inactive until an administrator migrates to one explicitly.
 
+### Storage domains API and CLI
+
+Git LFS (`lfs`) and the container registry (`registry`) are storage domains
+that share one administrator API. Both Administration pages use it, and every
+endpoint requires an administrator:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/v1/admin/storage/domains` | Every domain with its active target or local root, usage totals, and active and last migration |
+| `GET /api/v1/admin/storage/domains/{domain}` | One domain's status |
+| `GET /api/v1/admin/storage/domains/{domain}/repositories` | Per-repository usage; accepts `search`, `owner`, `owner_type` (`user` or `organization`), `min_bytes`, `max_bytes`, `sort` (`bytes_desc`, `bytes_asc`, `name`), `limit` (1-100, default 10), and `offset` |
+| `POST /api/v1/admin/storage/domains/{domain}/migrate` | Start an online migration; send `{"target_id": "..."}` or `{"local": true}`, with an optional `batch_size` |
+| `GET /api/v1/admin/storage/domains/{domain}/migrations/{operation_id}` | Migration progress as JSON |
+| `GET /api/v1/admin/storage/domains/{domain}/migrations/{operation_id}/events` | Migration progress as server-sent events |
+
+An unknown domain returns 404. Domain-specific counters, such as registry
+tags and staged uploads, appear under `details` and are described by the
+status's `detail_fields`.
+
+```bash
+gtd admin storage domain list
+gtd admin storage domain status registry
+gtd admin storage domain repositories lfs --owner-type organization --min-bytes 1048576
+gtd admin storage domain migrate registry --target "$TARGET_ID"
+gtd admin storage domain migrate lfs --local
+gtd admin storage domain progress registry "$OPERATION_ID"
+```
+
+`progress` streams JSON Lines until the migration finishes; add `--once` to
+print the current state.
+
+The per-domain routes `/api/v1/admin/storage/lfs/status`,
+`/api/v1/admin/storage/lfs/repositories`, `/api/v1/admin/storage/migrations`,
+`/api/v1/admin/storage/progress/{operation_id}` (outside maintenance mode), and
+`/api/v1/admin/storage/registry/{status,repositories,migrate,migrations/{operation_id}/events}`
+are deprecated aliases of the domain API and will be removed in a later
+release. The `gtd admin storage lfs-status`, `lfs-repositories`, `migrate`,
+and `progress` commands and `gtd admin registry` now call the domain API and
+are deprecated as well.
+
 ## Backups
 
 Offline backups made with the `gitadel` server binary use a storage lock to
