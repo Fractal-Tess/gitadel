@@ -4,6 +4,8 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-29
+
 ### Changed
 
 - Redesigned the sign-in and registration pages: a centered card over an animated WebGL canyon background, with passkey and single sign-on buttons above the password form and a show/hide password toggle. The background pauses when hidden and stays still with reduced motion.
@@ -11,6 +13,7 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 ### Fixed
 
 - Full HTTP clones of repositories with many refs no longer fail with "expected 'packfile'". Gitadel now accepts the gzip-compressed request bodies Git sends for large negotiations.
+- Pasting a long SSH public key into the Add an SSH key dialog no longer stretches the form past the dialog; the key wraps inside the field.
 
 ## [0.15.0] - 2026-09-29
 
@@ -399,7 +402,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/Fractal-Tess/gitadel/compare/v0.13.0...v0.13.1
