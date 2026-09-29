@@ -328,6 +328,7 @@ pub mod user {
         pub is_admin: bool,
         pub default_repository_visibility: String,
         pub theme_preference: String,
+        pub motion_preference: String,
         pub disabled_at: Option<DateTimeUtc>,
         pub avatar_updated_at: Option<DateTimeUtc>,
         pub created_at: DateTimeUtc,

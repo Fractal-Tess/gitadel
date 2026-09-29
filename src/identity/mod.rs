@@ -954,6 +954,7 @@ pub async fn bootstrap_admin(
         is_admin: Set(true),
         default_repository_visibility: Set("private".to_owned()),
         theme_preference: Set("system".to_owned()),
+        motion_preference: Set("system".to_owned()),
         disabled_at: Set(None),
         avatar_updated_at: Set(None),
         created_at: Set(now),
@@ -1157,6 +1158,7 @@ pub fn router() -> Router<IdentityState> {
             put(auth::update_repository_preferences),
         )
         .route("/me/theme-preference", put(auth::update_theme_preference))
+        .route("/me/motion-preference", put(auth::update_motion_preference))
         .route("/me/password", put(auth::update_password))
         .route("/me/two-factor", get(two_factor::status))
         .route("/me/two-factor/enroll", post(two_factor::start_enrollment))
@@ -1383,6 +1385,7 @@ pub struct UserResponse {
     pub is_admin: bool,
     pub default_repository_visibility: String,
     pub theme_preference: String,
+    pub motion_preference: String,
     pub avatar_updated_at: Option<chrono::DateTime<Utc>>,
 }
 
@@ -1394,6 +1397,7 @@ impl From<user::Model> for UserResponse {
             is_admin: user.is_admin,
             default_repository_visibility: user.default_repository_visibility,
             theme_preference: user.theme_preference,
+            motion_preference: user.motion_preference,
             avatar_updated_at: user.avatar_updated_at,
         }
     }

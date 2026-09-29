@@ -316,6 +316,50 @@ pub async fn update_theme_preference(
 }
 
 #[derive(Deserialize)]
+pub struct UpdateMotionPreferenceRequest {
+    motion_preference: String,
+}
+
+/// Whether the interface animates: `system` follows the browser's
+/// reduced-motion setting, `reduce` turns animation off everywhere.
+pub async fn update_motion_preference(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(request): Json<UpdateMotionPreferenceRequest>,
+) -> Result<Json<AuthResponse>, ApiError> {
+    let actor = state
+        .authenticate(&headers, &jar, super::SCOPE_WRITE)
+        .await?;
+    require_browser_session(actor.via_api_token)?;
+    if !matches!(request.motion_preference.as_str(), "system" | "reduce") {
+        return Err(ApiError::bad_request(
+            "Motion preference must be system or reduce.",
+        ));
+    }
+
+    let actor_id = actor.user.id;
+    let motion_preference = request.motion_preference;
+    let transaction = state.database().begin().await?;
+    let mut account: user::ActiveModel = actor.user.into();
+    account.motion_preference = Set(motion_preference.clone());
+    account.updated_at = Set(Utc::now());
+    let account = account.update(&transaction).await?;
+    state
+        .audit_on(
+            &transaction,
+            Some(actor_id),
+            "account.motion_preference.update",
+            Some(motion_preference),
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(Json(AuthResponse {
+        user: account.into(),
+    }))
+}
+
+#[derive(Deserialize)]
 pub struct UpdatePasswordRequest {
     current_password: String,
     new_password: String,
@@ -523,6 +567,7 @@ pub async fn register(
         is_admin: Set(false),
         default_repository_visibility: Set("private".to_owned()),
         theme_preference: Set("system".to_owned()),
+        motion_preference: Set("system".to_owned()),
         disabled_at: Set(None),
         avatar_updated_at: Set(None),
         created_at: Set(now),

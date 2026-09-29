@@ -28,6 +28,7 @@ pub(crate) async fn owner(database: &DatabaseConnection, username: &str) -> user
         is_admin: Set(false),
         default_repository_visibility: Set("private".to_owned()),
         theme_preference: Set("system".to_owned()),
+        motion_preference: Set("system".to_owned()),
         disabled_at: Set(None),
         avatar_updated_at: Set(None),
         created_at: Set(now),

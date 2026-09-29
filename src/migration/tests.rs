@@ -1,11 +1,52 @@
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectOptions, ConnectionTrait, Database, EntityTrait,
-    QueryFilter, Set,
+    ActiveModelTrait, ColumnTrait, ConnectOptions, ConnectionTrait, Database, DbBackend,
+    EntityTrait, QueryFilter, Set, Statement,
 };
 use sea_orm_migration::MigratorTrait;
 use uuid::Uuid;
 
 use crate::entity::{repository, repository_icon};
+
+/// The owner a partly migrated database's rows point at.
+struct LegacyOwner {
+    id: Uuid,
+    username: String,
+}
+
+/// Inserts an account with plain SQL rather than through the `users` entity,
+/// which names columns that later migrations add and an older schema lacks.
+async fn legacy_owner(database: &sea_orm::DatabaseConnection) -> LegacyOwner {
+    let owner = LegacyOwner {
+        id: Uuid::new_v4(),
+        username: "migration-owner".to_owned(),
+    };
+    let now = chrono::Utc::now();
+    database
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO users (id, username, password_hash, is_admin, \
+             default_repository_visibility, theme_preference, created_at, updated_at) \
+             VALUES (?, ?, 'unused', 1, 'private', 'system', ?, ?)",
+            [
+                owner.id.into(),
+                owner.username.clone().into(),
+                now.into(),
+                now.into(),
+            ],
+        ))
+        .await
+        .unwrap();
+    database
+        .execute_raw(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO namespaces (slug, kind, user_id, organization_id, created_at) \
+             VALUES (?, 'user', ?, NULL, ?)",
+            [owner.username.clone().into(), owner.id.into(), now.into()],
+        ))
+        .await
+        .unwrap();
+    owner
+}
 
 #[tokio::test]
 async fn nullable_default_branch_migration_preserves_repository_children_and_uniqueness() {
@@ -13,13 +54,7 @@ async fn nullable_default_branch_migration_preserves_repository_children_and_uni
     options.max_connections(1);
     let database = Database::connect(options).await.unwrap();
     super::Migrator::up(&database, Some(51)).await.unwrap();
-    let owner = crate::identity::bootstrap_admin(
-        &database,
-        "migration-owner",
-        "migration-test-password".to_owned(),
-    )
-    .await
-    .unwrap();
+    let owner = legacy_owner(&database).await;
     let now = chrono::Utc::now();
     let id = Uuid::new_v4();
     let create = |id| repository::ActiveModel {
@@ -107,13 +142,7 @@ async fn action_run_event_migration_preserves_runs_and_job_references() {
     super::Migrator::up(&database, Some(before as u32))
         .await
         .unwrap();
-    let owner = crate::identity::bootstrap_admin(
-        &database,
-        "migration-owner",
-        "migration-test-password".to_owned(),
-    )
-    .await
-    .unwrap();
+    let owner = legacy_owner(&database).await;
     let now = chrono::Utc::now();
     let repository_id = Uuid::new_v4();
     repository::ActiveModel {
