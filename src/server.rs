@@ -72,6 +72,15 @@ async fn frontend_asset(name: &str) -> Option<Cow<'static, [u8]>> {
     }
 }
 
+/// Where images may load from. Beyond the instance itself, only shields.io:
+/// READMEs lean on its badges, and one trusted host leaks far less about who
+/// is reading than allowing any `https:` image would.
+const IMAGE_SOURCES: &str = "'self' data: blob: https://img.shields.io";
+
+/// Policy for API and asset responses; the frontend document adds script
+/// hashes to its own, built from the same image sources.
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://img.shields.io; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
+
 #[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
@@ -138,11 +147,9 @@ async fn request_context(request: Request, next: Next) -> Response {
         .map(|ConnectInfo(peer)| peer.ip());
     let mut response = identity::with_remote_address(address, next.run(request)).await;
     let headers = response.headers_mut();
-    headers.entry(header::CONTENT_SECURITY_POLICY).or_insert(
-        HeaderValue::from_static(
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
-        ),
-    );
+    headers
+        .entry(header::CONTENT_SECURITY_POLICY)
+        .or_insert(HeaderValue::from_static(CONTENT_SECURITY_POLICY));
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
@@ -675,7 +682,7 @@ fn frontend_content_security_policy(data: &[u8]) -> Option<HeaderValue> {
     }
     let hashes = hashes.join(" ");
     let policy = format!(
-        "default-src 'self'; script-src 'self' {hashes}; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+        "default-src 'self'; script-src 'self' {hashes}; style-src 'self' 'unsafe-inline'; img-src {IMAGE_SOURCES}; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
     );
     HeaderValue::from_str(&policy).ok()
 }
@@ -707,5 +714,37 @@ async fn shutdown_signal() {
     tokio::select! {
         () = interrupt => {},
         () = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn image_directive(policy: &str) -> &str {
+        policy
+            .split("; ")
+            .find(|directive| directive.starts_with("img-src "))
+            .expect("policy has an img-src directive")
+    }
+
+    #[test]
+    fn both_policies_allow_only_the_configured_image_sources() {
+        let expected = format!("img-src {IMAGE_SOURCES}");
+        assert_eq!(image_directive(CONTENT_SECURITY_POLICY), expected);
+
+        let document = frontend_content_security_policy(b"<script>window.x = 1</script>")
+            .expect("document policy");
+        assert_eq!(image_directive(document.to_str().unwrap()), expected);
+    }
+
+    #[test]
+    fn images_are_not_open_to_every_https_host() {
+        assert!(
+            IMAGE_SOURCES
+                .split(' ')
+                .all(|source| source != "https:" && source != "*")
+        );
+        assert!(IMAGE_SOURCES.contains("https://img.shields.io"));
     }
 }
