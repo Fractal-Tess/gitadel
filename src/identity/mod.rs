@@ -1,6 +1,5 @@
 mod admin;
-mod admin_lfs;
-mod admin_registry;
+mod admin_storage;
 mod auth;
 mod avatar;
 mod email;
@@ -1066,30 +1065,64 @@ pub fn router() -> Router<IdentityState> {
             "/admin/storage/targets",
             get(admin::list_storage_targets).post(admin::create_storage_target),
         )
-        .route("/admin/storage/lfs/status", get(admin::lfs_storage_status))
-        .route(
-            "/admin/storage/lfs/repositories",
-            get(admin_lfs::list_lfs_repository_usage),
-        )
         .route(
             "/admin/storage/targets/test",
             post(admin::test_storage_target),
         )
+        .route("/admin/storage/domains", get(admin_storage::list_domains))
+        .route(
+            "/admin/storage/domains/{domain}",
+            get(admin_storage::domain_status),
+        )
+        .route(
+            "/admin/storage/domains/{domain}/repositories",
+            get(admin_storage::domain_repositories),
+        )
+        .route(
+            "/admin/storage/domains/{domain}/migrate",
+            post(admin_storage::migrate_domain),
+        )
+        .route(
+            "/admin/storage/domains/{domain}/migrations/{operation_id}",
+            get(admin_storage::domain_migration),
+        )
+        .route(
+            "/admin/storage/domains/{domain}/migrations/{operation_id}/events",
+            get(admin_storage::domain_migration_events),
+        )
+        // Deprecated per-domain aliases of the routes above; remove after one
+        // release.
+        .route(
+            "/admin/storage/lfs/status",
+            get(admin_storage::legacy::lfs_status),
+        )
+        .route(
+            "/admin/storage/lfs/repositories",
+            get(admin_storage::legacy::lfs_repositories),
+        )
+        .route(
+            "/admin/storage/migrations",
+            post(admin_storage::legacy::lfs_migrate),
+        )
+        .route(
+            "/admin/storage/progress/{operation_id}",
+            get(admin_storage::legacy::lfs_progress),
+        )
         .route(
             "/admin/storage/registry/status",
-            get(admin_registry::registry_status),
+            get(admin_storage::legacy::registry_status),
         )
         .route(
             "/admin/storage/registry/repositories",
-            get(admin_registry::list_registry_repository_usage),
+            get(admin_storage::legacy::registry_repositories),
         )
         .route(
             "/admin/storage/registry/migrate",
-            post(admin_registry::migrate_registry),
+            post(admin_storage::legacy::registry_migrate),
         )
         .route(
             "/admin/storage/registry/migrations/{operation_id}/events",
-            get(admin_registry::registry_migration_events),
+            get(admin_storage::legacy::registry_events),
         )
         .route(
             "/admin/storage/targets/{target_id}",
@@ -1102,11 +1135,6 @@ pub fn router() -> Router<IdentityState> {
         .route(
             "/admin/storage/targets/{target_id}/usage",
             post(admin::measure_storage_target),
-        )
-        .route("/admin/storage/migrations", post(admin::migrate_storage))
-        .route(
-            "/admin/storage/progress/{operation_id}",
-            get(admin::storage_progress),
         )
         .route("/register", post(auth::register))
         .route("/setup", post(auth::setup))

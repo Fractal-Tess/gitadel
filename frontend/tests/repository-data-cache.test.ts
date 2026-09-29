@@ -16,7 +16,7 @@ import {
 } from "../src/lib/settings/backup-settings-cache.js";
 import {
   clearSettingsDataCache,
-  loadLfsStatus,
+  loadStorageDomain,
   loadStorageTargets,
   loadApiTokens,
   preloadAccountSettingsView,
@@ -212,26 +212,49 @@ describe("settings data cache", () => {
     ]);
   });
 
-  test("preloads both datasets required by Git LFS administration", async () => {
-    const paths: string[] = [];
-    globalThis.fetch = ((input: string | URL | Request) => {
-      const path = String(input);
-      paths.push(path);
-      return Promise.resolve(
-        Response.json(
-          path.endsWith("/targets") ? [] : { object_count: 0, total_bytes: 0 },
-        ),
-      );
-    }) as typeof fetch;
+  for (const domain of ["lfs", "registry"] as const) {
+    test(`preloads both datasets required by ${domain} storage administration`, async () => {
+      const paths: string[] = [];
+      globalThis.fetch = ((input: string | URL | Request) => {
+        const path = String(input);
+        paths.push(path);
+        return Promise.resolve(
+          Response.json(
+            path.endsWith("/targets")
+              ? []
+              : {
+                  name: domain,
+                  label: domain,
+                  active_target_id: null,
+                  active_target_name: null,
+                  local_label: "Local storage",
+                  local_root: "/data",
+                  usage: {
+                    repository_count: 0,
+                    object_count: 0,
+                    total_bytes: 0,
+                    details: {},
+                  },
+                  detail_fields: [],
+                  active_migration: null,
+                  last_migration: null,
+                },
+          ),
+        );
+      }) as typeof fetch;
 
-    preloadAdminSettingsView(scope, "lfs");
-    await Promise.all([loadStorageTargets(scope), loadLfsStatus(scope)]);
+      preloadAdminSettingsView(scope, domain);
+      await Promise.all([
+        loadStorageTargets(scope),
+        loadStorageDomain(scope, domain),
+      ]);
 
-    assert.deepEqual(paths.sort(), [
-      "/api/v1/admin/storage/lfs/status",
-      "/api/v1/admin/storage/targets",
-    ]);
-  });
+      assert.deepEqual(paths.sort(), [
+        `/api/v1/admin/storage/domains/${domain}`,
+        "/api/v1/admin/storage/targets",
+      ]);
+    });
+  }
 });
 
 describe("repository data cache", () => {

@@ -18,11 +18,10 @@ import {
 } from "$lib/api/sso.js";
 import { auditEventSchema, type AuditEvent } from "$lib/api/instance.js";
 import {
-  lfsStorageStatusSchema,
-  registryStorageStatusSchema,
+  storageDomainPath,
+  storageDomainStatusSchema,
   storageTargetsSchema,
-  type LfsStorageStatus,
-  type RegistryStorageStatus,
+  type StorageDomainStatus,
   type StorageTarget,
 } from "$lib/api/storage.js";
 import { requestJson } from "$lib/api/transport.js";
@@ -133,10 +132,9 @@ export type AdminSettingsView =
 const passkeys = new SettingsCache<PasskeySummary[]>();
 const sshKeys = new SettingsCache<SshKey[]>();
 const apiTokens = new SettingsCache<ApiToken[]>();
-const registryStatus = new SettingsCache<RegistryStorageStatus>();
 const oauthApplications = new SettingsCache<OauthApplication[]>();
 const storageTargets = new SettingsCache<StorageTarget[]>();
-const lfsStatus = new SettingsCache<LfsStorageStatus>();
+const storageDomains = new SettingsCache<StorageDomainStatus>();
 const adminActivity = new SettingsCache<AuditEvent[]>();
 const authenticationConfiguration =
   new SettingsCache<AuthenticationConfiguration>();
@@ -273,54 +271,32 @@ export function refreshStorageTargets(
   return loadStorageTargets(scope);
 }
 
-export function loadLfsStatus(
+function domainKey(scope: AuthorizationCacheScope, domain: string): string {
+  return `${key(scope)}:${domain}`;
+}
+
+export function loadStorageDomain(
   scope: AuthorizationCacheScope,
-): Promise<LfsStorageStatus> {
-  return lfsStatus.load(key(scope), () =>
-    requestJson("/api/v1/admin/storage/lfs/status", lfsStorageStatusSchema),
+  domain: string,
+): Promise<StorageDomainStatus> {
+  return storageDomains.load(domainKey(scope, domain), () =>
+    requestJson(storageDomainPath(domain), storageDomainStatusSchema),
   );
 }
 
-export function peekLfsStatus(
+export function peekStorageDomain(
   scope: AuthorizationCacheScope,
-): LfsStorageStatus | null {
-  return lfsStatus.peek(key(scope));
+  domain: string,
+): StorageDomainStatus | null {
+  return storageDomains.peek(domainKey(scope, domain));
 }
 
-export function setLfsStatus(
+export function refreshStorageDomain(
   scope: AuthorizationCacheScope,
-  value: LfsStorageStatus,
-): void {
-  lfsStatus.set(key(scope), value);
-}
-export function refreshLfsStatus(
-  scope: AuthorizationCacheScope,
-): Promise<LfsStorageStatus> {
-  lfsStatus.invalidate(key(scope));
-  return loadLfsStatus(scope);
-}
-export function loadRegistryStatus(
-  scope: AuthorizationCacheScope,
-): Promise<RegistryStorageStatus> {
-  return registryStatus.load(key(scope), () =>
-    requestJson(
-      "/api/v1/admin/storage/registry/status",
-      registryStorageStatusSchema,
-    ),
-  );
-}
-
-export function peekRegistryStatus(
-  scope: AuthorizationCacheScope,
-): RegistryStorageStatus | null {
-  return registryStatus.peek(key(scope));
-}
-
-export function refreshRegistryStatus(
-  scope: AuthorizationCacheScope,
-): Promise<RegistryStorageStatus> {
-  registryStatus.invalidate(key(scope));
-  return loadRegistryStatus(scope);
+  domain: string,
+): Promise<StorageDomainStatus> {
+  storageDomains.invalidate(domainKey(scope, domain));
+  return loadStorageDomain(scope, domain);
 }
 
 export function loadAdminActivity(
@@ -394,9 +370,9 @@ export function preloadAdminSettingsView(
       : view === "storage"
         ? [loadStorageTargets(scope)]
         : view === "lfs"
-          ? [loadStorageTargets(scope), loadLfsStatus(scope)]
+          ? [loadStorageTargets(scope), loadStorageDomain(scope, "lfs")]
           : view === "registry"
-            ? [loadStorageTargets(scope), loadRegistryStatus(scope)]
+            ? [loadStorageTargets(scope), loadStorageDomain(scope, "registry")]
             : view === "backups"
               ? (preloadBackupSettings(scope), [])
               : view === "activity"
@@ -411,8 +387,7 @@ export function clearSettingsDataCache(): void {
   apiTokens.clear();
   oauthApplications.clear();
   storageTargets.clear();
-  lfsStatus.clear();
-  registryStatus.clear();
+  storageDomains.clear();
   adminActivity.clear();
   authenticationConfiguration.clear();
   oidcProviders.clear();

@@ -1,20 +1,21 @@
 //! Git LFS object storage: the LFS [`StorageDomain`] and the offline
 //! `gitadel lfs` commands.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use sea_orm::{
     ColumnTrait as _, DatabaseConnection, DatabaseTransaction, EntityTrait as _, QueryFilter as _,
-    Set, sea_query::OnConflict,
+    QuerySelect as _, Set, sea_query::OnConflict,
 };
 use uuid::Uuid;
 
 use crate::{
     blob_store::{
-        BlobDigest, BlobMetadata, DomainStorage, ObjectKey, ObjectPrefix, StorageDomain,
+        BlobDigest, BlobMetadata, DomainStorage, DomainUsage, ObjectKey, ObjectPrefix,
+        RepositoryUsage, StorageDomain, UsageContext,
         targets::{self, StorageTargetConfiguration},
     },
     config::{LfsCommand, LfsTargetCommand, S3Settings, Settings, StorageSettings},
@@ -237,6 +238,38 @@ async fn catalog_object(
     .exec(database)
     .await?;
     Ok(())
+}
+
+/// LFS usage, read from the `lfs_objects` catalog. An object shared by
+/// repositories counts once for each repository that owns it.
+pub(crate) struct LfsUsage;
+
+#[async_trait]
+impl DomainUsage for LfsUsage {
+    async fn by_repository(
+        &self,
+        context: UsageContext<'_>,
+    ) -> Result<HashMap<Uuid, RepositoryUsage>> {
+        let rows = lfs_object::Entity::find()
+            .select_only()
+            .column(lfs_object::Column::RepositoryId)
+            .column_as(lfs_object::Column::Oid.count(), "object_count")
+            .column_as(lfs_object::Column::Size.sum(), "total_bytes")
+            .group_by(lfs_object::Column::RepositoryId)
+            .into_tuple::<(Uuid, i64, i64)>()
+            .all(context.database)
+            .await?;
+        rows.into_iter()
+            .map(|(repository_id, object_count, total_bytes)| {
+                let usage = RepositoryUsage {
+                    object_count: u64::try_from(object_count)?,
+                    total_bytes: u64::try_from(total_bytes)?,
+                    details: Default::default(),
+                };
+                Ok((repository_id, usage))
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
