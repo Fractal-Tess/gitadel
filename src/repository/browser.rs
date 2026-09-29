@@ -19,7 +19,7 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use comrak::{Options, markdown_to_html};
 use russh::keys::ssh_key::{HashAlg, PublicKey, SshSig};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sley::{
     GitError, GitObjectType, ObjectId, ReachableCommitOptions, ReferenceTarget,
     Repository as GitRepository, StreamControl, TagQueryOptions,
@@ -59,8 +59,18 @@ const MAX_REPOSITORY_ACTIVITY_DAYS: u16 = 365;
 const DEFAULT_OVERVIEW_PER_PAGE: usize = 20;
 const MAX_OVERVIEW_PER_PAGE: usize = 50;
 
+/// A blank `rev=` means "no revision given" and falls back to the default
+/// branch, rather than reaching the revision parser as an empty spec.
+fn blank_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.filter(|value| !value.trim().is_empty()))
+}
+
 #[derive(Deserialize)]
 pub struct BrowseQuery {
+    #[serde(default, deserialize_with = "blank_as_none")]
     pub(super) rev: Option<String>,
     #[serde(default)]
     pub(super) path: String,
@@ -92,12 +102,14 @@ impl SourceArchiveFormat {
 
 #[derive(Deserialize)]
 pub struct SourceArchiveQuery {
+    #[serde(default, deserialize_with = "blank_as_none")]
     rev: Option<String>,
     format: SourceArchiveFormat,
 }
 
 #[derive(Deserialize)]
 pub struct HistoryQuery {
+    #[serde(default, deserialize_with = "blank_as_none")]
     rev: Option<String>,
     #[serde(default = "default_page")]
     page: usize,
