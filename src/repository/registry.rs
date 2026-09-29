@@ -49,7 +49,7 @@ pub(crate) async fn browse(
     );
     let images = RegistryStore::new()
         .browse_images(
-            &state.repository_path(&repository),
+            &state.registry_path(&repository),
             repository.storage_key,
             state.registry_storage().store(),
         )

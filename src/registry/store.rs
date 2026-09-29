@@ -101,7 +101,8 @@ struct PayloadStore {
 }
 
 /// One image of a repository. Payloads go through [`PayloadStore`]; tags,
-/// manifest media types, and uploads stay in the repository directory.
+/// manifest media types, and uploads stay in the image's directory under the
+/// registry root.
 #[derive(Clone)]
 pub(super) struct ImageStore {
     image_dir: PathBuf,
@@ -206,7 +207,8 @@ impl RegistryStore {
         Self
     }
 
-    /// `store` is the registry domain's active store.
+    /// `repository_path` is the repository's directory under the registry
+    /// root, and `store` is the registry domain's active store.
     pub(super) fn image(
         &self,
         repository_storage_key: Uuid,
@@ -230,15 +232,7 @@ impl RegistryStore {
         if existing_directory(repository_path).await?.is_none() {
             return Ok(result);
         }
-        let registry = repository_path.join("gitadel-registry");
-        if existing_directory(&registry).await?.is_none() {
-            return Ok(result);
-        }
-        let root = registry.join("images");
-        if existing_directory(&root).await?.is_none() {
-            return Ok(result);
-        }
-        let mut entries = fs::read_dir(&root).await?;
+        let mut entries = fs::read_dir(repository_path).await?;
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             let metadata = fs::symlink_metadata(&path).await?;
@@ -542,24 +536,18 @@ impl ImageStore {
         self.root().join("uploads")
     }
 
-    fn repository_root(&self) -> PathBuf {
-        self.image_dir
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| self.image_dir.clone())
-    }
-
     async fn ensure_image(&self) -> Result<(), StoreError> {
-        let repository_root = self.repository_root();
-        if existing_directory(&repository_root).await?.is_none() {
-            return Err(StoreError::Invalid("repository root is missing".to_owned()));
+        let repository = self
+            .image_dir
+            .parent()
+            .ok_or_else(|| StoreError::Invalid("image directory has no parent".to_owned()))?;
+        let registry_root = repository
+            .parent()
+            .ok_or_else(|| StoreError::Invalid("registry root is missing".to_owned()))?;
+        if existing_directory(registry_root).await?.is_none() {
+            return Err(StoreError::Invalid("registry root is missing".to_owned()));
         }
-        let registry = repository_root.join("gitadel-registry");
-        ensure_directory(&registry).await?;
-        let images = registry.join("images");
-        ensure_directory(&images).await?;
+        ensure_directory(repository).await?;
         ensure_directory(&self.image_dir).await?;
         let suffix = self.root().join("suffix");
         if existing_regular_file(&suffix).await?.is_some() {
@@ -1459,12 +1447,9 @@ fn same_store(left: &Arc<dyn BlobStore>, right: &Arc<dyn BlobStore>) -> bool {
     std::ptr::addr_eq(Arc::as_ptr(left), Arc::as_ptr(right))
 }
 
-/// The metadata directory of one image inside its repository.
+/// The directory of one image inside its repository's registry directory.
 fn image_directory(repository_path: &Path, suffix: &str) -> PathBuf {
-    repository_path
-        .join("gitadel-registry")
-        .join("images")
-        .join(hex_digest(suffix.as_bytes()))
+    repository_path.join(hex_digest(suffix.as_bytes()))
 }
 
 async fn read_tags(refs_dir: &Path) -> Result<Vec<String>, StoreError> {
@@ -1749,11 +1734,8 @@ mod tests {
             let root =
                 std::env::temp_dir().join(format!("gitadel-registry-test-{}", Uuid::new_v4()));
             let storage_key = Uuid::new_v4();
-            fs::create_dir_all(root.join(format!("{storage_key}.git")))
-                .await
-                .unwrap();
             let payloads: Arc<dyn BlobStore> = Arc::new(
-                crate::registry::storage::RegistryLocalStore::new(root.clone())
+                crate::blob_store::FilesystemBlobStore::with_namespace(root.clone(), "registry")
                     .await
                     .unwrap(),
             );
@@ -1772,7 +1754,7 @@ mod tests {
         fn reopen(&self) -> ImageStore {
             RegistryStore::new().image(
                 self.storage_key,
-                self.root.join(format!("{}.git", self.storage_key)),
+                self.root.join(self.storage_key.to_string()),
                 "",
                 self.payloads.clone(),
             )

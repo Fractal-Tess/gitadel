@@ -3,6 +3,7 @@ mod error;
 mod http;
 pub(crate) mod storage;
 pub(crate) mod store;
+mod upgrade;
 
 pub use http::router;
 

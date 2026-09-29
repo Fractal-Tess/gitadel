@@ -309,7 +309,7 @@ async fn context(
         })?;
     let store = state.store.image(
         repository.storage_key,
-        state.repositories.repository_path(&repository),
+        state.repositories.registry_path(&repository),
         name.suffix,
         state.repositories.registry_storage().store(),
     );
@@ -859,7 +859,7 @@ async fn catalog(
             }
             for suffix in state
                 .store
-                .list_images(&state.repositories.repository_path(&repository))
+                .list_images(&state.repositories.registry_path(&repository))
                 .await?
             {
                 let name = if suffix.is_empty() {

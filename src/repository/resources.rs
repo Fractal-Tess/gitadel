@@ -1053,6 +1053,7 @@ async fn remove_repository(
         &state.lfs_repository_path(&repository),
     )
     .await;
+    cleanup_repository(&state.registry_path(&repository)).await;
     cleanup_repository(&state.source_archive_cache_directory(&repository)).await;
     Ok(())
 }

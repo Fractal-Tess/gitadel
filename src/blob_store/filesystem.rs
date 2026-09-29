@@ -23,6 +23,8 @@ use crate::filesystem::create_private_directory_async;
 #[derive(Clone, Debug)]
 pub struct FilesystemBlobStore {
     root: Arc<PathBuf>,
+    /// Key prefix the root stands for; `None` maps keys verbatim.
+    namespace: Option<Arc<str>>,
 }
 
 impl FilesystemBlobStore {
@@ -35,18 +37,52 @@ impl FilesystemBlobStore {
             .with_context(|| format!("could not resolve blob store {}", root.display()))?;
         Ok(Self {
             root: Arc::new(root),
+            namespace: None,
         })
     }
 
-    fn path(&self, key: &ObjectKey) -> PathBuf {
-        self.root.join(key.as_str())
+    /// A store that holds only keys under `namespace/`, with the namespace
+    /// left out of paths: key `namespace/a/b` lives at `root/a/b`.
+    pub async fn with_namespace(root: PathBuf, namespace: &str) -> Result<Self> {
+        ObjectKey::new(namespace)?;
+        Ok(Self {
+            namespace: Some(Arc::from(namespace)),
+            ..Self::new(root).await?
+        })
+    }
+
+    fn path(&self, key: &ObjectKey) -> Result<PathBuf> {
+        let relative = match &self.namespace {
+            Some(namespace) => key
+                .as_str()
+                .strip_prefix(namespace.as_ref())
+                .and_then(|rest| rest.strip_prefix('/'))
+                .with_context(|| format!("blob key {key} is outside the {namespace} store"))?,
+            None => key.as_str(),
+        };
+        Ok(self.root.join(relative))
+    }
+
+    /// The directory a listing prefix covers, relative to the root, or `None`
+    /// when no key under the prefix can live in this store.
+    fn local_prefix<'a>(&self, prefix: &'a ObjectPrefix) -> Option<&'a str> {
+        let Some(namespace) = &self.namespace else {
+            return Some(prefix.as_str());
+        };
+        let value = prefix.as_str();
+        if value.is_empty() || value == namespace.as_ref() {
+            return Some("");
+        }
+        value
+            .strip_prefix(namespace.as_ref())
+            .and_then(|rest| rest.strip_prefix('/'))
     }
 }
 
 #[async_trait]
 impl BlobStore for FilesystemBlobStore {
     async fn stat(&self, key: &ObjectKey) -> Result<Option<BlobMetadata>> {
-        let path = self.path(key);
+        let path = self.path(key)?;
         let metadata = match fs::symlink_metadata(&path).await {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -67,7 +103,7 @@ impl BlobStore for FilesystemBlobStore {
     }
 
     async fn read(&self, key: &ObjectKey) -> Result<BlobReader> {
-        let path = self.path(key);
+        let path = self.path(key)?;
         let metadata = fs::symlink_metadata(&path)
             .await
             .with_context(|| format!("could not inspect blob {}", path.display()))?;
@@ -91,7 +127,7 @@ impl BlobStore for FilesystemBlobStore {
             range.end <= metadata.size,
             "blob byte range exceeds object size"
         );
-        let path = self.path(key);
+        let path = self.path(key)?;
         let mut file = fs::File::open(&path)
             .await
             .with_context(|| format!("could not open blob {}", path.display()))?;
@@ -107,13 +143,13 @@ impl BlobStore for FilesystemBlobStore {
     ) -> Result<PutOutcome> {
         if let Some(existing) = self.stat(key).await? {
             ensure!(existing.digest == expected, DigestMismatch);
-            let size = verify_file(&self.path(key), expected).await?;
+            let size = verify_file(&self.path(key)?, expected).await?;
             return Ok(PutOutcome {
                 size,
                 created: false,
             });
         }
-        let path = self.path(key);
+        let path = self.path(key)?;
         let parent = path.parent().context("blob path has no parent")?;
         fs::create_dir_all(parent).await?;
         let temporary = parent.join(format!(".{}.upload", Uuid::new_v4().simple()));
@@ -175,7 +211,10 @@ impl BlobStore for FilesystemBlobStore {
 
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<BlobMetadata>> {
         let root = self.root.clone();
-        let prefix = prefix.as_str().to_owned();
+        let Some(prefix) = self.local_prefix(prefix).map(str::to_owned) else {
+            return Ok(Vec::new());
+        };
+        let namespace = self.namespace.clone();
         tokio::task::spawn_blocking(move || {
             let base = if prefix.is_empty() {
                 root.as_ref().clone()
@@ -195,7 +234,11 @@ impl BlobStore for FilesystemBlobStore {
                 let Some(relative) = relative.to_str() else {
                     continue;
                 };
-                let key = ObjectKey::new(relative.replace(std::path::MAIN_SEPARATOR, "/"))?;
+                let relative = relative.replace(std::path::MAIN_SEPARATOR, "/");
+                let key = ObjectKey::new(match &namespace {
+                    Some(namespace) => format!("{namespace}/{relative}"),
+                    None => relative,
+                })?;
                 let Some(oid) = key.as_str().rsplit('/').next() else {
                     continue;
                 };
@@ -215,7 +258,7 @@ impl BlobStore for FilesystemBlobStore {
     }
 
     async fn delete(&self, key: &ObjectKey) -> Result<()> {
-        match fs::remove_file(self.path(key)).await {
+        match fs::remove_file(self.path(key)?).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error.into()),
@@ -232,13 +275,13 @@ impl BlobStore for FilesystemBlobStore {
         let size = verify_file(path, expected).await?;
         if let Some(existing) = self.stat(key).await? {
             ensure!(existing.digest == expected, DigestMismatch);
-            let size = verify_file(&self.path(key), expected).await?;
+            let size = verify_file(&self.path(key)?, expected).await?;
             return Ok(PutOutcome {
                 size,
                 created: false,
             });
         }
-        let destination = self.path(key);
+        let destination = self.path(key)?;
         let parent = destination.parent().context("blob path has no parent")?;
         fs::create_dir_all(parent).await?;
         match fs::rename(path, &destination).await {
@@ -270,10 +313,10 @@ impl BlobStore for FilesystemBlobStore {
                 created: false,
             });
         }
-        let path = self.path(destination);
+        let path = self.path(destination)?;
         let parent = path.parent().context("blob path has no parent")?;
         fs::create_dir_all(parent).await?;
-        match fs::hard_link(self.path(source), &path).await {
+        match fs::hard_link(self.path(source)?, &path).await {
             Ok(()) => {
                 sync_directory(parent.to_path_buf()).await?;
                 Ok(PutOutcome {

@@ -38,6 +38,7 @@ impl Fixture {
         settings.database.url = format!("sqlite://{}?mode=rwc", root.join("gitadel.db").display());
         settings.storage.repository_root = root.join("repositories");
         settings.storage.lfs_root = root.join("lfs");
+        settings.storage.registry_root = root.join("registry");
         settings.storage.actions_artifact_root = root.join("actions");
         let database = database::connect_and_migrate(&settings.database)
             .await

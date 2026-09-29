@@ -69,7 +69,7 @@ async fn usage(
         .ok_or_else(|| ApiError::internal("Registry storage is unavailable."))?;
     let rows = storage::usage_by_repository(
         state.database(),
-        &state.runtime_settings()?.storage.repository_root,
+        &state.runtime_settings()?.storage.registry_root,
         &registry,
     )
     .await

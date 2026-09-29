@@ -36,7 +36,9 @@ use crate::{
 mod filesystem;
 mod s3;
 
-const FORMAT_VERSION: u32 = 3;
+/// Version 4 adds `registry/`, the registry root. Older archives keep registry
+/// data inside repository directories; startup moves it after a restore.
+const FORMAT_VERSION: u32 = 4;
 const MIN_FORMAT_VERSION: u32 = 1;
 const ARCHIVE_ROOT: &str = "backup";
 const MANIFEST_NAME: &str = "manifest.json";
@@ -598,6 +600,7 @@ async fn create_staged_backup(
         .with_context(|| format!("could not create {}", staging.display()))?;
     fs::create_dir(staging.join("repositories"))?;
     fs::create_dir(staging.join("lfs"))?;
+    fs::create_dir(staging.join("registry"))?;
     fs::create_dir(staging.join("actions-artifacts"))?;
     if let Some(reporter) = reporter {
         reporter.report(
@@ -640,10 +643,10 @@ async fn create_staged_backup(
     copy_tree(
         &settings.storage.repository_root,
         &staging.join("repositories"),
-        registry_objects.is_some(),
     )?;
+    copy_tree(&settings.storage.registry_root, &staging.join("registry"))?;
     if let Some(objects) = registry_objects {
-        materialize(&registry_storage, &objects, staging.join("repositories")).await?;
+        materialize(&registry_storage, &objects, staging.join("registry")).await?;
     }
     if let Some(reporter) = reporter {
         reporter.report(
@@ -651,14 +654,13 @@ async fn create_staged_backup(
             "Copying Git LFS objects and uploaded files.",
         );
     }
-    copy_tree(&settings.storage.lfs_root, &staging.join("lfs"), false)?;
+    copy_tree(&settings.storage.lfs_root, &staging.join("lfs"))?;
     if let Some(objects) = lfs_objects {
         materialize(&lfs_storage, &objects, staging.join("lfs")).await?;
     }
     copy_tree(
         &settings.storage.actions_artifact_root,
         &staging.join("actions-artifacts"),
-        false,
     )?;
     if let Some(reporter) = reporter {
         reporter.report(
@@ -1314,6 +1316,11 @@ pub fn restore_available_space(settings: &Settings) -> Result<u64> {
             .unwrap_or_else(|| Path::new(".")),
         settings
             .storage
+            .registry_root
+            .parent()
+            .unwrap_or_else(|| Path::new(".")),
+        settings
+            .storage
             .actions_artifact_root
             .parent()
             .unwrap_or_else(|| Path::new(".")),
@@ -1345,6 +1352,7 @@ fn restore_archive(input: &Path, settings: &Settings, config_path: &Path) -> Res
     ensure_restore_target(&database_path, false)?;
     ensure_restore_target(&settings.storage.repository_root, true)?;
     ensure_restore_target(&settings.storage.lfs_root, true)?;
+    ensure_restore_target(&settings.storage.registry_root, true)?;
 
     let parent = database_path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent).with_context(|| format!("could not create {}", parent.display()))?;
@@ -1384,6 +1392,13 @@ fn restore_from_staging(
         "backup settings are missing"
     );
     let includes_actions_artifacts = manifest.format_version >= 3;
+    let includes_registry = manifest.format_version >= 4;
+    if includes_registry {
+        ensure!(
+            root.join("registry").is_dir(),
+            "backup registry data is missing"
+        );
+    }
     if includes_actions_artifacts {
         ensure!(
             root.join("actions-artifacts").is_dir(),
@@ -1395,6 +1410,7 @@ fn restore_from_staging(
     let suffix = Uuid::new_v4().simple().to_string();
     let repository_temp = sibling_temp(&settings.storage.repository_root, &suffix);
     let lfs_temp = sibling_temp(&settings.storage.lfs_root, &suffix);
+    let registry_temp = sibling_temp(&settings.storage.registry_root, &suffix);
     let actions_artifact_temp = sibling_temp(&settings.storage.actions_artifact_root, &suffix);
     let database_temp = sibling_temp(database_path, &suffix);
     let host_key_temp = sibling_temp(&settings.ssh.host_key, &suffix);
@@ -1407,6 +1423,9 @@ fn restore_from_staging(
     if includes_actions_artifacts {
         temporary_paths.push(actions_artifact_temp.clone());
     }
+    if includes_registry {
+        temporary_paths.push(registry_temp.clone());
+    }
     if manifest.host_key {
         temporary_paths.push(host_key_temp.clone());
     }
@@ -1415,14 +1434,13 @@ fn restore_from_staging(
     }
 
     let prepared = (|| -> Result<()> {
-        copy_tree(&root.join("repositories"), &repository_temp, false)?;
-        copy_tree(&root.join("lfs"), &lfs_temp, false)?;
+        copy_tree(&root.join("repositories"), &repository_temp)?;
+        copy_tree(&root.join("lfs"), &lfs_temp)?;
+        if includes_registry {
+            copy_tree(&root.join("registry"), &registry_temp)?;
+        }
         if includes_actions_artifacts {
-            copy_tree(
-                &root.join("actions-artifacts"),
-                &actions_artifact_temp,
-                false,
-            )?;
+            copy_tree(&root.join("actions-artifacts"), &actions_artifact_temp)?;
         }
         copy_file(&root.join("database.sqlite"), &database_temp)?;
         if manifest.host_key {
@@ -1443,6 +1461,10 @@ fn restore_from_staging(
     remove_empty_target(&settings.storage.lfs_root)?;
     rename_prepared(&repository_temp, &settings.storage.repository_root)?;
     rename_prepared(&lfs_temp, &settings.storage.lfs_root)?;
+    if includes_registry {
+        remove_empty_target(&settings.storage.registry_root)?;
+        rename_prepared(&registry_temp, &settings.storage.registry_root)?;
+    }
     if includes_actions_artifacts {
         remove_empty_target(&settings.storage.actions_artifact_root)?;
         rename_prepared(
@@ -1473,6 +1495,7 @@ fn replace_archive(input: &Path, settings: &Settings) -> Result<()> {
         database_path.clone(),
         settings.storage.repository_root.clone(),
         settings.storage.lfs_root.clone(),
+        settings.storage.registry_root.clone(),
         sqlite_sidecar(&database_path, "-wal"),
         sqlite_sidecar(&database_path, "-shm"),
     ];
@@ -1667,7 +1690,7 @@ fn data_file_paths(root: &Path) -> Result<BTreeSet<String>> {
     Ok(files)
 }
 
-fn copy_tree(source: &Path, destination: &Path, skip_registry_payloads: bool) -> Result<()> {
+fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
     fs::create_dir_all(destination)
         .with_context(|| format!("could not create {}", destination.display()))?;
     if !source.exists() {
@@ -1686,14 +1709,6 @@ fn copy_tree(source: &Path, destination: &Path, skip_registry_payloads: bool) ->
         if entry.file_type().is_dir() {
             fs::create_dir_all(&target)?;
         } else if entry.file_type().is_file() {
-            if skip_registry_payloads
-                && relative
-                    .to_str()
-                    .and_then(crate::registry::storage::registry_object_key)
-                    .is_some()
-            {
-                continue;
-            }
             copy_file(entry.path(), &target)?;
         }
     }
@@ -1828,6 +1843,7 @@ mod tests {
         repository: Vec<u8>,
         lfs: Vec<u8>,
         upload: Vec<u8>,
+        registry: Vec<u8>,
         actions_artifact: Vec<u8>,
         host_key: Vec<u8>,
         effective_settings: String,
@@ -1858,6 +1874,7 @@ mod tests {
         settings.database.url = format!("sqlite://{}?mode=rwc", root.join("gitadel.db").display());
         settings.storage.repository_root = root.join("repositories");
         settings.storage.lfs_root = root.join("lfs");
+        settings.storage.registry_root = root.join("registry");
         settings.storage.actions_artifact_root = root.join("actions-artifacts");
         settings.ssh.host_key = root.join("ssh-host-key");
         settings
@@ -1933,6 +1950,12 @@ mod tests {
             .join("uploads/issue-attachment");
         fs::create_dir_all(upload_file.parent().context("upload file has no parent")?)?;
         fs::write(&upload_file, b"issue-upload")?;
+        let registry_file = source_settings
+            .storage
+            .registry_root
+            .join("registry-payload");
+        fs::create_dir_all(&source_settings.storage.registry_root)?;
+        fs::write(&registry_file, b"registry-payload")?;
         let artifact_file = source_settings
             .storage
             .actions_artifact_root
@@ -1987,6 +2010,12 @@ mod tests {
                     .lfs_root
                     .join(lfs_relative.as_str()),
             )?,
+            registry: fs::read(
+                restored_settings
+                    .storage
+                    .registry_root
+                    .join("registry-payload"),
+            )?,
             upload: fs::read(
                 restored_settings
                     .storage
@@ -2009,6 +2038,7 @@ mod tests {
             repository: b"repository-object".to_vec(),
             lfs: b"lfs-object".to_vec(),
             upload: b"issue-upload".to_vec(),
+            registry: b"registry-payload".to_vec(),
             actions_artifact: b"actions-artifact".to_vec(),
             host_key: b"ssh-host-key".to_vec(),
             effective_settings: toml::to_string_pretty(&source_settings)?,
