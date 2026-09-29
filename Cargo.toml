@@ -92,7 +92,7 @@ tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "pro
 toml = "1.1.6"
 tokio-util = { version = "0.7.19", features = ["io", "rt"] }
 tower = { version = "0.5.3", features = ["util"] }
-tower-http = { version = "0.7.1", features = ["compression-br", "compression-gzip", "trace"] }
+tower-http = { version = "0.7.1", features = ["compression-br", "compression-gzip", "decompression-gzip", "trace"] }
 tokei = { git = "https://github.com/XAMPPRocky/tokei", rev = "c277b1515eff47937f3fe5214b817e8231321e07", default-features = false }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

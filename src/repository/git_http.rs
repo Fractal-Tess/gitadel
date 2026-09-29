@@ -13,6 +13,7 @@ use futures_util::TryStreamExt as _;
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::{ReaderStream, StreamReader};
+use tower_http::decompression::RequestDecompressionLayer;
 
 use super::{
     Permission, RepositoryState,
@@ -70,6 +71,9 @@ pub fn router() -> Router<GitHttpState> {
             "/{namespace}/{repository}/git-receive-pack",
             post(receive_pack),
         )
+        // Git gzips large request bodies, such as the negotiation of a full
+        // clone of a repository with many refs.
+        .layer(RequestDecompressionLayer::new())
 }
 
 async fn info_refs(
