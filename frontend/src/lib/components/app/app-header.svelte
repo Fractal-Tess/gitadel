@@ -7,7 +7,6 @@
 
   import BrandMark from "$lib/components/brand-mark.svelte";
   import UserMenu from "$lib/components/app/user-menu.svelte";
-  import ThemeSwitcher from "$lib/components/app/theme-switcher.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Kbd from "$lib/components/ui/kbd/index.js";
   import { useSidebar } from "$lib/components/ui/sidebar/index.js";
@@ -259,7 +258,6 @@
       <Plus data-icon="inline-start" />
       <span class="hidden sm:inline">New</span>
     </Button>
-    <ThemeSwitcher />
   {/if}
 
   <UserMenu />

@@ -1,3 +1,7 @@
+<!--
+  The theme choice, as a submenu of the account menu. The checked option is
+  the saved preference; picking another saves it to the account.
+-->
 <script lang="ts">
   import MoonIcon from "@lucide/svelte/icons/moon";
   import SunIcon from "@lucide/svelte/icons/sun";
@@ -6,16 +10,19 @@
   import type { ThemePreference } from "$lib/api/auth.js";
   import { ApiFailure } from "$lib/api/transport.js";
   import * as DropdownMenu from "$lib/components/ui/dropdown-menu/index.js";
-  import { buttonVariants } from "$lib/components/ui/button/index.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
   const app = useAppState();
   let working = $state(false);
+  const preference = $derived(
+    app.authStatus?.user?.theme_preference ?? "system",
+  );
 
-  async function selectMode(preference: ThemePreference): Promise<void> {
+  async function selectMode(next: ThemePreference): Promise<void> {
+    if (next === preference) return;
     working = true;
     try {
-      await app.updateThemePreference(preference);
+      await app.updateThemePreference(next);
     } catch (error) {
       toast.error(
         error instanceof ApiFailure || error instanceof Error
@@ -28,28 +35,23 @@
   }
 </script>
 
-<DropdownMenu.Root>
-  <DropdownMenu.Trigger
-    class={buttonVariants({ variant: "outline", size: "icon" })}
-    disabled={working}
-  >
-    <SunIcon
-      class="h-[1.2rem] w-[1.2rem] scale-100 rotate-0 !transition-all dark:scale-0 dark:-rotate-90"
-    />
-    <MoonIcon
-      class="absolute h-[1.2rem] w-[1.2rem] scale-0 rotate-90 !transition-all dark:scale-100 dark:rotate-0"
-    />
-    <span class="sr-only">Toggle theme</span>
-  </DropdownMenu.Trigger>
-  <DropdownMenu.Content align="end">
-    <DropdownMenu.Item onclick={() => void selectMode("light")}>
-      Light
-    </DropdownMenu.Item>
-    <DropdownMenu.Item onclick={() => void selectMode("dark")}>
-      Dark
-    </DropdownMenu.Item>
-    <DropdownMenu.Item onclick={() => void selectMode("system")}>
-      System
-    </DropdownMenu.Item>
-  </DropdownMenu.Content>
-</DropdownMenu.Root>
+<DropdownMenu.Sub>
+  <DropdownMenu.SubTrigger class="py-1.5" disabled={working}>
+    <SunIcon class="dark:hidden" />
+    <MoonIcon class="hidden dark:block" />
+    Theme
+    <span class="flex-1 text-right text-xs text-muted-foreground capitalize">
+      {preference}
+    </span>
+  </DropdownMenu.SubTrigger>
+  <DropdownMenu.SubContent class="min-w-32">
+    <DropdownMenu.RadioGroup
+      value={preference}
+      onValueChange={(value) => void selectMode(value as ThemePreference)}
+    >
+      <DropdownMenu.RadioItem value="light">Light</DropdownMenu.RadioItem>
+      <DropdownMenu.RadioItem value="dark">Dark</DropdownMenu.RadioItem>
+      <DropdownMenu.RadioItem value="system">System</DropdownMenu.RadioItem>
+    </DropdownMenu.RadioGroup>
+  </DropdownMenu.SubContent>
+</DropdownMenu.Sub>

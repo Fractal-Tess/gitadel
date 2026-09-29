@@ -8,6 +8,7 @@
   import Server from "@lucide/svelte/icons/server";
   import Settings2 from "@lucide/svelte/icons/settings-2";
 
+  import ThemeSwitcher from "$lib/components/app/theme-switcher.svelte";
   import * as Avatar from "$lib/components/ui/avatar/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as DropdownMenu from "$lib/components/ui/dropdown-menu/index.js";
@@ -63,45 +64,81 @@
         </Button>
       {/snippet}
     </DropdownMenu.Trigger>
-    <DropdownMenu.Content align="end" class="w-56">
-      <DropdownMenu.Label class="truncate font-normal">
-        <span class="text-muted-foreground">Signed in as</span>
-        <span class="mt-0.5 block font-medium">{username}</span>
-      </DropdownMenu.Label>
-      <DropdownMenu.Separator />
+    <DropdownMenu.Content align="end" class="w-64 p-1.5">
+      <!-- Who is signed in doubles as the way to their public profile. -->
       <DropdownMenu.Item
+        class="gap-3 px-2 py-2"
+        onclick={() =>
+          void goto(resolve("/[namespace]", { namespace: username }))}
+      >
+        <Avatar.Root class="size-9">
+          {#if imageUrl}
+            <Avatar.Image src={imageUrl} alt="" />
+          {/if}
+          <Avatar.Fallback class="text-xs uppercase">
+            {username.slice(0, 2)}
+          </Avatar.Fallback>
+        </Avatar.Root>
+        <span class="grid min-w-0 leading-tight">
+          <span class="truncate font-medium">{username}</span>
+          <span class="truncate text-xs text-muted-foreground">
+            {app.authStatus.user?.is_admin ? "Administrator · " : ""}View profile
+          </span>
+        </span>
+      </DropdownMenu.Item>
+      <DropdownMenu.Separator class="my-1.5" />
+      <DropdownMenu.Item
+        class="py-1.5"
         onclick={() =>
           void goto(resolve("/-/account/[view]", { view: "profile" }))}
       >
         <Settings2 />Account settings
       </DropdownMenu.Item>
-      <DropdownMenu.Separator />
+      <ThemeSwitcher />
+      <DropdownMenu.Separator class="my-1.5" />
       <!-- The personal namespace's management pages live here rather than in
            a tab bar over the profile. -->
+      <DropdownMenu.Group>
+        <DropdownMenu.GroupHeading
+          class="px-2 pt-1 pb-1.5 text-[11px] font-medium tracking-wide text-muted-foreground uppercase"
+        >
+          Your namespace
+        </DropdownMenu.GroupHeading>
+        <DropdownMenu.Item
+          class="py-1.5"
+          onclick={() =>
+            void goto(resolve("/[namespace]/runners", { namespace: username }))}
+        >
+          <Server />Runners
+        </DropdownMenu.Item>
+        <DropdownMenu.Item
+          class="py-1.5"
+          onclick={() =>
+            void goto(
+              resolve("/[namespace]/integrations", { namespace: username }),
+            )}
+        >
+          <Rocket />Integrations
+        </DropdownMenu.Item>
+        <DropdownMenu.Item
+          class="py-1.5"
+          onclick={() =>
+            void goto(
+              resolve("/[namespace]/mirror-credentials", {
+                namespace: username,
+              }),
+            )}
+        >
+          <KeyRound />Mirror identities
+        </DropdownMenu.Item>
+      </DropdownMenu.Group>
+      <DropdownMenu.Separator class="my-1.5" />
       <DropdownMenu.Item
-        onclick={() =>
-          void goto(resolve("/[namespace]/runners", { namespace: username }))}
+        class="py-1.5"
+        variant="destructive"
+        disabled={working}
+        onclick={() => void logout()}
       >
-        <Server />Runners
-      </DropdownMenu.Item>
-      <DropdownMenu.Item
-        onclick={() =>
-          void goto(
-            resolve("/[namespace]/integrations", { namespace: username }),
-          )}
-      >
-        <Rocket />Integrations
-      </DropdownMenu.Item>
-      <DropdownMenu.Item
-        onclick={() =>
-          void goto(
-            resolve("/[namespace]/mirror-credentials", { namespace: username }),
-          )}
-      >
-        <KeyRound />Mirror identities
-      </DropdownMenu.Item>
-      <DropdownMenu.Separator />
-      <DropdownMenu.Item disabled={working} onclick={() => void logout()}>
         <LogOut />{working ? "Signing out…" : "Sign out"}
       </DropdownMenu.Item>
     </DropdownMenu.Content>
