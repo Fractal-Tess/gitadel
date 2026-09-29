@@ -3,6 +3,7 @@ use std::{
     fs::{self, File},
     io::{Read as _, Write as _},
     path::{Component, Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -16,21 +17,20 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    sync::watch,
-};
+use tokio::sync::watch;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::{
     backup_provider::{self, BackupProvider, BackupProviderConfig, FilesystemSettings},
-    blob_store::{BlobDigest, BlobStore as _, FilesystemBlobStore, ObjectPrefix, targets},
+    blob_store::{BlobMetadata, DomainStorage, StorageDomain as _, manager},
     config::{BackupCommand, DatabaseSettings, S3Settings, Settings},
     database,
-    entity::{backup_provider_schedule, repository},
+    entity::backup_provider_schedule,
     filesystem::{create_private_directory, open_private_file},
     identity::IdentityState,
+    registry::storage::RegistryDomain,
+    storage::LfsDomain,
 };
 
 mod filesystem;
@@ -173,25 +173,6 @@ impl MaintenanceProgressReporter {
             message: message.into(),
             processed_bytes: None,
             total_bytes: None,
-        });
-    }
-
-    pub(crate) fn report_progress(
-        &self,
-        phase: MaintenancePhase,
-        message: impl Into<String>,
-        processed_bytes: u64,
-        total_bytes: u64,
-    ) {
-        let (operation_id, key, operation) = self.identity();
-        self.sender.send_replace(MaintenanceProgress {
-            operation_id,
-            key,
-            operation,
-            phase,
-            message: message.into(),
-            processed_bytes: Some(processed_bytes),
-            total_bytes: Some(total_bytes),
         });
     }
 
@@ -626,9 +607,22 @@ async fn create_staged_backup(
     }
 
     let database = database::connect_and_migrate(&settings.database).await?;
-    let lfs_storage = targets::load_active(&database, settings.storage.lfs_root.clone()).await?;
-    let registry_storage = crate::registry::storage::load_active(&database).await?;
-    let registry_repositories = repository::Entity::find().all(&database).await?;
+    // Payloads on a storage target are materialized into the local layout, so
+    // a restored instance starts on local storage.
+    let lfs_storage = DomainStorage::load(
+        &database,
+        Arc::new(LfsDomain),
+        LfsDomain.local_root(&settings.storage),
+    )
+    .await?;
+    let lfs_objects = external_inventory(&database, &lfs_storage).await?;
+    let registry_storage = DomainStorage::load(
+        &database,
+        Arc::new(RegistryDomain),
+        RegistryDomain.local_root(&settings.storage),
+    )
+    .await?;
+    let registry_objects = external_inventory(&database, &registry_storage).await?;
     let snapshot_path = staging.join("database.sqlite");
     snapshot_database(&database, &snapshot_path).await?;
     database
@@ -646,24 +640,10 @@ async fn create_staged_backup(
     copy_tree(
         &settings.storage.repository_root,
         &staging.join("repositories"),
-        registry_storage.is_some(),
+        registry_objects.is_some(),
     )?;
-    if let Some(active) = registry_storage {
-        let destination = FilesystemBlobStore::new(staging.join("repositories")).await?;
-        for object in
-            crate::registry::storage::inventory(active.store.as_ref(), true, &registry_repositories)
-                .await?
-        {
-            let key = crate::registry::storage::local_object_key(&object.key)?;
-            let reader = active.store.read(&object.key).await?;
-            let copied = destination
-                .put_verified(&key, object.digest, reader)
-                .await?;
-            ensure!(
-                copied.size == object.size,
-                "backup registry object size mismatch"
-            );
-        }
+    if let Some(objects) = registry_objects {
+        materialize(&registry_storage, &objects, staging.join("repositories")).await?;
     }
     if let Some(reporter) = reporter {
         reporter.report(
@@ -672,7 +652,9 @@ async fn create_staged_backup(
         );
     }
     copy_tree(&settings.storage.lfs_root, &staging.join("lfs"), false)?;
-    materialize_lfs(lfs_storage.store.as_ref(), &staging.join("lfs")).await?;
+    if let Some(objects) = lfs_objects {
+        materialize(&lfs_storage, &objects, staging.join("lfs")).await?;
+    }
     copy_tree(
         &settings.storage.actions_artifact_root,
         &staging.join("actions-artifacts"),
@@ -744,11 +726,9 @@ async fn prepare_restored_snapshot(path: &Path) -> Result<()> {
     database
         .execute_unprepared(
             "PRAGMA foreign_keys = ON;\
-             UPDATE lfs_storage_state SET active_target_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = 1;\
+             UPDATE storage_domain_state SET active_target_id = NULL, updated_at = CURRENT_TIMESTAMP;\
              UPDATE lfs_objects SET storage_target_id = NULL;\
-             DELETE FROM lfs_storage_migrations;\
-             UPDATE registry_storage_state SET active_target_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = 1;\
-             DELETE FROM registry_storage_migrations;\
+             DELETE FROM storage_migrations;\
              PRAGMA wal_checkpoint(TRUNCATE);",
         )
         .await
@@ -757,46 +737,33 @@ async fn prepare_restored_snapshot(path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn materialize_lfs(
-    store: &dyn crate::blob_store::BlobStore,
-    destination: &Path,
+/// The objects to copy out of a domain's storage target, or `None` when the
+/// domain uses its local root, which the directory copy already covers.
+async fn external_inventory(
+    database: &DatabaseConnection,
+    storage: &DomainStorage,
+) -> Result<Option<Vec<BlobMetadata>>> {
+    if storage.target_id().is_none() {
+        return Ok(None);
+    }
+    storage.inventory(database).await.map(Some)
+}
+
+/// Writes `objects` into the domain's local layout under `root`.
+async fn materialize(
+    storage: &DomainStorage,
+    objects: &[BlobMetadata],
+    root: PathBuf,
 ) -> Result<()> {
-    let objects = store.list(&ObjectPrefix::new("")?).await?;
-    for metadata in objects {
-        let parts = metadata.key.as_str().split('/').collect::<Vec<_>>();
-        if parts.len() != 4
-            || Uuid::parse_str(parts[0]).is_err()
-            || parts[1].len() != 2
-            || parts[2].len() != 2
-            || parts[3].parse::<BlobDigest>().is_err()
-        {
-            continue;
-        }
-        let path = destination.join(metadata.key.as_str());
-        let parent = path.parent().context("backup LFS object has no parent")?;
-        tokio::fs::create_dir_all(parent).await?;
-        let mut source = store.read(&metadata.key).await?;
-        let mut output = tokio::fs::File::create(&path).await?;
-        let mut digest = Sha256::new();
-        let mut size = 0_u64;
-        let mut buffer = vec![0_u8; 128 * 1024];
-        loop {
-            let read = source.read(&mut buffer).await?;
-            if read == 0 {
-                break;
-            }
-            digest.update(&buffer[..read]);
-            output.write_all(&buffer[..read]).await?;
-            size = size.saturating_add(read as u64);
-        }
-        output.flush().await?;
-        output.sync_all().await?;
-        ensure!(size == metadata.size, "backup LFS object size mismatch");
-        let actual: [u8; 32] = digest.finalize().into();
-        ensure!(
-            actual == *metadata.digest.as_bytes(),
-            "backup LFS object digest mismatch"
-        );
+    let label = storage.domain().label();
+    let destination = storage.domain().open_local(root).await?;
+    let source = storage.store();
+    for object in objects {
+        // A stale local copy from before the target was selected is replaced.
+        destination.delete(&object.key).await?;
+        manager::copy_object(source.as_ref(), destination.as_ref(), object, label)
+            .await
+            .with_context(|| format!("could not back up {label} object {}", object.key))?;
     }
     Ok(())
 }
@@ -1849,7 +1816,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        blob_store::lfs_object_key,
+        blob_store::{BlobDigest, lfs_object_key},
         entity::{backup_provider_schedule, instance, user},
     };
 

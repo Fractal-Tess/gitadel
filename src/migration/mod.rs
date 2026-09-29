@@ -66,6 +66,7 @@ mod m20260927_000065_repository_commit_statuses;
 mod m20260927_000066_webhook_events;
 mod m20260927_000067_user_email;
 mod m20260927_000068_notification_preferences;
+mod m20260929_000069_storage_domains;
 
 #[cfg(test)]
 mod tests;
@@ -145,6 +146,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260927_000060_action_job_matrix::Migration),
             Box::new(m20260927_000061_action_dispatch_schedule::Migration),
             Box::new(m20260927_000062_action_reruns::Migration),
+            Box::new(m20260929_000069_storage_domains::Migration),
         ]
     }
 }

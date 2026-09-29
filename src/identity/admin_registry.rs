@@ -14,7 +14,8 @@ use uuid::Uuid;
 
 use super::{ApiError, IdentityState, SCOPE_READ, SCOPE_WRITE, require_admin};
 use crate::{
-    entity::{namespace, organization, registry_storage_migration, repository},
+    blob_store::manager,
+    entity::{namespace, organization, repository, storage_migration},
     registry::{storage, store::RegistryUsage},
 };
 
@@ -62,19 +63,18 @@ pub struct RegistryRepositoryUsageResponse {
 async fn usage(
     state: &IdentityState,
 ) -> Result<(Option<Uuid>, Vec<(repository::Model, RegistryUsage)>), ApiError> {
-    let manager = state
+    let registry = state
         .registry_storage()
         .await
         .ok_or_else(|| ApiError::internal("Registry storage is unavailable."))?;
-    let active = manager.active();
     let rows = storage::usage_by_repository(
         state.database(),
-        &state.runtime_settings()?.storage,
-        &active,
+        &state.runtime_settings()?.storage.repository_root,
+        &registry,
     )
     .await
     .map_err(ApiError::internal)?;
-    Ok((active.map(|active| active.id), rows))
+    Ok((registry.target_id(), rows))
 }
 
 pub async fn registry_status(
@@ -245,23 +245,18 @@ pub async fn migrate_registry(
             .await
             .map_err(|_| ApiError::bad_request("The storage target does not exist."))?;
     }
-    let manager = state
+    let registry = state
         .registry_storage()
         .await
         .ok_or_else(|| ApiError::internal("Registry storage is unavailable."))?;
-    let migration_guard = manager
+    let migration_guard = registry
         .try_lock_migration()
         .ok_or_else(|| ApiError::conflict("Another registry migration is already in progress."))?;
     let operation_id = Uuid::new_v4();
-    let settings = state.runtime_settings()?.storage.clone();
-    storage::reserve_migration(
-        state.database(),
-        request.target_id,
-        operation_id,
-        manager.target_id(),
-    )
-    .await
-    .map_err(|error| ApiError::bad_request(format!("Could not start migration: {error:#}")))?;
+    registry
+        .reserve_migration(state.database(), request.target_id, operation_id)
+        .await
+        .map_err(|error| ApiError::bad_request(format!("Could not start migration: {error:#}")))?;
     if let Err(error) = state
         .audit(
             Some(actor.user.id),
@@ -270,20 +265,14 @@ pub async fn migrate_registry(
         )
         .await
     {
-        storage::mark_failed(state.database(), operation_id, &anyhow::anyhow!("{error}")).await;
+        manager::mark_failed(state.database(), operation_id, &anyhow::anyhow!("{error}")).await;
         return Err(error);
     }
     let database = state.database().clone();
     tokio::spawn(async move {
-        if let Err(error) = storage::migrate_online(
-            &database,
-            &settings,
-            operation_id,
-            request.batch_size,
-            manager,
-            migration_guard,
-        )
-        .await
+        if let Err(error) = registry
+            .migrate_online(&database, operation_id, request.batch_size, migration_guard)
+            .await
         {
             tracing::error!(%error, %operation_id, "online registry storage migration failed");
         }
@@ -305,9 +294,10 @@ pub async fn registry_migration_events(
     Path(operation_id): Path<Uuid>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiError> {
     require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    registry_storage_migration::Entity::find_by_id(operation_id)
+    storage_migration::Entity::find_by_id(operation_id)
         .one(state.database())
         .await?
+        .filter(|migration| migration.domain == "registry")
         .ok_or_else(ApiError::not_found)?;
     let events = stream::unfold(
         (state.database().clone(), false),
@@ -315,15 +305,14 @@ pub async fn registry_migration_events(
             if done {
                 return None;
             }
-            let (payload, terminal) = match registry_storage_migration::Entity::find_by_id(
-                operation_id,
-            )
-            .one(&database)
-            .await
+            let (payload, terminal) = match storage_migration::Entity::find_by_id(operation_id)
+                .one(&database)
+                .await
             {
                 Ok(Some(row)) => {
                     let terminal = matches!(row.state.as_str(), "completed" | "failed");
-                    let message = match row.phase.as_str() {
+                    let phase = manager::progress_phase(&row);
+                    let message = match phase.as_ref() {
                         "scheduled" => "Container registry migration is starting.",
                         "checking_destination" => "Checking the destination storage target.",
                         "copying_registry" => "Copying and verifying container registry objects.",
@@ -338,7 +327,7 @@ pub async fn registry_migration_events(
                     (
                         serde_json::json!({
                             "operation_id": row.id, "key": row.last_key.as_deref().unwrap_or(""),
-                            "operation": "registry_migrate", "phase": row.phase, "message": message,
+                            "operation": "registry_migrate", "phase": phase, "message": message,
                             "processed_bytes": row.copied_bytes.max(0), "total_bytes": row.total_bytes,
                         }),
                         terminal,

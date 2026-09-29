@@ -47,11 +47,12 @@ pub(crate) async fn browse(
         "{registry_host}/{}/{}",
         repository.namespace, repository.name
     );
+    let active = state.registry_storage().active();
     let images = RegistryStore::new()
         .browse_images(
             &state.repository_path(&repository),
             repository.storage_key,
-            state.registry_storage().store(),
+            active.target_id.map(|_| active.store),
         )
         .await
         .map_err(ApiError::internal)?

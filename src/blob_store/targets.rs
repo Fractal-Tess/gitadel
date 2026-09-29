@@ -13,13 +13,14 @@ use uuid::Uuid;
 
 use crate::{
     config::S3Settings,
-    entity::{
-        lfs_storage_state, lfs_storage_target, registry_storage_migration, registry_storage_state,
-        repository,
-    },
+    entity::{storage_domain_state, storage_migration, storage_target},
+    registry::storage::RegistryDomain,
 };
 
-use super::{BlobDigest, BlobStore, FilesystemBlobStore, ObjectKey, ObjectPrefix, S3BlobStore};
+use super::{
+    BlobDigest, BlobStore, FilesystemBlobStore, ObjectKey, ObjectPrefix, S3BlobStore,
+    manager::{self, active_target_id},
+};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -166,55 +167,14 @@ pub async fn measure(configuration: &StorageTargetConfiguration) -> Result<Measu
     })
 }
 
-pub struct ActiveBlobStore {
-    pub store: Arc<dyn BlobStore>,
-    pub target_id: Option<Uuid>,
-}
-
-pub async fn load_active(
-    database: &DatabaseConnection,
-    fallback_path: PathBuf,
-) -> Result<ActiveBlobStore> {
-    let state = lfs_storage_state::Entity::find_by_id(1)
-        .one(database)
-        .await?
-        .context("LFS storage state is missing")?;
-    let Some(target_id) = state.active_target_id else {
-        return Ok(ActiveBlobStore {
-            store: Arc::new(FilesystemBlobStore::new(fallback_path).await?),
-            target_id: None,
-        });
-    };
-    let target = lfs_storage_target::Entity::find_by_id(target_id)
-        .one(database)
-        .await?
-        .context("active LFS storage target is missing")?;
-    let configuration: StorageTargetConfiguration = serde_json::from_str(&target.configuration)
-        .context("active LFS storage target configuration is invalid")?;
-    let store = configuration.open().await?;
-    verify_ownership(store.as_ref(), target_id).await?;
-    Ok(ActiveBlobStore {
-        store,
-        target_id: Some(target_id),
-    })
-}
-
 pub async fn list(
     database: &DatabaseConnection,
     fallback_path: &std::path::Path,
     measured: &std::collections::HashMap<Uuid, MeasuredUsage>,
 ) -> Result<Vec<StorageTargetView>> {
-    let active = lfs_storage_state::Entity::find_by_id(1)
-        .one(database)
-        .await?
-        .context("LFS storage state is missing")?
-        .active_target_id;
-    let registry_active = registry_storage_state::Entity::find_by_id(1)
-        .one(database)
-        .await?
-        .map(|state| state.active_target_id)
-        .unwrap_or(None);
-    let targets = lfs_storage_target::Entity::find().all(database).await?;
+    let active = active_target_id(database, "lfs").await?;
+    let registry_active = active_target_id(database, "registry").await?;
+    let targets = storage_target::Entity::find().all(database).await?;
     let lfs_usage = lfs_usage_by_target(database).await?;
     let mut registry_object_count = 0;
     let mut registry_bytes = 0_u64;
@@ -222,9 +182,7 @@ pub async fn list(
         let (_, configuration) = find(database, id).await?;
         let store = configuration.open().await?;
         verify_ownership(store.as_ref(), id).await?;
-        let repositories = repository::Entity::find().all(database).await?;
-        let objects =
-            crate::registry::storage::inventory(store.as_ref(), true, &repositories).await?;
+        let objects = manager::inventory(database, &RegistryDomain, store.as_ref()).await?;
         registry_object_count = objects.len() as u64;
         for object in objects {
             registry_bytes = registry_bytes
@@ -267,7 +225,7 @@ pub async fn list(
     });
     for target in targets {
         let configuration: StorageTargetConfiguration = serde_json::from_str(&target.configuration)
-            .context("stored LFS target configuration is invalid")?;
+            .context("stored storage target configuration is invalid")?;
         let capacity = match &configuration {
             StorageTargetConfiguration::Filesystem { path } => filesystem_capacity(path),
             StorageTargetConfiguration::S3 { .. } => None,
@@ -290,13 +248,13 @@ pub async fn list(
 pub async fn find(
     database: &DatabaseConnection,
     id: Uuid,
-) -> Result<(lfs_storage_target::Model, StorageTargetConfiguration)> {
-    let target = lfs_storage_target::Entity::find_by_id(id)
+) -> Result<(storage_target::Model, StorageTargetConfiguration)> {
+    let target = storage_target::Entity::find_by_id(id)
         .one(database)
         .await?
-        .context("LFS storage target does not exist")?;
+        .context("storage target does not exist")?;
     let configuration = serde_json::from_str(&target.configuration)
-        .context("stored LFS target configuration is invalid")?;
+        .context("stored storage target configuration is invalid")?;
     Ok((target, configuration))
 }
 
@@ -316,7 +274,7 @@ pub async fn create(
     test_store(store.as_ref()).await?;
     write_ownership_marker(store.as_ref(), id).await?;
     let now = Utc::now();
-    let model = lfs_storage_target::ActiveModel {
+    let model = storage_target::ActiveModel {
         id: Set(id),
         name: Set(name.trim().to_owned()),
         kind: Set(configuration.kind().to_owned()),
@@ -416,96 +374,101 @@ async fn write_ownership_marker(store: &dyn BlobStore, target_id: Uuid) -> Resul
         .await?;
     Ok(())
 }
-pub async fn delete_prefix_from_all(
+
+/// Deletes `prefix` from every owned storage target. Local roots belong to
+/// their domain, which cleans them itself.
+pub async fn delete_prefix_from_targets(
     database: &DatabaseConnection,
-    fallback_path: PathBuf,
     prefix: &ObjectPrefix,
+    label: &str,
 ) -> Result<()> {
-    let local = FilesystemBlobStore::new(fallback_path).await?;
-    delete_prefix(&local, prefix).await;
-    for target in lfs_storage_target::Entity::find().all(database).await? {
+    for target in storage_target::Entity::find().all(database).await? {
         let configuration: StorageTargetConfiguration = match serde_json::from_str(
             &target.configuration,
         ) {
             Ok(configuration) => configuration,
             Err(error) => {
-                tracing::error!(%error, target_id = %target.id, "could not decode LFS target during cleanup");
+                tracing::error!(%error, target_id = %target.id, "could not decode storage target during {label} cleanup");
                 continue;
             }
         };
         let store = match configuration.open().await {
             Ok(store) => store,
             Err(error) => {
-                tracing::error!(%error, target_id = %target.id, "could not open LFS target during cleanup");
+                tracing::error!(%error, target_id = %target.id, "could not open storage target during {label} cleanup");
                 continue;
             }
         };
         if let Err(error) = verify_ownership(store.as_ref(), target.id).await {
-            tracing::error!(%error, target_id = %target.id, "refused to clean an unowned LFS target");
+            tracing::error!(%error, target_id = %target.id, "refused to clean an unowned storage target");
             continue;
         }
-        delete_prefix(store.as_ref(), prefix).await;
+        delete_prefix(store.as_ref(), prefix, label).await;
     }
     Ok(())
 }
 
-async fn delete_prefix(store: &dyn BlobStore, prefix: &ObjectPrefix) {
+pub(super) async fn delete_prefix(store: &dyn BlobStore, prefix: &ObjectPrefix, label: &str) {
     let objects = match store.list(prefix).await {
         Ok(objects) => objects,
         Err(error) => {
-            tracing::error!(%error, "could not list repository LFS objects for cleanup");
+            tracing::error!(%error, "could not list repository {label} objects for cleanup");
             return;
         }
     };
     for object in objects {
         if let Err(error) = store.delete(&object.key).await {
-            tracing::error!(%error, key = %object.key, "could not clean up repository LFS object");
+            tracing::error!(%error, key = %object.key, "could not clean up repository {label} object");
         }
     }
 }
 
 fn ownership_marker(target_id: Uuid) -> Result<(ObjectKey, Vec<u8>)> {
+    // The marker predates shared targets; its wording is part of the on-disk format.
     let payload = format!("gitadel-lfs-target:{target_id}").into_bytes();
     let digest = BlobDigest::from_bytes(Sha256::digest(&payload).into());
     let key = ObjectKey::new(format!(".gitadel/target/{target_id}/{}", digest.to_hex()))?;
     Ok((key, payload))
 }
 
+/// Display name of a persisted domain identifier.
+fn domain_label(domain: &str) -> &str {
+    match domain {
+        "lfs" => "LFS",
+        other => other,
+    }
+}
+
 pub async fn delete(database: &DatabaseConnection, target_id: Uuid) -> Result<()> {
-    let active = lfs_storage_state::Entity::find_by_id(1)
+    if let Some(state) = storage_domain_state::Entity::find()
+        .filter(storage_domain_state::Column::ActiveTargetId.eq(target_id))
         .one(database)
         .await?
-        .context("LFS storage state is missing")?;
-    if active.active_target_id == Some(target_id) {
-        bail!("the active LFS storage target cannot be deleted");
+    {
+        bail!(
+            "the active {} storage target cannot be deleted",
+            domain_label(&state.domain)
+        );
     }
-    let registry = registry_storage_state::Entity::find_by_id(1)
-        .one(database)
-        .await?
-        .context("registry storage state is missing")?;
-    if registry.active_target_id == Some(target_id) {
-        bail!("the active registry storage target cannot be deleted");
-    }
-    let migration = registry_storage_migration::Entity::find()
-        .filter(registry_storage_migration::Column::State.ne("completed"))
-        .filter(registry_storage_migration::Column::State.ne("failed"))
+    let migration = storage_migration::Entity::find()
+        .filter(storage_migration::Column::State.ne(manager::state::COMPLETED))
+        .filter(storage_migration::Column::State.ne(manager::state::FAILED))
         .filter(
             Condition::any()
-                .add(registry_storage_migration::Column::SourceTargetId.eq(target_id))
-                .add(registry_storage_migration::Column::TargetId.eq(target_id)),
+                .add(storage_migration::Column::SourceTargetId.eq(target_id))
+                .add(storage_migration::Column::TargetId.eq(target_id)),
         )
         .one(database)
         .await?;
-    ensure!(
-        migration.is_none(),
-        "a target used by an in-progress registry migration cannot be deleted"
-    );
-    let result = lfs_storage_target::Entity::delete_by_id(target_id)
+    if let Some(migration) = migration {
+        bail!(
+            "a target used by an in-progress {} migration cannot be deleted",
+            domain_label(&migration.domain)
+        );
+    }
+    let result = storage_target::Entity::delete_by_id(target_id)
         .exec(database)
         .await?;
-    ensure!(
-        result.rows_affected == 1,
-        "LFS storage target does not exist"
-    );
+    ensure!(result.rows_affected == 1, "storage target does not exist");
     Ok(())
 }

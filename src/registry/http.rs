@@ -307,12 +307,13 @@ async fn context(
                 RegistryError::challenge(challenge(state, image, action))
             }
         })?;
-    let store = if let Some(backend) = state.repositories.registry_storage().store() {
+    let active = state.repositories.registry_storage().active();
+    let store = if active.target_id.is_some() {
         state.store.image_external(
             repository.storage_key,
             state.repositories.repository_path(&repository),
             name.suffix,
-            backend,
+            active.store,
         )
     } else {
         state

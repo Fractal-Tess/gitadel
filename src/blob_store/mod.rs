@@ -11,11 +11,15 @@ use async_trait::async_trait;
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncRead, ReadBuf};
 
+mod domain;
 mod filesystem;
+pub mod manager;
 mod s3;
 pub mod targets;
 
+pub use domain::StorageDomain;
 pub use filesystem::FilesystemBlobStore;
+pub use manager::DomainStorage;
 pub use s3::S3BlobStore;
 
 pub type BlobReader = Pin<Box<dyn AsyncRead + Send>>;

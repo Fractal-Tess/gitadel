@@ -5,7 +5,7 @@ use std::{
 
 use super::{Permission, RepositoryState, browser::read_git, mirrors, validate_repository_name};
 use crate::{
-    blob_store::{ObjectPrefix, targets},
+    blob_store::ObjectPrefix,
     entity::{
         lfs_object, namespace, organization_member, repository, repository_alias,
         repository_collaborator, repository_favorite, repository_topic, topic, user,
@@ -1044,17 +1044,10 @@ async fn remove_repository(
         .await?;
     transaction.commit().await?;
     cleanup_lfs_blobs(state, repository.storage_key).await;
-    let registry_prefix = ObjectPrefix::new(format!("registry/{}", repository.storage_key))
-        .map_err(ApiError::internal)?;
-    if let Err(error) = targets::delete_prefix_from_all(
-        state.identity().database(),
-        state.local_lfs_root().to_path_buf(),
-        &registry_prefix,
-    )
-    .await
-    {
-        tracing::error!(%error, "could not clean repository registry objects from every target");
-    }
+    state
+        .registry_storage()
+        .delete_repository(state.identity().database(), repository.storage_key)
+        .await;
     cleanup_repository_storage(
         &state.repository_path(&repository),
         &state.lfs_repository_path(&repository),
@@ -1603,23 +1596,11 @@ async fn catalog_repository_lfs(
 }
 
 async fn cleanup_lfs_blobs(state: &RepositoryState, storage_key: Uuid) {
-    let prefix = match ObjectPrefix::new(storage_key.to_string()) {
-        Ok(prefix) => prefix,
-        Err(error) => {
-            tracing::error!(%error, "could not construct repository LFS cleanup prefix");
-            return;
-        }
-    };
     let _operation_guard = state.lfs_operation_guard().await;
-    if let Err(error) = targets::delete_prefix_from_all(
-        state.identity().database(),
-        state.local_lfs_root().to_path_buf(),
-        &prefix,
-    )
-    .await
-    {
-        tracing::error!(%error, "could not clean repository LFS objects from every target");
-    }
+    state
+        .lfs_storage()
+        .delete_repository(state.identity().database(), storage_key)
+        .await;
 }
 
 async fn cleanup_repository_storage(repository_path: &Path, lfs_path: &Path) {

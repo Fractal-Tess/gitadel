@@ -195,11 +195,11 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
         IdentityState::new_with_runtime(database, settings.clone(), maintenance_sender)
             .context("could not initialize authentication")?;
     identity_state
-        .initialize_lfs_storage(settings.storage.lfs_root.clone())
+        .initialize_lfs_storage(&settings.storage)
         .await
         .context("could not initialize LFS storage")?;
     identity_state
-        .initialize_registry_storage()
+        .initialize_registry_storage(&settings.storage)
         .await
         .context("could not initialize registry storage")?;
     if let Some(link) = identity_state

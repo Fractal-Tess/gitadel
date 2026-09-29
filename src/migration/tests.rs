@@ -237,3 +237,142 @@ async fn action_run_event_migration_preserves_runs_and_job_references() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn storage_domain_migration_keeps_selected_targets_and_history() {
+    use crate::entity::{storage_domain_state, storage_migration, storage_target};
+
+    let mut options = ConnectOptions::new("sqlite::memory:");
+    options.max_connections(1);
+    let database = Database::connect(options).await.unwrap();
+    let before = super::Migrator::migrations()
+        .iter()
+        .position(|migration| migration.name() == "m20260929_000069_storage_domains")
+        .unwrap();
+    super::Migrator::up(&database, Some(before as u32))
+        .await
+        .unwrap();
+    let lfs_target = Uuid::new_v4();
+    let registry_target = Uuid::new_v4();
+    let lfs_migration = Uuid::new_v4();
+    let registry_migration = Uuid::new_v4();
+    let at = "'2026-09-01T00:00:00+00:00'";
+    // The entities track the new schema, so the old tables are written with SQL.
+    for statement in [
+        format!(
+            "INSERT INTO lfs_storage_targets (id, name, kind, configuration, created_at, updated_at) \
+             VALUES (x'{}', 'LFS', 'filesystem', '{{}}', {at}, {at}), \
+                    (x'{}', 'Registry', 'filesystem', '{{}}', {at}, {at})",
+            lfs_target.simple(),
+            registry_target.simple()
+        ),
+        format!(
+            "UPDATE lfs_storage_state SET active_target_id = x'{}'",
+            lfs_target.simple()
+        ),
+        format!(
+            "UPDATE registry_storage_state SET active_target_id = x'{}'",
+            registry_target.simple()
+        ),
+        format!(
+            "INSERT INTO lfs_storage_migrations (id, source_target_id, target_id, state, phase, \
+             last_key, copied_objects, copied_bytes, error, started_at, updated_at, completed_at) \
+             VALUES (x'{}', NULL, x'{}', 'completed', 'complete', 'last', 3, 42, NULL, {at}, {at}, {at})",
+            lfs_migration.simple(),
+            lfs_target.simple()
+        ),
+        format!(
+            "INSERT INTO registry_storage_migrations (id, source_target_id, target_id, state, phase, \
+             last_key, copied_objects, copied_bytes, total_bytes, error, started_at, updated_at, completed_at) \
+             VALUES (x'{}', NULL, x'{}', 'failed', 'copying_registry', NULL, 1, 7, 9, 'boom', {at}, {at}, NULL)",
+            registry_migration.simple(),
+            registry_target.simple()
+        ),
+    ] {
+        database.execute_unprepared(&statement).await.unwrap();
+    }
+
+    super::Migrator::up(&database, None).await.unwrap();
+
+    let selected = |domain: &'static str| {
+        let database = &database;
+        async move {
+            storage_domain_state::Entity::find_by_id(domain)
+                .one(database)
+                .await
+                .unwrap()
+                .unwrap()
+                .active_target_id
+        }
+    };
+    assert_eq!(selected("lfs").await, Some(lfs_target));
+    assert_eq!(selected("registry").await, Some(registry_target));
+    assert_eq!(
+        storage_target::Entity::find()
+            .all(&database)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    let lfs = storage_migration::Entity::find_by_id(lfs_migration)
+        .one(&database)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            lfs.domain.as_str(),
+            lfs.state.as_str(),
+            lfs.phase.as_str(),
+            lfs.copied_bytes,
+            lfs.target_id
+        ),
+        ("lfs", "completed", "completed", 42, Some(lfs_target))
+    );
+    let registry = storage_migration::Entity::find_by_id(registry_migration)
+        .one(&database)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            registry.domain.as_str(),
+            registry.phase.as_str(),
+            registry.total_bytes,
+            registry.error.as_deref()
+        ),
+        ("registry", "copying", Some(9), Some("boom"))
+    );
+    // References to the renamed target table still hold: a selected target
+    // cannot be deleted.
+    assert!(
+        storage_target::Entity::delete_by_id(registry_target)
+            .exec(&database)
+            .await
+            .is_err()
+    );
+    let lfs_object_references = database
+        .query_all_raw(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            "SELECT \"table\" FROM pragma_foreign_key_list('lfs_objects') WHERE \"from\" = 'storage_target_id'",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        lfs_object_references[0]
+            .try_get::<String>("", "table")
+            .unwrap(),
+        "storage_targets"
+    );
+    assert!(
+        database
+            .query_all_raw(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Sqlite,
+                "PRAGMA foreign_key_check"
+            ))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::{
     blob_store::targets::StorageTargetConfiguration,
     config::{S3Settings, validate_s3_settings},
-    entity::{backup_provider, backup_provider_exclusion, lfs_storage_target},
+    entity::{backup_provider, backup_provider_exclusion, storage_target},
 };
 
 pub const RUNTIME_S3_PROVIDER_ID: Uuid = Uuid::nil();
@@ -144,9 +144,7 @@ pub async fn load_with_storage(
         .one(database)
         .await?
         .is_none()
-        && let Some(target) = lfs_storage_target::Entity::find_by_id(id)
-            .one(database)
-            .await?
+        && let Some(target) = storage_target::Entity::find_by_id(id).one(database).await?
     {
         return storage_target_provider(target).map(Some);
     }
@@ -258,7 +256,7 @@ async fn storage_providers(
     excluded: &HashSet<Uuid>,
 ) -> Result<Vec<BackupProvider>> {
     let mut providers = Vec::new();
-    for target in lfs_storage_target::Entity::find().all(database).await? {
+    for target in storage_target::Entity::find().all(database).await? {
         if !excluded.contains(&target.id) {
             providers.push(storage_target_provider(target)?);
         }
@@ -285,9 +283,9 @@ fn filesystem_backup_path(path: &std::path::Path) -> Result<PathBuf> {
     Ok(path.with_file_name(format!("{name}-backups")))
 }
 
-fn storage_target_provider(target: lfs_storage_target::Model) -> Result<BackupProvider> {
+fn storage_target_provider(target: storage_target::Model) -> Result<BackupProvider> {
     let configuration = serde_json::from_str::<StorageTargetConfiguration>(&target.configuration)
-        .context("stored LFS target configuration is invalid")?;
+        .context("stored storage target configuration is invalid")?;
     let config = match configuration {
         StorageTargetConfiguration::Filesystem { path } => {
             BackupProviderConfig::Filesystem(FilesystemSettings {

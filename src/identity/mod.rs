@@ -61,7 +61,7 @@ use webauthn_rs::{
 use crate::{
     archive::MaintenanceAction,
     backup_provider::{BackupProvider, BackupProviderConfig},
-    blob_store::targets::MeasuredUsage,
+    blob_store::{DomainStorage, targets::MeasuredUsage},
     config::{AuthSettings, Settings},
     entity::{api_token, audit_event, namespace, oauth_access_token, session, ssh_key, user},
 };
@@ -104,9 +104,8 @@ pub struct IdentityState {
     runtime_settings: Option<Arc<Settings>>,
     maintenance_sender: Option<mpsc::Sender<MaintenanceAction>>,
     maintenance_pending: Arc<Mutex<bool>>,
-    lfs_storage: Arc<tokio::sync::RwLock<Option<Arc<crate::storage::LfsStorageManager>>>>,
-    registry_storage:
-        Arc<tokio::sync::RwLock<Option<Arc<crate::registry::storage::RegistryStorageManager>>>>,
+    lfs_storage: Arc<tokio::sync::RwLock<Option<Arc<DomainStorage>>>>,
+    registry_storage: Arc<tokio::sync::RwLock<Option<Arc<DomainStorage>>>>,
     validated_backups: Arc<Mutex<HashMap<Uuid, ValidatedBackup>>>,
     tested_backup_providers: Arc<Mutex<HashMap<Uuid, TestedBackupProvider>>>,
     measured_storage: Arc<Mutex<HashMap<Uuid, MeasuredUsage>>>,
@@ -373,26 +372,27 @@ impl IdentityState {
     }
     pub(crate) async fn initialize_lfs_storage(
         &self,
-        fallback_path: PathBuf,
+        settings: &crate::config::StorageSettings,
     ) -> Result<(), anyhow::Error> {
-        let manager = crate::storage::LfsStorageManager::new(&self.database, fallback_path).await?;
+        let manager = crate::storage::start(&self.database, settings).await?;
         *self.lfs_storage.write().await = Some(manager);
         Ok(())
     }
 
-    pub(crate) async fn initialize_registry_storage(&self) -> Result<(), anyhow::Error> {
-        let manager = crate::registry::storage::RegistryStorageManager::new(&self.database).await?;
+    pub(crate) async fn initialize_registry_storage(
+        &self,
+        settings: &crate::config::StorageSettings,
+    ) -> Result<(), anyhow::Error> {
+        let manager = crate::registry::storage::start(&self.database, settings).await?;
         *self.registry_storage.write().await = Some(manager);
         Ok(())
     }
 
-    pub(crate) async fn registry_storage(
-        &self,
-    ) -> Option<Arc<crate::registry::storage::RegistryStorageManager>> {
+    pub(crate) async fn registry_storage(&self) -> Option<Arc<DomainStorage>> {
         self.registry_storage.read().await.clone()
     }
 
-    pub(crate) async fn lfs_storage(&self) -> Option<Arc<crate::storage::LfsStorageManager>> {
+    pub(crate) async fn lfs_storage(&self) -> Option<Arc<DomainStorage>> {
         self.lfs_storage.read().await.clone()
     }
 

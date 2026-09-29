@@ -94,8 +94,8 @@ pub struct RepositoryState {
     mirror_syncing: Arc<Mutex<HashSet<Uuid>>>,
     github_known_hosts: Arc<Mutex<Option<(String, Instant)>>>,
     lfs_root: Arc<PathBuf>,
-    lfs_storage: Arc<crate::storage::LfsStorageManager>,
-    registry_storage: Arc<crate::registry::storage::RegistryStorageManager>,
+    lfs_storage: Arc<crate::blob_store::DomainStorage>,
+    registry_storage: Arc<crate::blob_store::DomainStorage>,
     public_url: Arc<Url>,
     ssh_port: u16,
     lfs_tokens: Arc<RwLock<HashMap<String, LfsAuthorization>>>,
@@ -156,19 +156,11 @@ impl RepositoryState {
         mirrors::cleanup_temporary_files(&settings.repository_root).await?;
         let lfs_storage = match identity.lfs_storage().await {
             Some(manager) => manager,
-            None => {
-                crate::storage::LfsStorageManager::new(
-                    identity.database(),
-                    settings.lfs_root.clone(),
-                )
-                .await?
-            }
+            None => crate::storage::start(identity.database(), &settings).await?,
         };
         let registry_storage = match identity.registry_storage().await {
             Some(manager) => manager,
-            None => {
-                crate::registry::storage::RegistryStorageManager::new(identity.database()).await?
-            }
+            None => crate::registry::storage::start(identity.database(), &settings).await?,
         };
         mirrors::cleanup_lfs_staging(&settings.lfs_root).await?;
         create_private_directory_async(&settings.actions_artifact_root).await?;
@@ -280,8 +272,8 @@ impl RepositoryState {
         self.actions_artifact_root.as_ref()
     }
 
-    pub(super) fn local_lfs_root(&self) -> &Path {
-        self.lfs_root.as_ref()
+    pub(super) fn lfs_storage(&self) -> &Arc<crate::blob_store::DomainStorage> {
+        &self.lfs_storage
     }
 
     pub(super) fn lfs_repository_path(&self, repository: &repository::Model) -> PathBuf {
@@ -312,9 +304,7 @@ impl RepositoryState {
         self.lfs_storage.lock_operation().await
     }
 
-    pub(crate) fn registry_storage(
-        &self,
-    ) -> &Arc<crate::registry::storage::RegistryStorageManager> {
+    pub(crate) fn registry_storage(&self) -> &Arc<crate::blob_store::DomainStorage> {
         &self.registry_storage
     }
     pub(super) fn lfs_endpoint(&self, repository: &repository::Model) -> String {
