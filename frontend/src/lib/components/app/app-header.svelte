@@ -14,6 +14,7 @@
     preloadExplore,
     preloadRepositoryIndex,
   } from "$lib/navigation-cache.js";
+  import { adminSettingsSections } from "$lib/settings/navigation.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
   import { useShellState } from "$lib/state/shell-state.svelte.js";
 
@@ -94,7 +95,12 @@
           label: "Administration",
           href: resolve("/-/administration/[view]", { view: "appearance" }),
         },
-        { label: viewLabels[page.params.view ?? ""] ?? "Appearance" },
+        {
+          label:
+            adminSettingsSections.find(
+              (section) => section.id === page.params.view,
+            )?.label ?? "Appearance",
+        },
       ];
     }
     if (path === "/imports/new") {
