@@ -1,4 +1,9 @@
-use std::{io::SeekFrom, ops::Range, path::PathBuf, sync::Arc};
+use std::{
+    io::SeekFrom,
+    ops::Range,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
@@ -11,7 +16,7 @@ use uuid::Uuid;
 
 use super::{
     BlobDigest, BlobMetadata, BlobReader, BlobStore, DigestMismatch, ObjectKey, ObjectPrefix,
-    PutOutcome, verifying_reader,
+    PutOutcome, verify_file, verifying_reader,
 };
 use crate::filesystem::create_private_directory_async;
 
@@ -216,26 +221,90 @@ impl BlobStore for FilesystemBlobStore {
             Err(error) => Err(error.into()),
         }
     }
+
+    /// Renames the verified file into place, copying only across filesystems.
+    async fn put_file(
+        &self,
+        key: &ObjectKey,
+        expected: BlobDigest,
+        path: &Path,
+    ) -> Result<PutOutcome> {
+        let size = verify_file(path, expected).await?;
+        if let Some(existing) = self.stat(key).await? {
+            ensure!(existing.digest == expected, DigestMismatch);
+            let size = verify_file(&self.path(key), expected).await?;
+            return Ok(PutOutcome {
+                size,
+                created: false,
+            });
+        }
+        let destination = self.path(key);
+        let parent = destination.parent().context("blob path has no parent")?;
+        fs::create_dir_all(parent).await?;
+        match fs::rename(path, &destination).await {
+            Ok(()) => {
+                sync_directory(parent.to_path_buf()).await?;
+                Ok(PutOutcome {
+                    size,
+                    created: true,
+                })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
+                let file = fs::File::open(path).await?;
+                self.put_verified(key, expected, Box::pin(file)).await
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Hard-links the source, so both keys share one copy on disk.
+    async fn duplicate(&self, source: &ObjectKey, destination: &ObjectKey) -> Result<PutOutcome> {
+        let metadata = self
+            .stat(source)
+            .await?
+            .with_context(|| format!("blob {source} does not exist"))?;
+        if let Some(existing) = self.stat(destination).await? {
+            ensure!(existing.digest == metadata.digest, DigestMismatch);
+            return Ok(PutOutcome {
+                size: existing.size,
+                created: false,
+            });
+        }
+        let path = self.path(destination);
+        let parent = path.parent().context("blob path has no parent")?;
+        fs::create_dir_all(parent).await?;
+        match fs::hard_link(self.path(source), &path).await {
+            Ok(()) => {
+                sync_directory(parent.to_path_buf()).await?;
+                Ok(PutOutcome {
+                    size: metadata.size,
+                    created: true,
+                })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let existing = self
+                    .stat(destination)
+                    .await?
+                    .context("concurrent blob link disappeared")?;
+                ensure!(existing.digest == metadata.digest, DigestMismatch);
+                Ok(PutOutcome {
+                    size: existing.size,
+                    created: false,
+                })
+            }
+            // Filesystems without hard links fall back to a verified copy.
+            Err(_) => {
+                let reader = self.read(source).await?;
+                self.put_verified(destination, metadata.digest, reader)
+                    .await
+            }
+        }
+    }
 }
 
-async fn verify_file(path: &std::path::Path, expected: BlobDigest) -> Result<u64> {
-    let mut file = fs::File::open(path).await?;
-    let mut hasher = Sha256::new();
-    let mut size = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).await?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-        size = size.saturating_add(read as u64);
-    }
-    let actual: [u8; 32] = hasher.finalize().into();
-    if actual != *expected.as_bytes() {
-        return Err(DigestMismatch.into());
-    }
-    Ok(size)
+async fn sync_directory(path: PathBuf) -> Result<()> {
+    tokio::task::spawn_blocking(move || std::fs::File::open(path)?.sync_all()).await??;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -285,6 +354,32 @@ mod tests {
                 .await
                 .is_err()
         );
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn file_puts_move_and_duplicates_share_one_copy() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let root = std::env::temp_dir().join(format!("gitadel-blob-test-{}", Uuid::new_v4()));
+        let store = FilesystemBlobStore::new(root.clone()).await.unwrap();
+        let payload = b"uploaded payload";
+        let digest = BlobDigest::from_bytes(Sha256::digest(payload).into());
+        let upload = root.join("upload");
+        fs::write(&upload, b"tampered").await.unwrap();
+        let first = ObjectKey::new(format!("first/{}", digest.to_hex())).unwrap();
+        let error = store.put_file(&first, digest, &upload).await.unwrap_err();
+        assert!(error.downcast_ref::<DigestMismatch>().is_some());
+        assert!(store.stat(&first).await.unwrap().is_none());
+
+        fs::write(&upload, payload).await.unwrap();
+        let outcome = store.put_file(&first, digest, &upload).await.unwrap();
+        assert!(outcome.created && !upload.exists());
+
+        let second = ObjectKey::new(format!("second/{}", digest.to_hex())).unwrap();
+        store.duplicate(&first, &second).await.unwrap();
+        let inode = |key: &ObjectKey| std::fs::metadata(root.join(key.as_str())).unwrap().ino();
+        assert_eq!(inode(&first), inode(&second));
         fs::remove_dir_all(root).await.unwrap();
     }
 

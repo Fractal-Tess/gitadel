@@ -21,14 +21,13 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::blob_store::{
-    BlobDigest, BlobReader, BlobStore, DigestMismatch, FilesystemBlobStore, ObjectKey, ObjectPrefix,
+    BlobDigest, BlobReader, BlobStore, DigestMismatch, ObjectKey, ObjectPrefix,
 };
 
 pub(super) const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 pub(super) const MAX_BLOB_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 pub(super) const UPLOAD_TTL_SECONDS: u64 = 86_400;
 const LOCK_STRIPES: usize = 64;
-const IO_BUFFER_BYTES: usize = 64 * 1024;
 
 const OCI_IMAGE_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 const OCI_IMAGE_INDEX_MEDIA_TYPE: &str = "application/vnd.oci.image.index.v1+json";
@@ -93,18 +92,22 @@ impl From<anyhow::Error> for StoreError {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RegistryStore;
 
+/// Where an image's blobs and manifest objects live: the registry storage
+/// domain's active store, under `registry/<storage-key>/<image-hash>`.
 #[derive(Clone)]
-struct ExternalBackend {
+struct PayloadStore {
     store: Arc<dyn BlobStore>,
-    prefix: ObjectPrefix,
+    prefix: Arc<str>,
 }
 
+/// One image of a repository. Payloads go through [`PayloadStore`]; tags,
+/// manifest media types, and uploads stay in the repository directory.
 #[derive(Clone)]
 pub(super) struct ImageStore {
     image_dir: PathBuf,
     suffix: Arc<str>,
     valid: bool,
-    external: Option<ExternalBackend>,
+    payloads: PayloadStore,
 }
 
 #[derive(Clone, Debug)]
@@ -203,37 +206,24 @@ impl RegistryStore {
         Self
     }
 
-    pub(super) fn image(&self, repository_path: PathBuf, suffix: &str) -> ImageStore {
-        ImageStore {
-            image_dir: repository_path
-                .join("gitadel-registry")
-                .join("images")
-                .join(hex_digest(suffix.as_bytes())),
-            suffix: Arc::from(suffix),
-            valid: valid_suffix(suffix),
-            external: None,
-        }
-    }
-
-    pub(super) fn image_external(
+    /// `store` is the registry domain's active store.
+    pub(super) fn image(
         &self,
         repository_storage_key: Uuid,
         repository_path: PathBuf,
         suffix: &str,
-        backend: Arc<dyn BlobStore>,
+        store: Arc<dyn BlobStore>,
     ) -> ImageStore {
-        let mut image = self.image(repository_path, suffix);
-        let image_hash = image
-            .image_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("image directory is a SHA-256 name");
-        image.external = Some(ExternalBackend {
-            store: backend,
-            prefix: ObjectPrefix::new(format!("registry/{repository_storage_key}/{image_hash}"))
-                .expect("registry object prefix is valid"),
-        });
-        image
+        let image_hash = hex_digest(suffix.as_bytes());
+        ImageStore {
+            image_dir: image_directory(&repository_path, suffix),
+            suffix: Arc::from(suffix),
+            valid: valid_suffix(suffix),
+            payloads: PayloadStore {
+                store,
+                prefix: Arc::from(format!("registry/{repository_storage_key}/{image_hash}")),
+            },
+        }
     }
     pub async fn list_images(&self, repository_path: &Path) -> Result<Vec<String>, StoreError> {
         let mut result = Vec::new();
@@ -276,58 +266,44 @@ impl RegistryStore {
         &self,
         repository_path: &Path,
         repository_storage_key: Uuid,
-        backend: Option<Arc<dyn BlobStore>>,
+        store: Arc<dyn BlobStore>,
     ) -> Result<Vec<ImageMetadata>, StoreError> {
         let suffixes = self.list_images(repository_path).await?;
         let mut result = Vec::with_capacity(suffixes.len());
-        if let Some(backend) = backend {
-            let prefix = ObjectPrefix::new(format!("registry/{repository_storage_key}"))?;
-            let mut objects_by_image = HashMap::<String, Vec<_>>::new();
-            for object in backend.list(&prefix).await? {
-                let Some(relative) = object
-                    .key
-                    .as_str()
-                    .strip_prefix(prefix.as_str())
-                    .and_then(|value| value.strip_prefix('/'))
-                else {
-                    continue;
-                };
-                let Some((image_hash, _)) = relative.split_once('/') else {
-                    continue;
-                };
-                if image_hash.len() != 64
-                    || !image_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-                {
-                    continue;
-                }
-                objects_by_image
-                    .entry(image_hash.to_owned())
-                    .or_default()
-                    .push(object);
+        let prefix = ObjectPrefix::new(format!("registry/{repository_storage_key}"))?;
+        let mut objects_by_image = HashMap::<String, Vec<_>>::new();
+        for object in store.list(&prefix).await? {
+            let Some(relative) = object
+                .key
+                .as_str()
+                .strip_prefix(prefix.as_str())
+                .and_then(|value| value.strip_prefix('/'))
+            else {
+                continue;
+            };
+            let Some((image_hash, _)) = relative.split_once('/') else {
+                continue;
+            };
+            if image_hash.len() != 64 || !image_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                continue;
             }
-            for suffix in suffixes {
-                let image_hash = hex_digest(suffix.as_bytes());
-                let image = self.image_external(
-                    repository_storage_key,
-                    repository_path.to_path_buf(),
-                    &suffix,
-                    backend.clone(),
-                );
-                let objects = objects_by_image.remove(&image_hash).unwrap_or_default();
-                let metadata = image.metadata(&objects).await?;
-                if !metadata.references.is_empty() {
-                    result.push(metadata);
-                }
-            }
-        } else {
-            for suffix in suffixes {
-                let image = self.image(repository_path.to_path_buf(), &suffix);
-                let local = FilesystemBlobStore::new(image.image_dir.clone()).await?;
-                let objects = local.list(&ObjectPrefix::new("")?).await?;
-                let metadata = image.metadata(&objects).await?;
-                if !metadata.references.is_empty() {
-                    result.push(metadata);
-                }
+            objects_by_image
+                .entry(image_hash.to_owned())
+                .or_default()
+                .push(object);
+        }
+        for suffix in suffixes {
+            let image_hash = hex_digest(suffix.as_bytes());
+            let image = self.image(
+                repository_storage_key,
+                repository_path.to_path_buf(),
+                &suffix,
+                store.clone(),
+            );
+            let objects = objects_by_image.remove(&image_hash).unwrap_or_default();
+            let metadata = image.metadata(&objects).await?;
+            if !metadata.references.is_empty() {
+                result.push(metadata);
             }
         }
         result.sort_by(|left, right| left.suffix.cmp(&right.suffix));
@@ -344,9 +320,12 @@ impl RegistryStore {
             ..RegistryUsage::default()
         };
         for suffix in images {
-            let image = self.image(repository_path.to_path_buf(), &suffix);
-            usage.tag_count += image.tags().await?.len() as u64;
-            let mut uploads = match fs::read_dir(image.uploads_dir()).await {
+            let image_dir = image_directory(repository_path, &suffix);
+            usage.tag_count += {
+                let _guard = image_lock(&image_dir).await;
+                read_tags(&image_dir.join("refs")).await?.len() as u64
+            };
+            let mut uploads = match fs::read_dir(image_dir.join("uploads")).await {
                 Ok(uploads) => uploads,
                 Err(error) if error.kind() == ErrorKind::NotFound => continue,
                 Err(error) => return Err(error.into()),
@@ -405,16 +384,12 @@ impl ImageStore {
         let mut manifest_sizes = HashMap::<String, u64>::new();
         let mut size_bytes = 0_u64;
         for object in objects {
-            let relative = if let Some(external) = &self.external {
-                object
-                    .key
-                    .as_str()
-                    .strip_prefix(external.prefix.as_str())
-                    .and_then(|value| value.strip_prefix('/'))
-            } else {
-                Some(object.key.as_str())
-            };
-            let Some(relative) = relative else {
+            let Some(relative) = object
+                .key
+                .as_str()
+                .strip_prefix(self.payloads.prefix.as_ref())
+                .and_then(|value| value.strip_prefix('/'))
+            else {
                 continue;
             };
             if let Some(digest) = relative
@@ -675,19 +650,11 @@ impl ImageStore {
         if range.is_some() && (start >= end || end > size) {
             return Err(StoreError::RangeInvalid);
         }
-        let reader: BlobReader = if let Some(external) = &self.external {
-            let key = self.external_key(&path)?;
-            if start == 0 && end == size {
-                external.store.read(&key).await?
-            } else {
-                external.store.read_range(&key, start..end).await?
-            }
+        let key = self.payload_key(&path)?;
+        let reader = if start == 0 && end == size {
+            self.payloads.store.read(&key).await?
         } else {
-            let mut file = File::open(path).await?;
-            if start != 0 {
-                file.seek(SeekFrom::Start(start)).await?;
-            }
-            Box::pin(file.take(end - start))
+            self.payloads.store.read_range(&key, start..end).await?
         };
         Ok(Some((reader, size)))
     }
@@ -718,25 +685,21 @@ impl ImageStore {
         if source.payload_size(&source_path).await?.is_none() {
             return Ok(false);
         }
-        if self.external.is_some() || source.external.is_some() {
+        // Within one store the payload can be shared (a hard link on disk)
+        // instead of copied.
+        if same_store(&self.payloads.store, &source.payloads.store) {
+            self.payloads
+                .store
+                .duplicate(
+                    &source.payload_key(&source_path)?,
+                    &self.payload_key(&destination)?,
+                )
+                .await?;
+        } else {
             let reader = source.read_payload(&source_path).await?;
             self.publish_payload(&destination, digest, reader).await?;
-            return Ok(true);
         }
-        let Some(parent) = destination.parent() else {
-            return Err(StoreError::Invalid("blob path has no parent".to_owned()));
-        };
-        if let Some(first) = parent.parent() {
-            ensure_directory(first).await?;
-        }
-        ensure_directory(parent).await?;
-        match fs::hard_link(source_path, &destination).await {
-            Ok(()) => {
-                sync_directory(parent).await?;
-                Ok(true)
-            }
-            Err(error) => Err(error.into()),
-        }
+        Ok(true)
     }
     pub async fn start_upload(&self, owner: Uuid) -> Result<Uuid, StoreError> {
         if !self.valid {
@@ -905,49 +868,17 @@ impl ImageStore {
         if size > MAX_BLOB_BYTES {
             return Err(StoreError::TooLarge);
         }
-        verify_file_digest(&data, &digest).await?;
         let destination = self.blob_path(&digest).await?;
-        if self.external.is_some() {
-            self.publish_payload(&destination, &digest, Box::pin(File::open(&data).await?))
-                .await?;
-            fs::remove_dir_all(&directory).await?;
-            sync_directory(&self.uploads_dir()).await?;
-            return Ok(size);
-        }
-        if regular_file_exists(&destination).await? {
-            let existing_size =
-                regular_file_len(&destination)
-                    .await?
-                    .ok_or(StoreError::Invalid(
-                        "blob disappeared while finishing upload".to_owned(),
-                    ))?;
-            verify_file_digest(&destination, &digest).await?;
-            fs::remove_dir_all(&directory).await?;
-            sync_directory(&self.uploads_dir()).await?;
-            return Ok(existing_size);
-        }
-        let parent = destination
-            .parent()
-            .ok_or_else(|| StoreError::Invalid("blob path has no parent".to_owned()))?;
-        if let Some(first) = parent.parent() {
-            ensure_directory(first).await?;
-        }
-        ensure_directory(parent).await?;
-        match fs::rename(&data, &destination).await {
-            Ok(()) => {
-                sync_directory(parent).await?;
-                fs::remove_dir_all(directory).await?;
-                sync_directory(&self.uploads_dir()).await?;
-                Ok(size)
-            }
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                fs::remove_dir_all(directory).await?;
-                let destination_size = regular_file_len(&destination).await?.unwrap_or(size);
-                verify_file_digest(&destination, &digest).await?;
-                Ok(destination_size)
-            }
-            Err(error) => Err(error.into()),
-        }
+        let expected: BlobDigest = digest["sha256:".len()..].parse()?;
+        // The store verifies the upload and may move it into place.
+        let published = self
+            .payloads
+            .store
+            .put_file(&self.payload_key(&destination)?, expected, &data)
+            .await?;
+        fs::remove_dir_all(&directory).await?;
+        sync_directory(&self.uploads_dir()).await?;
+        Ok(published.size)
     }
     pub async fn cancel_upload(&self, id: Uuid, owner: Uuid) -> Result<bool, StoreError> {
         if !self.valid {
@@ -1013,16 +944,12 @@ impl ImageStore {
                 atomic_write(&metadata_path, &metadata_bytes).await?;
             }
         } else {
-            if self.external.is_some() {
-                self.publish_payload(
-                    &object,
-                    &digest,
-                    Box::pin(std::io::Cursor::new(bytes.to_vec())),
-                )
-                .await?;
-            } else {
-                atomic_write(&object, bytes).await?;
-            }
+            self.publish_payload(
+                &object,
+                &digest,
+                Box::pin(std::io::Cursor::new(bytes.to_vec())),
+            )
+            .await?;
             atomic_write(&metadata_path, &metadata_bytes).await?;
         }
         let updated_at = Some(Utc::now().to_rfc3339());
@@ -1118,29 +1045,7 @@ impl ImageStore {
     }
     pub async fn tags(&self) -> Result<Vec<String>, StoreError> {
         let _guard = self.lock().await?;
-        let mut result = Vec::new();
-        let mut entries = match fs::read_dir(self.refs_dir()).await {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(result),
-            Err(error) => return Err(error.into()),
-        };
-        while let Some(entry) = entries.next_entry().await? {
-            let metadata = fs::symlink_metadata(entry.path()).await?;
-            if !metadata.file_type().is_file() {
-                continue;
-            }
-            let Ok(bytes) = read_bounded_file(&entry.path(), 4096).await else {
-                continue;
-            };
-            let Ok(meta) = serde_json::from_slice::<ReferenceMeta>(&bytes) else {
-                continue;
-            };
-            if !meta.reference.starts_with("sha256:") && valid_tag(&meta.reference) {
-                result.push(meta.reference);
-            }
-        }
-        result.sort();
-        Ok(result)
+        read_tags(&self.refs_dir()).await
     }
     pub async fn referrers(
         &self,
@@ -1492,55 +1397,33 @@ impl ImageStore {
 }
 
 impl ImageStore {
-    fn relative_key(&self, path: &Path) -> Result<ObjectKey, StoreError> {
+    /// The canonical payload key of a path under the image directory.
+    fn payload_key(&self, path: &Path) -> Result<ObjectKey, StoreError> {
         let relative = path
             .strip_prefix(&self.image_dir)
-            .map_err(|error| StoreError::Invalid(error.to_string()))?;
-        let relative = relative
+            .map_err(|error| StoreError::Invalid(error.to_string()))?
             .to_str()
             .ok_or_else(|| StoreError::Invalid("payload path is not UTF-8".to_owned()))?;
-        Ok(ObjectKey::new(relative)?)
-    }
-
-    fn external_key(&self, path: &Path) -> Result<ObjectKey, StoreError> {
-        let external = self
-            .external
-            .as_ref()
-            .ok_or_else(|| StoreError::Invalid("external backend is unavailable".to_owned()))?;
         Ok(ObjectKey::new(format!(
-            "{}/{}",
-            external.prefix.as_str(),
-            self.relative_key(path)?
+            "{}/{relative}",
+            self.payloads.prefix
         ))?)
     }
 
     async fn payload_size(&self, path: &Path) -> Result<Option<u64>, StoreError> {
-        if let Some(external) = &self.external {
-            Ok(external
-                .store
-                .stat(&self.external_key(path)?)
-                .await?
-                .map(|metadata| metadata.size))
-        } else {
-            regular_file_len(path).await
-        }
+        Ok(self
+            .payloads
+            .store
+            .stat(&self.payload_key(path)?)
+            .await?
+            .map(|metadata| metadata.size))
     }
 
     async fn read_payload(&self, path: &Path) -> Result<BlobReader, StoreError> {
-        if let Some(external) = &self.external {
-            Ok(external.store.read(&self.external_key(path)?).await?)
-        } else {
-            if existing_regular_file(path).await?.is_none() {
-                return Err(std::io::Error::from(ErrorKind::NotFound).into());
-            }
-            Ok(Box::pin(File::open(path).await?))
-        }
+        Ok(self.payloads.store.read(&self.payload_key(path)?).await?)
     }
 
     async fn read_bounded_payload(&self, path: &Path, limit: usize) -> Result<Vec<u8>, StoreError> {
-        if self.external.is_none() {
-            return read_bounded_file(path, limit).await;
-        }
         let mut reader = self.read_payload(path).await?.take(limit as u64 + 1);
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
@@ -1558,31 +1441,56 @@ impl ImageStore {
     ) -> Result<(), StoreError> {
         let digest = normalize_digest(digest)?;
         let expected: BlobDigest = digest["sha256:".len()..].parse()?;
-        if let Some(external) = &self.external {
-            external
-                .store
-                .put_verified(&self.external_key(path)?, expected, reader)
-                .await?;
-        } else {
-            FilesystemBlobStore::new(self.image_dir.clone())
-                .await?
-                .put_verified(&self.relative_key(path)?, expected, reader)
-                .await?;
-        }
+        self.payloads
+            .store
+            .put_verified(&self.payload_key(path)?, expected, reader)
+            .await?;
         Ok(())
     }
 
     async fn delete_payload(&self, path: &Path) -> Result<(), StoreError> {
-        if let Some(external) = &self.external {
-            external.store.delete(&self.external_key(path)?).await?;
-        } else {
-            fs::remove_file(path).await?;
-            if let Some(parent) = path.parent() {
-                sync_directory(parent).await?;
-            }
-        }
+        self.payloads.store.delete(&self.payload_key(path)?).await?;
         Ok(())
     }
+}
+
+/// Whether two handles point at the same store instance.
+fn same_store(left: &Arc<dyn BlobStore>, right: &Arc<dyn BlobStore>) -> bool {
+    std::ptr::addr_eq(Arc::as_ptr(left), Arc::as_ptr(right))
+}
+
+/// The metadata directory of one image inside its repository.
+fn image_directory(repository_path: &Path, suffix: &str) -> PathBuf {
+    repository_path
+        .join("gitadel-registry")
+        .join("images")
+        .join(hex_digest(suffix.as_bytes()))
+}
+
+async fn read_tags(refs_dir: &Path) -> Result<Vec<String>, StoreError> {
+    let mut result = Vec::new();
+    let mut entries = match fs::read_dir(refs_dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(result),
+        Err(error) => return Err(error.into()),
+    };
+    while let Some(entry) = entries.next_entry().await? {
+        let metadata = fs::symlink_metadata(entry.path()).await?;
+        if !metadata.file_type().is_file() {
+            continue;
+        }
+        let Ok(bytes) = read_bounded_file(&entry.path(), 4096).await else {
+            continue;
+        };
+        let Ok(meta) = serde_json::from_slice::<ReferenceMeta>(&bytes) else {
+            continue;
+        };
+        if !meta.reference.starts_with("sha256:") && valid_tag(&meta.reference) {
+            result.push(meta.reference);
+        }
+    }
+    result.sort();
+    Ok(result)
 }
 
 fn valid_suffix(value: &str) -> bool {
@@ -1703,19 +1611,6 @@ async fn sync_directory(path: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
-async fn regular_file_exists(path: &Path) -> Result<bool, StoreError> {
-    match fs::symlink_metadata(path).await {
-        Ok(metadata) => {
-            if !metadata.file_type().is_file() {
-                return Err(StoreError::Invalid("expected a regular file".to_owned()));
-            }
-            Ok(true)
-        }
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error.into()),
-    }
-}
-
 async fn regular_file_len(path: &Path) -> Result<Option<u64>, StoreError> {
     match fs::symlink_metadata(path).await {
         Ok(metadata) => {
@@ -1778,24 +1673,6 @@ async fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
         let _ = fs::remove_file(&temporary).await;
     }
     result
-}
-
-async fn verify_file_digest(path: &Path, expected: &str) -> Result<(), StoreError> {
-    let mut file = File::open(path).await?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; IO_BUFFER_BYTES];
-    loop {
-        let read = file.read(&mut buffer).await?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let actual = format!("sha256:{}", hex::encode(hasher.finalize()));
-    if actual != expected {
-        return Err(StoreError::DigestInvalid);
-    }
-    Ok(())
 }
 
 async fn cleanup_expired_uploads(root: &Path) -> Result<(), StoreError> {
@@ -1861,6 +1738,8 @@ mod tests {
 
     struct Fixture {
         root: PathBuf,
+        storage_key: Uuid,
+        payloads: Arc<dyn BlobStore>,
         image: ImageStore,
         owner: Uuid,
     }
@@ -1869,12 +1748,34 @@ mod tests {
         async fn new() -> Self {
             let root =
                 std::env::temp_dir().join(format!("gitadel-registry-test-{}", Uuid::new_v4()));
-            fs::create_dir(&root).await.unwrap();
-            Self {
-                image: RegistryStore::new().image(root.clone(), ""),
+            let storage_key = Uuid::new_v4();
+            fs::create_dir_all(root.join(format!("{storage_key}.git")))
+                .await
+                .unwrap();
+            let payloads: Arc<dyn BlobStore> = Arc::new(
+                crate::registry::storage::RegistryLocalStore::new(root.clone())
+                    .await
+                    .unwrap(),
+            );
+            let mut fixture = Self {
+                image: RegistryStore::new().image(storage_key, root.clone(), "", payloads.clone()),
                 root,
+                storage_key,
+                payloads,
                 owner: Uuid::new_v4(),
-            }
+            };
+            fixture.image = fixture.reopen();
+            fixture
+        }
+
+        /// A fresh handle on the same image, as a later request would get.
+        fn reopen(&self) -> ImageStore {
+            RegistryStore::new().image(
+                self.storage_key,
+                self.root.join(format!("{}.git", self.storage_key)),
+                "",
+                self.payloads.clone(),
+            )
         }
 
         async fn blob(&self, bytes: &'static [u8]) -> String {
@@ -1933,7 +1834,7 @@ mod tests {
         fixture.image.cancel_upload(other, owner).await.unwrap();
         pending.abort();
         let _ = pending.await;
-        let reopened = RegistryStore::new().image(fixture.root.clone(), "");
+        let reopened = fixture.reopen();
         assert_eq!(reopened.upload_status(id, owner).await.unwrap(), Some(4));
         reopened
             .append_upload(id, owner, Body::from("tail"), Some((4, 7)))

@@ -234,6 +234,23 @@ impl BlobStore for RegistryLocalStore {
     async fn delete(&self, key: &ObjectKey) -> Result<()> {
         self.files.delete(&local_object_key(key)?).await
     }
+
+    async fn put_file(
+        &self,
+        key: &ObjectKey,
+        expected: BlobDigest,
+        path: &Path,
+    ) -> Result<PutOutcome> {
+        self.files
+            .put_file(&local_object_key(key)?, expected, path)
+            .await
+    }
+
+    async fn duplicate(&self, source: &ObjectKey, destination: &ObjectKey) -> Result<PutOutcome> {
+        self.files
+            .duplicate(&local_object_key(source)?, &local_object_key(destination)?)
+            .await
+    }
 }
 
 /// Registry usage per repository: payloads from the active store, and tags,

@@ -6,7 +6,7 @@ use std::{
     task::{Context as TaskContext, Poll},
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use async_trait::async_trait;
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncRead, ReadBuf};
@@ -174,6 +174,29 @@ impl AsyncRead for DigestVerifyingReader {
     }
 }
 
+/// Hashes a file and returns its size, or fails with [`DigestMismatch`].
+async fn verify_file(path: &std::path::Path, expected: BlobDigest) -> Result<u64> {
+    use tokio::io::AsyncReadExt as _;
+
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut hasher = Sha256::new();
+    let mut size = 0_u64;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size = size.saturating_add(read as u64);
+    }
+    let actual: [u8; 32] = hasher.finalize().into();
+    if actual != *expected.as_bytes() {
+        return Err(DigestMismatch.into());
+    }
+    Ok(size)
+}
+
 fn verifying_reader(inner: BlobReader, expected: BlobDigest) -> BlobReader {
     Box::pin(DigestVerifyingReader {
         inner,
@@ -198,6 +221,32 @@ pub trait BlobStore: Send + Sync {
     ) -> Result<PutOutcome>;
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<BlobMetadata>>;
     async fn delete(&self, key: &ObjectKey) -> Result<()>;
+
+    /// Publishes a local file. The file's digest is verified even when the key
+    /// already exists, and stores on the same filesystem may move the file
+    /// instead of copying it, so callers must treat `path` as consumed.
+    async fn put_file(
+        &self,
+        key: &ObjectKey,
+        expected: BlobDigest,
+        path: &std::path::Path,
+    ) -> Result<PutOutcome> {
+        verify_file(path, expected).await?;
+        let file = tokio::fs::File::open(path).await?;
+        self.put_verified(key, expected, Box::pin(file)).await
+    }
+
+    /// Stores the content of `source` under `destination` as well. Stores
+    /// that can share content without copying it override this.
+    async fn duplicate(&self, source: &ObjectKey, destination: &ObjectKey) -> Result<PutOutcome> {
+        let metadata = self
+            .stat(source)
+            .await?
+            .with_context(|| format!("blob {source} does not exist"))?;
+        let reader = self.read(source).await?;
+        self.put_verified(destination, metadata.digest, reader)
+            .await
+    }
 }
 
 pub fn lfs_object_key(storage_key: uuid::Uuid, oid: &str) -> Result<ObjectKey> {

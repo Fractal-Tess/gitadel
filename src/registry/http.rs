@@ -307,19 +307,12 @@ async fn context(
                 RegistryError::challenge(challenge(state, image, action))
             }
         })?;
-    let active = state.repositories.registry_storage().active();
-    let store = if active.target_id.is_some() {
-        state.store.image_external(
-            repository.storage_key,
-            state.repositories.repository_path(&repository),
-            name.suffix,
-            active.store,
-        )
-    } else {
-        state
-            .store
-            .image(state.repositories.repository_path(&repository), name.suffix)
-    };
+    let store = state.store.image(
+        repository.storage_key,
+        state.repositories.repository_path(&repository),
+        name.suffix,
+        state.repositories.registry_storage().store(),
+    );
     Ok((repository, store))
 }
 
