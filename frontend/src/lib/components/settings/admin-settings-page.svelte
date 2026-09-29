@@ -9,8 +9,7 @@
   import ActionsSettings from "$lib/components/settings/actions-settings.svelte";
   import BackupSettings from "$lib/components/settings/backup-settings.svelte";
   import EmailSettings from "$lib/components/settings/email-settings.svelte";
-  import LfsSettings from "$lib/components/settings/lfs-settings.svelte";
-  import RegistrySettings from "$lib/components/settings/registry-settings.svelte";
+  import StorageDomainSettings from "$lib/components/settings/storage-domain-settings.svelte";
   import IntegritySettings from "$lib/components/settings/integrity-settings.svelte";
   import StorageSettings from "$lib/components/settings/storage-settings.svelte";
   import { AccountSettingsState } from "$lib/settings/account-settings-state.svelte.js";
@@ -133,9 +132,19 @@
   {:else if view === "storage"}
     <StorageSettings />
   {:else if view === "lfs"}
-    <LfsSettings />
+    <StorageDomainSettings
+      domain="lfs"
+      noun="Git LFS"
+      objectsLabel="LFS objects"
+      migrationNote="Browsing, Git operations, and LFS downloads remain available. LFS uploads continue during copying and wait while the final changes are moved."
+    />
   {:else if view === "registry"}
-    <RegistrySettings />
+    <StorageDomainSettings
+      domain="registry"
+      noun="container registry"
+      objectsLabel="Blobs and manifests"
+      migrationNote="Pulls remain available. Registry pushes wait while the final changes are moved."
+    />
   {:else if view === "backups"}
     <BackupSettings />
   {:else if view === "maintenance"}
