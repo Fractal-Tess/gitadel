@@ -155,10 +155,17 @@ pub struct UsageTotals {
 }
 
 impl UsageTotals {
-    fn sum<'a>(usages: impl IntoIterator<Item = &'a RepositoryUsage>) -> Self {
+    /// Sums `usages`, reporting every counter in `fields` even when it is zero.
+    fn sum<'a>(
+        fields: &[UsageDetail],
+        usages: impl IntoIterator<Item = &'a RepositoryUsage>,
+    ) -> Self {
         let mut totals = Self {
             repository_count: 0,
-            usage: RepositoryUsage::default(),
+            usage: RepositoryUsage {
+                details: fields.iter().map(|field| (field.key, 0)).collect(),
+                ..RepositoryUsage::default()
+            },
         };
         for usage in usages {
             if usage.object_count > 0 {
@@ -192,7 +199,7 @@ async fn status(state: &IdentityState, domain: &Domain) -> Result<DomainStatus, 
         active_target_name,
         local_label: domain.entry.local_label,
         local_root: domain.storage.local_root().display().to_string(),
-        usage: UsageTotals::sum(usage.values()),
+        usage: UsageTotals::sum(domain.entry.usage.details(), usage.values()),
         detail_fields: domain.entry.usage.details(),
         active_migration,
         last_migration,

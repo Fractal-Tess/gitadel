@@ -298,6 +298,33 @@ async fn status_reports_local_storage_and_totals() {
 }
 
 #[tokio::test]
+async fn empty_status_reports_every_detail_counter() {
+    let fixture = Fixture::new().await;
+    let status = status(&fixture.state, &fixture.domain("registry").await)
+        .await
+        .unwrap();
+    assert_eq!(
+        status
+            .usage
+            .usage
+            .details
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        {
+            let mut keys = status
+                .detail_fields
+                .iter()
+                .map(|field| field.key)
+                .collect::<Vec<_>>();
+            keys.sort_unstable();
+            keys
+        }
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn registry_status_reports_domain_details() {
     let fixture = Fixture::with_usage("registry").await;
     let status = status(&fixture.state, &fixture.domain("registry").await)
