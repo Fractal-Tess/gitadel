@@ -2,10 +2,16 @@
   import { goto } from "$app/navigation";
   import { resolve } from "$app/paths";
   import { page } from "$app/state";
+  import Eye from "@lucide/svelte/icons/eye";
+  import EyeOff from "@lucide/svelte/icons/eye-off";
   import KeyRound from "@lucide/svelte/icons/key-round";
   import LogIn from "@lucide/svelte/icons/log-in";
   import { toast } from "svelte-sonner";
 
+  import AuthShell, {
+    authButtonClass,
+    authInputClass,
+  } from "$lib/components/app/auth-shell.svelte";
   import { Badge } from "$lib/components/ui/badge/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
@@ -30,6 +36,7 @@
   );
   let username = $state("");
   let password = $state("");
+  let showPassword = $state(false);
   let working = $state(false);
   // Set once the password was accepted for an account with two-factor
   // authentication; the next request completes the sign-in.
@@ -99,6 +106,7 @@
         },
       );
       password = "";
+      showPassword = false;
       if ("two_factor_required" in response) {
         twoFactorChallengeId = response.challenge_id;
         twoFactorCode = "";
@@ -172,165 +180,197 @@
   <title>Sign in · {app.instance?.site_name ?? "Gitadel"}</title>
 </svelte:head>
 
-<main class="grid min-h-screen place-items-center bg-background px-5 py-12">
-  <section class="w-full max-w-md rounded-md border bg-card/25 p-6 shadow-sm">
-    <a class="text-sm font-bold tracking-[-0.035em]" href={resolve("/")}
-      >{app.instance?.site_name ?? "GITADEL"}</a
-    >
-    <p
-      class="mt-8 text-xs font-medium uppercase tracking-wider text-muted-foreground"
-    >
-      Account access
+{#snippet lastUsed(onPrimary: boolean)}
+  <Badge
+    class={[
+      "absolute -top-2 right-3 z-10 h-4 rounded-full px-1.5 text-[9px] leading-none shadow-sm",
+      onPrimary
+        ? "border border-card bg-orange-500 text-black"
+        : "border border-orange-500/40 bg-card text-orange-700 dark:text-orange-300",
+    ]}
+  >
+    Last used
+  </Badge>
+{/snippet}
+
+<AuthShell>
+  {#if twoFactorChallengeId}
+    <h1 class="text-3xl font-semibold tracking-[-0.03em]">
+      Two-factor authentication
+    </h1>
+    <p class="mt-2 text-sm leading-6 text-muted-foreground">
+      Enter the 6-digit code from your authenticator app, or one of your
+      recovery codes.
     </p>
-    {#if twoFactorChallengeId}
-      <h1 class="mt-2 text-2xl font-semibold">Two-factor authentication</h1>
-      <p class="mt-2 text-sm text-muted-foreground">
-        Enter the 6-digit code from your authenticator app, or one of your
-        recovery codes.
-      </p>
-      <form
-        class="mt-6 grid gap-4"
-        onsubmit={(event) => {
-          event.preventDefault();
-          void submitTwoFactorCode();
+    <form
+      class="mt-8 grid gap-4"
+      onsubmit={(event) => {
+        event.preventDefault();
+        void submitTwoFactorCode();
+      }}
+    >
+      <Field.Field>
+        <Field.Label for="login-two-factor-code"
+          >Authentication code</Field.Label
+        >
+        <Input
+          id="login-two-factor-code"
+          class={[authInputClass, "font-mono tracking-[0.2em]"]}
+          bind:value={twoFactorCode}
+          autocomplete="one-time-code"
+          autocapitalize="off"
+          spellcheck={false}
+          maxlength={32}
+          required
+        />
+      </Field.Field>
+      <Button
+        class={[authButtonClass, "mt-1 hover:bg-primary/90"]}
+        type="submit"
+        disabled={working || !twoFactorCode.trim()}
+      >
+        Verify
+      </Button>
+      <Button
+        class={authButtonClass}
+        type="button"
+        variant="ghost"
+        disabled={working}
+        onclick={() => {
+          twoFactorChallengeId = null;
+          twoFactorCode = "";
         }}
       >
-        <Field.Field>
-          <Field.Label for="login-two-factor-code">Authentication code</Field.Label>
-          <Input
-            id="login-two-factor-code"
-            bind:value={twoFactorCode}
-            autocomplete="one-time-code"
-            autocapitalize="off"
-            spellcheck={false}
-            maxlength={32}
-            required
-          />
-        </Field.Field>
-        <Button type="submit" disabled={working || !twoFactorCode.trim()}>
-          Verify
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          disabled={working}
-          onclick={() => {
-            twoFactorChallengeId = null;
-            twoFactorCode = "";
-          }}
-        >
-          Start over
-        </Button>
-      </form>
-    {:else}
-      <h1 class="mt-2 text-2xl font-semibold">Sign in</h1>
-      <p class="mt-2 text-sm text-muted-foreground">
-        Use your account to access private repositories and settings.
-      </p>
+        Start over
+      </Button>
+    </form>
+  {:else}
+    <h1 class="text-3xl font-semibold tracking-[-0.03em]">Sign in</h1>
+    <p class="mt-2 text-sm leading-6 text-muted-foreground">
+      Use your account to access private repositories and settings.
+    </p>
 
-      {#if authentication?.password_enabled}
-        <form
-          class="mt-6 grid gap-4"
-          onsubmit={(event) => {
-            event.preventDefault();
-            void loginWithPassword();
-          }}
-        >
-          <Field.Field>
-            <Field.Label for="login-username">Username</Field.Label>
-            <Input
-              id="login-username"
-              bind:value={username}
-              autocomplete="username"
-              required
-            />
-          </Field.Field>
-          <Field.Field>
-            <div class="flex items-baseline justify-between gap-3">
-              <Field.Label for="login-password">Password</Field.Label>
-              {#if app.authStatus?.email_enabled}
-                <a
-                  class="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
-                  href={resolve("/reset-password")}>Forgot password?</a
-                >
-              {/if}
-            </div>
-            <Input
-              id="login-password"
-              type="password"
-              bind:value={password}
-              autocomplete="current-password"
-              required
-            />
-          </Field.Field>
-          <Button class="relative" type="submit" disabled={working}>
-            Sign in
-            {#if lastLoginMethod === "password"}
-              <Badge
-                variant="secondary"
-                class="absolute -right-2 -bottom-2 z-10 h-4 border border-border bg-background px-1.5 text-[9px] leading-none text-foreground shadow-sm"
-              >
-                Last used
-              </Badge>
+    {#if hasAlternativeLogin}
+      <div class="mt-8 grid gap-3">
+        {#if authentication?.passkey_enabled}
+          <Button
+            class={authButtonClass}
+            variant="outline"
+            disabled={working}
+            aria-describedby="passkey-login-help"
+            onclick={() => void loginWithPasskey()}
+          >
+            <KeyRound data-icon="inline-start" />Use a passkey
+            {#if lastLoginMethod === "passkey"}
+              {@render lastUsed(false)}
             {/if}
           </Button>
-        </form>
-      {/if}
-
-      {#if authentication?.password_enabled && hasAlternativeLogin}
-        <div class="my-5 flex items-center gap-3 text-xs text-muted-foreground">
-          <span class="h-px flex-1 bg-border"></span>or<span
-            class="h-px flex-1 bg-border"
-          ></span>
-        </div>
-      {/if}
-
-      <div class:mt-6={!authentication?.password_enabled} class="grid gap-3">
-        {#if authentication?.passkey_enabled}
-          <div>
-            <Button
-              class="relative w-full gap-2"
-              variant="outline"
-              disabled={working}
-              aria-describedby="passkey-login-help"
-              onclick={() => void loginWithPasskey()}
-            >
-              <KeyRound data-icon="inline-start" />Use a passkey
-              {#if lastLoginMethod === "passkey"}
-                <Badge
-                  class="absolute -right-2 -bottom-2 z-10 h-4 border border-background bg-primary px-1.5 text-[9px] leading-none text-primary-foreground shadow-sm"
-                >
-                  Last used
-                </Badge>
-              {/if}
-            </Button>
-            <p
-              id="passkey-login-help"
-              class="mt-3 text-center text-xs text-muted-foreground"
-            >
-              Choose a passkey saved for this site. No username required.
-            </p>
-          </div>
         {/if}
 
         {#each authentication?.providers ?? [] as provider (provider.id)}
           <Button
-            class="relative w-full gap-2"
+            class={authButtonClass}
             variant="outline"
             href={ssoHref(provider.id)}
             disabled={working}
           >
             <LogIn data-icon="inline-start" />Continue with {provider.name}
             {#if lastLoginMethod === `sso:${provider.id}`}
-              <Badge
-                class="absolute -right-2 -bottom-2 z-10 h-4 border border-background bg-primary px-1.5 text-[9px] leading-none text-primary-foreground shadow-sm"
-              >
-                Last used
-              </Badge>
+              {@render lastUsed(false)}
             {/if}
           </Button>
         {/each}
+
+        {#if authentication?.passkey_enabled}
+          <p
+            id="passkey-login-help"
+            class="text-center text-xs text-balance text-muted-foreground"
+          >
+            Choose a passkey saved for this site. No username required.
+          </p>
+        {/if}
       </div>
     {/if}
-  </section>
-</main>
+
+    {#if authentication?.password_enabled && hasAlternativeLogin}
+      <div
+        class="my-6 flex items-center gap-3 text-xs text-muted-foreground"
+        aria-hidden="true"
+      >
+        <span class="h-px flex-1 bg-border"></span>or<span
+          class="h-px flex-1 bg-border"
+        ></span>
+      </div>
+    {/if}
+
+    {#if authentication?.password_enabled}
+      <form
+        class={["grid gap-4", !hasAlternativeLogin && "mt-8"]}
+        onsubmit={(event) => {
+          event.preventDefault();
+          void loginWithPassword();
+        }}
+      >
+        <Field.Field>
+          <Field.Label for="login-username">Username</Field.Label>
+          <Input
+            id="login-username"
+            class={authInputClass}
+            bind:value={username}
+            autocomplete="username"
+            autocapitalize="off"
+            spellcheck={false}
+            required
+          />
+        </Field.Field>
+        <Field.Field>
+          <Field.Label for="login-password">Password</Field.Label>
+          <div class="relative">
+            <Input
+              id="login-password"
+              class={[authInputClass, "pr-11"]}
+              type={showPassword ? "text" : "password"}
+              bind:value={password}
+              autocomplete="current-password"
+              required
+            />
+            <button
+              type="button"
+              class="absolute inset-y-1 right-1 grid w-9 place-items-center rounded-lg text-muted-foreground transition-colors outline-none hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+              aria-label="Show password"
+              aria-controls="login-password"
+              aria-pressed={showPassword}
+              onclick={() => (showPassword = !showPassword)}
+            >
+              {#if showPassword}
+                <EyeOff class="size-4" aria-hidden="true" />
+              {:else}
+                <Eye class="size-4" aria-hidden="true" />
+              {/if}
+            </button>
+          </div>
+        </Field.Field>
+        <Button
+          class={[authButtonClass, "mt-1 hover:bg-primary/90"]}
+          type="submit"
+          disabled={working}
+        >
+          Sign in
+          {#if lastLoginMethod === "password"}
+            {@render lastUsed(true)}
+          {/if}
+        </Button>
+      </form>
+    {/if}
+
+    <div class="mt-8 grid gap-2 text-center text-sm">
+      {#if authentication?.password_enabled && app.authStatus?.email_enabled}
+        <a
+          class="mx-auto w-fit rounded-sm font-medium text-orange-700 underline-offset-4 outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50 dark:text-orange-400"
+          href={resolve("/reset-password")}>Forgot password?</a
+        >
+      {/if}
+      <p class="text-muted-foreground">Accounts are created by invitation.</p>
+    </div>
+  {/if}
+</AuthShell>
