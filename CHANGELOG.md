@@ -4,6 +4,17 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-09-29
+
+### Added
+
+- A user or organization page now opens with a profile: the README of the repository named after the namespace (for example `alice/alice`), up to six pinned repositories, and a year of commit activity drawn as a GitHub-style grid. The activity counts commits across the namespace's repositories that you can read, and leaves out mirrors. Owners choose and order the pins with **Customize pins**; the profile steps aside while you search the list.
+- `GET /api/v1/namespaces/{slug}/activity` and `GET`/`PUT /api/v1/namespaces/{slug}/pins` serve the activity and pins. Setting pins needs a write token for the namespace owner.
+
+### Fixed
+
+- README badges from `img.shields.io` now render. The Content-Security-Policy allowed only images from the instance itself, so every badge showed as a broken image. `img.shields.io` is the only external image host allowed; other external images stay blocked.
+
 ## [0.17.0] - 2026-09-29
 
 ### Changed
@@ -409,7 +420,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.14.0...v0.15.0

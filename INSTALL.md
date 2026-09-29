@@ -37,7 +37,7 @@ Configure the stack with environment variables, either exported or in an
 | `GITADEL_LISTEN_ADDRESS` | `127.0.0.1` | Host address for the published ports. Use `0.0.0.0` to accept connections from other machines. |
 | `GITADEL_HTTP_PORT` | `3000` | Host port for HTTP. |
 | `GITADEL_SSH_PORT` | `2222` | Host port for Git over SSH. |
-| `GITADEL_VERSION` | `latest` | Image tag, such as `0.17.0`. |
+| `GITADEL_VERSION` | `latest` | Image tag, such as `0.18.0`. |
 
 For example, to reach an instance on your network at `http://192.168.1.10:3000`:
 
@@ -152,10 +152,10 @@ On a machine with the Gitadel SOPS token and private mesh access:
 GITADEL_USERNAME=fractal-tess \
 GITADEL_TOKEN_FILE=/run/secrets/gitadel_api_token \
 GITADEL_TLS_VERIFY=false \
-nix shell nixpkgs#skopeo --command ./scripts/publish-image.sh 0.17.0 latest
+nix shell nixpkgs#skopeo --command ./scripts/publish-image.sh 0.18.0 latest
 ```
 
-With Skopeo already installed, `just publish-image 0.17.0 latest` calls the
+With Skopeo already installed, `just publish-image 0.18.0 latest` calls the
 same script; keep the environment variables above. No tag argument means
 `latest`. The build targets the Docker daemon's native platform, not a
 multi-platform image.
