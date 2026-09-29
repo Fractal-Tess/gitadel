@@ -1,14 +1,16 @@
 <!--
-  Frame for sign-in and account creation: an always-dark animated field fills
-  the page, with the instance mark above and the page's form in a centred card.
+  Frame for sign-in and account creation: an always-dark page split in two.
+  An animated field fills a rounded panel on the left, carrying the instance
+  mark and tagline, and the page's form sits beside it. Below the `lg`
+  breakpoint the panel shrinks to a banner above the form.
 -->
 <script lang="ts" module>
   export type AuthBackground = "ravine" | "squares";
 
-  /** The field drawn behind the sign-in and registration cards. */
+  /** The field drawn in the panel beside the sign-in and registration forms. */
   export const AUTH_BACKGROUND: AuthBackground = "ravine";
 
-  /** Shared sizing for inputs and full-width actions inside the card. */
+  /** Shared sizing for inputs and full-width actions in the form. */
   export const authInputClass =
     "h-11 rounded-xl bg-muted/60 px-3.5 md:text-sm dark:bg-input/20";
   export const authButtonClass = "relative h-11 w-full rounded-xl text-sm";
@@ -32,53 +34,60 @@
   const siteName = $derived(app.instance?.site_name || "Gitadel");
 </script>
 
-<main class="relative isolate min-h-svh bg-[#050505] text-white">
-  <div class="fixed inset-0 -z-10" aria-hidden="true">
-    {#if background === "squares"}
-      <BlinkingSquares
-        class="size-full"
-        direction="right"
-        gridSize={48}
-        squareColor="#f97316"
-        backgroundColor="#0a0a0a"
-        fadeStart={0.5}
-        falloff={1.6}
-        squareSize={0.56}
-        minBrightness={0.35}
-        twinkleSpeed={0.9}
-        twinkleStrength={0.85}
-      />
-    {:else}
-      <Ravine class="size-full" />
-    {/if}
-  </div>
-
-  <div class="flex min-h-svh flex-col px-4 py-5 sm:px-8 sm:py-7">
-    <a
-      class="flex w-fit items-center gap-3 rounded-lg outline-none focus-visible:ring-3 focus-visible:ring-white/50"
-      href={resolve("/")}
+<div class="dark">
+  <main class="min-h-svh bg-background p-3 text-foreground sm:p-4">
+    <div
+      class="mx-auto grid min-h-[calc(100svh-1.5rem)] max-w-[1400px] gap-3 overflow-hidden rounded-[28px] border border-white/10 p-3 sm:min-h-[calc(100svh-2rem)] lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]"
     >
-      <span
-        class="grid size-9 place-items-center rounded-xl bg-white/[0.07] ring-1 ring-white/15 backdrop-blur-sm"
+      <section
+        class="relative isolate flex min-h-44 flex-col justify-between overflow-hidden rounded-[18px] bg-black p-5 ring-1 ring-white/10 text-white sm:p-7 lg:min-h-0 lg:p-9"
       >
-        <BrandMark theme="dark" class="size-[18px]" />
-      </span>
-      <span class="text-base font-semibold tracking-[-0.02em]">{siteName}</span>
-    </a>
+        <div class="absolute inset-0 -z-10" aria-hidden="true">
+          {#if background === "squares"}
+            <BlinkingSquares
+              class="size-full"
+              direction="right"
+              gridSize={48}
+              squareColor="#f97316"
+              backgroundColor="#0a0a0a"
+              fadeStart={0.5}
+              falloff={1.6}
+              squareSize={0.56}
+              minBrightness={0.35}
+              twinkleSpeed={0.9}
+              twinkleStrength={0.85}
+            />
+          {:else}
+            <Ravine class="size-full" timeOffset={10} />
+          {/if}
+        </div>
 
-    <div class="flex flex-1 items-center justify-center py-8">
-      <div
-        class="w-full max-w-[420px] rounded-[28px] border border-white/10 bg-card p-6 text-card-foreground shadow-[0_32px_80px_-24px_rgb(0_0_0/0.8)] backdrop-blur-xl sm:p-9 dark:bg-card/80"
-      >
-        {@render children()}
+        <a
+          class="flex w-fit items-center gap-3 rounded-lg outline-none focus-visible:ring-3 focus-visible:ring-white/50"
+          href={resolve("/")}
+        >
+          <span
+            class="grid size-9 place-items-center rounded-xl bg-white/[0.07] ring-1 ring-white/15 backdrop-blur-sm"
+          >
+            <BrandMark theme="dark" class="size-[18px]" />
+          </span>
+          <span class="text-base font-semibold tracking-[-0.02em]"
+            >{siteName}</span
+          >
+        </a>
+
+        <p
+          class="hidden text-[2.25rem] leading-[1.05] font-semibold tracking-[-0.035em] lg:block"
+        >
+          Your code,<br /><span class="text-white/50">kept close.</span>
+        </p>
+      </section>
+
+      <div class="flex items-center justify-center px-2 py-8 sm:px-8 lg:py-10">
+        <div class="w-full max-w-[380px]">
+          {@render children()}
+        </div>
       </div>
     </div>
-
-    <!-- Only where it clears the centred card. -->
-    <p
-      class="pointer-events-none absolute bottom-8 left-8 hidden text-[2rem] leading-[1.05] font-semibold tracking-[-0.035em] xl:block"
-    >
-      Your code,<br /><span class="text-white/50">kept close.</span>
-    </p>
-  </div>
-</main>
+  </main>
+</div>
