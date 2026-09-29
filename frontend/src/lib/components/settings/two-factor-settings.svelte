@@ -175,7 +175,7 @@
       <p class="text-sm text-muted-foreground">Loading…</p>
     {:else}
       {#if recoveryCodes}
-        <div class="grid gap-3 rounded-lg border bg-muted/30 p-4">
+        <div class="motion-rise grid gap-3 rounded-lg border bg-muted/30 p-4">
           <div class="flex items-start justify-between gap-3">
             <div>
               <p class="text-sm font-medium">Save your recovery codes</p>
@@ -241,7 +241,7 @@
           </div>
         </div>
       {:else if enrollment}
-        <div class="grid gap-4 sm:grid-cols-[auto_minmax(0,1fr)]">
+        <div class="motion-rise grid gap-4 sm:grid-cols-[auto_minmax(0,1fr)]">
           {#if qrImage}
             <img
               class="size-44 rounded-md border bg-white p-2"

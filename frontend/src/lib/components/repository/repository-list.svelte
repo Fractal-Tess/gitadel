@@ -573,7 +573,7 @@
                     title={cloneUrl(repository, target)}
                   >
                     {#if copied === `${repository.id}:${target}`}
-                      <Check class="size-3.5 text-emerald-500" />
+                      <Check class="motion-pop size-3.5 text-emerald-500" />
                     {:else}
                       {target}
                     {/if}

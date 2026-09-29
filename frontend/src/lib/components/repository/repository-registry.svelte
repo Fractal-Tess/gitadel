@@ -149,7 +149,7 @@
                       onclick={() => void copyPullCommand(command)}
                     >
                       {#if copiedCommand === command}
-                        <Check class="size-3.5 text-emerald-500" />
+                        <Check class="motion-pop size-3.5 text-emerald-500" />
                       {:else}
                         <Copy class="size-3.5" />
                       {/if}

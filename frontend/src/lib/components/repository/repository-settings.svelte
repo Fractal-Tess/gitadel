@@ -350,7 +350,7 @@
                 <span class="text-xs text-destructive">Choose one</span>
               {/if}
             </div>
-            <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+            <div class="motion-list grid grid-cols-2 gap-2 sm:grid-cols-3">
               {#each repository.settings.iconCandidates.candidates as candidate (candidate.path)}
                 <button
                   type="button"

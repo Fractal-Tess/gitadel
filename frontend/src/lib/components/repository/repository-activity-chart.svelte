@@ -135,7 +135,7 @@
     onpointerleave={() => (hovered = null)}
   >
     <svg
-      class="block h-10 w-full overflow-visible"
+      class="motion-reveal block h-10 w-full overflow-visible"
       viewBox={`0 0 100 ${CHART_HEIGHT}`}
       preserveAspectRatio="none"
     >

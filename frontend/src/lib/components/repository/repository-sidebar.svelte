@@ -179,7 +179,7 @@
               class="grid w-7 shrink-0 place-items-center self-stretch border-l text-muted-foreground"
             >
               {#if repository.copied === kind.id}
-                <Check class="size-3.5 text-emerald-500" />
+                <Check class="motion-pop size-3.5 text-emerald-500" />
               {:else}
                 <Copy class="size-3.5" />
               {/if}

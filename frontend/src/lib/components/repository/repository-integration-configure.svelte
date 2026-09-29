@@ -715,6 +715,9 @@
           </Breadcrumb.Item>
         </Breadcrumb.List>
       </Breadcrumb.Root>
+      <!-- Each setup step settles in under the fixed step bar. -->
+      {#key setupStep}
+      <div class="motion-view space-y-5">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p class="sr-only">
@@ -988,6 +991,8 @@
           </div>
         </form>
       {/if}
+      </div>
+      {/key}
     </section>
   {/if}
 

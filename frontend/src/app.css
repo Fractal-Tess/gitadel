@@ -341,6 +341,12 @@
   }
 }
 
+@keyframes motion-reveal {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+}
+
 @keyframes motion-fade-out {
   to {
     opacity: 0;
@@ -423,6 +429,15 @@
   .motion-grow {
     transform-origin: left;
     animation: motion-grow 700ms var(--ease-out-quint) backwards;
+  }
+
+  /*
+   * A chart drawing itself left to right. It inherits its list item's
+   * `--stagger`, so each sparkline starts just after its row settles.
+   */
+  .motion-reveal {
+    animation: motion-reveal 900ms var(--ease-out-quint) backwards;
+    animation-delay: calc(min(var(--stagger, 0), 12) * 35ms + 150ms);
   }
 
   /* A brief swell that confirms a toggle, such as favoriting. */

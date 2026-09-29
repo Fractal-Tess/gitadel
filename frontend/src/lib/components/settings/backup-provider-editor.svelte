@@ -151,7 +151,7 @@
 </script>
 
 {#if step === "provider"}
-  <div class="grid gap-3 sm:grid-cols-2">
+  <div class="motion-list grid gap-3 sm:grid-cols-2">
     {#each providers as candidate (candidate.slug)}
       <button
         type="button"
@@ -180,7 +180,7 @@
   </div>
 {:else}
   <form
-    class="grid gap-5"
+    class="motion-view grid gap-5"
     onsubmit={(event) => {
       event.preventDefault();
       void submit();

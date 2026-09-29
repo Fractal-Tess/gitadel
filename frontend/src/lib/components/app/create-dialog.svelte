@@ -319,6 +319,10 @@
       }
     }}
   >
+    <!-- Each step settles in as it replaces the last. Repository and mirror
+         share one form, so switching between them does not remount it. -->
+    {#key mode === "mirror" ? "repository" : mode}
+    <div class="motion-view grid min-w-0 gap-4">
     {#if mode === "choose"}
       <Dialog.Header>
         <Dialog.Title>Create new</Dialog.Title>
@@ -718,5 +722,7 @@
         </Dialog.Footer>
       </form>
     {/if}
+    </div>
+    {/key}
   </Dialog.Content>
 </Dialog.Root>
