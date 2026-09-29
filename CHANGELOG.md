@@ -4,6 +4,17 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-29
+
+### Added
+
+- Pushing over HTTP to a repository that does not exist now creates it, as Git over SSH already did. The repository is created in your own namespace or an organization you own, with your default visibility (private unless you changed it), and needs a token with write access.
+
+### Fixed
+
+- Opening a repository with no commits no longer fails with "empty revision spec" and a 500 from the tree and history requests; the empty-repository page shows instead.
+- A push or fetch whose upload was cut off partway is now logged as an incomplete request body. It was reported as a "pack checksum mismatch", which hid the interrupted upload.
+
 ## [0.14.0] - 2026-09-29
 
 ### Added
@@ -380,7 +391,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/Fractal-Tess/gitadel/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.12.0...v0.13.0
