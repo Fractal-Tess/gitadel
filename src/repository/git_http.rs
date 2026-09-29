@@ -180,13 +180,18 @@ async fn upload_pack(
     let (request_reader, response_writer) = tokio::io::split(response_io);
     let request_stream = body.into_data_stream().map_err(io::Error::other);
     let mut request_stream = StreamReader::new(request_stream);
+    let cancellation = BridgeCancellation::default();
+    let feeder_cancellation = cancellation.clone();
     let feeder = tokio::spawn(async move {
         if let Err(error) = tokio::io::copy(&mut request_stream, &mut request_writer).await {
-            tracing::debug!(%error, "upload-pack request body closed early");
+            // Closing the pipe here would look like a clean end of input, and
+            // a truncated pack would then surface as a checksum mismatch.
+            tracing::warn!(%error, "upload-pack request body ended before it was complete");
+            feeder_cancellation.cancel();
+            return;
         }
         let _ = request_writer.shutdown().await;
     });
-    let cancellation = BridgeCancellation::default();
     let worker_cancellation = cancellation.clone();
     let handle = tokio::runtime::Handle::current();
     let mut worker = tokio::task::spawn_blocking(move || {
@@ -257,13 +262,18 @@ async fn receive_pack(
     let (request_reader, response_writer) = tokio::io::split(response_io);
     let request = body.into_data_stream().map_err(io::Error::other);
     let mut request = StreamReader::new(request);
+    let cancellation = BridgeCancellation::default();
+    let feeder_cancellation = cancellation.clone();
     let feeder = tokio::spawn(async move {
         if let Err(error) = tokio::io::copy(&mut request, &mut request_writer).await {
-            tracing::debug!(%error, "receive-pack request body closed early");
+            // Closing the pipe here would look like a clean end of input, and
+            // a truncated pack would then surface as a checksum mismatch.
+            tracing::warn!(%error, "receive-pack request body ended before it was complete");
+            feeder_cancellation.cancel();
+            return;
         }
         let _ = request_writer.shutdown().await;
     });
-    let cancellation = BridgeCancellation::default();
     let worker_cancellation = cancellation.clone();
     let handle = tokio::runtime::Handle::current();
     let worker_path = path.clone();
