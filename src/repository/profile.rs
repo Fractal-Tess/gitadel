@@ -19,9 +19,9 @@ use uuid::Uuid;
 use super::{
     RepositoryState,
     browser::{
-        ActivityResponse, MAX_REPOSITORY_ACTIVITY_DAYS, RepositoryOverviewItemResponse,
-        activity_response, activity_start_date, read_repository_overview,
-        repository_overview_items,
+        ActivityResponse, DayCommitResponse, MAX_REPOSITORY_ACTIVITY_DAYS,
+        RepositoryOverviewItemResponse, activity_response, activity_start_date,
+        read_commits_authored_on, read_repository_overview, repository_overview_items,
     },
     resources::{accessible_repositories, owned_namespace},
 };
@@ -45,6 +45,21 @@ pub struct NamespaceActivityResponse {
 pub struct PinnedRepositoriesResponse {
     repositories: Vec<RepositoryOverviewItemResponse>,
     limit: usize,
+}
+
+#[derive(Serialize)]
+pub struct RepositoryDayResponse {
+    namespace: String,
+    name: String,
+    commits: Vec<DayCommitResponse>,
+}
+
+#[derive(Serialize)]
+pub struct NamespaceDayResponse {
+    date: NaiveDate,
+    total_commits: usize,
+    /// Repositories with commits that day, busiest first.
+    repositories: Vec<RepositoryDayResponse>,
 }
 
 #[derive(Deserialize)]
@@ -112,6 +127,61 @@ pub async fn activity(
     Ok(Json(NamespaceActivityResponse {
         repository_count,
         activity: activity_response(start_date, end_date, days),
+    }))
+}
+
+/// The commits behind one day of the activity graph, grouped by repository.
+/// Reads the same repositories as [`activity`], so the two always agree.
+pub async fn activity_day(
+    State(state): State<RepositoryState>,
+    AxumPath((slug, date)): AxumPath<(String, NaiveDate)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Json<NamespaceDayResponse>, ApiError> {
+    ensure_namespace(&state, &slug).await?;
+    let accessible = accessible_repositories(&state, &headers, &jar).await?;
+    let mut pending = JoinSet::new();
+    for repository in accessible
+        .repositories
+        .into_iter()
+        .filter(|repository| repository.namespace == slug && !repository.mirrored)
+    {
+        let state = state.clone();
+        let slots = state.analysis_slots.clone();
+        pending.spawn(async move {
+            let _permit = slots.acquire_owned().await.map_err(ApiError::internal)?;
+            let commits = read_commits_authored_on(&state, &repository, date).await;
+            Ok::<_, ApiError>((repository, commits))
+        });
+    }
+
+    let mut repositories = Vec::new();
+    while let Some(result) = pending.join_next().await {
+        let (repository, commits) = result.map_err(ApiError::internal)??;
+        match commits {
+            Ok(commits) if !commits.is_empty() => repositories.push(RepositoryDayResponse {
+                namespace: repository.namespace,
+                name: repository.name,
+                commits,
+            }),
+            Ok(_) => {}
+            Err(_) => tracing::warn!(
+                repository = %format!("{}/{}", repository.namespace, repository.name),
+                "could not read repository activity"
+            ),
+        }
+    }
+    repositories.sort_by(|left, right| {
+        right
+            .commits
+            .len()
+            .cmp(&left.commits.len())
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Ok(Json(NamespaceDayResponse {
+        date,
+        total_commits: repositories.iter().map(|day| day.commits.len()).sum(),
+        repositories,
     }))
 }
 

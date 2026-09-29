@@ -1518,16 +1518,11 @@ pub(super) async fn read_repository_overview(
                 ReachableCommitOptions::new(),
                 |metadata| {
                     let commit = git.read_commit(&metadata.oid)?;
-                    if let Some(signature) = commit.author_signature()
-                        && let Some(timestamp) =
-                            DateTime::<Utc>::from_timestamp(signature.time.seconds, 0)
+                    if let Some(date) = commit.author_signature().as_ref().and_then(authored_on)
+                        && date >= start_date
+                        && date <= end_date
                     {
-                        let date = (timestamp
-                            + Duration::minutes(i64::from(signature.time.timezone_offset_minutes)))
-                        .date_naive();
-                        if date >= start_date && date <= end_date {
-                            *activity.entry(date).or_default() += 1;
-                        }
+                        *activity.entry(date).or_default() += 1;
                     }
                     Ok(StreamControl::Continue)
                 },
@@ -1544,6 +1539,73 @@ pub(super) async fn read_repository_overview(
         .cache_overview(repository.id, &cache_key, &overview)
         .await?;
     Ok(overview)
+}
+
+/// The calendar day a commit was authored on, in the author's own time zone,
+/// which is the day the activity graph counts it under.
+fn authored_on(signature: &sley::Signature) -> Option<NaiveDate> {
+    let timestamp = DateTime::<Utc>::from_timestamp(signature.time.seconds, 0)?;
+    Some(
+        (timestamp + Duration::minutes(i64::from(signature.time.timezone_offset_minutes)))
+            .date_naive(),
+    )
+}
+
+/// A commit listed under one day of a namespace's activity graph.
+#[derive(Serialize)]
+pub struct DayCommitResponse {
+    oid: String,
+    short_oid: String,
+    title: String,
+    author_name: String,
+    timestamp: i64,
+}
+
+/// Commits reachable from any branch that were authored on `date`, newest
+/// first: the ones the activity graph counted for that day.
+pub(super) async fn read_commits_authored_on(
+    state: &RepositoryState,
+    repository: &repository::Model,
+    date: NaiveDate,
+) -> Result<Vec<DayCommitResponse>, ApiError> {
+    let path = state.repository_path(repository);
+    let mut commits = read_git(path, move |git| {
+        let mut roots = Vec::new();
+        for reference in git.references().list_refs_with_prefix("refs/heads/")? {
+            if let ReferenceTarget::Direct(target) = reference.target {
+                roots.push(git.peel_to_commit_oid(target)?);
+            }
+        }
+        let mut commits = Vec::new();
+        if roots.is_empty() {
+            return Ok(commits);
+        }
+        git.rev_graph().stream_reachable_commits(
+            roots,
+            ReachableCommitOptions::new(),
+            |metadata| {
+                let commit = git.read_commit(&metadata.oid)?;
+                let signature = commit.author_signature();
+                if signature.as_ref().and_then(authored_on) == Some(date) {
+                    let author = signature_response(signature, &commit.author);
+                    let message = String::from_utf8_lossy(&commit.message);
+                    let oid = metadata.oid.to_hex();
+                    commits.push(DayCommitResponse {
+                        short_oid: oid[..12.min(oid.len())].to_owned(),
+                        oid,
+                        title: message.trim().lines().next().unwrap_or_default().to_owned(),
+                        author_name: author.name,
+                        timestamp: author.timestamp,
+                    });
+                }
+                Ok(StreamControl::Continue)
+            },
+        )?;
+        Ok(commits)
+    })
+    .await?;
+    commits.sort_by_key(|commit| std::cmp::Reverse(commit.timestamp));
+    Ok(commits)
 }
 
 pub(super) async fn warm_repository_analysis(

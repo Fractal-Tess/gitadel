@@ -1055,6 +1055,10 @@ pub fn router() -> Router<RepositoryState> {
         )
         .route("/namespaces/{slug}/activity", get(profile::activity))
         .route(
+            "/namespaces/{slug}/activity/{date}",
+            get(profile::activity_day),
+        )
+        .route(
             "/namespaces/{slug}/pins",
             get(profile::list_pins).put(profile::set_pins),
         )
