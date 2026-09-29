@@ -1,12 +1,14 @@
 <!--
   Chooses which repositories a namespace pins and in what order. The pinned
   list is edited in place; the rest are added from a searchable list below it.
+  Each change is saved as it is made.
 -->
 <script lang="ts">
   import ArrowDown from "@lucide/svelte/icons/arrow-down";
   import ArrowUp from "@lucide/svelte/icons/arrow-up";
   import Plus from "@lucide/svelte/icons/plus";
   import X from "@lucide/svelte/icons/x";
+  import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
   import { z } from "zod";
 
@@ -37,7 +39,8 @@
   let selected = $state<string[]>([]);
   let query = $state("");
   let loading = $state(false);
-  let saving = $state(false);
+  /** The pins as the server last accepted them. */
+  let saved: string[] = [];
   let loadError = $state<string | null>(null);
 
   const byId = $derived(
@@ -61,7 +64,11 @@
   // Each time the dialog opens, start from what is pinned now.
   $effect(() => {
     if (!open) return;
-    selected = current.map((repository) => repository.id);
+    // Saves update `current` through the parent, so reading it untracked keeps
+    // each save from reloading the dialog underneath the person editing it.
+    const ids = untrack(() => current.map((repository) => repository.id));
+    selected = ids;
+    saved = ids;
     query = "";
     loadError = null;
     loading = true;
@@ -86,33 +93,47 @@
     };
   });
 
-  function move(index: number, offset: number): void {
-    const target = index + offset;
-    if (target < 0 || target >= selected.length) return;
-    const next = [...selected];
-    [next[index], next[target]] = [next[target], next[index]];
-    selected = next;
-  }
+  let saveSequence = 0;
 
-  async function save(): Promise<void> {
-    saving = true;
+  /**
+   * Every change saves at once. The list updates straight away, and a failed
+   * save puts back what the server last accepted. Only the latest save's
+   * answer is applied, so quick successive edits cannot land out of order.
+   */
+  async function update(next: string[]): Promise<void> {
+    const previous = saved;
+    selected = next;
+    const sequence = ++saveSequence;
     try {
       const result = await requestJson(
         `/api/v1/namespaces/${encodeURIComponent(namespace)}/pins`,
         pinnedRepositoriesSchema,
-        { method: "PUT", body: jsonBody({ repository_ids: selected }) },
+        { method: "PUT", body: jsonBody({ repository_ids: next }) },
       );
+      if (sequence !== saveSequence) return;
+      saved = next;
       onsaved(result);
-      open = false;
     } catch (caught) {
+      if (sequence !== saveSequence) return;
+      selected = previous;
       toast.error(
         caught instanceof ApiFailure || caught instanceof Error
           ? caught.message
           : "Could not save the pinned repositories.",
       );
-    } finally {
-      saving = false;
     }
+  }
+
+  function pin(id: string): void {
+    if (!full && !selected.includes(id)) void update([...selected, id]);
+  }
+
+  function move(index: number, offset: number): void {
+    const target = index + offset;
+    if (target < 0 || target >= selected.length) return;
+    const next = [...selected];
+    [next[index], next[target]] = [next[target], next[index]];
+    void update(next);
   }
 </script>
 
@@ -121,7 +142,7 @@
     <Dialog.Header>
       <Dialog.Title>Customize pins</Dialog.Title>
       <Dialog.Description>
-        Feature up to {limit} repositories at the top of the page, in the order shown.
+        Feature up to {limit} repositories at the top of the page, in the order shown. Changes save as you make them.
       </Dialog.Description>
     </Dialog.Header>
 
@@ -164,7 +185,7 @@
                   variant="ghost"
                   aria-label={`Unpin ${repository.name}`}
                   onclick={() =>
-                    (selected = selected.filter((id) => id !== repository.id))}
+                    void update(selected.filter((id) => id !== repository.id))}
                 >
                   <X class="size-3.5" />
                 </Button>
@@ -180,6 +201,16 @@
           placeholder="Search repositories"
           aria-label="Search repositories"
           bind:value={query}
+          onkeydown={(event) => {
+            // Enter pins the top match, so a name can be typed and taken.
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            const first = available[0];
+            if (first && !full) {
+              pin(first.id);
+              query = "";
+            }
+          }}
         />
         <div class="max-h-56 overflow-y-auto rounded-lg border">
           {#if loading}
@@ -193,17 +224,17 @@
           {:else}
             <ul class="divide-y">
               {#each available as repository (repository.id)}
-                <li class="flex items-center gap-2 py-1 pr-1 pl-3 text-sm">
-                  <span class="min-w-0 flex-1 truncate">{repository.name}</span>
-                  <Button
-                    size="icon-sm"
-                    variant="ghost"
+                <li>
+                  <button
+                    type="button"
+                    class="flex w-full items-center gap-2 py-2 pr-2.5 pl-3 text-left text-sm outline-none hover:bg-accent/55 focus-visible:bg-accent disabled:pointer-events-none disabled:opacity-50"
                     aria-label={`Pin ${repository.name}`}
                     disabled={full}
-                    onclick={() => (selected = [...selected, repository.id])}
+                    onclick={() => pin(repository.id)}
                   >
-                    <Plus class="size-3.5" />
-                  </Button>
+                    <span class="min-w-0 flex-1 truncate">{repository.name}</span>
+                    <Plus class="size-3.5 shrink-0 text-muted-foreground" />
+                  </button>
                 </li>
               {/each}
             </ul>
@@ -212,15 +243,5 @@
       </div>
     </div>
 
-    <Dialog.Footer>
-      <Dialog.Close>
-        {#snippet child({ props })}
-          <Button {...props} type="button" variant="outline">Cancel</Button>
-        {/snippet}
-      </Dialog.Close>
-      <Button disabled={saving || loading} onclick={() => void save()}>
-        {saving ? "Saving…" : "Save pins"}
-      </Button>
-    </Dialog.Footer>
   </Dialog.Content>
 </Dialog.Root>
