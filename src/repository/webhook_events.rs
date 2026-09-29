@@ -514,6 +514,7 @@ mod tests {
             StorageSettings {
                 repository_root: root.join("repositories"),
                 lfs_root: root.join("lfs"),
+                registry_root: root.join("registry"),
                 actions_artifact_root: root.join("actions-artifacts"),
             },
             public_url,

@@ -49,8 +49,8 @@ hard reload before deciding that a frontend change did not land.
 ## Configuration
 
 Bare defaults are `127.0.0.1:3000` with SSH on `2222`, a `gitadel.db` in the
-repository root, and `repositories/`, `lfs/`, and an SSH host key beside it -
-all gitignored. Those ports collide with any Gitadel already running on the
+repository root, and `repositories/`, `lfs/`, `registry/`, and an SSH host key
+beside it - all gitignored. Those ports collide with any Gitadel already running on the
 machine, and the SSH listener failing is fatal:
 
 ```
@@ -73,6 +73,7 @@ url = "sqlite://data/gitadel.db?mode=rwc"
 [storage]
 repository_root = "data/repositories"
 lfs_root = "data/lfs"
+registry_root = "data/registry"
 
 [ssh]
 bind = "0.0.0.0:2222"

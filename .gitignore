@@ -12,6 +12,7 @@
 /gitadel-ssh-ed25519.pub
 /repositories/
 /lfs/
+/registry/
 
 /frontend/node_modules/
 /frontend/.svelte-kit/
