@@ -1,6 +1,9 @@
 //! Namespace profile pages: a year of commit activity and pinned repositories.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::Arc,
+};
 
 use axum::{
     Json,
@@ -19,15 +22,18 @@ use uuid::Uuid;
 use super::{
     RepositoryState,
     browser::{
-        ActivityResponse, DayCommitResponse, MAX_REPOSITORY_ACTIVITY_DAYS,
+        ActivityResponse, DayCommitResponse, GitOverview, MAX_REPOSITORY_ACTIVITY_DAYS,
         RepositoryOverviewItemResponse, activity_response, activity_start_date,
         read_commits_authored_on, read_repository_overview, repository_overview_items,
     },
     resources::{accessible_repositories, owned_namespace},
 };
 use crate::{
-    entity::{namespace, namespace_pin, repository},
-    identity::{ApiError, SCOPE_WRITE},
+    entity::{namespace, namespace_pin, repository, user},
+    identity::{
+        ApiError, SCOPE_WRITE,
+        commit_emails::{CommitIdentities, commit_identities},
+    },
 };
 
 /// Pins a namespace may feature, as on GitHub.
@@ -35,6 +41,9 @@ const MAX_PINS: usize = 6;
 
 #[derive(Serialize)]
 pub struct NamespaceActivityResponse {
+    /// `person` counts the commits the user wrote anywhere; `organization`
+    /// counts every commit in its repositories.
+    scope: &'static str,
     /// Repositories the viewer may read that contributed to the graph.
     repository_count: usize,
     #[serde(flatten)]
@@ -68,11 +77,74 @@ pub struct SetPinsRequest {
 }
 
 async fn ensure_namespace(state: &RepositoryState, slug: &str) -> Result<(), ApiError> {
+    load_namespace(state, slug).await.map(|_| ())
+}
+
+async fn load_namespace(state: &RepositoryState, slug: &str) -> Result<namespace::Model, ApiError> {
     namespace::Entity::find_by_id(slug)
         .one(state.identity().database())
         .await?
-        .map(|_| ())
         .ok_or_else(ApiError::not_found)
+}
+
+/// Whose work a profile shows. A person's profile counts the commits they
+/// wrote, wherever they live; an organization's counts every commit in its own
+/// repositories.
+enum ProfileScope {
+    Person(CommitIdentities),
+    Organization(String),
+}
+
+async fn profile_scope(
+    state: &RepositoryState,
+    namespace: &namespace::Model,
+) -> Result<ProfileScope, ApiError> {
+    let database = state.identity().database();
+    if let Some(user_id) = namespace.user_id
+        && let Some(account) = user::Entity::find_by_id(user_id).one(database).await?
+    {
+        return Ok(ProfileScope::Person(
+            commit_identities(database, &account).await?,
+        ));
+    }
+    Ok(ProfileScope::Organization(namespace.slug.clone()))
+}
+
+impl ProfileScope {
+    /// The repositories this profile draws from, among those the viewer can
+    /// read. Mirrors are left out: their history is someone else's.
+    fn includes(&self, repository: &repository::Model) -> bool {
+        !repository.mirrored
+            && match self {
+                Self::Person(_) => true,
+                Self::Organization(slug) => repository.namespace == *slug,
+            }
+    }
+
+    /// Commits per day in one repository that this profile counts.
+    fn count(&self, overview: GitOverview) -> BTreeMap<NaiveDate, usize> {
+        match self {
+            Self::Organization(_) => overview.activity,
+            Self::Person(identities) => {
+                let mut days = BTreeMap::new();
+                for author in overview.authors {
+                    if identities.matches(&author.email, author.signer.as_deref()) {
+                        *days.entry(author.date).or_default() += author.count;
+                    }
+                }
+                days
+            }
+        }
+    }
+
+    fn counts_commit(&self, commit: &DayCommitResponse) -> bool {
+        match self {
+            Self::Organization(_) => true,
+            Self::Person(identities) => {
+                identities.matches(&commit.author_email, commit.signer.as_deref())
+            }
+        }
+    }
 }
 
 fn merge_activity(total: &mut BTreeMap<NaiveDate, usize>, repository: BTreeMap<NaiveDate, usize>) {
@@ -89,12 +161,13 @@ pub async fn activity(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<NamespaceActivityResponse>, ApiError> {
-    ensure_namespace(&state, &slug).await?;
+    let namespace = load_namespace(&state, &slug).await?;
+    let scope = Arc::new(profile_scope(&state, &namespace).await?);
     let accessible = accessible_repositories(&state, &headers, &jar).await?;
     let repositories = accessible
         .repositories
         .into_iter()
-        .filter(|repository| repository.namespace == slug && !repository.mirrored)
+        .filter(|repository| scope.includes(repository))
         .collect::<Vec<_>>();
 
     let end_date = Utc::now().date_naive();
@@ -103,11 +176,12 @@ pub async fn activity(
     for repository in repositories {
         let state = state.clone();
         let slots = state.analysis_slots.clone();
+        let scope = scope.clone();
         pending.spawn(async move {
             let _permit = slots.acquire_owned().await.map_err(ApiError::internal)?;
             let name = format!("{}/{}", repository.namespace, repository.name);
             let result = read_repository_overview(&state, &repository, start_date, end_date).await;
-            Ok::<_, ApiError>((name, result.map(|overview| overview.activity)))
+            Ok::<_, ApiError>((name, result.map(|overview| scope.count(overview))))
         });
     }
 
@@ -116,6 +190,8 @@ pub async fn activity(
     while let Some(result) = pending.join_next().await {
         let (name, activity) = result.map_err(ApiError::internal)??;
         match activity {
+            // A person's profile names only the repositories they wrote in.
+            Ok(activity) if activity.is_empty() && matches!(*scope, ProfileScope::Person(_)) => {}
             Ok(activity) => {
                 repository_count += 1;
                 merge_activity(&mut days, activity);
@@ -125,6 +201,10 @@ pub async fn activity(
         }
     }
     Ok(Json(NamespaceActivityResponse {
+        scope: match *scope {
+            ProfileScope::Person(_) => "person",
+            ProfileScope::Organization(_) => "organization",
+        },
         repository_count,
         activity: activity_response(start_date, end_date, days),
     }))
@@ -138,20 +218,40 @@ pub async fn activity_day(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<NamespaceDayResponse>, ApiError> {
-    ensure_namespace(&state, &slug).await?;
+    let namespace = load_namespace(&state, &slug).await?;
+    let scope = Arc::new(profile_scope(&state, &namespace).await?);
     let accessible = accessible_repositories(&state, &headers, &jar).await?;
+    let end_date = Utc::now().date_naive();
+    let start_date = activity_start_date(end_date, MAX_REPOSITORY_ACTIVITY_DAYS)?;
     let mut pending = JoinSet::new();
     for repository in accessible
         .repositories
         .into_iter()
-        .filter(|repository| repository.namespace == slug && !repository.mirrored)
+        .filter(|repository| scope.includes(repository))
     {
         let state = state.clone();
         let slots = state.analysis_slots.clone();
+        let scope = scope.clone();
         pending.spawn(async move {
             let _permit = slots.acquire_owned().await.map_err(ApiError::internal)?;
-            let commits = read_commits_authored_on(&state, &repository, date).await;
-            Ok::<_, ApiError>((repository, commits))
+            // The cached activity says which repositories have anything to
+            // show that day, so only those are walked again.
+            if (start_date..=end_date).contains(&date)
+                && let Ok(overview) =
+                    read_repository_overview(&state, &repository, start_date, end_date).await
+                && !scope.count(overview).contains_key(&date)
+            {
+                return Ok::<_, ApiError>((repository, Ok(Vec::new())));
+            }
+            let commits = read_commits_authored_on(&state, &repository, date)
+                .await
+                .map(|commits| {
+                    commits
+                        .into_iter()
+                        .filter(|commit| scope.counts_commit(commit))
+                        .collect::<Vec<_>>()
+                });
+            Ok((repository, commits))
         });
     }
 
@@ -313,6 +413,7 @@ pub async fn set_pins(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repository::browser::AuthorActivity;
 
     fn date(day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 9, day).unwrap()
@@ -325,6 +426,38 @@ mod tests {
         assert_eq!(
             total,
             BTreeMap::from([(date(1), 2), (date(2), 5), (date(3), 5)])
+        );
+    }
+
+    #[test]
+    fn a_person_counts_only_commits_they_wrote_or_signed() {
+        let author = |day, email: &str, signer: Option<&str>, count| AuthorActivity {
+            date: date(day),
+            email: email.to_owned(),
+            signer: signer.map(str::to_owned),
+            count,
+        };
+        let overview = GitOverview::for_tests(
+            BTreeMap::from([(date(1), 7), (date(2), 4)]),
+            vec![
+                author(1, "me@example.com", None, 2),
+                author(1, "someone@example.com", None, 5),
+                author(2, "laptop@example.com", Some("SHA256:mine"), 3),
+                author(2, "someone@example.com", Some("SHA256:theirs"), 1),
+            ],
+        );
+        let person = ProfileScope::Person(CommitIdentities {
+            emails: HashSet::from(["me@example.com".to_owned()]),
+            fingerprints: HashSet::from(["SHA256:mine".to_owned()]),
+        });
+        assert_eq!(
+            person.count(overview.clone()),
+            BTreeMap::from([(date(1), 2), (date(2), 3)])
+        );
+        let organization = ProfileScope::Organization("team".to_owned());
+        assert_eq!(
+            organization.count(overview),
+            BTreeMap::from([(date(1), 7), (date(2), 4)])
         );
     }
 

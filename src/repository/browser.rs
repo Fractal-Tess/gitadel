@@ -320,6 +320,51 @@ pub(super) struct GitOverview {
     branch_count: usize,
     head: Option<String>,
     pub(super) activity: BTreeMap<NaiveDate, usize>,
+    /// The same commits split by who wrote them, so a profile can count only
+    /// its owner's without walking the history again.
+    pub(super) authors: Vec<AuthorActivity>,
+}
+
+#[cfg(test)]
+impl GitOverview {
+    pub(super) fn for_tests(
+        activity: BTreeMap<NaiveDate, usize>,
+        authors: Vec<AuthorActivity>,
+    ) -> Self {
+        Self {
+            branch_count: 1,
+            head: None,
+            activity,
+            authors,
+        }
+    }
+}
+
+/// Commits in one repository on one day by one author address, and the SSH key
+/// that validly signed them, if any.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(super) struct AuthorActivity {
+    pub(super) date: NaiveDate,
+    pub(super) email: String,
+    pub(super) signer: Option<String>,
+    pub(super) count: usize,
+}
+
+/// The lowercased author address of a commit, and the fingerprint of the SSH
+/// key that validly signed it.
+fn commit_authorship(
+    git: &GitRepository,
+    oid: &ObjectId,
+    signature: Option<&sley::Signature>,
+) -> sley::Result<(String, Option<String>)> {
+    let email = signature
+        .map(|signature| String::from_utf8_lossy(signature.email.as_bytes()).to_ascii_lowercase())
+        .unwrap_or_default();
+    let signer = match verify_ssh_commit_signature(&git.read_object(oid)?.body) {
+        SshCommitSignature::Valid(fingerprint) => Some(fingerprint),
+        SshCommitSignature::Unsigned | SshCommitSignature::Invalid => None,
+    };
+    Ok((email, signer))
 }
 
 pub(super) async fn repository_overview_item(
@@ -1480,8 +1525,9 @@ pub(super) async fn read_repository_overview(
     start_date: NaiveDate,
     end_date: NaiveDate,
 ) -> Result<GitOverview, ApiError> {
+    // Versioned so entries cached before authors were recorded are skipped.
     let cache_key = format!(
-        "{}:{}:{}:{start_date}:{end_date}",
+        "v2:{}:{}:{}:{start_date}:{end_date}",
         repository.storage_key,
         repository.updated_at,
         repository.default_branch.as_deref().unwrap_or("")
@@ -1512,17 +1558,22 @@ pub(super) async fn read_repository_overview(
         }
         let head = default_index.map(|index| roots[index].to_hex());
         let mut activity = BTreeMap::new();
+        let mut authors = BTreeMap::<(NaiveDate, String, Option<String>), usize>::new();
         if !roots.is_empty() {
             git.rev_graph().stream_reachable_commits(
                 roots,
                 ReachableCommitOptions::new(),
                 |metadata| {
                     let commit = git.read_commit(&metadata.oid)?;
-                    if let Some(date) = commit.author_signature().as_ref().and_then(authored_on)
+                    let signature = commit.author_signature();
+                    if let Some(date) = signature.as_ref().and_then(authored_on)
                         && date >= start_date
                         && date <= end_date
                     {
                         *activity.entry(date).or_default() += 1;
+                        let (email, signer) =
+                            commit_authorship(git, &metadata.oid, signature.as_ref())?;
+                        *authors.entry((date, email, signer)).or_default() += 1;
                     }
                     Ok(StreamControl::Continue)
                 },
@@ -1532,6 +1583,15 @@ pub(super) async fn read_repository_overview(
             branch_count,
             head,
             activity,
+            authors: authors
+                .into_iter()
+                .map(|((date, email, signer), count)| AuthorActivity {
+                    date,
+                    email,
+                    signer,
+                    count,
+                })
+                .collect(),
         })
     })
     .await?;
@@ -1559,6 +1619,10 @@ pub struct DayCommitResponse {
     title: String,
     author_name: String,
     timestamp: i64,
+    #[serde(skip)]
+    pub(super) author_email: String,
+    #[serde(skip)]
+    pub(super) signer: Option<String>,
 }
 
 /// Commits reachable from any branch that were authored on `date`, newest
@@ -1587,6 +1651,8 @@ pub(super) async fn read_commits_authored_on(
                 let commit = git.read_commit(&metadata.oid)?;
                 let signature = commit.author_signature();
                 if signature.as_ref().and_then(authored_on) == Some(date) {
+                    let (author_email, signer) =
+                        commit_authorship(git, &metadata.oid, signature.as_ref())?;
                     let author = signature_response(signature, &commit.author);
                     let message = String::from_utf8_lossy(&commit.message);
                     let oid = metadata.oid.to_hex();
@@ -1596,6 +1662,8 @@ pub(super) async fn read_commits_authored_on(
                         title: message.trim().lines().next().unwrap_or_default().to_owned(),
                         author_name: author.name,
                         timestamp: author.timestamp,
+                        author_email,
+                        signer,
                     });
                 }
                 Ok(StreamControl::Continue)

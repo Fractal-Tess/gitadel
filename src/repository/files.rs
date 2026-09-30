@@ -17,7 +17,7 @@ use super::{
     Permission, RepositoryState,
     protection::{RefCheck, load_guard},
 };
-use crate::identity::{ApiError, SCOPE_WRITE};
+use crate::identity::{ApiError, SCOPE_WRITE, commit_emails::commit_author};
 
 const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
 pub(super) const MAX_FILE_REQUEST_BYTES: usize = MAX_FILE_BYTES * 6 + 16 * 1024;
@@ -131,6 +131,9 @@ async fn write_file_request(
     }
     let path = state.repository_path(&repository);
     let actor_user_id = actor.user.id;
+    let (author_name, author_email) =
+        commit_author(state.identity().database(), &actor.user).await?;
+    let author = format!("{author_name} <{author_email}>");
     let result = tokio::task::spawn_blocking(move || {
         let commit = write_file(
             &path,
@@ -139,7 +142,7 @@ async fn write_file_request(
             &request.path,
             request.content.into_bytes(),
             &request.message,
-            &actor.user.username,
+            &author,
             write,
         )?;
         Ok::<_, ApiError>(CreateFileResponse {
@@ -231,7 +234,7 @@ pub(super) fn commit_file(
         file_path,
         content,
         message,
-        username,
+        &format!("{username} <{username}@gitadel.local>"),
         FileWrite::Create,
     )
 }
@@ -248,7 +251,7 @@ pub(super) fn write_file(
     file_path: &str,
     content: Vec<u8>,
     message: &str,
-    username: &str,
+    author: &str,
     write: FileWrite,
 ) -> Result<ObjectId, ApiError> {
     let repository = GitRepository::open_exact_bare(path).map_err(ApiError::internal)?;
@@ -288,7 +291,8 @@ pub(super) fn write_file(
         ));
     }
     let now = Utc::now().timestamp();
-    let identity = format!("{username} <{username}@gitadel.local> {now} +0000");
+    // `author` is "Name <address>", already checked to hold no line breaks.
+    let identity = format!("{author} {now} +0000");
     let commit = CommitObject {
         tree,
         parents: current_oid.into_iter().collect(),
@@ -461,7 +465,7 @@ mod tests {
                 path,
                 content.to_vec(),
                 "Edit",
-                "test",
+                "test <test@example.com>",
                 FileWrite::Update,
             )
         };
