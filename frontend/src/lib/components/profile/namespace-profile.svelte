@@ -92,22 +92,31 @@
       style:--stagger={2}
     >
       {#if activity}
+        {@const noun =
+          activity.scope === "person" ? "contribution" : "commit"}
         <h2 class="mb-4 text-sm font-semibold">
           {#if activity.total_commits === 0}
-            No commits in the last year
+            No {noun}s in the last year
           {:else}
-            {activity.total_commits.toLocaleString()} commit{activity.total_commits ===
-            1
-              ? ""
-              : "s"} in the last year
+            {activity.total_commits.toLocaleString()}
+            {noun}{activity.total_commits === 1 ? "" : "s"} in the last year
           {/if}
           <span class="font-normal text-muted-foreground">
-            · {activity.repository_count} repositor{activity.repository_count ===
-            1
-              ? "y"
-              : "ies"}
+            · {activity.scope === "person" ? "in " : ""}{activity.repository_count}
+            repositor{activity.repository_count === 1 ? "y" : "ies"}
           </span>
         </h2>
+        {#if activity.scope === "person" && canManage && activity.total_commits === 0}
+          <p class="-mt-2 mb-4 text-xs text-muted-foreground">
+            Commits count when they use one of your
+            <a
+              class="underline underline-offset-2 hover:text-foreground"
+              href={resolve("/-/account/[view]", { view: "profile" })}
+              >commit emails</a
+            >
+            or are signed with your SSH key.
+          </p>
+        {/if}
         <ContributionGraph {activity} selected={date} href={dayHref} />
       {:else}
         <Skeleton class="mb-4 h-4 w-56" />

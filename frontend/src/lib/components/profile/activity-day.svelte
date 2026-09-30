@@ -45,10 +45,13 @@
     return () => controller.abort();
   });
 
-  function commitHref(repository: string, oid: string): string {
+  function commitHref(
+    repository: { namespace: string; name: string },
+    oid: string,
+  ): string {
     const base = resolve("/[namespace]/[name]", {
-      namespace,
-      name: repository,
+      namespace: repository.namespace,
+      name: repository.name,
     });
     return `${base}?view=commit&oid=${encodeURIComponent(oid)}`;
   }
@@ -84,7 +87,7 @@
       No commits on this day.
     </p>
   {:else}
-    {#each day.repositories as repository, index (repository.name)}
+    {#each day.repositories as repository, index (`${repository.namespace}/${repository.name}`)}
       <div
         class="motion-rise overflow-hidden rounded-lg border bg-card"
         style:--stagger={index}
@@ -101,7 +104,14 @@
             name={repository.name}
             class="size-5"
           />
-          <span class="min-w-0 flex-1 truncate">{repository.name}</span>
+          <!-- A person's work can live in other namespaces, so those are
+               named in full. -->
+          <span class="min-w-0 flex-1 truncate">
+            {#if repository.namespace !== namespace}<span
+                class="font-normal text-muted-foreground"
+                >{repository.namespace}/</span
+              >{/if}{repository.name}
+          </span>
           <span class="shrink-0 text-xs font-normal text-muted-foreground">
             {repository.commits.length} commit{repository.commits.length === 1
               ? ""
@@ -113,7 +123,7 @@
             <li>
               <a
                 class="flex items-center gap-3 px-4 py-2.5 text-sm hover:bg-accent/55"
-                href={commitHref(repository.name, commit.oid)}
+                href={commitHref(repository, commit.oid)}
               >
                 <GitCommitHorizontal
                   class="size-4 shrink-0 text-muted-foreground"

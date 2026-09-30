@@ -5,10 +5,27 @@ import {
   repositoryOverviewItemSchema,
 } from "$lib/api/repositories.js";
 
-/** Commits per day across a namespace's repositories the viewer can read. */
+/**
+ * Commits per day on a profile. A person's counts the commits they wrote in
+ * any repository the viewer can read; an organization's counts every commit
+ * in its own repositories.
+ */
 export const namespaceActivitySchema = repositoryActivitySchema.extend({
+  scope: z.enum(["person", "organization"]).default("organization"),
   repository_count: z.number().int().nonnegative(),
 });
+
+/** How the signed-in user's commits are recognised and authored. */
+export const commitIdentitySchema = z.object({
+  name: z.string().nullable(),
+  primary_email: z.string().nullable(),
+  author_name: z.string(),
+  author_email: z.string(),
+  emails: z.array(z.string()),
+  account_email: z.string().nullable(),
+});
+
+export type CommitIdentity = z.infer<typeof commitIdentitySchema>;
 
 export const pinnedRepositoriesSchema = z.object({
   repositories: z.array(repositoryOverviewItemSchema),
