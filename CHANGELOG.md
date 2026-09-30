@@ -4,6 +4,19 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-09-30
+
+### Added
+
+- **Commit emails** in Account settings → Profile. Commits written with one of these addresses count as yours. Your account email counts without being listed, and so do commits carrying a valid signature from one of your SSH keys. An address can belong to one account only, so nobody can claim someone else's commits.
+- Choose the name and address that commits made in the browser (file edits and new files) are authored with. They default to your account email, then to the instance placeholder used before.
+- `GET`/`PUT /api/v1/me/commit-identity`, `POST /api/v1/me/commit-emails`, and `DELETE /api/v1/me/commit-emails/{email}` manage them.
+
+### Changed
+
+- A person's profile graph now shows their contributions: commits they wrote, in any repository the viewer can read, instead of every commit by anyone in their own namespace. Imported and forked history by other authors no longer fills the graph. Picking a day lists those commits across namespaces. Organization profiles still count every commit in the organization's repositories.
+- Commits made in the browser are authored with your commit name and address instead of `username@gitadel.local`, so they count on your profile.
+
 ## [0.21.0] - 2026-09-30
 
 ### Added
@@ -457,7 +470,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.18.0...v0.19.0
