@@ -2,8 +2,10 @@
   import Braces from "@lucide/svelte/icons/braces";
   import Download from "@lucide/svelte/icons/download";
   import Minus from "@lucide/svelte/icons/minus";
+  import Pencil from "@lucide/svelte/icons/pencil";
   import Plus from "@lucide/svelte/icons/plus";
   import RepositorySubmodule from "$lib/components/repository/repository-submodule.svelte";
+  import RepositoryFileEditor from "$lib/components/repository/repository-file-editor.svelte";
   import RepositoryLfs from "$lib/components/repository/repository-lfs.svelte";
   import MaterialFileIcon from "$lib/components/repository/material-file-icon.svelte";
 
@@ -137,6 +139,8 @@
     {#key `${pageState.browser.blob.commit_oid}:${pageState.browser.blob.path}`}
       <RepositoryLfs state={pageState} />
     {/key}
+  {:else if pageState.browser.blob && pageState.editing?.path === pageState.browser.blob.path}
+    <RepositoryFileEditor state={pageState} />
   {:else if pageState.browser.blob}
     <header
       class="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-3 border-b px-5 py-2 text-sm font-semibold"
@@ -204,6 +208,16 @@
         >
           <Download class="size-3.5" />Raw
         </Button>
+        {#if pageState.canEditFile}
+          <Button
+            variant="ghost"
+            size="sm"
+            class="gap-1.5 text-muted-foreground"
+            onclick={() => pageState.startEditing()}
+          >
+            <Pencil class="size-3.5" />Edit
+          </Button>
+        {/if}
       </div>
     </header>
 

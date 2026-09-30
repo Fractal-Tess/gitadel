@@ -1,4 +1,5 @@
 import { toast } from "svelte-sonner";
+import { z } from "zod";
 import {
   loadRepositoryBootstrap,
   preloadRepository,
@@ -8,7 +9,7 @@ import {
   clearRepositoryDataCache,
 } from "$lib/repository/repository-data-cache.js";
 import { clearRepositoryPreload } from "$lib/repository/repository-preload.js";
-import { ApiFailure, requestJson } from "$lib/api/transport.js";
+import { ApiFailure, jsonBody, requestJson } from "$lib/api/transport.js";
 import {
   refsSchema,
   treeSchema,
@@ -43,6 +44,21 @@ export type RepositoryView =
   | "settings"
   | "integrations";
 export type CopyTarget = "http" | "ssh";
+
+/** A file open for editing in the browser, as it was when editing began. */
+export type FileEdit = {
+  path: string;
+  branch: string;
+  /** The branch tip the edit starts from; the commit must land on it. */
+  commit: string;
+  original: string;
+};
+
+const fileWriteResponseSchema = z.object({
+  path: z.string(),
+  branch: z.string(),
+  commit: z.string(),
+});
 const views: readonly RepositoryView[] = [
   "overview",
   "history",
@@ -91,6 +107,9 @@ export class RepositoryPageState {
   notFound = $state(false);
   error = $state<string | null>(null);
   copied = $state<CopyTarget | null>(null);
+  editing = $state.raw<FileEdit | null>(null);
+  /** The text being edited; compared with `editing.original` for changes. */
+  draft = $state("");
   #app: AppState;
   #repositoryRequestSequence = 0;
   #viewRequestController: AbortController | null = null;
@@ -332,6 +351,86 @@ export class RepositoryPageState {
     }
   }
 
+  /** Whether the open file can be edited here and committed to its branch. */
+  get canEditFile(): boolean {
+    const blob = this.browser.blob;
+    return Boolean(
+      this.repository?.can_write &&
+        !this.repository.archived_at &&
+        !this.repository.mirrored &&
+        blob &&
+        blob.content !== null &&
+        !blob.lfs &&
+        this.browser.refs?.branches.some(
+          (branch) => branch.name === blob.revision,
+        ),
+    );
+  }
+
+  get hasUnsavedEdit(): boolean {
+    return this.editing !== null && this.draft !== this.editing.original;
+  }
+
+  startEditing(): void {
+    const blob = this.browser.blob;
+    if (!blob || blob.content === null || !this.canEditFile) return;
+    this.editing = {
+      path: blob.path,
+      branch: blob.revision,
+      commit: blob.commit_oid,
+      original: blob.content,
+    };
+    this.draft = blob.content;
+  }
+
+  /**
+   * Leaves the editor. Unsaved changes are only thrown away once confirmed,
+   * so every way out of the file asks first; returns whether it left.
+   */
+  stopEditing(force = false): boolean {
+    if (!this.editing) return true;
+    if (
+      !force &&
+      this.hasUnsavedEdit &&
+      !window.confirm(`Discard your unsaved changes to ${this.editing.path}?`)
+    )
+      return false;
+    this.editing = null;
+    this.draft = "";
+    return true;
+  }
+
+  /** Commits the draft to the branch it was opened on, then shows the result. */
+  async commitEdit(message: string): Promise<void> {
+    const edit = this.editing;
+    if (!edit) return;
+    const result = await requestJson(
+      repositoryApi(this, "/files"),
+      fileWriteResponseSchema,
+      {
+        method: "PUT",
+        body: jsonBody({
+          branch: edit.branch,
+          expected_commit: edit.commit,
+          path: edit.path,
+          content: this.draft,
+          message,
+        }),
+      },
+    );
+    this.stopEditing(true);
+    clearRepositoryDataCache(this.namespace, this.name, this.scope);
+    clearRepositoryPreload(this.namespace, this.name, this.scope);
+    this.browser.refs = await requestJson(repositoryApi(this, "/refs"), refsSchema);
+    toast.success(`Committed ${result.commit.slice(0, 8)} to ${result.branch}.`, {
+      action: {
+        label: "View commit",
+        onClick: () => this.navigate("commit", { oid: result.commit }),
+      },
+    });
+    await this.loadView();
+  }
+
   navigate(
     nextView: RepositoryView,
     options: {
@@ -347,6 +446,7 @@ export class RepositoryPageState {
       commit?: string;
     } = {},
   ): void {
+    if (!this.stopEditing()) return;
     this.view =
       (nextView === "settings" || nextView === "integrations") &&
       !this.repository?.can_manage
@@ -374,6 +474,8 @@ export class RepositoryPageState {
   }
   restoreLocation(): void {
     if (!this.repository) return;
+    // Back and forward have already moved; the edit cannot hold them.
+    this.stopEditing(true);
     this.readLocation(this.repository);
     void this.loadView();
   }
@@ -384,6 +486,7 @@ export class RepositoryPageState {
     });
   }
   selectEntry(entry: Tree["entries"][number]): void {
+    if (entry.kind !== "tree" && !this.stopEditing()) return;
     this.error = null;
     this.browser.selectedPath = entry.path;
     if (entry.kind === "tree") {
