@@ -2,13 +2,17 @@
   import GitBranch from "@lucide/svelte/icons/git-branch";
   import Heart from "@lucide/svelte/icons/heart";
   import LockKeyhole from "@lucide/svelte/icons/lock-keyhole";
+  import PanelRightClose from "@lucide/svelte/icons/panel-right-close";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
 
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Select from "$lib/components/ui/select/index.js";
+  import * as Tooltip from "$lib/components/ui/tooltip/index.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
+  import { useShellState } from "$lib/state/shell-state.svelte.js";
 
   let { state: pageState }: { state: RepositoryPageState } = $props();
+  const shell = useShellState();
   /** Set by a click that favorites, so the heart swells once in response. */
   let popped = $state(false);
 </script>
@@ -97,4 +101,21 @@
       </span>
     </span>
   </Button>
+  <Tooltip.Root>
+    <Tooltip.Trigger>
+      {#snippet child({ props })}
+        <Button
+          {...props}
+          variant="ghost"
+          size="icon-sm"
+          class="hidden xl:inline-flex"
+          aria-label="Hide repository details"
+          onclick={() => shell.setDetailsOpen(false)}
+        >
+          <PanelRightClose />
+        </Button>
+      {/snippet}
+    </Tooltip.Trigger>
+    <Tooltip.Content side="bottom">Hide details</Tooltip.Content>
+  </Tooltip.Root>
 </section>

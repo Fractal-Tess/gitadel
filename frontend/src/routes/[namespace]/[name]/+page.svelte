@@ -12,6 +12,7 @@
   import RepositoryReleases from "$lib/components/repository/repository-releases.svelte";
   import RepositoryRegistry from "$lib/components/repository/repository-registry.svelte";
   import RepositorySettings from "$lib/components/repository/repository-settings.svelte";
+  import RepositoryDetailsStrip from "$lib/components/repository/repository-details-strip.svelte";
   import RepositorySidebar from "$lib/components/repository/repository-sidebar.svelte";
   import RepositoryTags from "$lib/components/repository/repository-tags.svelte";
   import RepositoryIntegrationConfigure from "$lib/components/repository/repository-integration-configure.svelte";
@@ -141,7 +142,16 @@
     {:else}
       <!-- The metadata column is a property of the repository, not of one view,
            so it lives here and stays put while the view changes. -->
-      <div class="grid xl:min-h-0 xl:flex-1 xl:grid-cols-[minmax(0,1fr)_18rem]">
+      <!-- The details panel can be folded away to a slim strip on wide
+           screens; the columns ease between the two widths. -->
+      <div
+        class={[
+          "grid transition-[grid-template-columns] duration-300 ease-[var(--ease-out-quint)] xl:min-h-0 xl:flex-1",
+          shell.detailsOpen
+            ? "xl:grid-cols-[minmax(0,1fr)_18rem]"
+            : "xl:grid-cols-[minmax(0,1fr)_3rem]",
+        ]}
+      >
         <!-- Only the overview draws its own edge-to-edge columns and scrollers;
              the other views are ordinary documents that need the page padding
              back and scroll as a single block. -->
@@ -171,7 +181,14 @@
           {/if}
         </div>
         {/key}
-        <RepositorySidebar {state} />
+        {#if shell.detailsOpen}
+          <RepositorySidebar {state} />
+        {:else}
+          <!-- Narrow screens stack the panel under the content, where hiding
+               it would save nothing, so it stays there. -->
+          <div class="xl:hidden"><RepositorySidebar {state} /></div>
+          <RepositoryDetailsStrip {state} />
+        {/if}
       </div>
     {/if}
   </div>
