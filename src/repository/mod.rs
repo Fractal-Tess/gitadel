@@ -1071,9 +1071,11 @@ pub fn router() -> Router<RepositoryState> {
         )
         .route(
             "/repositories/{namespace}/{name}/files",
-            axum::routing::post(files::create_file).layer(axum::extract::DefaultBodyLimit::max(
-                files::MAX_FILE_REQUEST_BYTES,
-            )),
+            axum::routing::post(files::create_file)
+                .put(files::update_file)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    files::MAX_FILE_REQUEST_BYTES,
+                )),
         )
         .route(
             "/repositories/{namespace}/{name}/source",

@@ -40,12 +40,66 @@ pub struct CreateFileResponse {
     pub commit: String,
 }
 
+/// Whether a write adds a new file or replaces the contents of an existing one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum FileWrite {
+    Create,
+    Update,
+}
+
 pub async fn create_file(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(request): Json<CreateFileRequest>,
+) -> Result<Json<CreateFileResponse>, ApiError> {
+    write_file_request(
+        state,
+        namespace,
+        name,
+        headers,
+        jar,
+        request,
+        FileWrite::Create,
+    )
+    .await
+}
+
+/// Replaces an existing file's contents on a branch with a new commit, as an
+/// edit made in the browser.
+pub async fn update_file(
+    State(state): State<RepositoryState>,
+    AxumPath((namespace, name)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(request): Json<CreateFileRequest>,
+) -> Result<Json<CreateFileResponse>, ApiError> {
+    if request.expected_commit.is_none() {
+        return Err(ApiError::bad_request(
+            "Editing a file needs the commit it was opened at.",
+        ));
+    }
+    write_file_request(
+        state,
+        namespace,
+        name,
+        headers,
+        jar,
+        request,
+        FileWrite::Update,
+    )
+    .await
+}
+
+async fn write_file_request(
+    state: RepositoryState,
+    namespace: String,
+    name: String,
+    headers: HeaderMap,
+    jar: CookieJar,
+    request: CreateFileRequest,
+    write: FileWrite,
 ) -> Result<Json<CreateFileResponse>, ApiError> {
     let (actor, repository) = state
         .authenticated_repository(
@@ -78,7 +132,7 @@ pub async fn create_file(
     let path = state.repository_path(&repository);
     let actor_user_id = actor.user.id;
     let result = tokio::task::spawn_blocking(move || {
-        let commit = commit_file(
+        let commit = write_file(
             &path,
             &branch,
             request.expected_commit.as_deref(),
@@ -86,6 +140,7 @@ pub async fn create_file(
             request.content.into_bytes(),
             &request.message,
             &actor.user.username,
+            write,
         )?;
         Ok::<_, ApiError>(CreateFileResponse {
             path: request.path,
@@ -158,6 +213,8 @@ fn validate_request(request: &CreateFileRequest) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Creates a file; the shorthand tests use for building up a branch.
+#[cfg(test)]
 pub(super) fn commit_file(
     path: &Path,
     branch: &str,
@@ -166,6 +223,33 @@ pub(super) fn commit_file(
     content: Vec<u8>,
     message: &str,
     username: &str,
+) -> Result<ObjectId, ApiError> {
+    write_file(
+        path,
+        branch,
+        expected_commit,
+        file_path,
+        content,
+        message,
+        username,
+        FileWrite::Create,
+    )
+}
+
+/// Commits `content` at `file_path` on top of the branch tip, which must still
+/// be `expected_commit`. Creating refuses an occupied path; updating needs a
+/// regular file there, keeps its mode, and refuses a write that changes
+/// nothing.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn write_file(
+    path: &Path,
+    branch: &str,
+    expected_commit: Option<&str>,
+    file_path: &str,
+    content: Vec<u8>,
+    message: &str,
+    username: &str,
+    write: FileWrite,
 ) -> Result<ObjectId, ApiError> {
     let repository = GitRepository::open_exact_bare(path).map_err(ApiError::internal)?;
     let reference = format!("refs/heads/{branch}");
@@ -197,7 +281,12 @@ pub(super) fn commit_file(
         .map_err(ApiError::internal)?;
     let blob = repository.write_blob(content).map_err(ApiError::internal)?;
     let components = file_path.split('/').collect::<Vec<_>>();
-    let tree = upsert_file(&repository, root, &components, blob)?;
+    let tree = upsert_file(&repository, root, &components, blob, write)?;
+    if write == FileWrite::Update && root == Some(tree) {
+        return Err(ApiError::bad_request(
+            "The file is unchanged, so there is nothing to commit.",
+        ));
+    }
     let now = Utc::now().timestamp();
     let identity = format!("{username} <{username}@gitadel.local> {now} +0000");
     let commit = CommitObject {
@@ -232,6 +321,7 @@ fn upsert_file(
     root: Option<ObjectId>,
     components: &[&str],
     blob: ObjectId,
+    write: FileWrite,
 ) -> Result<ObjectId, ApiError> {
     let existing_tree = root
         .map(|oid| repository.read_tree(&oid).map_err(ApiError::internal))
@@ -245,19 +335,38 @@ fn upsert_file(
     });
     let mut builder = existing_tree.map(TreeEditor::from_tree).unwrap_or_default();
     if components.len() == 1 {
-        if existing.is_some() {
-            return Err(ApiError::conflict(
-                "A file or directory already exists at that path.",
-            ));
-        }
-        builder.upsert_raw(BString::from(name.as_bytes()), 0o100644, blob);
+        let mode = match (write, existing) {
+            (FileWrite::Create, None) => 0o100644,
+            (FileWrite::Create, Some(_)) => {
+                return Err(ApiError::conflict(
+                    "A file or directory already exists at that path.",
+                ));
+            }
+            // Keep the executable bit; symlinks, submodules, and directories
+            // are not text files to edit.
+            (FileWrite::Update, Some((mode @ (0o100644 | 0o100755), _))) => mode,
+            (FileWrite::Update, Some(_)) => {
+                return Err(ApiError::conflict("Only regular files can be edited."));
+            }
+            (FileWrite::Update, None) => {
+                return Err(ApiError::conflict(
+                    "The file no longer exists on this branch.",
+                ));
+            }
+        };
+        builder.upsert_raw(BString::from(name.as_bytes()), mode, blob);
     } else {
         let child = match existing {
             Some((0o040000, oid)) => Some(oid),
             Some(_) => return Err(ApiError::conflict("A path component is already a file.")),
+            None if write == FileWrite::Update => {
+                return Err(ApiError::conflict(
+                    "The file no longer exists on this branch.",
+                ));
+            }
             None => None,
         };
-        let child_tree = upsert_file(repository, child, &components[1..], blob)?;
+        let child_tree = upsert_file(repository, child, &components[1..], blob, write)?;
         builder.upsert_raw(BString::from(name.as_bytes()), 0o040000, child_tree);
     }
     repository.write_tree(builder).map_err(ApiError::internal)
@@ -325,5 +434,74 @@ mod tests {
             .unwrap();
         assert_eq!(git.blobs().read(first_file.oid).unwrap(), b"first");
         assert_eq!(git.blobs().read(second_file.oid).unwrap(), b"second");
+    }
+
+    #[test]
+    fn updating_replaces_an_existing_file_and_refuses_everything_else() {
+        let directory = TestDirectory(
+            std::env::temp_dir().join(format!("gitadel-file-test-{}", uuid::Uuid::new_v4())),
+        );
+        let git = GitRepository::init_bare(&directory.0).unwrap();
+        let first = commit_file(
+            &directory.0,
+            "main",
+            None,
+            "notes/first.txt",
+            b"first".to_vec(),
+            "First",
+            "test",
+        )
+        .unwrap()
+        .to_hex();
+        let update = |expected: &str, path: &str, content: &[u8]| {
+            write_file(
+                &directory.0,
+                "main",
+                Some(expected),
+                path,
+                content.to_vec(),
+                "Edit",
+                "test",
+                FileWrite::Update,
+            )
+        };
+
+        let edited = update(&first, "notes/first.txt", b"edited").unwrap();
+        let file = git
+            .resolve_path(&edited.to_hex(), "notes/first.txt")
+            .unwrap();
+        assert_eq!(git.blobs().read(file.oid).unwrap(), b"edited");
+        assert_eq!(
+            git.read_commit(&edited)
+                .unwrap()
+                .parents
+                .iter()
+                .map(ObjectId::to_hex)
+                .collect::<Vec<_>>(),
+            vec![first.clone()]
+        );
+
+        let tip = edited.to_hex();
+        let status =
+            |result: Result<ObjectId, ApiError>| result.unwrap_err().into_response().status();
+        // Nothing changed, the file is missing, a directory, or the tip moved.
+        assert_eq!(
+            status(update(&tip, "notes/first.txt", b"edited")),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status(update(&tip, "notes/missing.txt", b"x")),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            status(update(&tip, "absent/file.txt", b"x")),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(status(update(&tip, "notes", b"x")), StatusCode::CONFLICT);
+        assert_eq!(
+            status(update(&first, "notes/first.txt", b"late")),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(git.rev_parse("refs/heads/main").unwrap(), edited);
     }
 }
