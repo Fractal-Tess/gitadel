@@ -364,6 +364,47 @@ pub mod user_email {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod user_commit_email {
+    use super::*;
+
+    /// An address a user writes commits under. Commits authored with it count
+    /// as theirs on their profile. Each address belongs to one account.
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "user_commit_emails")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub user_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub email: String,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod user_commit_profile {
+    use super::*;
+
+    /// The name and address commits made in the browser are authored with.
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "user_commit_profiles")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub user_id: Uuid,
+        pub name: Option<String>,
+        pub primary_email: Option<String>,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod email_token {
     use super::*;
 

@@ -71,6 +71,7 @@ mod m20260929_000071_registry_upgrades;
 mod m20260929_000072_registry_metadata;
 mod m20260929_000073_namespace_pins;
 mod m20260930_000074_user_motion_preference;
+mod m20260930_000075_user_commit_identities;
 
 #[cfg(test)]
 mod tests;
@@ -155,6 +156,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260929_000072_registry_metadata::Migration),
             Box::new(m20260929_000073_namespace_pins::Migration),
             Box::new(m20260930_000074_user_motion_preference::Migration),
+            Box::new(m20260930_000075_user_commit_identities::Migration),
         ]
     }
 }

@@ -2,6 +2,7 @@ mod admin;
 mod admin_storage;
 mod auth;
 mod avatar;
+pub mod commit_emails;
 mod email;
 mod integrations;
 mod mirror_identities;
@@ -1159,6 +1160,15 @@ pub fn router() -> Router<IdentityState> {
         )
         .route("/me/theme-preference", put(auth::update_theme_preference))
         .route("/me/motion-preference", put(auth::update_motion_preference))
+        .route(
+            "/me/commit-identity",
+            get(commit_emails::get_identity).put(commit_emails::update_identity),
+        )
+        .route("/me/commit-emails", post(commit_emails::add_email))
+        .route(
+            "/me/commit-emails/{email}",
+            delete(commit_emails::remove_email),
+        )
         .route("/me/password", put(auth::update_password))
         .route("/me/two-factor", get(two_factor::status))
         .route("/me/two-factor/enroll", post(two_factor::start_enrollment))
