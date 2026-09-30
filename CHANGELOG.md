@@ -4,6 +4,14 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-09-30
+
+### Added
+
+- Edit a file in the browser. **Edit** in a text file's header opens it in an editor with line numbers; Tab and Shift+Tab indent the way the file already does, and Ctrl+S (⌘S) opens the commit dialog. **Commit changes** adds a commit to the branch the file was opened on and shows the new tip. If someone pushed to that branch in the meantime, the commit is refused and the draft is kept, so neither change is lost. Leaving the file, switching branches, or closing the tab asks before discarding unsaved changes. Editing needs write access and a branch (not a tag or commit), and is not offered for binary, LFS, or oversized files, or for mirrors and archived repositories. Branch protection applies as it does to pushes.
+- `PUT /api/v1/repositories/{namespace}/{name}/files` replaces an existing file's contents, taking the same body as `POST`. It keeps the file's mode, refuses symlinks and submodules, and refuses a change that leaves the file as it was.
+- The details panel on the right of a repository page can be hidden with the button at its top, leaving a slim strip with the button that brings it back and the favorite toggle. The choice is remembered.
+
 ## [0.20.0] - 2026-09-30
 
 ### Added
@@ -449,7 +457,8 @@ Initial release.
 - CLI commands for repository creation and integrity-checked offline backup and restore.
 - Docker Compose and NixOS deployment, a portable SQLite-backed data directory, and an embedded SvelteKit frontend.
 
-[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/Fractal-Tess/gitadel/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/Fractal-Tess/gitadel/compare/v0.17.0...v0.18.0
