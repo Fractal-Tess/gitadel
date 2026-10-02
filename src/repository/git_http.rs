@@ -1,4 +1,4 @@
-use std::{io, ops::Deref, time::Duration};
+use std::{io, ops::Deref, sync::Arc, time::Duration};
 
 use axum::{
     Router,
@@ -9,10 +9,13 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use futures_util::TryStreamExt as _;
+use futures_util::{Stream, TryStreamExt as _};
 use serde::Deserialize;
-use tokio::io::AsyncWriteExt;
-use tokio_util::io::{ReaderStream, StreamReader};
+use tokio::{
+    io::{AsyncWrite, AsyncWriteExt},
+    sync::{OwnedSemaphorePermit, Semaphore},
+};
+use tokio_util::io::ReaderStream;
 use tower_http::decompression::RequestDecompressionLayer;
 
 use super::{
@@ -28,10 +31,23 @@ use crate::{
     identity::{ApiError, SCOPE_REPOSITORY_READ, SCOPE_WRITE},
 };
 
+/// A client that sends no request body bytes for this long is dropped, so a
+/// stalled connection cannot hold a blocking thread until the service cap.
+const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Upper bound for one upload-pack or receive-pack call.
+const SERVICE_TIME_LIMIT: Duration = Duration::from_secs(30 * 60);
+/// In-flight upload-pack and receive-pack calls. Each one occupies a blocking
+/// thread; the bound stays well under Tokio's blocking pool (512 by default)
+/// so stalled or slow Git clients cannot starve file and database work.
+const MAX_CONCURRENT_SERVICES: usize = 64;
+/// How long a request waits for a free service slot before it is turned away.
+const SERVICE_SLOT_WAIT: Duration = Duration::from_secs(30);
+
 #[derive(Clone)]
 pub(crate) struct GitHttpState {
     repository: RepositoryState,
     actions: ActionsState,
+    service_slots: Arc<Semaphore>,
 }
 
 impl GitHttpState {
@@ -39,7 +55,14 @@ impl GitHttpState {
         Self {
             repository,
             actions,
+            service_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_SERVICES)),
         }
+    }
+
+    /// Reserves a blocking-pool slot for one service call, or `None` when
+    /// every slot stays busy.
+    async fn service_slot(&self) -> Option<OwnedSemaphorePermit> {
+        acquire_service_slot(&self.service_slots, SERVICE_SLOT_WAIT).await
     }
 
     pub(super) fn actions_state(&self) -> &ActionsState {
@@ -122,17 +145,24 @@ async fn info_refs(
             .get("git-protocol")
             .and_then(|value| value.to_str().ok()),
     );
-    let mut output = Vec::new();
-    if let Err(error) = git_service::write_advertisement(
-        &path,
-        format,
-        service == "git-receive-pack",
-        v2,
-        &mut output,
-    ) {
-        tracing::error!(%error, repository = %repository_path(&repository), "Git service advertisement failed");
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
+    // Reading refs and configuration is synchronous file work.
+    let receive = service == "git-receive-pack";
+    let advertisement = tokio::task::spawn_blocking(move || {
+        let mut output = Vec::new();
+        git_service::write_advertisement(&path, format, receive, v2, &mut output).map(|()| output)
+    })
+    .await;
+    let output = match advertisement {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            tracing::error!(%error, repository = %repository_path(&repository), "Git service advertisement failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+        Err(error) => {
+            tracing::error!(%error, repository = %repository_path(&repository), "Git service advertisement task failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
     if v2 && service == "git-upload-pack" {
         return git_response(
             "application/x-git-upload-pack-advertisement",
@@ -179,34 +209,32 @@ async fn upload_pack(
             .get("git-protocol")
             .and_then(|value| value.to_str().ok()),
     );
+    let Some(slot) = state.service_slot().await else {
+        return service_busy();
+    };
     let (request_io, response_io) = tokio::io::duplex(64 * 1024);
-    let (response_reader, mut request_writer) = tokio::io::split(request_io);
+    let (response_reader, request_writer) = tokio::io::split(request_io);
     let (request_reader, response_writer) = tokio::io::split(response_io);
-    let request_stream = body.into_data_stream().map_err(io::Error::other);
-    let mut request_stream = StreamReader::new(request_stream);
     let cancellation = BridgeCancellation::default();
-    let feeder_cancellation = cancellation.clone();
-    let feeder = tokio::spawn(async move {
-        if let Err(error) = tokio::io::copy(&mut request_stream, &mut request_writer).await {
-            // Closing the pipe here would look like a clean end of input, and
-            // a truncated pack would then surface as a checksum mismatch.
-            tracing::warn!(%error, "upload-pack request body ended before it was complete");
-            feeder_cancellation.cancel();
-            return;
-        }
-        let _ = request_writer.shutdown().await;
-    });
+    let feeder = tokio::spawn(feed_request_body(
+        body.into_data_stream().map_err(io::Error::other),
+        request_writer,
+        cancellation.clone(),
+        BODY_IDLE_TIMEOUT,
+        "upload-pack",
+    ));
     let worker_cancellation = cancellation.clone();
     let handle = tokio::runtime::Handle::current();
     let mut worker = tokio::task::spawn_blocking(move || {
         let mut reader =
             BlockingReader::new(request_reader, handle.clone(), worker_cancellation.clone());
         let mut writer = BlockingWriter::new(response_writer, handle, worker_cancellation);
+        let _slot = slot;
         git_service::serve_upload_pack(&path, format, v2, true, &mut reader, &mut writer)
     });
     let display_path = repository_path(&repository);
     state.spawn_task(async move {
-        let result = tokio::time::timeout(Duration::from_secs(30 * 60), &mut worker).await;
+        let result = tokio::time::timeout(SERVICE_TIME_LIMIT, &mut worker).await;
         let result = match result {
             Err(_) => {
                 cancellation.cancel();
@@ -261,23 +289,20 @@ async fn receive_pack(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
+    let Some(slot) = state.service_slot().await else {
+        return service_busy();
+    };
     let (request_io, response_io) = tokio::io::duplex(64 * 1024);
-    let (response_reader, mut request_writer) = tokio::io::split(request_io);
+    let (response_reader, request_writer) = tokio::io::split(request_io);
     let (request_reader, response_writer) = tokio::io::split(response_io);
-    let request = body.into_data_stream().map_err(io::Error::other);
-    let mut request = StreamReader::new(request);
     let cancellation = BridgeCancellation::default();
-    let feeder_cancellation = cancellation.clone();
-    let feeder = tokio::spawn(async move {
-        if let Err(error) = tokio::io::copy(&mut request, &mut request_writer).await {
-            // Closing the pipe here would look like a clean end of input, and
-            // a truncated pack would then surface as a checksum mismatch.
-            tracing::warn!(%error, "receive-pack request body ended before it was complete");
-            feeder_cancellation.cancel();
-            return;
-        }
-        let _ = request_writer.shutdown().await;
-    });
+    let feeder = tokio::spawn(feed_request_body(
+        body.into_data_stream().map_err(io::Error::other),
+        request_writer,
+        cancellation.clone(),
+        BODY_IDLE_TIMEOUT,
+        "receive-pack",
+    ));
     let worker_cancellation = cancellation.clone();
     let handle = tokio::runtime::Handle::current();
     let worker_path = path.clone();
@@ -285,6 +310,7 @@ async fn receive_pack(
         let mut reader =
             BlockingReader::new(request_reader, handle.clone(), worker_cancellation.clone());
         let mut writer = BlockingWriter::new(response_writer, handle, worker_cancellation);
+        let _slot = slot;
         git_service::serve_receive_pack(&worker_path, format, &guard, &mut reader, &mut writer)
     });
     let display_path = repository_path(&repository);
@@ -293,7 +319,7 @@ async fn receive_pack(
     let audit_repository = repository.clone();
     let maintenance_path = path.clone();
     state.spawn_task(async move {
-        let result = tokio::time::timeout(Duration::from_secs(30 * 60), &mut worker).await;
+        let result = tokio::time::timeout(SERVICE_TIME_LIMIT, &mut worker).await;
         let result = match result {
             Err(_) => {
                 cancellation.cancel();
@@ -339,6 +365,66 @@ async fn receive_pack(
         "application/x-git-receive-pack-result",
         Body::from_stream(ReaderStream::new(response_reader)),
     )
+}
+
+async fn acquire_service_slot(
+    slots: &Arc<Semaphore>,
+    wait: Duration,
+) -> Option<OwnedSemaphorePermit> {
+    tokio::time::timeout(wait, Arc::clone(slots).acquire_owned())
+        .await
+        .ok()?
+        .ok()
+}
+
+fn service_busy() -> Response {
+    tracing::warn!("Git HTTP service is at its concurrency limit");
+    let mut response = StatusCode::SERVICE_UNAVAILABLE.into_response();
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("30"));
+    response
+}
+
+/// Copies the request body into the pipe the blocking service reads from.
+///
+/// Only the wait for the client is timed: a slow service applies ordinary
+/// back-pressure through the pipe and never counts as an idle client.
+async fn feed_request_body<S, W>(
+    body: S,
+    mut pipe: W,
+    cancellation: BridgeCancellation,
+    idle: Duration,
+    service: &'static str,
+) where
+    S: Stream<Item = io::Result<axum::body::Bytes>>,
+    W: AsyncWrite + Unpin,
+{
+    tokio::pin!(body);
+    loop {
+        let chunk = match tokio::time::timeout(idle, body.try_next()).await {
+            Ok(Ok(Some(chunk))) => chunk,
+            Ok(Ok(None)) => break,
+            Ok(Err(error)) => {
+                // Closing the pipe here would look like a clean end of input,
+                // and a truncated pack would then surface as a checksum
+                // mismatch.
+                tracing::warn!(%error, service, "request body ended before it was complete");
+                cancellation.cancel();
+                return;
+            }
+            Err(_) => {
+                tracing::warn!(service, "request body stalled; dropping the client");
+                cancellation.cancel();
+                return;
+            }
+        };
+        if pipe.write_all(&chunk).await.is_err() {
+            // The service finished or failed and closed its end.
+            return;
+        }
+    }
+    let _ = pipe.shutdown().await;
 }
 
 enum AuthorizationError {
@@ -487,14 +573,85 @@ fn repository_path(repository: &repository::Model) -> String {
 
 #[cfg(test)]
 mod tests {
-    use axum::http::{HeaderMap, HeaderValue, header};
+    use std::{sync::Arc, time::Duration};
 
-    use super::{repository_name, token_from_headers};
+    use axum::{
+        body::Bytes,
+        http::{HeaderMap, HeaderValue, StatusCode, header},
+    };
+    use futures_util::{StreamExt as _, stream};
+    use tokio::{io::AsyncReadExt as _, sync::Semaphore};
+
+    use super::{
+        BlockingReader, BridgeCancellation, acquire_service_slot, feed_request_body,
+        repository_name, service_busy, token_from_headers,
+    };
 
     fn authorization(value: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, HeaderValue::from_str(value).unwrap());
         headers
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stalled_request_body_cancels_the_service() {
+        let (pipe, mut service_end) = tokio::io::duplex(1024);
+        let cancellation = BridgeCancellation::default();
+        let body = stream::iter([Ok(Bytes::from_static(b"0032want"))]).chain(stream::pending());
+
+        feed_request_body(
+            body,
+            pipe,
+            cancellation.clone(),
+            Duration::from_millis(50),
+            "upload-pack",
+        )
+        .await;
+
+        // The bytes that did arrive were forwarded, then the stall cancelled
+        // the bridge so a blocked reader fails instead of waiting.
+        let mut received = [0u8; 8];
+        service_end.read_exact(&mut received).await.unwrap();
+        assert_eq!(&received, b"0032want");
+        let handle = tokio::runtime::Handle::current();
+        let read = tokio::task::spawn_blocking(move || {
+            let mut reader = BlockingReader::new(service_end, handle, cancellation);
+            std::io::Read::read(&mut reader, &mut [0u8; 8])
+        })
+        .await
+        .unwrap();
+        assert!(read.is_err());
+    }
+
+    #[tokio::test]
+    async fn complete_request_body_ends_the_pipe_cleanly() {
+        let (pipe, mut service_end) = tokio::io::duplex(1024);
+        let cancellation = BridgeCancellation::default();
+        let body = stream::iter([Ok(Bytes::from_static(b"0000"))]);
+
+        feed_request_body(
+            body,
+            pipe,
+            cancellation.clone(),
+            Duration::from_secs(5),
+            "upload-pack",
+        )
+        .await;
+
+        let mut received = Vec::new();
+        service_end.read_to_end(&mut received).await.unwrap();
+        assert_eq!(received, b"0000");
+    }
+
+    #[tokio::test]
+    async fn service_slots_bound_concurrency() {
+        let slots = Arc::new(Semaphore::new(1));
+        let wait = Duration::from_millis(20);
+        let held = acquire_service_slot(&slots, wait).await.unwrap();
+        assert!(acquire_service_slot(&slots, wait).await.is_none());
+        assert_eq!(service_busy().status(), StatusCode::SERVICE_UNAVAILABLE);
+        drop(held);
+        assert!(acquire_service_slot(&slots, wait).await.is_some());
     }
 
     #[test]
