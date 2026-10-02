@@ -15,7 +15,7 @@ use crate::{
 use axum::{
     Json,
     extract::{Path as AxumPath, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::IntoResponse,
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -815,6 +815,45 @@ pub(super) async fn backfill_legacy_empty_defaults(
         transaction.commit().await?;
     }
     Ok(())
+}
+
+/// How many ids one `IN (...)` lookup carries, which keeps a batched query
+/// well under SQLite's bound-parameter limit however long the list is.
+pub(super) const IN_QUERY_CHUNK: usize = 500;
+
+const DEFAULT_LIST_PER_PAGE: u64 = 100;
+const MAX_LIST_PER_PAGE: u64 = 100;
+
+/// The rows a list endpoint returns for its optional `page` (1-based) and
+/// `per_page` query parameters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PageWindow {
+    pub(super) offset: u64,
+    pub(super) limit: u64,
+}
+
+impl PageWindow {
+    pub(super) fn new(page: Option<u64>, per_page: Option<u64>) -> Self {
+        let limit = per_page
+            .unwrap_or(DEFAULT_LIST_PER_PAGE)
+            .clamp(1, MAX_LIST_PER_PAGE);
+        let offset = page
+            .unwrap_or(1)
+            .max(1)
+            .saturating_sub(1)
+            .saturating_mul(limit);
+        Self { offset, limit }
+    }
+}
+
+/// `X-Total-Count`: every row matching a paginated list's filters, so a
+/// client can tell how much lies beyond the page it holds while the body
+/// stays a bare array.
+pub(super) fn total_count_header(total: u64) -> [(HeaderName, HeaderValue); 1] {
+    [(
+        HeaderName::from_static("x-total-count"),
+        HeaderValue::from(total),
+    )]
 }
 
 impl RepositoryState {
@@ -1647,6 +1686,111 @@ async fn cleanup_repository_storage(repository_path: &Path, lfs_path: &Path) {
     }
 }
 
+/// A migrated in-memory instance with one administrator, for handler tests.
+#[cfg(test)]
+pub(super) mod test_support {
+    use chrono::Utc;
+    use sea_orm::{ActiveModelTrait, ConnectOptions, Database, DatabaseConnection, Set};
+    use sea_orm_migration::MigratorTrait;
+    use uuid::Uuid;
+
+    use crate::{
+        config::{AuthSettings, StorageSettings},
+        entity::{repository, user},
+        identity::IdentityState,
+        migration::Migrator,
+        repository::RepositoryState,
+    };
+
+    pub(in crate::repository) struct TestInstance {
+        pub(in crate::repository) state: RepositoryState,
+        pub(in crate::repository) database: DatabaseConnection,
+        pub(in crate::repository) owner: user::Model,
+        pub(in crate::repository) root: std::path::PathBuf,
+    }
+
+    impl Drop for TestInstance {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    pub(in crate::repository) async fn instance() -> TestInstance {
+        let root = std::env::temp_dir().join(format!("gitadel-handler-test-{}", Uuid::new_v4()));
+        let mut options = ConnectOptions::new("sqlite::memory:");
+        options.max_connections(1).sqlx_logging(false);
+        let database = Database::connect(options).await.unwrap();
+        Migrator::up(&database, None).await.unwrap();
+        let public_url = url::Url::parse("https://gitadel.test").unwrap();
+        let identity = IdentityState::new(
+            database.clone(),
+            AuthSettings {
+                session_lifetime_hours: 24,
+                invitation_lifetime_hours: 24,
+            },
+            public_url.clone(),
+        )
+        .unwrap();
+        let state = RepositoryState::new(
+            identity,
+            StorageSettings {
+                repository_root: root.join("repositories"),
+                lfs_root: root.join("lfs"),
+                registry_root: root.join("registry"),
+                actions_artifact_root: root.join("actions-artifacts"),
+            },
+            public_url,
+            22,
+        )
+        .await
+        .unwrap();
+        let owner = crate::identity::bootstrap_admin(
+            &database,
+            "alice",
+            "handler-test-password".to_owned(),
+        )
+        .await
+        .unwrap();
+        TestInstance {
+            state,
+            database,
+            owner,
+            root,
+        }
+    }
+
+    impl TestInstance {
+        /// A public repository row, so handlers can be called anonymously. No
+        /// Git directory is created for it.
+        pub(in crate::repository) async fn repository(&self, name: &str) -> repository::Model {
+            let now = Utc::now();
+            repository::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                namespace: Set(self.owner.username.clone()),
+                name: Set(name.to_owned()),
+                description: Set(None),
+                website_url: Set(None),
+                visibility: Set("public".to_owned()),
+                object_format: Set("sha1".to_owned()),
+                mirrored: Set(false),
+                default_branch: Set(Some("main".to_owned())),
+                issue_counter: Set(0),
+                storage_key: Set(Uuid::new_v4()),
+                created_by: Set(self.owner.id),
+                archived_at: Set(None),
+                deleted_at: Set(None),
+                icon_updated_at: Set(None),
+                icon_source: Set(None),
+                created_at: Set(now),
+                updated_at: Set(now),
+            }
+            .insert(&self.database)
+            .await
+            .unwrap()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::Path, process::Command};
@@ -1654,7 +1798,41 @@ mod tests {
     use sley::Repository as SleyRepository;
     use uuid::Uuid;
 
-    use super::select_default_branch;
+    use super::{PageWindow, select_default_branch};
+
+    #[test]
+    fn page_window_defaults_and_clamps() {
+        assert_eq!(
+            PageWindow::new(None, None),
+            PageWindow {
+                offset: 0,
+                limit: 100
+            }
+        );
+        assert_eq!(
+            PageWindow::new(Some(3), Some(20)),
+            PageWindow {
+                offset: 40,
+                limit: 20
+            }
+        );
+        // Page 0 is page 1, and per_page stays within 1..=100.
+        assert_eq!(
+            PageWindow::new(Some(0), Some(0)),
+            PageWindow {
+                offset: 0,
+                limit: 1
+            }
+        );
+        assert_eq!(
+            PageWindow::new(Some(2), Some(5_000)),
+            PageWindow {
+                offset: 100,
+                limit: 100
+            }
+        );
+        assert_eq!(PageWindow::new(Some(u64::MAX), None).offset, u64::MAX);
+    }
 
     fn git(path: &Path, arguments: &[&str]) {
         let output = Command::new("git")

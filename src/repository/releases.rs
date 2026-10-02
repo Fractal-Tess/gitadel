@@ -1,4 +1,8 @@
-use std::{path::PathBuf, pin::Pin};
+use std::{
+    collections::{BTreeSet, HashMap},
+    path::PathBuf,
+    pin::Pin,
+};
 
 use axum::{
     Json,
@@ -11,8 +15,8 @@ use axum_extra::extract::cookie::CookieJar;
 use chrono::Utc;
 use futures_util::{Stream, StreamExt as _, TryStreamExt as _};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, ExprTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait,
+    ActiveModelTrait, ColumnTrait, EntityTrait, ExprTrait, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use tokio::{fs, io::AsyncWriteExt as _};
@@ -23,6 +27,7 @@ use super::{
     Permission, RepositoryState,
     browser::{self, readable_repository},
     render_markdown,
+    resources::{IN_QUERY_CHUNK, PageWindow, total_count_header},
     webhook_events::{self, ChangeAction},
 };
 use crate::{
@@ -88,6 +93,12 @@ pub struct UpdateReleaseRequest {
     title: Option<String>,
     body: Option<String>,
     prerelease: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub struct ListReleasesQuery {
+    page: Option<u64>,
+    per_page: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -187,21 +198,28 @@ pub async fn forgejo_current_user(
 pub async fn list_releases(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
+    Query(query): Query<ListReleasesQuery>,
     headers: HeaderMap,
     jar: CookieJar,
-) -> Result<Json<Vec<ReleaseResponse>>, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
     let repository = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
-    let releases = repository_release::Entity::find()
-        .filter(repository_release::Column::RepositoryId.eq(repository.id))
+    let window = PageWindow::new(query.page, query.per_page);
+    let select = repository_release::Entity::find()
+        .filter(repository_release::Column::RepositoryId.eq(repository.id));
+    let total = select.clone().count(state.identity().database()).await?;
+    let releases = select
         .order_by_desc(repository_release::Column::PublishedAt)
+        // Releases published in the same instant keep one order across pages.
+        .order_by_desc(repository_release::Column::Id)
+        .offset(window.offset)
+        .limit(window.limit)
         .all(state.identity().database())
         .await?;
-    let latest_id = releases
-        .iter()
-        .find(|release| !release.prerelease)
-        .map(|release| release.id);
-    Ok(Json(
-        release_responses(&state, &repository, releases, latest_id).await?,
+    // The latest release may sit on another page than the one requested.
+    let latest_id = latest_release_id(&state, repository.id).await?;
+    Ok((
+        total_count_header(total),
+        Json(release_responses(&state, &repository, releases, latest_id).await?),
     ))
 }
 
@@ -1069,11 +1087,76 @@ async fn release_responses(
     releases: Vec<repository_release::Model>,
     latest_id: Option<Uuid>,
 ) -> Result<Vec<ReleaseResponse>, ApiError> {
-    let mut responses = Vec::with_capacity(releases.len());
-    for release in releases {
-        responses.push(release_response(state, repository, release, latest_id).await?);
+    if releases.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(responses)
+    let database = state.identity().database();
+    // One query per related table for the whole page, however long it is.
+    let author_ids = releases
+        .iter()
+        .map(|release| release.author_user_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut authors = HashMap::with_capacity(author_ids.len());
+    for ids in author_ids.chunks(IN_QUERY_CHUNK) {
+        authors.extend(
+            user::Entity::find()
+                .filter(user::Column::Id.is_in(ids.iter().copied()))
+                .all(database)
+                .await?
+                .into_iter()
+                .map(|author| (author.id, author.username)),
+        );
+    }
+    let release_ids = releases
+        .iter()
+        .map(|release| release.id)
+        .collect::<Vec<_>>();
+    let mut assets = HashMap::<Uuid, Vec<ReleaseAssetResponse>>::new();
+    for ids in release_ids.chunks(IN_QUERY_CHUNK) {
+        // Ordered by name, so each release's assets arrive already sorted.
+        for asset in release_asset::Entity::find()
+            .filter(release_asset::Column::ReleaseId.is_in(ids.iter().copied()))
+            .order_by_asc(release_asset::Column::Name)
+            .all(database)
+            .await?
+        {
+            assets
+                .entry(asset.release_id)
+                .or_default()
+                .push(asset_response(repository, asset));
+        }
+    }
+
+    Ok(releases
+        .into_iter()
+        .map(|release| ReleaseResponse {
+            id: release.id,
+            target_revision: release.target_revision,
+            target_oid: release.target_oid,
+            title: release.title,
+            rendered_body: render_markdown(&release.body),
+            body: release.body,
+            prerelease: release.prerelease,
+            latest: latest_id == Some(release.id),
+            author: authors
+                .get(&release.author_user_id)
+                .cloned()
+                .unwrap_or_else(|| "deleted-user".to_owned()),
+            published_at: release.published_at,
+            created_at: release.created_at,
+            updated_at: release.updated_at,
+            assets: assets.remove(&release.id).unwrap_or_default(),
+            external_url: release.external_url,
+            external_author: release.external_author.map(|username| {
+                ExternalReleaseAuthorResponse {
+                    username,
+                    profile_url: release.external_author_url,
+                }
+            }),
+        })
+        .collect())
 }
 
 async fn release_response(
@@ -1082,41 +1165,10 @@ async fn release_response(
     release: repository_release::Model,
     latest_id: Option<Uuid>,
 ) -> Result<ReleaseResponse, ApiError> {
-    let author = user::Entity::find_by_id(release.author_user_id)
-        .one(state.identity().database())
+    release_responses(state, repository, vec![release], latest_id)
         .await?
-        .map(|author| author.username)
-        .unwrap_or_else(|| "deleted-user".to_owned());
-    let assets = release_asset::Entity::find()
-        .filter(release_asset::Column::ReleaseId.eq(release.id))
-        .order_by_asc(release_asset::Column::Name)
-        .all(state.identity().database())
-        .await?
-        .into_iter()
-        .map(|asset| asset_response(repository, asset))
-        .collect();
-    Ok(ReleaseResponse {
-        id: release.id,
-        target_revision: release.target_revision,
-        target_oid: release.target_oid,
-        title: release.title,
-        rendered_body: render_markdown(&release.body),
-        body: release.body,
-        prerelease: release.prerelease,
-        latest: latest_id == Some(release.id),
-        author,
-        published_at: release.published_at,
-        created_at: release.created_at,
-        updated_at: release.updated_at,
-        assets,
-        external_url: release.external_url,
-        external_author: release
-            .external_author
-            .map(|username| ExternalReleaseAuthorResponse {
-                username,
-                profile_url: release.external_author_url,
-            }),
-    })
+        .pop()
+        .ok_or_else(|| ApiError::internal("release response was not built"))
 }
 
 async fn forgejo_release_response(
@@ -1297,12 +1349,146 @@ fn ascii_download_name(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use axum::{http::StatusCode, response::IntoResponse as _};
-    use chrono::Utc;
+    use axum::{
+        extract::{Path as AxumPath, Query, State},
+        http::{HeaderMap, StatusCode},
+        response::IntoResponse as _,
+    };
+    use axum_extra::extract::cookie::CookieJar;
+    use chrono::{Duration, Utc};
+    use sea_orm::{ActiveModelTrait, Set};
+    use serde_json::Value;
     use uuid::Uuid;
 
-    use super::ensure_accepts_writes;
-    use crate::entity::repository;
+    use super::{ListReleasesQuery, ensure_accepts_writes, list_releases};
+    use crate::{
+        entity::{release_asset, repository, repository_release},
+        repository::resources::test_support::{TestInstance, instance},
+    };
+
+    async fn insert_release(
+        instance: &TestInstance,
+        repository_id: Uuid,
+        title: &str,
+        age_days: i64,
+        prerelease: bool,
+    ) -> repository_release::Model {
+        let published = Utc::now() - Duration::days(age_days);
+        repository_release::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            repository_id: Set(repository_id),
+            author_user_id: Set(instance.owner.id),
+            target_revision: Set(title.to_owned()),
+            target_oid: Set("0".repeat(40)),
+            title: Set(title.to_owned()),
+            body: Set("Notes".to_owned()),
+            prerelease: Set(prerelease),
+            published_at: Set(published),
+            created_at: Set(published),
+            updated_at: Set(published),
+            external_source: Set(None),
+            external_instance_url: Set(None),
+            external_id: Set(None),
+            external_url: Set(None),
+            external_author: Set(None),
+            external_author_url: Set(None),
+            external_updated_at: Set(None),
+        }
+        .insert(&instance.database)
+        .await
+        .unwrap()
+    }
+
+    /// The `X-Total-Count` header and the JSON array a list request returns.
+    async fn list(
+        instance: &TestInstance,
+        page: Option<u64>,
+        per_page: Option<u64>,
+    ) -> (String, Vec<Value>) {
+        let response = list_releases(
+            State(instance.state.clone()),
+            AxumPath(("alice".to_owned(), "project".to_owned())),
+            Query(ListReleasesQuery { page, per_page }),
+            HeaderMap::new(),
+            CookieJar::new(),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        let total = response.headers()["x-total-count"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (total, serde_json::from_slice(&body).unwrap())
+    }
+
+    fn titles(releases: &[Value]) -> Vec<&str> {
+        releases
+            .iter()
+            .map(|release| release["title"].as_str().unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn release_list_pages_and_batches_authors_and_assets() {
+        let instance = instance().await;
+        let repository = instance.repository("project").await;
+        insert_release(&instance, repository.id, "v1.0.0", 3, false).await;
+        let stable = insert_release(&instance, repository.id, "v1.1.0", 2, false).await;
+        insert_release(&instance, repository.id, "v2.0.0-rc1", 1, true).await;
+        for name in ["b.zip", "a.zip"] {
+            release_asset::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                release_id: Set(stable.id),
+                name: Set(name.to_owned()),
+                content_type: Set("application/zip".to_owned()),
+                size_bytes: Set(1),
+                download_count: Set(0),
+                created_at: Set(Utc::now()),
+                external_source: Set(None),
+                external_instance_url: Set(None),
+                external_id: Set(None),
+                external_url: Set(None),
+                external_updated_at: Set(None),
+            }
+            .insert(&instance.database)
+            .await
+            .unwrap();
+        }
+
+        // The body stays a bare array, and defaults return everything here.
+        let (total, releases) = list(&instance, None, None).await;
+        assert_eq!(total, "3");
+        assert_eq!(titles(&releases), ["v2.0.0-rc1", "v1.1.0", "v1.0.0"]);
+        assert_eq!(releases[0]["latest"], false);
+        assert_eq!(releases[1]["latest"], true);
+        assert_eq!(releases[1]["author"], "alice");
+        let assets = releases[1]["assets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|asset| asset["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(assets, ["a.zip", "b.zip"]);
+        assert_eq!(releases[2]["assets"], Value::Array(Vec::new()));
+
+        let (total, releases) = list(&instance, Some(1), Some(1)).await;
+        assert_eq!(total, "3");
+        assert_eq!(titles(&releases), ["v2.0.0-rc1"]);
+        // The latest release is marked even when it is not on the first page.
+        let (_, releases) = list(&instance, Some(2), Some(1)).await;
+        assert_eq!(titles(&releases), ["v1.1.0"]);
+        assert_eq!(releases[0]["latest"], true);
+        let (_, releases) = list(&instance, Some(3), Some(1)).await;
+        assert_eq!(titles(&releases), ["v1.0.0"]);
+        assert_eq!(releases[0]["latest"], false);
+        let (total, releases) = list(&instance, Some(4), Some(1)).await;
+        assert_eq!(total, "3");
+        assert!(releases.is_empty());
+    }
 
     fn repository() -> repository::Model {
         let now = Utc::now();

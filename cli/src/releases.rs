@@ -7,7 +7,7 @@ use clap::Subcommand;
 use reqwest::{Method, header::CONTENT_TYPE};
 use serde_json::{Map, Value, json};
 
-use crate::{ApiClient, id, input::TextArgs, route_path, route_repo};
+use crate::{ApiClient, id, input::TextArgs, query::all_pages, route_path, route_repo};
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum ReleaseCommand {
@@ -194,7 +194,7 @@ async fn release(api: &ApiClient, repository: &str, wanted: &str) -> Result<(Str
         let release = api.request(Method::GET, &path, None).await?;
         return Ok((path, release));
     }
-    let releases = api.request(Method::GET, &base, None).await?;
+    let releases = all_pages(api, &base).await?;
     let release = find_unique(&releases, wanted, &["target_revision", "title"], "release")?;
     let path = route_path(&base, &[&item_id(release)?])?;
     Ok((path, release.clone()))
@@ -257,10 +257,7 @@ impl ApiClient {
 
 pub(crate) async fn run(api: &ApiClient, command: ReleaseCommand) -> Result<Value> {
     match command {
-        ReleaseCommand::List { repository } => {
-            api.request(Method::GET, &releases_path(&repository)?, None)
-                .await
-        }
+        ReleaseCommand::List { repository } => all_pages(api, &releases_path(&repository)?).await,
         ReleaseCommand::View {
             repository,
             release: wanted,

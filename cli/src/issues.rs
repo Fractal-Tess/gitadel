@@ -6,7 +6,12 @@ use reqwest::Method;
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
-use crate::{ApiClient, input::TextArgs, query::with_query, route_path, route_repo};
+use crate::{
+    ApiClient,
+    input::TextArgs,
+    query::{all_pages, with_query},
+    route_path, route_repo,
+};
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum IssueCommand {
@@ -303,7 +308,7 @@ pub(crate) async fn run(api: &ApiClient, command: IssueCommand) -> Result<Value>
                 issues_path(&repository)?,
                 &[("state", state.query_value()), ("q", search)],
             );
-            api.request(Method::GET, &path, None).await
+            all_pages(api, &path).await
         }
         IssueCommand::View {
             repository,

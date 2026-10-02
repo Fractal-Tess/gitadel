@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{
+    collections::{BTreeSet, HashMap},
+    path::PathBuf,
+};
 
 use axum::{
     Json,
@@ -21,6 +24,7 @@ use uuid::Uuid;
 
 use super::{
     Permission, RepositoryState, notifications, render_markdown,
+    resources::{IN_QUERY_CHUNK, PageWindow, total_count_header},
     webhook_events::{self, ChangeAction, IssueAction},
 };
 use crate::{
@@ -129,6 +133,8 @@ pub struct IssueCommentResponse {
 pub struct ListIssuesQuery {
     state: Option<String>,
     q: Option<String>,
+    page: Option<u64>,
+    per_page: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -189,9 +195,10 @@ pub async fn list_issues(
     Query(query): Query<ListIssuesQuery>,
     headers: HeaderMap,
     jar: CookieJar,
-) -> Result<Json<Vec<IssueResponse>>, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
     let (repository, viewer_id, can_write) =
         issue_context(&state, &headers, &jar, &namespace, &name).await?;
+    let window = PageWindow::new(query.page, query.per_page);
     let mut select = repository_issue::Entity::find()
         .filter(repository_issue::Column::RepositoryId.eq(repository.id));
     if let Some(issue_state) = query.state.as_deref() {
@@ -209,12 +216,18 @@ pub async fn list_issues(
                 .or(repository_issue::Column::Body.contains(&query)),
         );
     }
+    let total = select.clone().count(state.identity().database()).await?;
     let issues = select
         .order_by_desc(repository_issue::Column::UpdatedAt)
+        // Issues touched in the same instant keep one order across pages.
+        .order_by_desc(repository_issue::Column::Number)
+        .offset(window.offset)
+        .limit(window.limit)
         .all(state.identity().database())
         .await?;
-    Ok(Json(
-        issue_responses(&state, issues, viewer_id, can_write).await?,
+    Ok((
+        total_count_header(total),
+        Json(issue_responses(&state, issues, viewer_id, can_write).await?),
     ))
 }
 
@@ -1520,11 +1533,93 @@ async fn issue_responses(
     viewer_id: Option<Uuid>,
     can_write: bool,
 ) -> Result<Vec<IssueResponse>, ApiError> {
-    let mut responses = Vec::with_capacity(issues.len());
-    for issue in issues {
-        responses.push(issue_response(state, issue, viewer_id, can_write).await?);
+    if issues.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(responses)
+    let database = state.identity().database();
+    let issue_ids = issues.iter().map(|issue| issue.id).collect::<Vec<_>>();
+    // One query per related table for the whole page, however long it is.
+    let user_ids = issues
+        .iter()
+        .flat_map(|issue| [Some(issue.author_user_id), issue.assignee_user_id])
+        .flatten()
+        .collect();
+    let users = issue_users(state, user_ids).await?;
+    let mut assignments = Vec::new();
+    let mut comment_counts = HashMap::with_capacity(issues.len());
+    for ids in issue_ids.chunks(IN_QUERY_CHUNK) {
+        assignments.extend(
+            issue_label_assignment::Entity::find()
+                .filter(issue_label_assignment::Column::IssueId.is_in(ids.iter().copied()))
+                .all(database)
+                .await?,
+        );
+        comment_counts.extend(
+            issue_comment::Entity::find()
+                .select_only()
+                .column(issue_comment::Column::IssueId)
+                .column_as(issue_comment::Column::Id.count(), "comments")
+                .filter(issue_comment::Column::IssueId.is_in(ids.iter().copied()))
+                .group_by(issue_comment::Column::IssueId)
+                .into_tuple::<(Uuid, i64)>()
+                .all(database)
+                .await?,
+        );
+    }
+    let label_ids = assignments
+        .iter()
+        .map(|assignment| assignment.label_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut labels = HashMap::with_capacity(label_ids.len());
+    for ids in label_ids.chunks(IN_QUERY_CHUNK) {
+        labels.extend(
+            issue_label::Entity::find()
+                .filter(issue_label::Column::Id.is_in(ids.iter().copied()))
+                .all(database)
+                .await?
+                .into_iter()
+                .map(|label| (label.id, label_response(label))),
+        );
+    }
+    let mut issue_labels = HashMap::<Uuid, Vec<IssueLabelResponse>>::new();
+    for assignment in assignments {
+        if let Some(label) = labels.get(&assignment.label_id) {
+            issue_labels
+                .entry(assignment.issue_id)
+                .or_default()
+                .push(label.clone());
+        }
+    }
+
+    issues
+        .into_iter()
+        .map(|issue| {
+            let author = users
+                .get(&issue.author_user_id)
+                .cloned()
+                .ok_or_else(ApiError::not_found)?;
+            let assignee = issue
+                .assignee_user_id
+                .map(|id| users.get(&id).cloned().ok_or_else(ApiError::not_found))
+                .transpose()?;
+            let mut labels = issue_labels.remove(&issue.id).unwrap_or_default();
+            labels.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+            let comment_count = comment_counts
+                .get(&issue.id)
+                .map_or(0, |count| u64::try_from(*count).unwrap_or_default());
+            Ok(build_issue_response(
+                issue,
+                author,
+                assignee,
+                labels,
+                comment_count,
+                viewer_id,
+                can_write,
+            ))
+        })
+        .collect()
 }
 
 async fn issue_response(
@@ -1533,30 +1628,21 @@ async fn issue_response(
     viewer_id: Option<Uuid>,
     can_write: bool,
 ) -> Result<IssueResponse, ApiError> {
-    let author = issue_user(state, issue.author_user_id).await?;
-    let assignee = if let Some(id) = issue.assignee_user_id {
-        Some(issue_user(state, id).await?)
-    } else {
-        None
-    };
-    let assignments = issue_label_assignment::Entity::find()
-        .filter(issue_label_assignment::Column::IssueId.eq(issue.id))
-        .all(state.identity().database())
-        .await?;
-    let mut labels = Vec::with_capacity(assignments.len());
-    for assignment in assignments {
-        if let Some(label) = issue_label::Entity::find_by_id(assignment.label_id)
-            .one(state.identity().database())
-            .await?
-        {
-            labels.push(label_response(label));
-        }
-    }
-    labels.sort_unstable_by(|left, right| left.name.cmp(&right.name));
-    let comment_count = issue_comment::Entity::find()
-        .filter(issue_comment::Column::IssueId.eq(issue.id))
-        .count(state.identity().database())
-        .await?;
+    issue_responses(state, vec![issue], viewer_id, can_write)
+        .await?
+        .pop()
+        .ok_or_else(|| ApiError::internal("issue response was not built"))
+}
+
+fn build_issue_response(
+    issue: repository_issue::Model,
+    author: IssueUserResponse,
+    assignee: Option<IssueUserResponse>,
+    labels: Vec<IssueLabelResponse>,
+    comment_count: u64,
+    viewer_id: Option<Uuid>,
+    can_write: bool,
+) -> IssueResponse {
     let external_author = issue
         .external_author
         .as_ref()
@@ -1566,7 +1652,7 @@ async fn issue_response(
             profile_url: profile_url.clone(),
         });
     let imported = issue.external_source.is_some();
-    Ok(IssueResponse {
+    IssueResponse {
         id: issue.id,
         number: issue.number,
         title: issue.title,
@@ -1584,7 +1670,7 @@ async fn issue_response(
         external_author,
         can_edit: !imported && (viewer_id == Some(issue.author_user_id) || can_write),
         can_manage: !imported && can_write,
-    })
+    }
 }
 
 async fn comment_responses(
@@ -1593,11 +1679,23 @@ async fn comment_responses(
     viewer_id: Option<Uuid>,
     can_write: bool,
 ) -> Result<Vec<IssueCommentResponse>, ApiError> {
-    let mut responses = Vec::with_capacity(comments.len());
-    for comment in comments {
-        responses.push(comment_response(state, comment, viewer_id, can_write).await?);
-    }
-    Ok(responses)
+    let user_ids = comments
+        .iter()
+        .map(|comment| comment.author_user_id)
+        .collect();
+    let users = issue_users(state, user_ids).await?;
+    comments
+        .into_iter()
+        .map(|comment| {
+            let author = users
+                .get(&comment.author_user_id)
+                .cloned()
+                .ok_or_else(ApiError::not_found)?;
+            Ok(build_comment_response(
+                comment, author, viewer_id, can_write,
+            ))
+        })
+        .collect()
 }
 
 async fn comment_response(
@@ -1606,6 +1704,18 @@ async fn comment_response(
     viewer_id: Option<Uuid>,
     can_write: bool,
 ) -> Result<IssueCommentResponse, ApiError> {
+    comment_responses(state, vec![comment], viewer_id, can_write)
+        .await?
+        .pop()
+        .ok_or_else(|| ApiError::internal("comment response was not built"))
+}
+
+fn build_comment_response(
+    comment: issue_comment::Model,
+    author: IssueUserResponse,
+    viewer_id: Option<Uuid>,
+    can_write: bool,
+) -> IssueCommentResponse {
     let external_author = comment
         .external_author
         .as_ref()
@@ -1615,29 +1725,46 @@ async fn comment_response(
             profile_url: profile_url.clone(),
         });
     let imported = comment.external_source.is_some();
-    Ok(IssueCommentResponse {
+    IssueCommentResponse {
         id: comment.id,
         rendered_body: render_markdown(&comment.body),
         body: comment.body,
-        author: issue_user(state, comment.author_user_id).await?,
+        author,
         created_at: comment.created_at,
         updated_at: comment.updated_at,
         external_url: comment.external_url,
         external_author,
         can_edit: !imported && (viewer_id == Some(comment.author_user_id) || can_write),
-    })
+    }
 }
 
-async fn issue_user(state: &RepositoryState, id: Uuid) -> Result<IssueUserResponse, ApiError> {
-    user::Entity::find_by_id(id)
-        .one(state.identity().database())
-        .await?
-        .map(|account| IssueUserResponse {
-            id: account.id,
-            username: account.username,
-            avatar_updated_at: account.avatar_updated_at,
-        })
-        .ok_or_else(ApiError::not_found)
+/// The accounts behind `ids`, loaded together rather than one query each.
+async fn issue_users(
+    state: &RepositoryState,
+    ids: BTreeSet<Uuid>,
+) -> Result<HashMap<Uuid, IssueUserResponse>, ApiError> {
+    let ids = ids.into_iter().collect::<Vec<_>>();
+    let mut users = HashMap::with_capacity(ids.len());
+    for ids in ids.chunks(IN_QUERY_CHUNK) {
+        users.extend(
+            user::Entity::find()
+                .filter(user::Column::Id.is_in(ids.iter().copied()))
+                .all(state.identity().database())
+                .await?
+                .into_iter()
+                .map(|account| {
+                    (
+                        account.id,
+                        IssueUserResponse {
+                            id: account.id,
+                            username: account.username,
+                            avatar_updated_at: account.avatar_updated_at,
+                        },
+                    )
+                }),
+        );
+    }
+    Ok(users)
 }
 
 async fn assignee_id(
@@ -1834,9 +1961,213 @@ fn validate_label_description(value: String) -> Result<String, ApiError> {
 
 #[cfg(test)]
 mod tests {
-    use axum::{http::StatusCode, response::IntoResponse as _};
+    use axum::{
+        extract::{Path as AxumPath, Query, State},
+        http::{HeaderMap, StatusCode},
+        response::IntoResponse as _,
+    };
+    use axum_extra::extract::cookie::CookieJar;
+    use chrono::{Duration, Utc};
+    use sea_orm::{ActiveModelTrait, Set};
+    use serde_json::Value;
+    use uuid::Uuid;
 
-    use super::{AttachmentUsage, ensure_attachment_quota};
+    use super::{AttachmentUsage, ListIssuesQuery, ensure_attachment_quota, list_issues};
+    use crate::{
+        entity::{issue_comment, issue_label, issue_label_assignment, repository_issue},
+        repository::resources::test_support::{TestInstance, instance},
+    };
+
+    async fn insert_issue(
+        instance: &TestInstance,
+        repository_id: Uuid,
+        number: i64,
+        title: &str,
+        state: &str,
+    ) -> repository_issue::Model {
+        // Higher numbers are more recently updated, so lists lead with them.
+        let now = Utc::now() + Duration::seconds(number);
+        repository_issue::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            repository_id: Set(repository_id),
+            number: Set(number),
+            author_user_id: Set(instance.owner.id),
+            title: Set(title.to_owned()),
+            body: Set(format!("Body of **{title}**")),
+            state: Set(state.to_owned()),
+            assignee_user_id: Set(None),
+            created_at: Set(now),
+            updated_at: Set(now),
+            closed_at: Set(None),
+            external_source: Set(None),
+            external_id: Set(None),
+            external_url: Set(None),
+            external_author: Set(None),
+            external_author_url: Set(None),
+            external_updated_at: Set(None),
+        }
+        .insert(&instance.database)
+        .await
+        .unwrap()
+    }
+
+    /// The `X-Total-Count` header and the JSON array a list request returns.
+    async fn list(
+        instance: &TestInstance,
+        state: Option<&str>,
+        q: Option<&str>,
+        page: Option<u64>,
+        per_page: Option<u64>,
+    ) -> (String, Vec<Value>) {
+        let response = list_issues(
+            State(instance.state.clone()),
+            AxumPath(("alice".to_owned(), "project".to_owned())),
+            Query(ListIssuesQuery {
+                state: state.map(str::to_owned),
+                q: q.map(str::to_owned),
+                page,
+                per_page,
+            }),
+            HeaderMap::new(),
+            CookieJar::new(),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        let total = response.headers()["x-total-count"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (total, serde_json::from_slice(&body).unwrap())
+    }
+
+    fn numbers(issues: &[Value]) -> Vec<i64> {
+        issues
+            .iter()
+            .map(|issue| issue["number"].as_i64().unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn issue_list_pages_and_reports_the_total() {
+        let instance = instance().await;
+        let repository = instance.repository("project").await;
+        for number in 1..=5 {
+            let state = if number == 2 { "closed" } else { "open" };
+            let title = if number % 2 == 1 { "odd crash" } else { "even" };
+            insert_issue(&instance, repository.id, number, title, state).await;
+        }
+
+        // The body stays a bare array, and defaults return everything here.
+        let (total, issues) = list(&instance, None, None, None, None).await;
+        assert_eq!(total, "5");
+        assert_eq!(numbers(&issues), [5, 4, 3, 2, 1]);
+
+        let (total, issues) = list(&instance, None, None, Some(1), Some(2)).await;
+        assert_eq!(total, "5");
+        assert_eq!(numbers(&issues), [5, 4]);
+        let (_, issues) = list(&instance, None, None, Some(3), Some(2)).await;
+        assert_eq!(numbers(&issues), [1]);
+        let (total, issues) = list(&instance, None, None, Some(4), Some(2)).await;
+        assert_eq!(total, "5");
+        assert!(issues.is_empty());
+
+        // Filters narrow the total as well as the page.
+        let (total, issues) = list(&instance, Some("open"), None, Some(2), Some(3)).await;
+        assert_eq!(total, "4");
+        assert_eq!(numbers(&issues), [1]);
+        let (total, issues) = list(&instance, None, Some("crash"), Some(1), Some(2)).await;
+        assert_eq!(total, "3");
+        assert_eq!(numbers(&issues), [5, 3]);
+        let (total, issues) = list(&instance, Some("closed"), Some("crash"), None, None).await;
+        assert_eq!(total, "0");
+        assert!(issues.is_empty());
+    }
+
+    #[tokio::test]
+    async fn issue_list_batches_users_labels_and_comment_counts() {
+        let instance = instance().await;
+        let repository = instance.repository("project").await;
+        let plain = insert_issue(&instance, repository.id, 1, "plain", "open").await;
+        let busy = insert_issue(&instance, repository.id, 2, "busy", "open").await;
+        let mut assigned: repository_issue::ActiveModel = busy.clone().into();
+        assigned.assignee_user_id = Set(Some(instance.owner.id));
+        assigned.update(&instance.database).await.unwrap();
+        for name in ["zeta", "alpha"] {
+            let label = issue_label::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                repository_id: Set(repository.id),
+                name: Set(name.to_owned()),
+                color: Set("ff0000".to_owned()),
+                description: Set(String::new()),
+                external_source: Set(None),
+                external_instance_url: Set(None),
+                external_id: Set(None),
+                external_url: Set(None),
+                external_updated_at: Set(None),
+                created_at: Set(Utc::now()),
+            }
+            .insert(&instance.database)
+            .await
+            .unwrap();
+            issue_label_assignment::ActiveModel {
+                issue_id: Set(busy.id),
+                label_id: Set(label.id),
+            }
+            .insert(&instance.database)
+            .await
+            .unwrap();
+        }
+        for (issue, comments) in [(&busy, 3), (&plain, 0)] {
+            for _ in 0..comments {
+                issue_comment::ActiveModel {
+                    id: Set(Uuid::new_v4()),
+                    issue_id: Set(issue.id),
+                    author_user_id: Set(instance.owner.id),
+                    body: Set("comment".to_owned()),
+                    created_at: Set(Utc::now()),
+                    updated_at: Set(Utc::now()),
+                    external_source: Set(None),
+                    external_id: Set(None),
+                    external_url: Set(None),
+                    external_author: Set(None),
+                    external_author_url: Set(None),
+                    external_updated_at: Set(None),
+                }
+                .insert(&instance.database)
+                .await
+                .unwrap();
+            }
+        }
+
+        let (_, issues) = list(&instance, None, None, None, None).await;
+        let [busy, plain] = issues.as_slice() else {
+            panic!("expected two issues, got {issues:?}");
+        };
+        assert_eq!(busy["number"], 2);
+        assert_eq!(busy["author"]["username"], "alice");
+        assert_eq!(busy["assignee"]["username"], "alice");
+        assert_eq!(busy["comment_count"], 3);
+        let labels = busy["labels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|label| label["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["alpha", "zeta"]);
+        assert_eq!(
+            busy["rendered_body"],
+            "<p>Body of <strong>busy</strong></p>\n"
+        );
+
+        assert_eq!(plain["number"], 1);
+        assert_eq!(plain["assignee"], Value::Null);
+        assert_eq!(plain["comment_count"], 0);
+        assert_eq!(plain["labels"], Value::Array(Vec::new()));
+    }
 
     #[test]
     fn attachment_quota_accepts_the_exact_boundary() {
