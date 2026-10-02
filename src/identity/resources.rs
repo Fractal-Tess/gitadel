@@ -840,11 +840,22 @@ pub struct AuditEventResponse {
     created_at: chrono::DateTime<Utc>,
 }
 
+/// Paging for the audit history, newest first, beside the shared `limit`.
+///
+/// `before` is the stable way to page: pass the `id` of the last event of the
+/// previous page. `offset` skips rows instead and shifts as events arrive.
+#[derive(Deserialize)]
+pub struct AuditCursor {
+    offset: Option<u64>,
+    before: Option<i64>,
+}
+
 pub async fn list_audit(
     State(state): State<IdentityState>,
     headers: HeaderMap,
     jar: CookieJar,
     Query(pagination): Query<Pagination>,
+    Query(cursor): Query<AuditCursor>,
 ) -> Result<Json<Vec<AuditEventResponse>>, ApiError> {
     let actor = state.authenticate(&headers, &jar, SCOPE_READ).await?;
     if !actor.user.is_admin {
@@ -853,12 +864,13 @@ pub async fn list_audit(
         ));
     }
     let limit = pagination.limit.unwrap_or(100).clamp(1, 500);
-    let rows = audit_event::Entity::find()
-        .find_also_related(user::Entity)
-        .order_by_desc(audit_event::Column::Id)
-        .limit(limit)
-        .all(state.database())
-        .await?;
+    let rows = audit_page(
+        state.database(),
+        limit,
+        cursor.offset.unwrap_or(0),
+        cursor.before,
+    )
+    .await?;
     Ok(Json(
         rows.into_iter()
             .map(|(row, actor)| AuditEventResponse {
@@ -871,6 +883,21 @@ pub async fn list_audit(
             })
             .collect(),
     ))
+}
+
+async fn audit_page(
+    database: &DatabaseConnection,
+    limit: u64,
+    offset: u64,
+    before: Option<i64>,
+) -> Result<Vec<(audit_event::Model, Option<user::Model>)>, sea_orm::DbErr> {
+    let mut query = audit_event::Entity::find()
+        .find_also_related(user::Entity)
+        .order_by_desc(audit_event::Column::Id);
+    if let Some(before) = before {
+        query = query.filter(audit_event::Column::Id.lt(before));
+    }
+    query.limit(limit).offset(offset).all(database).await
 }
 
 #[cfg(test)]
@@ -1139,5 +1166,41 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["alicia"]
         );
+    }
+
+    #[tokio::test]
+    async fn audit_history_pages_past_the_first_page() {
+        let database = crate::actions::test_support::database().await;
+        let now = Utc::now();
+        for index in 0..7 {
+            audit_event::ActiveModel {
+                id: NotSet,
+                actor_user_id: Set(None),
+                action: Set(format!("event.{index}")),
+                target: Set(None),
+                remote_address: Set(None),
+                created_at: Set(now),
+            }
+            .insert(&database)
+            .await
+            .unwrap();
+        }
+        let ids = |rows: Vec<(audit_event::Model, Option<user::Model>)>| {
+            rows.into_iter().map(|(row, _)| row.id).collect::<Vec<_>>()
+        };
+
+        let first = ids(audit_page(&database, 3, 0, None).await.unwrap());
+        let by_offset = ids(audit_page(&database, 3, 3, None).await.unwrap());
+        let by_cursor = ids(audit_page(&database, 3, 0, first.last().copied())
+            .await
+            .unwrap());
+        let last = ids(audit_page(&database, 3, 6, None).await.unwrap());
+        let past_the_end = ids(audit_page(&database, 3, 7, None).await.unwrap());
+
+        assert_eq!(first, [7, 6, 5]);
+        assert_eq!(by_offset, [4, 3, 2]);
+        assert_eq!(by_cursor, by_offset);
+        assert_eq!(last, [1]);
+        assert!(past_the_end.is_empty());
     }
 }
