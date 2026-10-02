@@ -270,6 +270,7 @@ pub(crate) async fn sync_repository(
 /// Scans every repository; unchanged default-branch heads are skipped cheaply.
 pub(crate) async fn sync_all(state: &ActionsState) -> anyhow::Result<()> {
     let repositories = repository::Entity::find()
+        .filter(repository::Column::DeletedAt.is_null())
         .all(state.repository().identity().database())
         .await?;
     for repository in repositories {
