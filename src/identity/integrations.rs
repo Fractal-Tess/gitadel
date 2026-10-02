@@ -244,7 +244,7 @@ pub async fn create_integration(
     authorize_namespace(&state, &actor, &slug).await?;
     let provider = provider(&request.provider).ok_or_else(ApiError::not_found)?;
     let name = validate_name(&request.name)?;
-    let url = validate_url(&request.url, provider.name)?;
+    let url = validate_outbound_url(&request.url, provider.name).await?;
     let api_key = validate_api_key(&request.api_key, true)?.expect("required key was validated");
     let internal_url = validate_url(&request.internal_url, "Gitadel")?;
     let now = Utc::now();
@@ -295,11 +295,10 @@ pub async fn update_integration(
     let existing = owned_integration(state.database(), &slug, id).await?;
     let provider = provider(&existing.provider).ok_or_else(ApiError::not_found)?;
     let binding = source_binding(state.database(), id).await?;
-    let url = request
-        .url
-        .as_deref()
-        .map(|url| validate_url(url, provider.name))
-        .transpose()?;
+    let url = match request.url.as_deref() {
+        Some(url) => Some(validate_outbound_url(url, provider.name).await?),
+        None => None,
+    };
     let api_key = validate_api_key(request.api_key.as_deref().unwrap_or_default(), false)?;
     let internal_url = request
         .internal_url
@@ -686,7 +685,7 @@ pub async fn test_new_integration(
     let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
     authorize_namespace(&state, &actor, &slug).await?;
     let provider = provider(&request.provider).ok_or_else(ApiError::not_found)?;
-    let url = validate_url(&request.url, provider.name)?;
+    let url = validate_outbound_url(&request.url, provider.name).await?;
     let api_key = validate_api_key(&request.api_key, true)?.expect("required key was validated");
     test_credential(provider, &url, &api_key, None).await
 }
@@ -873,6 +872,13 @@ fn validate_api_key(value: &str, required: bool) -> Result<Option<String>, ApiEr
 }
 
 fn validate_url(value: &str, name: &str) -> Result<String, ApiError> {
+    Ok(parse_url(value, name)?
+        .as_str()
+        .trim_end_matches('/')
+        .to_owned())
+}
+
+fn parse_url(value: &str, name: &str) -> Result<url::Url, ApiError> {
     let url = url::Url::parse(value.trim()).map_err(|_| {
         ApiError::bad_request(format!("The {name} URL must be a valid HTTP or HTTPS URL."))
     })?;
@@ -880,11 +886,86 @@ fn validate_url(value: &str, name: &str) -> Result<String, ApiError> {
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
         || url.as_str().len() > 2048
     {
         return Err(ApiError::bad_request(format!(
-            "The {name} URL must be an HTTP or HTTPS URL without credentials."
+            "The {name} URL must be an HTTP or HTTPS URL without credentials, a query, or a fragment."
         )));
     }
+    Ok(url)
+}
+
+/// Validate a URL that Gitadel itself will send requests to.
+///
+/// Beyond the syntax rules, the host must not resolve to this machine or to a
+/// link-local address such as a cloud metadata service. Private networks stay
+/// allowed because providers normally run on one. The same check runs again,
+/// with the address pinned, whenever a request is made.
+async fn validate_outbound_url(value: &str, name: &str) -> Result<String, ApiError> {
+    let url = parse_url(value, name)?;
+    crate::network::pinned_service_http_client(&url, std::time::Duration::from_secs(10))
+        .await
+        .map_err(|error| ApiError::bad_request(format!("The {name} URL was refused: {error}")))?;
     Ok(url.as_str().trim_end_matches('/').to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn urls_reject_credentials_queries_and_fragments() {
+        for refused in [
+            "http://127.0.0.1:9000/x?",
+            "http://dokploy.example/x?a=b",
+            "http://dokploy.example/#fragment",
+            "http://user@dokploy.example/",
+            "http://user:secret@dokploy.example/",
+            "ftp://dokploy.example/",
+            "not a url",
+        ] {
+            assert!(validate_url(refused, "Dokploy").is_err(), "{refused}");
+        }
+        assert_eq!(
+            validate_url(" https://dokploy.example/base/ ", "Dokploy")
+                .ok()
+                .as_deref(),
+            Some("https://dokploy.example/base")
+        );
+    }
+
+    #[tokio::test]
+    async fn outbound_urls_refuse_loopback_and_metadata_but_allow_private_networks() {
+        for refused in [
+            "http://127.0.0.1:9000",
+            "http://localhost:9000",
+            "http://[::1]:9000",
+            "http://169.254.169.254",
+            "http://[fe80::1]",
+            "http://0.0.0.0:9000",
+            "http://[::ffff:127.0.0.1]",
+        ] {
+            assert!(
+                validate_outbound_url(refused, "Dokploy").await.is_err(),
+                "{refused}"
+            );
+        }
+        for allowed in [
+            "http://10.0.0.5:3000",
+            "http://192.168.1.20:3000",
+            "http://100.64.0.5:3000",
+            "http://[fd00::5]:3000",
+        ] {
+            assert_eq!(
+                validate_outbound_url(allowed, "Dokploy")
+                    .await
+                    .ok()
+                    .as_deref(),
+                Some(allowed),
+                "{allowed}"
+            );
+        }
+    }
 }

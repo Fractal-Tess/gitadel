@@ -148,6 +148,23 @@ pub(super) async fn post_push_event(
     Ok((status, body))
 }
 
-pub(super) async fn fresh_client() -> Result<reqwest::Client, String> {
-    crate::repository::outbound_http_client().map_err(|error| error.to_string())
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Build the client for one Dokploy instance.
+///
+/// Dokploy usually lives on a private network, so private ranges are allowed,
+/// but loopback and link-local (cloud metadata) addresses are refused and the
+/// resolved address is pinned for the lifetime of the client so DNS cannot
+/// rebind it between the check and the request. Redirects are not followed.
+pub(super) async fn client_for(base: &str) -> Result<reqwest::Client, String> {
+    let endpoint = url::Url::parse(base)
+        .map_err(|_| "the stored Dokploy URL is not a valid URL".to_owned())?;
+    if endpoint.query().is_some() || endpoint.fragment().is_some() {
+        return Err("the stored Dokploy URL must not contain a query or fragment".to_owned());
+    }
+    if cfg!(test) {
+        // Unit tests talk to servers bound on loopback.
+        return crate::repository::outbound_http_client().map_err(|error| error.to_string());
+    }
+    crate::network::pinned_service_http_client(&endpoint, REQUEST_TIMEOUT).await
 }

@@ -61,6 +61,48 @@ pub async fn pinned_public_http_client(
     endpoint: &Url,
     timeout: Duration,
 ) -> Result<Client, String> {
+    if let Some(Host::Domain(host)) = endpoint.host() {
+        let normalized_host = host.trim_end_matches('.');
+        if normalized_host.eq_ignore_ascii_case("localhost")
+            || normalized_host.to_ascii_lowercase().ends_with(".localhost")
+        {
+            return Err("Endpoint must use a public network address.".to_owned());
+        }
+    }
+    pinned_http_client(
+        endpoint,
+        timeout,
+        is_public_ip,
+        "Endpoint must use a public network address.",
+    )
+    .await
+}
+
+/// Build a client for a service that may live on a private network or VPN
+/// mesh, but never on this host or a link-local (cloud metadata) address.
+///
+/// The hostname is resolved once and the client is pinned to those addresses,
+/// so a later DNS answer cannot redirect the request elsewhere. Redirects are
+/// not followed.
+pub async fn pinned_service_http_client(
+    endpoint: &Url,
+    timeout: Duration,
+) -> Result<Client, String> {
+    pinned_http_client(
+        endpoint,
+        timeout,
+        is_service_ip,
+        "Endpoint must not use a loopback, link-local, or otherwise reserved address.",
+    )
+    .await
+}
+
+async fn pinned_http_client(
+    endpoint: &Url,
+    timeout: Duration,
+    allowed: fn(IpAddr) -> bool,
+    refusal: &str,
+) -> Result<Client, String> {
     if !matches!(endpoint.scheme(), "http" | "https") {
         return Err("Endpoint must use HTTP or HTTPS.".to_owned());
     }
@@ -74,27 +116,46 @@ pub async fn pinned_public_http_client(
     match endpoint.host() {
         Some(Host::Domain(host)) => {
             let normalized_host = host.trim_end_matches('.');
-            if normalized_host.eq_ignore_ascii_case("localhost")
-                || normalized_host.to_ascii_lowercase().ends_with(".localhost")
-            {
-                return Err("Endpoint must use a public network address.".to_owned());
-            }
             let addresses = lookup_host((normalized_host, port))
                 .await
                 .map_err(|error| format!("Could not resolve endpoint: {error}"))?
                 .collect::<Vec<_>>();
-            if addresses.is_empty() || addresses.iter().any(|address| !is_public_ip(address.ip())) {
-                return Err("Endpoint must use a public network address.".to_owned());
+            if addresses.is_empty() || addresses.iter().any(|address| !allowed(address.ip())) {
+                return Err(refusal.to_owned());
             }
             builder = builder.resolve_to_addrs(host, &addresses);
         }
-        Some(Host::Ipv4(address)) if is_public_ip(IpAddr::V4(address)) => {}
-        Some(Host::Ipv6(address)) if is_public_ip(IpAddr::V6(address)) => {}
-        _ => return Err("Endpoint must use a public network address.".to_owned()),
+        Some(Host::Ipv4(address)) if allowed(IpAddr::V4(address)) => {}
+        Some(Host::Ipv6(address)) if allowed(IpAddr::V6(address)) => {}
+        _ => return Err(refusal.to_owned()),
     }
     builder
         .build()
         .map_err(|error| format!("Could not prepare endpoint connection: {error}"))
+}
+
+/// Whether an address may host a user-configured service: anything except
+/// loopback, link-local, unspecified, multicast, and broadcast addresses.
+/// Private ranges (RFC 1918, CGNAT, unique local) are deliberately allowed.
+pub fn is_service_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            !(address.octets()[0] == 0
+                || address.is_loopback()
+                || address.is_link_local()
+                || address.is_multicast()
+                || address.is_broadcast())
+        }
+        IpAddr::V6(address) => {
+            if let Some(mapped) = address.to_ipv4_mapped() {
+                return is_service_ip(IpAddr::V4(mapped));
+            }
+            !(address.is_unspecified()
+                || address.is_loopback()
+                || address.is_unicast_link_local()
+                || address.is_multicast())
+        }
+    }
 }
 
 pub fn is_public_ip(address: IpAddr) -> bool {
@@ -143,6 +204,68 @@ mod tests {
                 pinned_public_http_client(&endpoint, Duration::from_secs(1))
                     .await
                     .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn service_addresses_allow_private_networks_but_not_this_host() {
+        for allowed in [
+            "10.0.0.5",
+            "172.16.4.1",
+            "192.168.1.20",
+            "100.64.0.5",
+            "8.8.8.8",
+            "fd00::1",
+            "2001:4860:4860::8888",
+        ] {
+            assert!(is_service_ip(allowed.parse().unwrap()), "{allowed}");
+        }
+        for refused in [
+            "127.0.0.1",
+            "127.8.9.1",
+            "0.0.0.0",
+            "0.1.2.3",
+            "169.254.169.254",
+            "224.0.0.1",
+            "255.255.255.255",
+            "::1",
+            "::",
+            "fe80::1",
+            "ff02::1",
+            "::ffff:127.0.0.1",
+            "::ffff:169.254.169.254",
+        ] {
+            assert!(!is_service_ip(refused.parse().unwrap()), "{refused}");
+        }
+    }
+
+    #[tokio::test]
+    async fn service_http_client_rejects_loopback_and_metadata_endpoints() {
+        for endpoint in [
+            "http://127.0.0.1:8080/",
+            "http://localhost:8080/",
+            "http://169.254.169.254/",
+            "http://[::1]/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://0.0.0.0/",
+            "ftp://10.0.0.1/",
+        ] {
+            let endpoint = Url::parse(endpoint).unwrap();
+            assert!(
+                pinned_service_http_client(&endpoint, Duration::from_secs(1))
+                    .await
+                    .is_err(),
+                "{endpoint}"
+            );
+        }
+        for endpoint in ["http://10.0.0.1:3000/", "https://100.64.0.5/"] {
+            let endpoint = Url::parse(endpoint).unwrap();
+            assert!(
+                pinned_service_http_client(&endpoint, Duration::from_secs(1))
+                    .await
+                    .is_ok(),
+                "{endpoint}"
             );
         }
     }

@@ -10,7 +10,7 @@ use serde_json::Value;
 mod transport;
 
 use transport::{
-    Resource, account_label, fresh_client, get_json, get_resource, post_for_status, post_json,
+    Resource, account_label, client_for, get_json, get_resource, post_for_status, post_json,
     post_push_event,
 };
 
@@ -142,7 +142,7 @@ struct Location {
 }
 
 async fn test(base: &str, api_key: &str) -> Result<TestReport, String> {
-    let client = fresh_client().await?;
+    let client = client_for(base).await?;
     let user = get_json(&client, base, "/api/user.get", api_key)
         .await
         .map_err(|error| format!("Dokploy rejected the credential: {error}"))?;
@@ -475,7 +475,7 @@ fn source_from_value(base: &str, value: &Value, ready: bool) -> Result<RemoteSou
 }
 
 async fn list_sources(credential: Credential<'_>) -> Result<Vec<RemoteSource>, String> {
-    let client = fresh_client().await?;
+    let client = client_for(credential.url).await?;
     let providers = get_json(
         &client,
         credential.url,
@@ -508,7 +508,7 @@ async fn update_source_internal_url(
     source_id: &str,
     internal_url: &str,
 ) -> Result<(), String> {
-    let client = fresh_client().await?;
+    let client = client_for(credential.url).await?;
     let source = get_json(
         &client,
         credential.url,
@@ -546,7 +546,7 @@ async fn create_source(
     credential: Credential<'_>,
     application: SourceApplication<'_>,
 ) -> Result<ProvisionedSource, String> {
-    let client = fresh_client().await?;
+    let client = client_for(credential.url).await?;
     let created = post_json(
         &client,
         credential.url,
@@ -580,7 +580,7 @@ async fn create_source(
 }
 
 async fn remove_source(credential: Credential<'_>, parent_id: &str) -> Result<(), String> {
-    let client = fresh_client().await?;
+    let client = client_for(credential.url).await?;
     post_for_status(
         &client,
         credential.url,
@@ -1019,7 +1019,7 @@ impl Integration for DokployIntegration {
     }
 
     async fn remote_resources(&self, request: RemoteResourcesRequest<'_>) -> Result<Value, String> {
-        let client = fresh_client().await?;
+        let client = client_for(request.credential.url).await?;
         list_resources(&client, request.credential.url, request.credential.api_key).await
     }
 
@@ -1027,7 +1027,7 @@ impl Integration for DokployIntegration {
         &self,
         request: CreateProjectRequest<'_>,
     ) -> Result<Value, String> {
-        let client = fresh_client().await?;
+        let client = client_for(request.credential.url).await?;
         create_project(
             &client,
             request.credential.url,
@@ -1041,7 +1041,7 @@ impl Integration for DokployIntegration {
         &self,
         request: CreateEnvironmentRequest<'_>,
     ) -> Result<Value, String> {
-        let client = fresh_client().await?;
+        let client = client_for(request.credential.url).await?;
         create_environment(
             &client,
             request.credential.url,
@@ -1052,7 +1052,7 @@ impl Integration for DokployIntegration {
     }
 
     async fn link_remote(&self, request: LinkRemoteRequest<'_>) -> Result<Value, String> {
-        let client = fresh_client().await?;
+        let client = client_for(request.credential.url).await?;
         let body = LinkResourceRequest {
             kind: parse_kind(request.kind)?,
             id: request.id,
@@ -1076,7 +1076,7 @@ impl Integration for DokployIntegration {
     }
 
     async fn create_remote(&self, request: CreateRemoteRequest<'_>) -> Result<Value, String> {
-        let client = fresh_client().await?;
+        let client = client_for(request.credential.url).await?;
         let body = CreateResourceRequest {
             kind: parse_kind(request.kind)?,
             name: request.name,
@@ -1102,7 +1102,7 @@ impl Integration for DokployIntegration {
     }
 
     async fn set_remote_enabled(&self, request: EnablementRequest<'_>) -> Result<(), String> {
-        let client = fresh_client().await?;
+        let client = client_for(request.credential.url).await?;
         let kind = parse_kind(request.kind)?;
         set_enabled(
             &client,
@@ -1121,7 +1121,7 @@ impl Integration for DokployIntegration {
             .ok_or("Choose a Dokploy deployment resource first.")?;
         let link: Link = serde_json::from_str(stored)
             .map_err(|error| format!("stored Dokploy resource is malformed: {error}"))?;
-        let client = fresh_client().await?;
+        let client = client_for(context.credential.url).await?;
         match context.event {
             Event::Push(PushEvent {
                 reference,
