@@ -182,8 +182,15 @@ function materialIconThemeAssets(): Plugin {
   };
 }
 
+// The backend's default bind address; see `[server] bind` in gitadel.toml.
 const backendTarget =
-  process.env.GITADEL_DEV_BACKEND ?? "http://127.0.0.1:8080";
+  process.env.GITADEL_DEV_BACKEND ?? "http://127.0.0.1:3000";
+// Extra hostnames the dev server answers to, comma-separated, for reaching it
+// from another device. Machine-specific names belong in the environment.
+const allowedHosts = (process.env.GITADEL_DEV_ALLOWED_HOSTS ?? "")
+  .split(",")
+  .map((host) => host.trim())
+  .filter(Boolean);
 
 export default defineConfig({
   define: {
@@ -202,7 +209,7 @@ export default defineConfig({
     },
   },
   server: {
-    allowedHosts: ["kiwi.netbird.cloud"],
+    allowedHosts,
     proxy: {
       "/api": backendTarget,
       "/healthz": backendTarget,
