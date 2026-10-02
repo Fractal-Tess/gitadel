@@ -2,7 +2,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
     path::Path,
-    sync::{Arc, LazyLock},
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicI64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -31,7 +34,7 @@ use uuid::Uuid;
 use super::{Permission, RepositoryState, browser::read_git};
 use crate::{
     actions::ActionsState,
-    entity::{repository, repository_webhook, repository_webhook_delivery, user},
+    entity::{repository, repository_webhook, repository_webhook_delivery, session, user},
     identity::{ApiError, SCOPE_READ, SCOPE_WRITE},
     network::pinned_public_http_client,
 };
@@ -63,6 +66,8 @@ const WEBHOOK_MAX_ATTEMPTS: i32 = 5;
 /// A delivery claimed this long ago without finishing belonged to a worker
 /// that died; requests themselves time out after ten seconds.
 const WEBHOOK_STALE_AFTER_SECONDS: i64 = 60;
+const SESSION_SWEEP_INTERVAL_SECONDS: i64 = 60 * 60;
+static LAST_SESSION_SWEEP: AtomicI64 = AtomicI64::new(0);
 const DEFAULT_WEBHOOK_EVENT: &str = "push";
 static WEBHOOK_DELIVERY_SLOTS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(WEBHOOK_DELIVERY_CONCURRENCY)));
@@ -787,6 +792,7 @@ async fn insert_delivery(
 
 pub(super) async fn process_pending_deliveries(state: &RepositoryState) -> Result<(), ApiError> {
     let database = state.identity().database();
+    sweep_expired_sessions(database).await;
     recover_stale_deliveries(database, Utc::now()).await?;
     loop {
         let Ok(permit) = Arc::clone(&WEBHOOK_DELIVERY_SLOTS).try_acquire_owned() else {
@@ -840,6 +846,28 @@ pub(super) async fn process_pending_deliveries(state: &RepositoryState) -> Resul
         });
     }
     Ok(())
+}
+
+/// Remove expired browser sessions at most once per [`SESSION_SWEEP_INTERVAL_SECONDS`].
+///
+/// Sessions have no worker of their own. The outbox is drained from the
+/// repository scheduler every thirty seconds, which makes it the nearest
+/// periodic tick; a failure is logged and never holds up deliveries.
+async fn sweep_expired_sessions(database: &DatabaseConnection) {
+    let now = Utc::now();
+    let last = LAST_SESSION_SWEEP.load(Ordering::Relaxed);
+    if now.timestamp() - last < SESSION_SWEEP_INTERVAL_SECONDS
+        || LAST_SESSION_SWEEP
+            .compare_exchange(last, now.timestamp(), Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+    {
+        return;
+    }
+    match session::delete_expired(database, now).await {
+        Ok(0) => {}
+        Ok(removed) => tracing::debug!(removed, "removed expired sessions"),
+        Err(error) => tracing::warn!(%error, "could not remove expired sessions"),
+    }
 }
 
 async fn deliver(

@@ -528,6 +528,21 @@ pub mod session {
     pub enum Relation {}
 
     impl ActiveModelBehavior for ActiveModel {}
+
+    /// Delete sessions that expired before `now` and report how many went.
+    ///
+    /// Authentication already ignores them, so this only reclaims rows that
+    /// would otherwise stay until the user is deleted.
+    pub async fn delete_expired<C: ConnectionTrait>(
+        connection: &C,
+        now: DateTimeUtc,
+    ) -> Result<u64, DbErr> {
+        Ok(Entity::delete_many()
+            .filter(Column::ExpiresAt.lt(now))
+            .exec(connection)
+            .await?
+            .rows_affected)
+    }
 }
 
 pub mod invitation {

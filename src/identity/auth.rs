@@ -1246,6 +1246,36 @@ mod tests {
         assert_eq!(namespace_of!(action_variable), moved);
     }
 
+    #[tokio::test]
+    async fn expired_sessions_are_swept_and_live_ones_kept() {
+        let database = database().await;
+        let owner = test_support::owner(&database, "owner").await;
+        let now = Utc::now();
+        for (token, expires_at) in [
+            ("expired", now - chrono::Duration::seconds(1)),
+            ("long-expired", now - chrono::Duration::days(90)),
+            ("live", now + chrono::Duration::hours(1)),
+        ] {
+            session::ActiveModel {
+                token_hash: Set(token.to_owned()),
+                user_id: Set(owner.id),
+                expires_at: Set(expires_at),
+                created_at: Set(now),
+                last_seen_at: Set(now),
+            }
+            .insert(&database)
+            .await
+            .unwrap();
+        }
+
+        let removed = session::delete_expired(&database, now).await.unwrap();
+
+        let remaining = session::Entity::find().all(&database).await.unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].token_hash, "live");
+    }
+
     #[test]
     fn credential_changes_refuse_api_tokens() {
         assert!(require_browser_session(false).is_ok());

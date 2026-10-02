@@ -453,3 +453,27 @@ async fn webhook_retry_migration_leaves_queued_deliveries_due() {
     assert_eq!(delivery.status, "pending");
     assert_eq!(delivery.next_attempt_at, None);
 }
+
+#[tokio::test]
+async fn latest_audit_event_of_an_action_is_found_through_the_index() {
+    let mut options = ConnectOptions::new("sqlite::memory:");
+    options.max_connections(1);
+    let database = Database::connect(options).await.unwrap();
+    super::Migrator::up(&database, None).await.unwrap();
+
+    let plan = database
+        .query_all_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "EXPLAIN QUERY PLAN SELECT id FROM audit_events \
+             WHERE action = 'repository.integrity.check' ORDER BY id DESC LIMIT 1",
+        ))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.try_get::<String>("", "detail").unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(plan.contains("idx-audit-event-action-id"), "{plan}");
+    assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+}
