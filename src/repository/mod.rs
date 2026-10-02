@@ -16,6 +16,7 @@ mod integrity;
 mod issues;
 mod lfs;
 mod maintenance;
+mod markdown;
 mod mirror_scheduler;
 mod mirrors;
 mod native_remote;
