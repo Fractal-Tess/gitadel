@@ -905,6 +905,9 @@ pub async fn delete_passkey(
     let actor = state
         .authenticate(&headers, &jar, super::SCOPE_WRITE)
         .await?;
+    // Removing a sign-in credential is as sensitive as adding one: a leaked
+    // write token must not be able to strip an account's passkeys.
+    require_browser_session(actor.via_api_token)?;
     let transaction = state.database().begin().await?;
     let result = passkey::Entity::delete_many()
         .filter(passkey::Column::Id.eq(id))
@@ -1241,6 +1244,12 @@ mod tests {
         assert_eq!(namespace_of!(action_runner_registration_token), moved);
         assert_eq!(namespace_of!(action_secret), moved);
         assert_eq!(namespace_of!(action_variable), moved);
+    }
+
+    #[test]
+    fn credential_changes_refuse_api_tokens() {
+        assert!(require_browser_session(false).is_ok());
+        assert!(require_browser_session(true).is_err());
     }
 
     #[tokio::test]
