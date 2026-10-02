@@ -44,7 +44,7 @@ use sley_diff_merge::{
 };
 use tokei::{Config as TokeiConfig, LanguageType};
 use tokio::{
-    sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore},
+    sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, SemaphorePermit},
     task::JoinSet,
 };
 
@@ -1469,6 +1469,9 @@ pub async fn history(
     let page = query.page.max(1);
     let per_page = query.per_page.clamp(1, 100);
     let path = state.repository_path(&repository);
+    // Held across the walk to the page, the diffs of its commits, and the
+    // release distances counted for them.
+    let _slot = history_slot().await?;
     let (selected, has_next) = read_git(path.clone(), move |git| {
         let tip = git.peel_to_commit_oid(git.rev_parse(&revision)?)?;
         let start = (page - 1).saturating_mul(per_page);
@@ -1570,75 +1573,105 @@ pub async fn diff(
 ) -> Result<Json<DiffResponse>, ApiError> {
     let repository = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
     let path = state.repository_path(&repository);
+    let _slot = history_slot().await?;
     let response = read_git(path, move |git| {
         let oid = git.peel_to_commit_oid(git.rev_parse(&revision)?)?;
-        let commit = git.read_commit(&oid)?;
-        let options = DiffNameStatusOptions {
-            detect_renames: true,
-            ..DiffNameStatusOptions::default()
-        };
-        let entries = if let Some(parent) = commit.parents.first().copied() {
-            let parent_tree = git.read_commit(&parent)?.tree;
-            diff_name_status_trees_with_options(
-                git.object_database(),
-                git.object_format(),
-                &parent_tree,
-                &commit.tree,
-                options,
-            )?
-        } else {
-            diff_name_status_empty_tree_with_options(
-                git.object_database(),
-                git.object_format(),
-                &commit.tree,
-                options,
-            )?
-        };
-        let mut output = LimitedDiffWriter::new(MAX_DIFF_BYTES);
-        let render_options = DiffRenderOptions {
-            db: git.object_database(),
-            lazy_fetch: None,
-            worktree_root: None,
-            use_worktree_new: false,
-            format: git.object_format(),
-            abbrev: 40,
-            src_prefix: "a/",
-            dst_prefix: "b/",
-            context: 3,
-            userdiff: None,
-            funcname: None,
-            colors: None,
-            word_diff: None,
-            line_indicators: LineIndicators::default(),
-            suppress_blank_empty: false,
-            no_index_contents: None,
-            submodule_format: SubmoduleDiffFormat::Short,
-            submodule_dirt: None,
-            ws_error: None,
-            color_moved: None,
-            interhunk: 0,
-            ws_ignore: WsIgnore::default(),
-            diff_algorithm: DiffAlgorithm::Myers,
-            ignore_blank_lines: false,
-            ignore_regexes: &[],
-            line_ranges: None,
-            indent_heuristic: true,
-            binary: false,
-            anchors: &[],
-            allow_textconv: false,
-            big_file_threshold: 512 * 1024 * 1024,
-            submodule_render: None,
-        };
-        for entry in &entries {
-            write_diff_patch_entry(&mut output, entry, render_options)?;
-        }
-        Ok(DiffResponse {
-            patch: String::from_utf8_lossy(output.as_bytes()).into_owned(),
-            truncated: output.truncated(),
-        })
+        render_commit_diff(git, oid, MAX_DIFF_BYTES)
     })
     .await?;
     Ok(Json(response))
+}
+
+const HISTORY_CONCURRENCY: usize = 4;
+
+/// Bounds the history walks and diffs running at once, as `analysis_slots`
+/// does for analysis: each occupies a blocking thread for as long as the
+/// repository makes it, and a burst of them would leave none for anything
+/// else. Requests beyond the bound wait their turn.
+static HISTORY_SLOTS: Semaphore = Semaphore::const_new(HISTORY_CONCURRENCY);
+
+async fn history_slot() -> Result<SemaphorePermit<'static>, ApiError> {
+    HISTORY_SLOTS.acquire().await.map_err(ApiError::internal)
+}
+
+/// The patch of `oid` against its first parent, cut off at `limit` bytes.
+fn render_commit_diff(
+    git: &GitRepository,
+    oid: ObjectId,
+    limit: usize,
+) -> sley::Result<DiffResponse> {
+    let commit = git.read_commit(&oid)?;
+    let options = DiffNameStatusOptions {
+        detect_renames: true,
+        ..DiffNameStatusOptions::default()
+    };
+    let entries = if let Some(parent) = commit.parents.first().copied() {
+        let parent_tree = git.read_commit(&parent)?.tree;
+        diff_name_status_trees_with_options(
+            git.object_database(),
+            git.object_format(),
+            &parent_tree,
+            &commit.tree,
+            options,
+        )?
+    } else {
+        diff_name_status_empty_tree_with_options(
+            git.object_database(),
+            git.object_format(),
+            &commit.tree,
+            options,
+        )?
+    };
+    let mut output = LimitedDiffWriter::new(limit);
+    let render_options = DiffRenderOptions {
+        db: git.object_database(),
+        lazy_fetch: None,
+        worktree_root: None,
+        use_worktree_new: false,
+        format: git.object_format(),
+        abbrev: 40,
+        src_prefix: "a/",
+        dst_prefix: "b/",
+        context: 3,
+        userdiff: None,
+        funcname: None,
+        colors: None,
+        word_diff: None,
+        line_indicators: LineIndicators::default(),
+        suppress_blank_empty: false,
+        no_index_contents: None,
+        submodule_format: SubmoduleDiffFormat::Short,
+        submodule_dirt: None,
+        ws_error: None,
+        color_moved: None,
+        interhunk: 0,
+        ws_ignore: WsIgnore::default(),
+        diff_algorithm: DiffAlgorithm::Myers,
+        ignore_blank_lines: false,
+        ignore_regexes: &[],
+        line_ranges: None,
+        indent_heuristic: true,
+        binary: false,
+        anchors: &[],
+        allow_textconv: false,
+        big_file_threshold: 512 * 1024 * 1024,
+        submodule_render: None,
+    };
+    for entry in &entries {
+        // Once the writer is full it refuses further bytes, which ends
+        // the entry being rendered; the remaining ones are not started.
+        match write_diff_patch_entry(&mut output, entry, render_options) {
+            Err(_) if output.truncated() => break,
+            result => result?,
+        }
+        if output.truncated() {
+            break;
+        }
+    }
+    Ok(DiffResponse {
+        patch: String::from_utf8_lossy(output.as_bytes()).into_owned(),
+        truncated: output.truncated(),
+    })
 }
 
 struct LimitedDiffWriter {
@@ -1671,7 +1704,13 @@ impl Write for LimitedDiffWriter {
         let copied = bytes.len().min(remaining);
         self.bytes.extend_from_slice(&bytes[..copied]);
         if copied != bytes.len() {
+            // Keep what fits and fail the write, so the renderer stops
+            // producing a patch nobody will receive.
             self.truncated = true;
+            return Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "diff exceeds the output size limit",
+            ));
         }
         Ok(bytes.len())
     }
@@ -2928,10 +2967,10 @@ mod tests {
 
     use super::{
         ArchiveFileWriter, AuthorActivity, BrowseQuery, CommitLineStats, DayCommitResponse,
-        HistoryQuery, MAX_SOURCE_ARCHIVE_BYTES, SshCommitSignature, authored_on, commit_authorship,
-        count_reachable_commits, if_none_match, line_stats_key, metered_body, raw_blob_permits,
-        read_commits_authored_on, read_repository_overview, read_submodule_metadata, single_flight,
-        verify_ssh_commit_signature,
+        HistoryQuery, LimitedDiffWriter, MAX_SOURCE_ARCHIVE_BYTES, SshCommitSignature, authored_on,
+        commit_authorship, count_reachable_commits, if_none_match, line_stats_key, metered_body,
+        raw_blob_permits, read_commits_authored_on, read_repository_overview,
+        read_submodule_metadata, render_commit_diff, single_flight, verify_ssh_commit_signature,
     };
     use crate::{
         entity::repository_cache_entry,
@@ -3677,6 +3716,86 @@ mod tests {
         assert_eq!(lines[&second], (70, 7));
         assert_eq!(lines[&third], (1, 0));
         assert_eq!(cached().await.len(), 3);
+    }
+
+    #[test]
+    fn limited_diff_writer_keeps_what_fits_and_refuses_the_rest() {
+        let mut writer = LimitedDiffWriter::new(5);
+        writer.write_all(b"abc").expect("write within the limit");
+        assert!(!writer.truncated());
+
+        let error = writer.write_all(b"defg").expect_err("refuse the overflow");
+        assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
+        assert!(writer.truncated());
+        assert_eq!(writer.as_bytes(), b"abcde");
+        assert!(writer.write_all(b"h").is_err());
+        assert_eq!(writer.as_bytes(), b"abcde");
+    }
+
+    #[tokio::test]
+    async fn truncated_diff_is_a_prefix_of_the_whole_patch() {
+        let instance = instance().await;
+        let (_, git) = instance.git_repository("project").await;
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            let content = (0..200)
+                .map(|line| format!("{name} line {line}\n"))
+                .collect::<String>();
+            fs::write(git.work_tree.join(name), content).unwrap();
+        }
+        let commit = git.commit_file("d.txt", b"last\n", COMMIT_DATE);
+        let native = GitRepository::open_exact_bare(&git.git_dir).unwrap();
+        let oid = native.rev_parse(&commit).unwrap();
+
+        let whole = render_commit_diff(&native, oid, usize::MAX).unwrap();
+        assert!(!whole.truncated);
+        for file in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+            assert!(whole.patch.contains(&format!("+++ b/{file}")));
+        }
+        let exact = render_commit_diff(&native, oid, whole.patch.len()).unwrap();
+        assert!(!exact.truncated);
+        assert_eq!(exact.patch, whole.patch);
+
+        // Cut anywhere, the response is the same bytes the full render starts
+        // with, as it was when the renderer ran on past the limit.
+        for limit in [0, 1, 100, 4_000, whole.patch.len() - 1] {
+            let cut = render_commit_diff(&native, oid, limit).unwrap();
+            assert!(cut.truncated, "limit {limit}");
+            assert_eq!(cut.patch, whole.patch[..limit], "limit {limit}");
+        }
+    }
+
+    #[tokio::test]
+    async fn diff_waits_for_a_history_slot() {
+        let instance = instance().await;
+        let (_, git) = instance.git_repository("project").await;
+        let commit = git.commit_file("notes.txt", b"one\n", COMMIT_DATE);
+        let request = || {
+            super::diff(
+                State(instance.state.clone()),
+                AxumPath(("alice".to_owned(), "project".to_owned(), commit.clone())),
+                HeaderMap::new(),
+                CookieJar::new(),
+            )
+        };
+
+        let busy = super::HISTORY_SLOTS
+            .acquire_many(u32::try_from(super::HISTORY_CONCURRENCY).unwrap())
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), request())
+                .await
+                .is_err()
+        );
+        drop(busy);
+
+        let response = tokio::time::timeout(Duration::from_secs(30), request())
+            .await
+            .expect("the diff runs once a slot is free")
+            .unwrap()
+            .0;
+        assert!(!response.truncated);
+        assert!(response.patch.contains("+one"));
     }
 
     #[tokio::test]
