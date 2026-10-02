@@ -2,7 +2,12 @@ import { toast } from "svelte-sonner";
 import { errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
 import { invitationSchema, type AuditEvent } from "$lib/api/instance.js";
 import {
+  appendAuditPage,
+  firstAuditPage,
+} from "$lib/settings/audit-pagination.js";
+import {
   loadAdminActivity,
+  loadAdminActivityPage,
   peekAdminActivity,
   refreshAdminActivity,
   type AdminSettingsView,
@@ -11,12 +16,18 @@ import type { AppState } from "$lib/state/app-state.svelte.js";
 
 export class AdminSettingsState {
   auditEvents = $state.raw<AuditEvent[]>([]);
+  /** Whether older events than the loaded ones may exist. */
+  auditHasMore = $state(false);
+  auditLoadingMore = $state(false);
   invitation = $state<string | null>(null);
   invitationHours = $state("72");
   working = $state(false);
   loading = $state(false);
   error = $state<string | null>(null);
   #loadSequence = 0;
+  // Advanced whenever the first page is replaced, so an older page that was
+  // requested before the replacement is not appended to the new list.
+  #activityGeneration = 0;
 
   constructor(private readonly app: AppState) {}
 
@@ -30,7 +41,7 @@ export class AdminSettingsState {
     const scope = this.app.authorizationScope;
     const cached = peekAdminActivity(scope);
     if (cached) {
-      this.auditEvents = cached;
+      this.#showFirstPage(cached);
       this.loading = false;
       this.error = null;
       return;
@@ -44,7 +55,7 @@ export class AdminSettingsState {
         this.app.authorizationScope !== scope
       )
         return;
-      this.auditEvents = events;
+      this.#showFirstPage(events);
     } catch (caught) {
       if (
         sequence === this.#loadSequence &&
@@ -66,10 +77,39 @@ export class AdminSettingsState {
     await this.run(async () => {
       const events = await refreshAdminActivity(scope);
       if (this.app.authorizationScope === scope) {
-        this.auditEvents = events;
+        this.#showFirstPage(events);
         this.error = null;
       }
     }, "toast");
+  }
+
+  async loadMoreActivity(): Promise<void> {
+    if (this.auditLoadingMore || !this.auditHasMore) return;
+    const scope = this.app.authorizationScope;
+    const generation = this.#activityGeneration;
+    this.auditLoadingMore = true;
+    try {
+      const page = await loadAdminActivityPage(this.auditEvents.length);
+      if (
+        this.app.authorizationScope !== scope ||
+        generation !== this.#activityGeneration
+      )
+        return;
+      const next = appendAuditPage(this.auditEvents, page);
+      this.auditEvents = next.events;
+      this.auditHasMore = next.hasMore;
+    } catch (caught) {
+      toast.error(errorMessage(caught));
+    } finally {
+      this.auditLoadingMore = false;
+    }
+  }
+
+  #showFirstPage(events: AuditEvent[]): void {
+    const first = firstAuditPage(events);
+    this.#activityGeneration += 1;
+    this.auditEvents = first.events;
+    this.auditHasMore = first.hasMore;
   }
 
   async createInvitation(): Promise<void> {
@@ -86,7 +126,7 @@ export class AdminSettingsState {
       this.invitation = response.token;
       const events = await refreshAdminActivity(scope);
       if (this.app.authorizationScope === scope) {
-        this.auditEvents = events;
+        this.#showFirstPage(events);
         this.error = null;
       }
     }, "toast");

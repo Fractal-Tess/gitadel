@@ -235,6 +235,21 @@
               No instance activity yet.
             </li>
           {/each}
+          {#if state.auditHasMore}
+            <li class="flex justify-center py-4">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={state.auditLoadingMore}
+                onclick={() => void state.loadMoreActivity()}
+              >
+                {#if state.auditLoadingMore}
+                  <Spinner data-icon="inline-start" />
+                {/if}
+                Load more
+              </Button>
+            </li>
+          {/if}
         </ul>
       {/if}
     </section>

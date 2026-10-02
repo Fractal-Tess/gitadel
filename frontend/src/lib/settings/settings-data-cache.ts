@@ -25,6 +25,7 @@ import {
   type StorageTarget,
 } from "$lib/api/storage.js";
 import { requestJson } from "$lib/api/transport.js";
+import { AUDIT_PAGE_SIZE } from "$lib/settings/audit-pagination.js";
 import {
   authorizationCacheScopeKey,
   type AuthorizationCacheScope,
@@ -303,8 +304,20 @@ export function loadAdminActivity(
   scope: AuthorizationCacheScope,
 ): Promise<AuditEvent[]> {
   return adminActivity.load(key(scope), () =>
-    requestJson("/api/v1/audit?limit=100", z.array(auditEventSchema)),
+    requestJson(
+      `/api/v1/audit?limit=${AUDIT_PAGE_SIZE}`,
+      z.array(auditEventSchema),
+    ),
   );
+}
+
+/** Loads the events that follow the first `offset` ones; never cached. */
+export function loadAdminActivityPage(offset: number): Promise<AuditEvent[]> {
+  const query = new URLSearchParams({
+    limit: String(AUDIT_PAGE_SIZE),
+    offset: String(offset),
+  });
+  return requestJson(`/api/v1/audit?${query}`, z.array(auditEventSchema));
 }
 
 export function peekAdminActivity(
