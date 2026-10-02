@@ -4,15 +4,17 @@ use std::{
     fs::File,
     io::{self, Write},
     path::{Path, PathBuf},
+    sync::{Arc, LazyLock},
     time::{Duration as StdDuration, Instant},
 };
 
 use axum::{
     Json,
     body::Body,
+    body::Bytes,
     extract::{Path as AxumPath, Query, State},
-    http::{HeaderMap, HeaderValue, header},
-    response::Response,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
@@ -38,7 +40,10 @@ use sley_diff_merge::{
     diff_name_status_trees_with_options,
 };
 use tokei::{Config as TokeiConfig, LanguageType};
-use tokio::task::JoinSet;
+use tokio::{
+    sync::{OwnedSemaphorePermit, Semaphore},
+    task::JoinSet,
+};
 
 use super::{
     RepositoryState,
@@ -877,7 +882,7 @@ pub async fn blob(
     headers: HeaderMap,
     jar: CookieJar,
     Query(query): Query<BrowseQuery>,
-) -> Result<Json<BlobResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     let repository = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
     let revision = query
         .rev
@@ -888,11 +893,23 @@ pub async fn blob(
         return Err(ApiError::bad_request("A file path is required."));
     }
     let path = state.repository_path(&repository);
-    let (mut response, image_content) = read_git(path, move |git| {
+    let read = read_git(path, move |git| {
         let commit_oid = git.peel_to_commit_oid(git.rev_parse(&revision)?)?;
         let resolved = git.resolve_path(&commit_oid.to_hex(), &requested_path)?;
         if resolved.object_type != GitObjectType::Blob {
             return Err(GitError::InvalidPath(requested_path));
+        }
+        // The response is a function of the commit and blob it names and of
+        // the release that rendered it, so those make its validator; checking
+        // it here answers a repeat view without reading the blob.
+        let etag = format!(
+            "W/\"{}-{}-{}\"",
+            env!("CARGO_PKG_VERSION"),
+            commit_oid.to_hex(),
+            resolved.oid.to_hex()
+        );
+        if if_none_match(&headers, &etag) {
+            return Ok(BlobRead::NotModified(etag));
         }
         let size = git
             .read_object_header(&resolved.oid)?
@@ -952,9 +969,13 @@ pub async fn blob(
                 "Image previews are limited to 16 MiB. Download the original instead.".to_owned()
             }),
         };
-        Ok((response, image_content))
+        Ok(BlobRead::Found(Box::new((response, image_content, etag))))
     })
     .await?;
+    let (mut response, image_content, etag) = match read {
+        BlobRead::NotModified(etag) => return not_modified(&etag),
+        BlobRead::Found(found) => *found,
+    };
     if let Some(content) = image_content {
         match super::image::resolve_image_content(&state, &repository, content).await {
             Ok(content) => {
@@ -972,7 +993,19 @@ pub async fn blob(
             Err(error) => response.image_error = Some(error.to_string()),
         }
     }
-    Ok(Json(response))
+    // A failed preview can succeed later without the commit changing, for
+    // example once an LFS object is uploaded, so it is not given a validator.
+    let cacheable = response.image_error.is_none();
+    let mut response = Json(response).into_response();
+    if cacheable {
+        insert_validator_headers(response.headers_mut(), &etag)?;
+    }
+    Ok(response)
+}
+
+enum BlobRead {
+    NotModified(String),
+    Found(Box<(BlobResponse, Option<Vec<u8>>, String)>),
 }
 
 pub async fn raw(
@@ -993,17 +1026,29 @@ pub async fn raw(
     }
     let repository_path = state.repository_path(&repository);
     let mime_path = requested_path.clone();
-    let content = read_git(repository_path, move |git| {
+    // Resolve the blob before reading it: its id is the validator, so a
+    // client that already holds these bytes costs no blob read at all.
+    let (blob_oid, size) = read_git(repository_path.clone(), move |git| {
         let resolved = git.resolve_path(&revision, &requested_path)?;
         if resolved.object_type != GitObjectType::Blob {
             return Err(GitError::InvalidPath(requested_path));
         }
-        git.blobs().read(resolved.oid)
+        let size = git
+            .read_object_header(&resolved.oid)?
+            .map_or(u64::MAX, |(_, size)| size);
+        Ok((resolved.oid, size))
     })
     .await?;
+    let etag = format!("\"{}\"", blob_oid.to_hex());
+    if if_none_match(&headers, &etag) {
+        return not_modified(&etag);
+    }
+    let permit = raw_blob_memory(size).await?;
+    let content = read_git(repository_path, move |git| git.blobs().read(blob_oid)).await?;
     let content_type = mime_guess::from_path(&mime_path)
         .first_or_octet_stream()
         .to_string();
+    let mut content_length = None;
     let body = if super::image::is_image_path(&mime_path)
         && let Some(oid) = super::image::lfs_image_oid(&content)?
     {
@@ -1017,17 +1062,22 @@ pub async fn raw(
         let reader = store.read(&key).await.map_err(ApiError::internal)?;
         Body::from_stream(tokio_util::io::ReaderStream::new(reader))
     } else {
-        Body::from(content)
+        content_length = Some(content.len());
+        metered_body(content, permit)
     };
     let mut response = Response::new(body);
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_str(&content_type).map_err(ApiError::internal)?,
     );
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-cache"),
-    );
+    if let Some(length) = content_length {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_LENGTH, HeaderValue::from(length));
+    }
+    // `no-cache` still revalidates on every use, as a revision may be a
+    // branch that moves; the validator makes that revalidation cheap.
+    insert_validator_headers(response.headers_mut(), &etag)?;
     response.headers_mut().insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
@@ -1051,6 +1101,94 @@ pub async fn raw(
             .map_err(ApiError::internal)?,
         );
     }
+    Ok(response)
+}
+
+/// Raw blobs up to this size are served without reserving memory for them.
+const UNMETERED_RAW_BLOB_BYTES: u64 = 1024 * 1024;
+/// How much blob content `raw` responses may hold in memory at once, in MiB.
+const RAW_BLOB_MEMORY_BUDGET_MIB: u32 = 256;
+
+/// Sley hands out a blob as one buffer, with no streaming reader, so `raw`
+/// holds a file in memory until the client has received it. This budget, one
+/// permit per MiB, bounds what concurrent downloads of large files can pin.
+static RAW_BLOB_MEMORY: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(RAW_BLOB_MEMORY_BUDGET_MIB as usize)));
+
+/// The permits a blob of `size` bytes takes from [`RAW_BLOB_MEMORY`], or none
+/// for a small one. A blob larger than the whole budget takes all of it, so
+/// it is served alone rather than refused.
+fn raw_blob_permits(size: u64) -> Option<u32> {
+    (size > UNMETERED_RAW_BLOB_BYTES).then(|| {
+        u32::try_from(size.div_ceil(1024 * 1024))
+            .unwrap_or(u32::MAX)
+            .min(RAW_BLOB_MEMORY_BUDGET_MIB)
+    })
+}
+
+/// Wait for room to hold a blob of `size` bytes in memory.
+async fn raw_blob_memory(size: u64) -> Result<Option<OwnedSemaphorePermit>, ApiError> {
+    match raw_blob_permits(size) {
+        Some(permits) => Arc::clone(&RAW_BLOB_MEMORY)
+            .acquire_many_owned(permits)
+            .await
+            .map(Some)
+            .map_err(ApiError::internal),
+        None => Ok(None),
+    }
+}
+
+/// A body over `content` that keeps `permit` until the last byte is handed to
+/// the connection or the client goes away.
+fn metered_body(content: Vec<u8>, permit: Option<OwnedSemaphorePermit>) -> Body {
+    const CHUNK_BYTES: usize = 64 * 1024;
+    let Some(permit) = permit else {
+        return Body::from(content);
+    };
+    let content = Bytes::from(content);
+    Body::from_stream(futures_util::stream::unfold(
+        (content, permit),
+        |(mut content, permit)| async move {
+            if content.is_empty() {
+                return None;
+            }
+            let chunk = content.split_to(content.len().min(CHUNK_BYTES));
+            Some((Ok::<_, std::convert::Infallible>(chunk), (content, permit)))
+        },
+    ))
+}
+
+/// Whether the request's `If-None-Match` names `etag`, by the weak comparison
+/// conditional GETs use.
+fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
+    let opaque = etag.trim_start_matches("W/");
+    headers
+        .get_all(header::IF_NONE_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .any(|candidate| candidate == "*" || candidate.trim_start_matches("W/") == opaque)
+}
+
+/// The validator and the cache policy that makes clients use it: store the
+/// response privately, and revalidate it before every reuse.
+fn insert_validator_headers(headers: &mut HeaderMap, etag: &str) -> Result<(), ApiError> {
+    headers.insert(
+        header::ETAG,
+        HeaderValue::from_str(etag).map_err(ApiError::internal)?,
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-cache"),
+    );
+    Ok(())
+}
+
+fn not_modified(etag: &str) -> Result<Response, ApiError> {
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = StatusCode::NOT_MODIFIED;
+    insert_validator_headers(response.headers_mut(), etag)?;
     Ok(response)
 }
 
@@ -2362,10 +2500,22 @@ mod tests {
     };
     use uuid::Uuid;
 
+    use std::sync::Arc;
+
+    use axum::{
+        extract::{Path as AxumPath, Query, State},
+        http::{HeaderMap, HeaderValue, StatusCode, header},
+        response::Response,
+    };
+    use axum_extra::extract::cookie::CookieJar;
+    use tokio::sync::Semaphore;
+
     use super::{
-        ArchiveFileWriter, MAX_SOURCE_ARCHIVE_BYTES, SshCommitSignature, count_reachable_commits,
+        ArchiveFileWriter, BrowseQuery, MAX_SOURCE_ARCHIVE_BYTES, SshCommitSignature,
+        count_reachable_commits, if_none_match, metered_body, raw_blob_permits,
         read_submodule_metadata, verify_ssh_commit_signature,
     };
+    use crate::repository::resources::test_support::instance;
 
     fn native_repository() -> (PathBuf, GitRepository) {
         let path = std::env::temp_dir().join(format!("gitadel-submodule-test-{}", Uuid::new_v4()));
@@ -2661,6 +2811,162 @@ mod tests {
             2
         );
         fs::remove_dir_all(path).expect("remove test repository");
+    }
+
+    const COMMIT_DATE: &str = "2026-03-01T12:00:00Z";
+
+    fn browse(path: &str) -> Query<BrowseQuery> {
+        Query(BrowseQuery {
+            rev: None,
+            path: path.to_owned(),
+        })
+    }
+
+    fn project() -> AxumPath<(String, String)> {
+        AxumPath(("alice".to_owned(), "project".to_owned()))
+    }
+
+    fn conditional(etag: &HeaderValue) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_NONE_MATCH, etag.clone());
+        headers
+    }
+
+    async fn body_bytes(response: Response) -> Vec<u8> {
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec()
+    }
+
+    #[tokio::test]
+    async fn raw_answers_a_matching_validator_with_not_modified() {
+        let instance = instance().await;
+        let (_, git) = instance.git_repository("project").await;
+        git.commit_file("notes.txt", b"first\n", COMMIT_DATE);
+        let blob_oid = git.run(COMMIT_DATE, &["rev-parse", "HEAD:notes.txt"]);
+        let request = |headers: HeaderMap| {
+            super::raw(
+                State(instance.state.clone()),
+                project(),
+                headers,
+                CookieJar::new(),
+                browse("notes.txt"),
+            )
+        };
+
+        let response = request(HeaderMap::new()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let etag = response.headers()[header::ETAG].clone();
+        assert_eq!(etag, format!("\"{blob_oid}\"").as_str());
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "private, no-cache"
+        );
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "6");
+        assert_eq!(body_bytes(response).await, b"first\n");
+
+        let response = request(conditional(&etag)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(response.headers()[header::ETAG], etag);
+        assert!(body_bytes(response).await.is_empty());
+
+        // The same path at a new commit no longer matches the old validator.
+        git.commit_file("notes.txt", b"second\n", COMMIT_DATE);
+        let response = request(conditional(&etag)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_ne!(response.headers()[header::ETAG], etag);
+        assert_eq!(body_bytes(response).await, b"second\n");
+    }
+
+    #[tokio::test]
+    async fn blob_answers_a_matching_validator_with_not_modified() {
+        let instance = instance().await;
+        let (_, git) = instance.git_repository("project").await;
+        let commit_oid = git.commit_file("README.md", b"# Title\n", COMMIT_DATE);
+        let blob_oid = git.run(COMMIT_DATE, &["rev-parse", "HEAD:README.md"]);
+        let request = |headers: HeaderMap| {
+            super::blob(
+                State(instance.state.clone()),
+                project(),
+                headers,
+                CookieJar::new(),
+                browse("README.md"),
+            )
+        };
+
+        let response = request(HeaderMap::new()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let etag = response.headers()[header::ETAG].clone();
+        assert_eq!(
+            etag,
+            format!(
+                "W/\"{}-{commit_oid}-{blob_oid}\"",
+                env!("CARGO_PKG_VERSION")
+            )
+            .as_str()
+        );
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes(response).await).unwrap();
+        assert_eq!(body["content"], "# Title\n");
+        assert_eq!(body["oid"], blob_oid.as_str());
+
+        let response = request(conditional(&etag)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert!(body_bytes(response).await.is_empty());
+
+        // A new commit changes the response even where the file is the same.
+        git.commit_file("other.txt", b"x\n", COMMIT_DATE);
+        let response = request(conditional(&etag)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn if_none_match_compares_weakly_across_a_list() {
+        let headers = |value: &'static str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::IF_NONE_MATCH, HeaderValue::from_static(value));
+            headers
+        };
+        assert!(!if_none_match(&HeaderMap::new(), "\"abc\""));
+        assert!(if_none_match(&headers("\"abc\""), "\"abc\""));
+        assert!(if_none_match(&headers("W/\"abc\""), "\"abc\""));
+        assert!(if_none_match(&headers("\"abc\""), "W/\"abc\""));
+        assert!(if_none_match(&headers("\"x\", \"abc\""), "\"abc\""));
+        assert!(if_none_match(&headers("*"), "\"abc\""));
+        assert!(!if_none_match(&headers("\"abcd\""), "\"abc\""));
+        assert!(!if_none_match(&headers("abc"), "\"abc\""));
+    }
+
+    #[test]
+    fn raw_blob_memory_is_metered_per_mebibyte() {
+        const MIB: u64 = 1024 * 1024;
+        assert_eq!(raw_blob_permits(0), None);
+        assert_eq!(raw_blob_permits(MIB), None);
+        assert_eq!(raw_blob_permits(MIB + 1), Some(2));
+        assert_eq!(raw_blob_permits(10 * MIB), Some(10));
+        // A blob beyond the whole budget is served alone, not refused.
+        assert_eq!(
+            raw_blob_permits(u64::MAX),
+            Some(super::RAW_BLOB_MEMORY_BUDGET_MIB)
+        );
+    }
+
+    #[tokio::test]
+    async fn metered_body_keeps_its_permit_until_the_body_is_gone() {
+        let slots = Arc::new(Semaphore::new(4));
+        let permit = Arc::clone(&slots).acquire_many_owned(3).await.unwrap();
+        let content = (0..200_000).map(|index| index as u8).collect::<Vec<_>>();
+
+        let body = metered_body(content.clone(), Some(permit));
+        assert_eq!(slots.available_permits(), 1);
+        let received = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        assert_eq!(received, content);
+        assert_eq!(slots.available_permits(), 4);
+
+        // A client that goes away mid-download releases the memory too.
+        let permit = Arc::clone(&slots).acquire_many_owned(3).await.unwrap();
+        drop(metered_body(content, Some(permit)));
+        assert_eq!(slots.available_permits(), 4);
     }
 
     #[test]

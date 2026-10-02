@@ -1689,6 +1689,8 @@ async fn cleanup_repository_storage(repository_path: &Path, lfs_path: &Path) {
 /// A migrated in-memory instance with one administrator, for handler tests.
 #[cfg(test)]
 pub(super) mod test_support {
+    use std::{path::PathBuf, process::Command};
+
     use chrono::Utc;
     use sea_orm::{ActiveModelTrait, ConnectOptions, Database, DatabaseConnection, Set};
     use sea_orm_migration::MigratorTrait;
@@ -1787,6 +1789,81 @@ pub(super) mod test_support {
             .insert(&self.database)
             .await
             .unwrap()
+        }
+
+        /// A public repository with an empty bare Git directory behind it.
+        pub(in crate::repository) async fn git_repository(
+            &self,
+            name: &str,
+        ) -> (repository::Model, TestGit) {
+            let repository = self.repository(name).await;
+            let git = TestGit {
+                git_dir: self.state.repository_path(&repository),
+                work_tree: self.root.join(format!("work-{}", repository.storage_key)),
+            };
+            std::fs::create_dir_all(&git.work_tree).unwrap();
+            let output = Command::new("git")
+                .args(["init", "--quiet", "--bare", "--initial-branch=main"])
+                .arg(&git.git_dir)
+                .output()
+                .expect("run git init");
+            assert!(output.status.success(), "git init failed");
+            (repository, git)
+        }
+    }
+
+    /// Drives the Git CLI against a test repository's bare directory through
+    /// a scratch work tree.
+    pub(in crate::repository) struct TestGit {
+        pub(in crate::repository) git_dir: PathBuf,
+        pub(in crate::repository) work_tree: PathBuf,
+    }
+
+    impl TestGit {
+        /// Run `git` with a fixed identity, authoring and committing at `date`.
+        pub(in crate::repository) fn run(&self, date: &str, arguments: &[&str]) -> String {
+            let output = Command::new("git")
+                .arg("--git-dir")
+                .arg(&self.git_dir)
+                .arg("--work-tree")
+                .arg(&self.work_tree)
+                .args(arguments)
+                .current_dir(&self.work_tree)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "Gitadel Test")
+                .env("GIT_AUTHOR_EMAIL", "gitadel@example.test")
+                .env("GIT_COMMITTER_NAME", "Gitadel Test")
+                .env("GIT_COMMITTER_EMAIL", "gitadel@example.test")
+                .env("GIT_AUTHOR_DATE", date)
+                .env("GIT_COMMITTER_DATE", date)
+                .output()
+                .expect("run git command");
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                arguments.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        }
+
+        /// Write `content` to `path` and commit it, returning the commit id.
+        pub(in crate::repository) fn commit_file(
+            &self,
+            path: &str,
+            content: &[u8],
+            date: &str,
+        ) -> String {
+            let file = self.work_tree.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, content).unwrap();
+            self.run(date, &["add", "--all"]);
+            self.run(
+                date,
+                &["commit", "--quiet", "-m", &format!("Update {path}")],
+            );
+            self.run(date, &["rev-parse", "HEAD"])
         }
     }
 }
