@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod access_tests;
+mod analysis;
 mod browser;
 mod deploy_keys;
 mod files;
