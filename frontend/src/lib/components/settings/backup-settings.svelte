@@ -1,680 +1,63 @@
 <script lang="ts">
-  import { toString as cronToString } from "cronstrue";
   import { onMount } from "svelte";
-  import ArchiveRestore from "@lucide/svelte/icons/archive-restore";
-  import Bot from "@lucide/svelte/icons/bot";
   import CalendarClock from "@lucide/svelte/icons/calendar-clock";
-  import CalendarDays from "@lucide/svelte/icons/calendar-days";
-  import CheckCircle2 from "@lucide/svelte/icons/check-circle-2";
   import CloudUpload from "@lucide/svelte/icons/cloud-upload";
-  import Download from "@lucide/svelte/icons/download";
   import HardDrive from "@lucide/svelte/icons/hard-drive";
-  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
-  import ShieldCheck from "@lucide/svelte/icons/shield-check";
-  import Tag from "@lucide/svelte/icons/tag";
-  import Trash2 from "@lucide/svelte/icons/trash-2";
   import TriangleAlert from "@lucide/svelte/icons/triangle-alert";
-  import UserRound from "@lucide/svelte/icons/user-round";
 
+  import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
+  import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
+  import BackupCreateDialog from "$lib/components/settings/backup-create-dialog.svelte";
+  import BackupProviderEditor from "$lib/components/settings/backup-provider-editor.svelte";
+  import BackupRestorePanel from "$lib/components/settings/backup-restore-panel.svelte";
+  import BackupSnapshotList from "$lib/components/settings/backup-snapshot-list.svelte";
   import * as Alert from "$lib/components/ui/alert/index.js";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
-  import { Badge } from "$lib/components/ui/badge/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Card from "$lib/components/ui/card/index.js";
-  import { Checkbox } from "$lib/components/ui/checkbox/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
   import * as Select from "$lib/components/ui/select/index.js";
   import { Spinner } from "$lib/components/ui/spinner/index.js";
-  import BackupProviderEditor, {
-    type BackupProviderEditorValue,
-  } from "$lib/components/settings/backup-provider-editor.svelte";
-  import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
-  import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
+  import { formatDateTime } from "$lib/format.js";
   import {
-    ApiFailure,
-    errorMessage,
-    jsonBody,
-    requestEmpty,
-    requestJson,
-  } from "$lib/api/transport.js";
-  import { toast } from "svelte-sonner";
-  import {
-    backupProgressSchema,
-    backupProviderSchema,
-    backupProviderTestSchema,
-    backupScheduledSchema,
-    backupSnapshotSchema,
-    restorePreflightSchema,
-    type BackupProgress,
-    type BackupProvider,
-    type BackupProviderCatalogItem,
-    type BackupSnapshot,
-    type RestorePreflight,
-  } from "$lib/api/backups.js";
-  import { z } from "zod";
-  import { formatBytes, formatDateTime } from "$lib/format.js";
-  import {
-    clearBackupSettingsCache,
-    loadBackupSettings,
-  } from "$lib/settings/backup-settings-cache.js";
+    BackupState,
+    CUSTOM_SCHEDULE,
+    SCHEDULE_OPTIONS,
+  } from "$lib/settings/backup-state.svelte.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
-  const app = useAppState();
-  const CUSTOM_SCHEDULE = "custom";
-  const DEFAULT_CUSTOM_CRON = "0 2 * * *";
-  const SCHEDULE_OPTIONS = [
-    { value: "", label: "Automatic backups off" },
-    { value: "0 * * * *", label: "Every hour" },
-    { value: "0 */6 * * *", label: "Every 6 hours" },
-    { value: "0 2 * * *", label: "Every day at 02:00 UTC" },
-    { value: "0 2 * * 0", label: "Every Sunday at 02:00 UTC" },
-    { value: CUSTOM_SCHEDULE, label: "Custom cron" },
-  ];
-  const BACKUP_DEADLINE = 10 * 60 * 1_000;
-  // A restore replaces every repository, so it may run far longer than a
-  // backup; the server must at least have stopped well before that.
-  const RESTORE_SHUTDOWN_DEADLINE = 2 * 60 * 1_000;
-  const RESTORE_DEADLINE = 60 * 60 * 1_000;
-  class BackupProgressFailure extends Error {}
-
-  // Aborted when the page is left, which ends every poll started here.
-  const lifetime = new AbortController();
-
-  let providerCatalog = $state.raw<BackupProviderCatalogItem[]>([]);
-  let providers = $state.raw<BackupProvider[]>([]);
-  let selectedProviderId = $state<string | null>(null);
-  let settings = $derived(
-    providers.find((provider) => provider.id === selectedProviderId) ?? null,
-  );
-  let snapshots = $state.raw<BackupSnapshot[]>([]);
-  let preflight = $state.raw<RestorePreflight | null>(null);
-  let pendingDelete = $state.raw<BackupSnapshot | null>(null);
-  let deleteDialogOpen = $state(false);
-  let deleting = $state(false);
-  let creating = $state(false);
-  let backupProgress = $state.raw<BackupProgress | null>(null);
-  let progressFailure = $state<string | null>(null);
-  let progressSource: EventSource | null = null;
-  let providerEditorOpen = $state(false);
-  let createDialogOpen = $state(false);
-  let createProviderId = $state<string | undefined>(undefined);
-  let editingProvider = $state.raw<BackupProvider | null>(null);
-  let editorRevision = $state(0);
-  let providerRemoveDialogOpen = $state(false);
-  let pendingProviderRemove = $state.raw<BackupProvider | null>(null);
-  let backupName = $state("");
-  let scheduleMode = $state("");
-  let customCron = $state(DEFAULT_CUSTOM_CRON);
-  let savingSchedule = $state(false);
-  let scheduleExpression = $derived(
-    scheduleMode === CUSTOM_SCHEDULE
-      ? customCron.trim() || null
-      : scheduleMode || null,
-  );
-  let cronExplanation = $derived(explainCron(customCron));
-  let scheduleDirty = $derived(
-    scheduleExpression !== (settings?.schedule ?? null),
-  );
-  let canSaveSchedule = $derived(
-    scheduleDirty &&
-      (scheduleMode !== CUSTOM_SCHEDULE || cronExplanation.valid),
-  );
-  let backupProgressPercent = $derived.by(() => {
-    if (
-      backupProgress?.processed_bytes === null ||
-      backupProgress?.total_bytes === null ||
-      !backupProgress?.total_bytes
-    ) {
-      return null;
-    }
-    return Math.min(
-      100,
-      Math.round(
-        (backupProgress.processed_bytes / backupProgress.total_bytes) * 100,
-      ),
-    );
-  });
-  let password = $state("");
-  let createSafetyBackup = $state(true);
-  let confirmReplacement = $state(false);
-  let working = $state(false);
-  // Set from the moment a restore is accepted until the page reloads.
-  let restoring = $state(false);
-  let error = $state<string | null>(null);
+  const backup = new BackupState(useAppState());
 
   onMount(() => {
-    void initialize();
-    return () => {
-      lifetime.abort();
-      progressSource?.close();
-    };
+    void backup.initialize();
+    return backup.destroy;
   });
-
-  async function initialize() {
-    const scope = app.authorizationScope;
-    await run(async () => {
-      const loaded = await loadBackupSettings(scope);
-      const providersValue = loaded.providers;
-      const selected =
-        providersValue.find((provider) => provider.id === selectedProviderId) ??
-        providersValue.find(
-          (provider) => provider.id === loaded.selectedProviderId,
-        ) ??
-        null;
-      const snapshotsValue =
-        selected?.id === loaded.selectedProviderId
-          ? loaded.snapshots
-          : selected
-            ? await fetchSnapshots(selected.id)
-            : [];
-      if (app.authorizationScope !== scope) {
-        void initialize();
-        return;
-      }
-      providerCatalog = loaded.providerCatalog;
-      providers = providersValue;
-      selectedProviderId = selected?.id ?? null;
-      applyProvider(selected);
-      snapshots = snapshotsValue;
-    }, "inline");
-  }
-
-  function applyProvider(provider: BackupProvider | null) {
-    scheduleMode = modeForSchedule(provider?.schedule ?? null);
-    if (scheduleMode === CUSTOM_SCHEDULE) {
-      customCron = provider?.schedule ?? DEFAULT_CUSTOM_CRON;
-    }
-  }
-
-  function providerPath(id: string) {
-    return `/api/v1/admin/backup/providers/${encodeURIComponent(id)}`;
-  }
-
-  function providerPayload(value: BackupProviderEditorValue) {
-    return {
-      id: value.id,
-      name: value.name,
-      provider: value.provider,
-      path: value.path || null,
-      endpoint: value.endpoint || null,
-      bucket: value.bucket || null,
-      access_key: value.accessKey || null,
-      secret_key: value.secretKey || null,
-      region: value.region || null,
-      prefix: value.prefix,
-      test_token: value.testToken,
-    };
-  }
-
-  async function fetchSnapshots(
-    providerId = selectedProviderId,
-    init: RequestInit = {},
-  ) {
-    if (!providerId) return [];
-    return requestJson(
-      `${providerPath(providerId)}/backups`,
-      z.array(backupSnapshotSchema),
-      init,
-    );
-  }
-
-  /** Resolves after `milliseconds`, or at once when the page is left. */
-  function pause(milliseconds: number): Promise<void> {
-    const signal = lifetime.signal;
-    return new Promise((resolve) => {
-      if (signal.aborted) {
-        resolve();
-        return;
-      }
-      const finish = () => {
-        window.clearTimeout(timer);
-        signal.removeEventListener("abort", finish);
-        resolve();
-      };
-      const timer = window.setTimeout(finish, milliseconds);
-      signal.addEventListener("abort", finish);
-    });
-  }
-
-  function openCreateProvider() {
-    editingProvider = null;
-    editorRevision += 1;
-    providerEditorOpen = true;
-  }
-
-  function openConfigureProvider(provider: BackupProvider) {
-    editingProvider = provider;
-    editorRevision += 1;
-    providerEditorOpen = true;
-  }
-
-  function openCreateBackup() {
-    createProviderId = selectedProviderId ?? providers[0]?.id ?? null;
-    backupName = "";
-    createDialogOpen = true;
-  }
-
-  async function testProvider(value: BackupProviderEditorValue) {
-    return requestJson(
-      "/api/v1/admin/backup/providers/test",
-      backupProviderTestSchema,
-      {
-        method: "POST",
-        body: jsonBody(providerPayload(value)),
-      },
-    );
-  }
-
-  async function saveProvider(value: BackupProviderEditorValue) {
-    const saved = await requestJson(
-      value.id ? providerPath(value.id) : "/api/v1/admin/backup/providers",
-      backupProviderSchema,
-      {
-        method: value.id ? "PUT" : "POST",
-        body: jsonBody(providerPayload(value)),
-      },
-    );
-    clearBackupSettingsCache();
-    providers = value.id
-      ? providers.map((provider) =>
-          provider.id === value.id ? saved : provider,
-        )
-      : [...providers, saved];
-    selectedProviderId = saved.id;
-    applyProvider(saved);
-    providerEditorOpen = false;
-    snapshots = [];
-    const snapshotsLoaded = await run(async () => {
-      snapshots = await fetchSnapshots(saved.id);
-    }, "inline");
-    if (snapshotsLoaded) toast.success(`${saved.name} saved.`);
-  }
-
-  async function selectProvider(provider: BackupProvider) {
-    selectedProviderId = provider.id;
-    preflight = null;
-    applyProvider(provider);
-    await run(async () => {
-      snapshots = await fetchSnapshots(provider.id);
-    }, "inline");
-  }
-
-  function requestProviderRemove(provider: BackupProvider) {
-    pendingProviderRemove = provider;
-    providerRemoveDialogOpen = true;
-  }
-
-  async function confirmProviderRemove() {
-    const provider = pendingProviderRemove;
-    if (!provider) return;
-    await run(async () => {
-      await requestEmpty(providerPath(provider.id), { method: "DELETE" });
-      clearBackupSettingsCache();
-      providers = providers.filter((candidate) => candidate.id !== provider.id);
-      const selected = providers[0] ?? null;
-      selectedProviderId = selected?.id ?? null;
-      applyProvider(selected);
-      providerRemoveDialogOpen = false;
-      pendingProviderRemove = null;
-      snapshots = [];
-      toast.success(`${provider.name} removed.`);
-      snapshots = selected ? await fetchSnapshots(selected.id) : [];
-    });
-  }
-
-  async function saveSchedule() {
-    const provider = settings;
-    if (!provider || !canSaveSchedule) return;
-    savingSchedule = true;
-    try {
-      await run(async () => {
-        const loaded = await requestJson(
-          `${providerPath(provider.id)}/schedule`,
-          backupProviderSchema,
-          {
-            method: "PUT",
-            body: jsonBody({ schedule: scheduleExpression }),
-          },
-        );
-        clearBackupSettingsCache();
-        providers = providers.map((candidate) =>
-          candidate.id === provider.id ? loaded : candidate,
-        );
-        selectedProviderId = loaded.id;
-        applyProvider(loaded);
-        toast.success(
-          loaded.schedule
-            ? "Automatic backup schedule saved."
-            : "Automatic backups disabled.",
-        );
-      });
-    } finally {
-      savingSchedule = false;
-    }
-  }
-
-  async function refreshSnapshots() {
-    await run(async () => {
-      snapshots = await fetchSnapshots();
-      toast.success("Backup list refreshed.");
-    });
-  }
-
-  async function createBackup() {
-    const provider =
-      providers.find((candidate) => candidate.id === createProviderId) ?? null;
-    if (!provider) return;
-    selectedProviderId = provider.id;
-    applyProvider(provider);
-    preflight = null;
-    snapshots = [];
-    creating = true;
-    try {
-      await run(async () => {
-        const response = await requestJson(
-          `${providerPath(provider.id)}/backups`,
-          backupScheduledSchema,
-          {
-            method: "POST",
-            body: jsonBody({ name: backupName.trim() || null }),
-          },
-        );
-        clearBackupSettingsCache();
-        toast.success(response.message);
-        createDialogOpen = false;
-        backupProgress = {
-          operation_id: response.operation_id,
-          key: response.key,
-          operation: "create",
-          phase: "scheduled",
-          message: "Stopping Gitadel services for a consistent snapshot.",
-          processed_bytes: null,
-          total_bytes: null,
-        };
-        watchBackupProgress(response.operation_id);
-        await waitForBackup(response.key, provider.id);
-        backupName = "";
-        backupProgress = null;
-        toast.success("Backup created and added to snapshots.");
-      });
-    } finally {
-      creating = false;
-      progressSource?.close();
-      progressSource = null;
-    }
-  }
-
-  function watchBackupProgress(operationId: string) {
-    progressFailure = null;
-    progressSource?.close();
-    const source = new EventSource(
-      `/api/v1/admin/backups/progress/${encodeURIComponent(operationId)}`,
-    );
-    progressSource = source;
-    source.onmessage = (event) => {
-      let payload: unknown;
-      try {
-        payload = JSON.parse(event.data) as unknown;
-      } catch {
-        return;
-      }
-      const parsed = backupProgressSchema.safeParse(payload);
-      if (!parsed.success || parsed.data.operation_id !== operationId) return;
-      backupProgress = parsed.data;
-      if (parsed.data.phase === "failed") {
-        progressFailure = parsed.data.message;
-        source.close();
-      } else if (parsed.data.phase === "completed") {
-        source.close();
-      }
-    };
-  }
-
-  async function waitForBackup(key: string, providerId: string) {
-    const signal = lifetime.signal;
-    const deadline = Date.now() + BACKUP_DEADLINE;
-    await pause(1_500);
-    while (Date.now() < deadline) {
-      signal.throwIfAborted();
-      if (progressFailure) throw new BackupProgressFailure(progressFailure);
-      try {
-        const updated = await fetchSnapshots(providerId, { signal });
-        if (updated.some((snapshot) => snapshot.key === key)) {
-          snapshots = updated;
-          return;
-        }
-      } catch (caught) {
-        signal.throwIfAborted();
-        if (
-          caught instanceof ApiFailure &&
-          ![0, 404, 502, 503].includes(caught.status)
-        ) {
-          throw caught;
-        }
-        // The full server is unavailable while the maintenance server reports
-        // progress; status 0 is a request that reached neither.
-      }
-      await pause(1_000);
-    }
-    throw new Error("Backup creation did not finish within 10 minutes.");
-  }
-
-  function requestDelete(snapshot: BackupSnapshot) {
-    pendingDelete = snapshot;
-    deleteDialogOpen = true;
-  }
-
-  async function deleteSnapshot() {
-    const snapshot = pendingDelete;
-    const provider = settings;
-    if (!snapshot || !provider) return;
-    deleting = true;
-    let deleted = false;
-    try {
-      await run(async () => {
-        await requestEmpty(
-          `${providerPath(provider.id)}/backups/object?key=${encodeURIComponent(snapshot.key)}`,
-          { method: "DELETE" },
-        );
-        clearBackupSettingsCache();
-        snapshots = snapshots.filter(
-          (candidate) => candidate.key !== snapshot.key,
-        );
-        if (preflight?.key === snapshot.key) preflight = null;
-        toast.success("Backup deleted.");
-        deleted = true;
-      });
-      if (deleted) {
-        deleteDialogOpen = false;
-        pendingDelete = null;
-      }
-    } finally {
-      deleting = false;
-    }
-  }
-
-  async function validateSnapshot(snapshot: BackupSnapshot) {
-    const provider = settings;
-    if (!provider) return;
-    await run(async () => {
-      preflight = await requestJson(
-        `${providerPath(provider.id)}/backups/preflight`,
-        restorePreflightSchema,
-        {
-          method: "POST",
-          body: jsonBody({ key: snapshot.key }),
-        },
-      );
-      password = "";
-      createSafetyBackup = true;
-      confirmReplacement = false;
-      toast.success(
-        "Backup copied and verified. Review the restore details below.",
-      );
-    });
-  }
-
-  async function restoreBackup() {
-    const selected = preflight;
-    const provider = settings;
-    if (!selected || !provider) return;
-    await run(async () => {
-      const response = await requestJson(
-        `${providerPath(provider.id)}/backups/restore`,
-        backupScheduledSchema,
-        {
-          method: "POST",
-          body: jsonBody({
-            token: selected.token,
-            password,
-            create_safety_backup: createSafetyBackup,
-          }),
-        },
-      );
-      toast.success(response.message);
-      void waitForRestart();
-    });
-  }
-
-  /**
-   * Reloads once the restored server answers again. A healthy answer only
-   * counts after the server was seen down, since the server keeps answering
-   * for a moment before the restore stops it.
-   */
-  async function waitForRestart() {
-    const signal = lifetime.signal;
-    const started = Date.now();
-    let wentDown = false;
-    restoring = true;
-    try {
-      await pause(1_500);
-      while (!signal.aborted) {
-        const healthy = await isHealthy(signal);
-        if (signal.aborted) return;
-        if (!healthy) {
-          wentDown = true;
-        } else if (wentDown) {
-          window.location.reload();
-          return;
-        }
-        const elapsed = Date.now() - started;
-        if (!wentDown && elapsed > RESTORE_SHUTDOWN_DEADLINE) {
-          error =
-            "The restore was scheduled, but Gitadel did not stop to run it. Check the server logs, then reload this page.";
-          return;
-        }
-        if (elapsed > RESTORE_DEADLINE) {
-          error =
-            "Gitadel did not come back within an hour of starting the restore. Check the server logs, then reload this page.";
-          return;
-        }
-        await pause(1_000);
-      }
-    } finally {
-      restoring = false;
-    }
-  }
-
-  async function isHealthy(signal: AbortSignal): Promise<boolean> {
-    try {
-      const response = await fetch("/healthz", { cache: "no-store", signal });
-      return response.ok;
-    } catch {
-      // The server is expected to be unavailable during maintenance.
-      return false;
-    }
-  }
-
-  async function run(
-    task: () => Promise<void>,
-    failureTarget: "inline" | "toast" = "toast",
-  ): Promise<boolean> {
-    working = true;
-    error = null;
-    try {
-      await task();
-      return true;
-    } catch (caught) {
-      // Nothing is left to report to once the page has been closed.
-      if (lifetime.signal.aborted) return false;
-      const message = errorMessage(caught);
-      if (
-        caught instanceof BackupProgressFailure ||
-        failureTarget === "inline"
-      ) {
-        error = message;
-      } else {
-        toast.error(message);
-      }
-      return false;
-    } finally {
-      working = false;
-    }
-  }
-
-  function fileName(key: string) {
-    return key.split("/").at(-1) ?? key;
-  }
-
-  function isAutomaticBackup(snapshot: BackupSnapshot) {
-    return (
-      snapshot.name === "pre restore safety" ||
-      snapshot.name === "scheduled automatic backup"
-    );
-  }
-
-  function modeForSchedule(schedule: string | null) {
-    if (schedule === null) return "";
-    return SCHEDULE_OPTIONS.some(
-      (option) => option.value !== CUSTOM_SCHEDULE && option.value === schedule,
-    )
-      ? schedule
-      : CUSTOM_SCHEDULE;
-  }
-
-  function explainCron(expression: string) {
-    const normalized = expression.trim();
-    if (![5, 6, 7].includes(normalized.split(/\s+/).filter(Boolean).length)) {
-      return {
-        valid: false,
-        description: "Use a five-, six-, or seven-field cron expression.",
-      };
-    }
-    try {
-      const description = cronToString(normalized, {
-        use24HourTimeFormat: true,
-        verbose: true,
-      }).replace(/\.$/, "");
-      return { valid: true, description: `${description} (UTC).` };
-    } catch {
-      return {
-        valid: false,
-        description: "This is not a valid cron expression.",
-      };
-    }
-  }
 </script>
 
 <section class="flex flex-col gap-6" aria-label="Backups">
-  {#if providers.length > 0}
+  {#if backup.providers.length > 0}
     <div class="flex justify-end">
-      <Button type="button" onclick={openCreateBackup} disabled={working}>
+      <Button
+        type="button"
+        onclick={backup.openCreateBackup}
+        disabled={backup.busy}
+      >
         <CloudUpload data-icon="inline-start" /> Create backup
       </Button>
     </div>
   {/if}
 
-  {#if error}
+  {#if backup.error}
     <Alert.Root variant="destructive">
       <TriangleAlert />
       <Alert.Title>Backup operation failed</Alert.Title>
-      <Alert.Description>{error}</Alert.Description>
+      <Alert.Description>{backup.error}</Alert.Description>
     </Alert.Root>
   {/if}
 
-  {#if working && providers.length === 0}
+  {#if backup.busy && backup.providers.length === 0}
     <p class="flex items-center gap-2 text-sm text-muted-foreground">
       <Spinner />Loading backup providers…
     </p>
@@ -683,11 +66,11 @@
       <IntegrationAddCard
         title="Add backup provider"
         description="Connect another filesystem or S3 backup destination."
-        onclick={openCreateProvider}
+        onclick={backup.openCreateProvider}
       />
-      {#each providers as provider (provider.id)}
+      {#each backup.providers as provider (provider.id)}
         {@const catalogProvider =
-          providerCatalog.find(
+          backup.providerCatalog.find(
             (candidate) => candidate.slug === provider.provider,
           ) ?? null}
         <IntegrationConnectionCard
@@ -707,8 +90,8 @@
           detailLabel={provider.schedule
             ? `Next ${provider.next_backup_at ? formatDateTime(provider.next_backup_at) : "run pending"}`
             : null}
-          selected={provider.id === selectedProviderId}
-          onselect={() => void selectProvider(provider)}
+          selected={provider.id === backup.selectedProviderId}
+          onselect={() => void backup.selectProvider(provider)}
         >
           {#snippet icon()}
             {#if provider.provider === "filesystem"}
@@ -722,25 +105,28 @@
     </div>
   {/if}
 
-  {#if settings}
+  {#if backup.settings}
+    {@const selected = backup.settings}
     <div
       class="flex flex-wrap items-center justify-between gap-3 rounded-xl border bg-card/25 px-4 py-3"
     >
       <div class="min-w-0">
-        <p class="truncate text-sm font-medium">Managing {settings.name}</p>
+        <p class="truncate text-sm font-medium">
+          Managing {backup.settings.name}
+        </p>
         <p class="mt-0.5 text-xs text-muted-foreground">
-          {settings.provider === "filesystem"
-            ? settings.path
-            : `${settings.bucket} at ${settings.endpoint}`}
+          {backup.settings.provider === "filesystem"
+            ? backup.settings.path
+            : `${backup.settings.bucket} at ${backup.settings.endpoint}`}
         </p>
       </div>
       <div class="flex gap-2">
-        {#if !settings.managed_by_storage}
+        {#if !backup.settings.managed_by_storage}
           <Button
             type="button"
             variant="outline"
             size="sm"
-            onclick={() => openConfigureProvider(settings)}
+            onclick={() => backup.openConfigureProvider(selected)}
           >
             Configure
           </Button>
@@ -750,7 +136,7 @@
           variant="ghost"
           size="sm"
           class="text-muted-foreground hover:text-destructive"
-          onclick={() => requestProviderRemove(settings)}
+          onclick={() => backup.requestProviderRemove(selected)}
         >
           Remove
         </Button>
@@ -758,7 +144,7 @@
     </div>
   {/if}
 
-  {#if settings}
+  {#if backup.settings}
     <Card.Root>
       <Card.Header class="border-b">
         <div class="flex items-center gap-3">
@@ -766,8 +152,8 @@
           <div>
             <Card.Title>Automatic backups</Card.Title>
             <Card.Description>
-              Create complete snapshots with {settings.name} on a predefined interval
-              or UTC cron schedule.
+              Create complete snapshots with {backup.settings.name} on a predefined
+              interval or UTC cron schedule.
             </Card.Description>
           </div>
         </div>
@@ -776,17 +162,17 @@
         <form
           onsubmit={(event) => {
             event.preventDefault();
-            void saveSchedule();
+            void backup.saveSchedule();
           }}
         >
           <Field.Group>
             <Field.Field>
               <Field.Label for="automatic-backup-schedule">Schedule</Field.Label
               >
-              <Select.Root type="single" bind:value={scheduleMode}>
+              <Select.Root type="single" bind:value={backup.scheduleMode}>
                 <Select.Trigger id="automatic-backup-schedule" class="w-full">
                   {SCHEDULE_OPTIONS.find(
-                    (option) => option.value === scheduleMode,
+                    (option) => option.value === backup.scheduleMode,
                   )?.label ?? "Choose a schedule"}
                 </Select.Trigger>
                 <Select.Content>
@@ -805,16 +191,16 @@
               </Field.Description>
             </Field.Field>
 
-            {#if scheduleMode === CUSTOM_SCHEDULE}
-              <Field.Field data-invalid={!cronExplanation.valid}>
+            {#if backup.scheduleMode === CUSTOM_SCHEDULE}
+              <Field.Field data-invalid={!backup.cronExplanation.valid}>
                 <Field.Label for="automatic-backup-cron"
                   >Cron expression</Field.Label
                 >
                 <Input
                   id="automatic-backup-cron"
-                  bind:value={customCron}
+                  bind:value={backup.customCron}
                   class="font-mono"
-                  aria-invalid={!cronExplanation.valid}
+                  aria-invalid={!backup.cronExplanation.valid}
                   autocomplete="off"
                   spellcheck="false"
                   placeholder="0 2 * * *"
@@ -826,14 +212,18 @@
                 </Field.Description>
               </Field.Field>
               <Alert.Root
-                variant={cronExplanation.valid ? "default" : "destructive"}
+                variant={backup.cronExplanation.valid
+                  ? "default"
+                  : "destructive"}
               >
                 <CalendarClock />
                 <Alert.Title>
-                  {cronExplanation.valid ? "Cron translation" : "Invalid cron"}
+                  {backup.cronExplanation.valid
+                    ? "Cron translation"
+                    : "Invalid cron"}
                 </Alert.Title>
                 <Alert.Description
-                  >{cronExplanation.description}</Alert.Description
+                  >{backup.cronExplanation.description}</Alert.Description
                 >
               </Alert.Root>
             {/if}
@@ -844,17 +234,20 @@
                   Next automatic backup
                 </dt>
                 <dd class="mt-1 font-medium">
-                  {#if scheduleDirty}
+                  {#if backup.scheduleDirty}
                     Save the schedule to calculate the next run.
-                  {:else if settings.next_backup_at}
-                    {formatDateTime(settings.next_backup_at)}
+                  {:else if backup.settings.next_backup_at}
+                    {formatDateTime(backup.settings.next_backup_at)}
                   {:else}
                     Not scheduled
                   {/if}
                 </dd>
               </dl>
-              <Button type="submit" disabled={working || !canSaveSchedule}>
-                {#if savingSchedule}
+              <Button
+                type="submit"
+                disabled={backup.busy || !backup.canSaveSchedule}
+              >
+                {#if backup.savingSchedule}
                   <Spinner data-icon="inline-start" class="animate-spin" />
                   Saving…
                 {:else}
@@ -866,399 +259,45 @@
         </form>
       </Card.Content>
     </Card.Root>
-
-    <section class="overflow-hidden rounded-xl border bg-card/40 shadow-sm">
-      <header
-        class="flex flex-wrap items-center justify-between gap-3 border-b px-5 py-4"
-      >
-        <div class="flex items-center gap-3">
-          <ArchiveRestore class="size-4 text-muted-foreground" />
-          <div>
-            <h3 class="text-sm font-semibold">Snapshots</h3>
-            <p class="mt-0.5 text-xs text-muted-foreground">
-              Each snapshot includes the database, repositories, container
-              images, LFS, assets, host key, and effective configuration.
-            </p>
-          </div>
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={working}
-          onclick={() => void refreshSnapshots()}
-        >
-          <RefreshCw class="size-3.5" /> Refresh
-        </Button>
-      </header>
-
-      {#if creating && backupProgress}
-        <div
-          class="border-b bg-muted/20 px-5 py-4"
-          role="status"
-          aria-live="polite"
-        >
-          <div class="flex items-start gap-3">
-            {#if backupProgress.phase === "completed"}
-              <CheckCircle2 class="mt-0.5 size-4 shrink-0 text-emerald-400" />
-            {:else}
-              <Spinner class="mt-0.5 size-4 shrink-0 text-primary" />
-            {/if}
-            <div class="min-w-0 flex-1">
-              <div class="flex items-center justify-between gap-3">
-                <p class="text-sm font-medium">{backupProgress.message}</p>
-                {#if backupProgressPercent !== null}
-                  <span class="text-xs tabular-nums text-muted-foreground">
-                    {backupProgressPercent}%
-                  </span>
-                {/if}
-              </div>
-              {#if backupProgressPercent !== null}
-                <div
-                  class="mt-2 h-1.5 overflow-hidden rounded-full bg-muted"
-                  aria-label="Backup upload progress"
-                  aria-valuemin="0"
-                  aria-valuemax="100"
-                  aria-valuenow={backupProgressPercent}
-                  role="progressbar"
-                >
-                  <div
-                    class="h-full rounded-full bg-primary transition-[width] duration-300"
-                    style:width={`${backupProgressPercent}%`}
-                  ></div>
-                </div>
-                <p class="mt-1.5 text-xs text-muted-foreground">
-                  {formatBytes(backupProgress.processed_bytes ?? 0)} of
-                  {formatBytes(backupProgress.total_bytes ?? 0)} uploaded
-                </p>
-              {:else}
-                <p class="mt-1 text-xs text-muted-foreground">
-                  The server remains unavailable to normal requests while this
-                  phase runs.
-                </p>
-              {/if}
-            </div>
-          </div>
-        </div>
-      {/if}
-
-      {#if snapshots.length === 0}
-        <p class="p-5 text-sm text-muted-foreground">
-          No snapshots found under this prefix.
-        </p>
-      {:else}
-        <div class="motion-list divide-y">
-          {#each snapshots as snapshot (snapshot.key)}
-            <article
-              class="flex flex-wrap items-center justify-between gap-4 px-5 py-4"
-            >
-              <div class="min-w-0">
-                <p class="truncate text-sm font-medium" title={snapshot.key}>
-                  {snapshot.name ?? "Unnamed backup"}
-                </p>
-                <p
-                  class="mt-0.5 truncate font-mono text-xs text-muted-foreground"
-                >
-                  {fileName(snapshot.key)}
-                </p>
-                <div class="mt-2 flex flex-wrap gap-1.5">
-                  <Badge variant="outline">
-                    <CalendarDays data-icon="inline-start" />
-                    {formatDateTime(snapshot.created_at)}
-                  </Badge>
-                  <Badge variant="outline">
-                    <HardDrive data-icon="inline-start" />
-                    {formatBytes(snapshot.size)}
-                  </Badge>
-                  <Badge variant="outline">
-                    <Tag data-icon="inline-start" />
-                    Gitadel {snapshot.gitadel_version ?? "unknown"}
-                  </Badge>
-                  <Badge variant="secondary">
-                    {#if isAutomaticBackup(snapshot)}
-                      <Bot data-icon="inline-start" /> Auto-generated
-                    {:else}
-                      <UserRound data-icon="inline-start" /> Manual
-                    {/if}
-                  </Badge>
-                </div>
-              </div>
-              <div class="flex flex-wrap items-center gap-2">
-                <Button
-                  href={`${providerPath(settings.id)}/backups/object?key=${encodeURIComponent(snapshot.key)}`}
-                  download={fileName(snapshot.key)}
-                  variant="outline"
-                  size="sm"
-                  disabled={working}
-                >
-                  <Download class="size-3.5" /> Download
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={working}
-                  onclick={() => void validateSnapshot(snapshot)}
-                >
-                  Validate restore
-                </Button>
-                <Button
-                  type="button"
-                  variant="destructive"
-                  size="sm"
-                  disabled={working}
-                  onclick={() => requestDelete(snapshot)}
-                >
-                  <Trash2 class="size-3.5" /> Delete
-                </Button>
-              </div>
-            </article>
-          {/each}
-        </div>
-      {/if}
-    </section>
   {/if}
 
-  {#if preflight}
-    <section
-      class="overflow-hidden rounded-xl border border-destructive/35 bg-destructive/3 shadow-sm"
-    >
-      <header
-        class="flex items-start gap-3 border-b border-destructive/20 px-5 py-4"
-      >
-        <TriangleAlert class="mt-0.5 size-4 shrink-0 text-destructive" />
-        <div>
-          <h3 class="text-sm font-semibold">Replace this instance</h3>
-          <p class="mt-1 text-xs leading-relaxed text-muted-foreground">
-            Restoring <span class="font-medium text-foreground"
-              >{preflight.backup_name ?? "this backup"}</span
-            >
-            from Gitadel {preflight.gitadel_version ?? "unknown"} will stop Gitadel
-            and completely replace the current database, users, settings, repositories,
-            LFS data, assets, and SSH host key.
-          </p>
-        </div>
-      </header>
-      <div class="grid gap-5 p-5">
-        <dl
-          class="grid gap-3 rounded-lg border bg-background/50 p-4 text-sm sm:grid-cols-3"
-        >
-          <div>
-            <dt class="text-xs text-muted-foreground">Created</dt>
-            <dd class="mt-1 font-medium">
-              {formatDateTime(preflight.created_at)}
-            </dd>
-          </div>
-          <div>
-            <dt class="text-xs text-muted-foreground">Verified files</dt>
-            <dd class="mt-1 font-medium">{preflight.file_count}</dd>
-          </div>
-          <div>
-            <dt class="text-xs text-muted-foreground">Restored size</dt>
-            <dd class="mt-1 font-medium">
-              {formatBytes(preflight.uncompressed_size)}
-            </dd>
-          </div>
-        </dl>
-
-        {#if preflight.version_warning}
-          <p
-            class="rounded-md border border-amber-500/30 bg-amber-500/8 p-3 text-sm text-amber-200"
-          >
-            {preflight.version_warning} Review release notes and compatibility before
-            continuing.
-          </p>
-        {/if}
-
-        <label
-          for="restore-safety-backup"
-          class="flex items-start gap-3 rounded-lg border p-4 text-sm"
-        >
-          <Checkbox
-            id="restore-safety-backup"
-            class="mt-0.5"
-            bind:checked={createSafetyBackup}
-          />
-          <span>
-            <span class="flex items-center gap-2 font-medium">
-              <ShieldCheck class="size-4 text-emerald-400" />
-              Back up the current instance first
-            </span>
-            <span
-              class="mt-1 block text-xs leading-relaxed text-muted-foreground"
-            >
-              Recommended. Restore will stop if this safety backup cannot be
-              created with {settings?.name ?? "the selected provider"}.
-            </span>
-          </span>
-        </label>
-
-        {#if !createSafetyBackup}
-          <p
-            class="rounded-md border border-amber-500/30 bg-amber-500/8 p-3 text-sm text-amber-200"
-          >
-            No recovery snapshot of the current instance will be created.
-          </p>
-        {/if}
-
-        <Field.Field>
-          <Field.Label for="restore-admin-password">
-            Administrator password
-          </Field.Label>
-          <Input
-            id="restore-admin-password"
-            bind:value={password}
-            type="password"
-            autocomplete="current-password"
-            required
-          />
-        </Field.Field>
-        <label
-          for="confirm-restore-replacement"
-          class="flex items-start gap-3 text-sm"
-        >
-          <Checkbox
-            id="confirm-restore-replacement"
-            class="mt-0.5"
-            bind:checked={confirmReplacement}
-          />
-          <span>
-            I understand that all current instance data will be replaced.
-          </span>
-        </label>
-        {#if restoring}
-          <p
-            class="flex items-center gap-2 text-sm text-muted-foreground"
-            role="status"
-          >
-            <Spinner />
-            Restoring. This page reloads when Gitadel is back.
-          </p>
-        {/if}
-        <div class="flex justify-end gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            disabled={working || restoring}
-            onclick={() => (preflight = null)}>Cancel</Button
-          >
-          <Button
-            type="button"
-            variant="destructive"
-            disabled={working ||
-              restoring ||
-              !password ||
-              !confirmReplacement}
-            onclick={() => void restoreBackup()}
-          >
-            Restore this backup
-          </Button>
-        </div>
-      </div>
-    </section>
-  {/if}
+  <BackupSnapshotList {backup} />
+  <BackupRestorePanel {backup} />
 </section>
 
-<Dialog.Root bind:open={createDialogOpen}>
-  <Dialog.Content class="ring-foreground/20 sm:max-w-md">
-    <Dialog.Header>
-      <Dialog.Title>Create backup</Dialog.Title>
-      <Dialog.Description>
-        Choose the destination first, then optionally name this snapshot.
-      </Dialog.Description>
-    </Dialog.Header>
-    <form
-      class="grid gap-4"
-      onsubmit={(event) => {
-        event.preventDefault();
-        void createBackup();
-      }}
-    >
-      <Field.Field>
-        <Field.Label for="backup-provider">Storage provider</Field.Label>
-        <Select.Root type="single" bind:value={createProviderId}>
-          <Select.Trigger id="backup-provider" class="w-full">
-            {providers.find((provider) => provider.id === createProviderId)
-              ?.name ?? "Choose a storage provider"}
-          </Select.Trigger>
-          <Select.Content>
-            <Select.Group>
-              <Select.Label>Backup destinations</Select.Label>
-              {#each providers as provider (provider.id)}
-                <Select.Item value={provider.id} label={provider.name}>
-                  {provider.name}
-                </Select.Item>
-              {/each}
-            </Select.Group>
-          </Select.Content>
-        </Select.Root>
-      </Field.Field>
-      <Field.Field>
-        <Field.Label for="backup-name">
-          Backup name <span class="font-normal text-muted-foreground"
-            >(optional)</span
-          >
-        </Field.Label>
-        <Input
-          id="backup-name"
-          bind:value={backupName}
-          maxlength={80}
-          pattern="[A-Za-z0-9 _.-]+"
-          placeholder="Before platform upgrade"
-        />
-      </Field.Field>
-      <Dialog.Footer>
-        <Button
-          type="button"
-          variant="ghost"
-          onclick={() => (createDialogOpen = false)}
-          disabled={creating}
-        >
-          Cancel
-        </Button>
-        <Button type="submit" disabled={creating || !createProviderId}>
-          {#if creating}
-            <Spinner class="size-4" data-icon="inline-start" /> Creating backup…
-          {:else}
-            <CloudUpload class="size-4" data-icon="inline-start" /> Create backup
-          {/if}
-        </Button>
-      </Dialog.Footer>
-    </form>
-  </Dialog.Content>
-</Dialog.Root>
+<BackupCreateDialog {backup} />
 
-<Dialog.Root bind:open={providerEditorOpen}>
+<Dialog.Root bind:open={backup.providerEditorOpen}>
   <Dialog.Content class="ring-foreground/20 sm:max-w-lg">
     <Dialog.Header>
       <Dialog.Title>
-        {editingProvider
-          ? `Configure ${editingProvider.name}`
+        {backup.editingProvider
+          ? `Configure ${backup.editingProvider.name}`
           : "Add backup provider"}
       </Dialog.Title>
       <Dialog.Description>
-        {editingProvider
+        {backup.editingProvider
           ? "Update this destination, test it, then save the exact configuration."
           : "Choose a provider, test the destination, then add it to the backup catalog."}
       </Dialog.Description>
     </Dialog.Header>
-    {#key editorRevision}
+    {#key backup.editorRevision}
       <BackupProviderEditor
-        providers={providerCatalog}
-        connection={editingProvider}
-        onsave={saveProvider}
-        ontest={testProvider}
-        oncancel={() => (providerEditorOpen = false)}
+        providers={backup.providerCatalog}
+        connection={backup.editingProvider}
+        onsave={backup.saveProvider}
+        ontest={backup.testProvider}
+        oncancel={() => (backup.providerEditorOpen = false)}
       />
     {/key}
   </Dialog.Content>
 </Dialog.Root>
 
-<AlertDialog.Root bind:open={providerRemoveDialogOpen}>
+<AlertDialog.Root bind:open={backup.providerRemoveDialogOpen}>
   <AlertDialog.Content>
     <AlertDialog.Header>
       <AlertDialog.Title>
-        Remove {pendingProviderRemove?.name ?? "this backup provider"}?
+        Remove {backup.pendingProviderRemove?.name ?? "this backup provider"}?
       </AlertDialog.Title>
       <AlertDialog.Description>
         Existing backup files remain at the destination, but Gitadel will no
@@ -1269,45 +308,9 @@
       <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
       <AlertDialog.Action
         variant="destructive"
-        onclick={() => void confirmProviderRemove()}
+        onclick={() => void backup.confirmProviderRemove()}
       >
         Remove provider
-      </AlertDialog.Action>
-    </AlertDialog.Footer>
-  </AlertDialog.Content>
-</AlertDialog.Root>
-
-<AlertDialog.Root bind:open={deleteDialogOpen}>
-  <AlertDialog.Content class="min-w-0 overflow-hidden sm:max-w-md">
-    <AlertDialog.Header>
-      <AlertDialog.Title class="break-words">
-        Delete {pendingDelete?.name ?? "this backup"}?
-      </AlertDialog.Title>
-      <AlertDialog.Description class="min-w-0 text-left">
-        This permanently removes
-        {#if pendingDelete}
-          <span class="break-all font-mono text-foreground">
-            {fileName(pendingDelete.key)}
-          </span>
-        {:else}
-          the snapshot
-        {/if}
-        from {settings?.name ?? "the selected provider"}. It cannot be restored
-        after deletion.
-      </AlertDialog.Description>
-    </AlertDialog.Header>
-    <AlertDialog.Footer>
-      <AlertDialog.Cancel disabled={deleting}>Cancel</AlertDialog.Cancel>
-      <AlertDialog.Action
-        variant="destructive"
-        disabled={deleting}
-        onclick={() => void deleteSnapshot()}
-      >
-        {#if deleting}
-          <Spinner class="size-3.5" data-icon="inline-start" /> Deleting…
-        {:else}
-          Delete backup
-        {/if}
       </AlertDialog.Action>
     </AlertDialog.Footer>
   </AlertDialog.Content>
