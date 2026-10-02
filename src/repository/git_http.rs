@@ -427,7 +427,8 @@ async fn feed_request_body<S, W>(
     let _ = pipe.shutdown().await;
 }
 
-enum AuthorizationError {
+#[derive(Debug)]
+pub(super) enum AuthorizationError {
     Status(StatusCode),
     AuthenticationRequired,
     Api(ApiError),
@@ -443,7 +444,7 @@ impl IntoResponse for AuthorizationError {
     }
 }
 
-async fn authorized_repository(
+pub(super) async fn authorized_repository(
     state: &GitHttpState,
     headers: &HeaderMap,
     namespace: &str,
@@ -452,10 +453,19 @@ async fn authorized_repository(
     let name = repository_name(repository_segment);
     let repository = match state.find(namespace, name).await {
         Ok(repository) => repository,
-        Err(_) if headers.get(header::AUTHORIZATION).is_none() => {
-            return Err(AuthorizationError::AuthenticationRequired);
+        Err(error) => {
+            // Answer exactly as a private repository the caller cannot read
+            // would: credentials are checked first, so only an authenticated
+            // caller learns that there is nothing here for them.
+            let token =
+                token_from_headers(headers).ok_or(AuthorizationError::AuthenticationRequired)?;
+            state
+                .identity()
+                .authenticate_token(&token, SCOPE_REPOSITORY_READ)
+                .await
+                .map_err(|_| AuthorizationError::AuthenticationRequired)?;
+            return Err(AuthorizationError::Api(error));
         }
-        Err(error) => return Err(AuthorizationError::Api(error)),
     };
     if repository.visibility == "public" {
         return Ok(repository);

@@ -395,7 +395,7 @@ async fn upsert_lfs_object(
     Ok(())
 }
 
-async fn authorized_repository(
+pub(super) async fn authorized_repository(
     state: &GitHttpState,
     headers: &HeaderMap,
     namespace: &str,
@@ -405,7 +405,20 @@ async fn authorized_repository(
     let name = repository_segment
         .strip_suffix(".git")
         .ok_or_else(ApiError::not_found)?;
-    let repository = state.find(namespace, name).await?;
+    let scope = match permission {
+        LfsPermission::Read => SCOPE_REPOSITORY_READ,
+        LfsPermission::Write => SCOPE_WRITE,
+    };
+    let repository = match state.find(namespace, name).await {
+        Ok(repository) => repository,
+        Err(error) => {
+            // Answer exactly as a private repository the caller cannot reach
+            // would: credentials are checked before anything is revealed.
+            let token = token_from_headers(headers).ok_or_else(ApiError::unauthorized)?;
+            state.identity().authenticate_token(&token, scope).await?;
+            return Err(error);
+        }
+    };
     if permission == LfsPermission::Read
         && state.actions_state().settings().lfs_read
         && let Some(token) = token_from_headers(headers)
@@ -439,16 +452,7 @@ async fn authorized_repository(
     }
 
     let token = token_from_headers(headers).ok_or_else(ApiError::unauthorized)?;
-    let actor = state
-        .identity()
-        .authenticate_token(
-            &token,
-            match permission {
-                LfsPermission::Read => SCOPE_REPOSITORY_READ,
-                LfsPermission::Write => SCOPE_WRITE,
-            },
-        )
-        .await?;
+    let actor = state.identity().authenticate_token(&token, scope).await?;
     state
         .authorize(
             &repository,

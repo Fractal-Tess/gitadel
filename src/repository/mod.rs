@@ -776,17 +776,18 @@ impl RepositoryState {
         user_id: Option<Uuid>,
         permission: Permission,
     ) -> Result<(), ApiError> {
+        // Access comes first: the read-only answers below would otherwise
+        // tell a caller without access that a private repository exists.
+        if !self.can_access(repository, user_id, permission).await? {
+            return Err(ApiError::not_found());
+        }
         if permission == Permission::Write && repository.archived_at.is_some() {
             return Err(ApiError::forbidden("Archived repositories are read-only."));
         }
         if permission == Permission::Write && repository.mirrored {
             return Err(ApiError::forbidden("Mirrored repositories are read-only."));
         }
-        if self.can_access(repository, user_id, permission).await? {
-            Ok(())
-        } else {
-            Err(ApiError::not_found())
-        }
+        Ok(())
     }
 
     pub async fn can_access(
