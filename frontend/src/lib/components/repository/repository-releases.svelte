@@ -278,6 +278,18 @@
         </article>
       {/each}
     </div>
+    {#if repository.releases.releasesHaveMore}
+      <div class="flex justify-center border-t py-6">
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={repository.releases.releasesLoadingMore}
+          onclick={() => void repository.releases.loadMoreReleases()}
+        >
+          {repository.releases.releasesLoadingMore ? "Loading…" : "Load more"}
+        </Button>
+      </div>
+    {/if}
   {:else}
     <div class="py-20 text-center">
       <Package class="mx-auto size-9 text-muted-foreground" />

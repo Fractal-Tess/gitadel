@@ -4,6 +4,7 @@ import { actionRunsSchema, type ActionRuns } from "$lib/api/actions.js";
 import { historySchema, type History } from "$lib/api/repositories.js";
 import { issueLabelSchema, issueSchema, issueUserSchema, type Issue, type IssueLabel, type IssueUser } from "$lib/api/issues.js";
 import { releaseSchema, type Release } from "$lib/api/releases.js";
+import { LIST_PAGE_SIZE } from "$lib/repository/pagination.js";
 import { requestJson } from "$lib/api/transport.js";
 import { webhookSchema, type Webhook } from "$lib/api/webhooks.js";
 import { authorizationCacheScopeKey, type AuthorizationCacheScope } from "$lib/cache-scope.js";
@@ -45,8 +46,13 @@ export function loadRepositoryActionRuns(namespace: string, name: string, _scope
   if (commit) query.set("commit", commit);
   return requestJson(`${repositoryApi(namespace, name, "/actions/runs")}?${query}`, actionRunsSchema);
 }
-export function loadRepositoryReleases(namespace: string, name: string, _scope: AuthorizationCacheScope, _refresh = false): Promise<Release[]> { return requestJson(repositoryApi(namespace, name, "/releases"), z.array(releaseSchema)); }
-export function loadRepositoryIssues(namespace: string, name: string, _scope: AuthorizationCacheScope, _refresh = false): Promise<Issue[]> { return requestJson(repositoryApi(namespace, name, "/issues"), z.array(issueSchema)); }
+function pageQuery(page: number): string { return String(new URLSearchParams({ page: String(page), per_page: String(LIST_PAGE_SIZE) })); }
+export function loadRepositoryReleases(namespace: string, name: string, scope: AuthorizationCacheScope, page = 1, refresh = false): Promise<Release[]> {
+  return loadCached(scopedDatasetKey(scope, namespace, name, `releases:${page}`), () => requestJson(`${repositoryApi(namespace, name, "/releases")}?${pageQuery(page)}`, z.array(releaseSchema)), refresh);
+}
+export function loadRepositoryIssues(namespace: string, name: string, scope: AuthorizationCacheScope, page = 1, refresh = false): Promise<Issue[]> {
+  return loadCached(scopedDatasetKey(scope, namespace, name, `issues:${page}`), () => requestJson(`${repositoryApi(namespace, name, "/issues")}?${pageQuery(page)}`, z.array(issueSchema)), refresh);
+}
 export function loadRepositoryIssueLabels(namespace: string, name: string, _scope: AuthorizationCacheScope, _refresh = false): Promise<IssueLabel[]> { return requestJson(repositoryApi(namespace, name, "/issue-labels"), z.array(issueLabelSchema)); }
 export function loadRepositoryAssignableUsers(namespace: string, name: string, _scope: AuthorizationCacheScope, _refresh = false): Promise<IssueUser[]> { return requestJson(repositoryApi(namespace, name, "/assignable-users"), z.array(issueUserSchema)); }
 export function loadRepositoryWebhooks(namespace: string, name: string, _scope: AuthorizationCacheScope, _refresh = false): Promise<Webhook[]> {

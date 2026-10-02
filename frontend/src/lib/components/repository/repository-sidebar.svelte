@@ -363,9 +363,10 @@
               class="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
               onclick={() => repository.navigate("releases")}
             >
-              {repository.releases.releases.length} total<ArrowRight
-                class="size-3"
-              />
+              {repository.releases.releases.length}{repository.releases
+                .releasesHaveMore
+                ? "+"
+                : ""} total<ArrowRight class="size-3" />
             </button>
           {/if}
         </div>

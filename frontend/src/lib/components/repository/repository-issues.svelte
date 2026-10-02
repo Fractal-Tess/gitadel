@@ -604,6 +604,22 @@
               </Empty.Root>
             </li>
           {/each}
+          {#if repository.issues.issuesHaveMore}
+            <li class="flex flex-col items-center gap-2 px-4 py-4">
+              <p class="text-xs text-muted-foreground">
+                Filters cover the {repository.issues.issues.length} issues loaded
+                so far.
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={repository.issues.issuesLoadingMore}
+                onclick={() => void repository.issues.loadMoreIssues()}
+              >
+                {repository.issues.issuesLoadingMore ? "Loading…" : "Load more"}
+              </Button>
+            </li>
+          {/if}
         {/if}
       </ul>
     </div>

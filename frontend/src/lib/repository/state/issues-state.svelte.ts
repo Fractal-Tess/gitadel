@@ -23,6 +23,7 @@ import {
   loadRepositoryIssueLabels,
   loadRepositoryIssues,
 } from "$lib/repository/repository-data-cache.js";
+import { appendPage, loadPages } from "$lib/repository/pagination.js";
 import type { RepositoryFeatureContext } from "./shared.js";
 import { repositoryApi } from "./shared.js";
 
@@ -52,11 +53,17 @@ export class RepositoryIssuesState {
   assignableUsersLoaded = $state(false);
   issuesLoading = $state(false);
   issuesLoaded = $state(false);
+  /** Whether the server holds issues beyond the ones loaded. */
+  issuesHaveMore = $state(false);
+  issuesLoadingMore = $state(false);
   issuePending = $state(false);
   commentPending = $state(false);
   labelPending = $state(false);
 
   #destroyed = false;
+  #issuePages = 1;
+  // Advanced by every full load, so a page requested before it is dropped.
+  #issuesGeneration = 0;
   constructor(context: RepositoryFeatureContext, callbacks: IssuesCallbacks) {
     this.namespace = context.locator.namespace;
     this.name = context.locator.name;
@@ -74,18 +81,59 @@ export class RepositoryIssuesState {
   async loadIssues(init: RequestInit = {}): Promise<void> {
     this.issuesLoading = true;
     try {
-      const issues = await loadRepositoryIssues(
-        this.namespace,
-        this.name,
-        this.scope,
-        !init.signal,
+      // A reload covers every page already on screen, so the list does not
+      // shrink back to its first page after an edit.
+      const loaded = await loadPages(
+        (page) =>
+          loadRepositoryIssues(
+            this.namespace,
+            this.name,
+            this.scope,
+            page,
+            !init.signal,
+          ),
+        this.#issuePages,
       );
       if (init.signal?.aborted || this.#destroyed || !this.isScopeCurrent())
         return;
-      this.issues = issues;
+      this.#issuesGeneration += 1;
+      this.#issuePages = Math.max(1, loaded.pages);
+      this.issues = loaded.items;
+      this.issuesHaveMore = loaded.hasMore;
       this.issuesLoaded = true;
     } finally {
       this.issuesLoading = false;
+    }
+  }
+  async loadMoreIssues(): Promise<void> {
+    if (this.issuesLoadingMore || !this.issuesHaveMore) return;
+    const generation = this.#issuesGeneration;
+    this.issuesLoadingMore = true;
+    try {
+      const page = await loadRepositoryIssues(
+        this.namespace,
+        this.name,
+        this.scope,
+        this.#issuePages + 1,
+        true,
+      );
+      if (
+        this.#destroyed ||
+        !this.isScopeCurrent() ||
+        generation !== this.#issuesGeneration
+      )
+        return;
+      const loaded = appendPage(
+        { items: this.issues, pages: this.#issuePages, hasMore: true },
+        page,
+      );
+      this.#issuePages = loaded.pages;
+      this.issues = loaded.items;
+      this.issuesHaveMore = loaded.hasMore;
+    } catch (caught) {
+      toast.error(errorMessage(caught));
+    } finally {
+      this.issuesLoadingMore = false;
     }
   }
   async loadIssue(number: number, init: RequestInit = {}): Promise<Issue> {

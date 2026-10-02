@@ -11,6 +11,7 @@ import {
   requestJson,
 } from "$lib/api/transport.js";
 import { loadRepositoryReleases } from "$lib/repository/repository-data-cache.js";
+import { appendPage, loadPages } from "$lib/repository/pagination.js";
 import type { RepositoryFeatureContext } from "./shared.js";
 import { repositoryApi } from "./shared.js";
 
@@ -28,9 +29,15 @@ export class RepositoryReleasesState {
   releasesLoading = $state(false);
   releasesLoaded = $state(false);
   releasesLoadFailed = $state(false);
+  /** Whether the server holds releases beyond the ones loaded. */
+  releasesHaveMore = $state(false);
+  releasesLoadingMore = $state(false);
   releasePending = $state(false);
   releaseAssetPending = $state(false);
   #destroyed = false;
+  #releasePages = 1;
+  // Advanced by every full load, so a page requested before it is dropped.
+  #releasesGeneration = 0;
   constructor(context: RepositoryFeatureContext, callbacks: ReleasesCallbacks) {
     this.namespace = context.locator.namespace;
     this.name = context.locator.name;
@@ -53,21 +60,62 @@ export class RepositoryReleasesState {
     this.releasesLoading = true;
     this.releasesLoadFailed = false;
     try {
-      const releases = await loadRepositoryReleases(
-        this.namespace,
-        this.name,
-        this.scope,
-        !init.signal,
+      // A reload covers every page already on screen, so the list does not
+      // shrink back to its first page after an edit.
+      const loaded = await loadPages(
+        (page) =>
+          loadRepositoryReleases(
+            this.namespace,
+            this.name,
+            this.scope,
+            page,
+            !init.signal,
+          ),
+        this.#releasePages,
       );
       if (init.signal?.aborted || this.#destroyed || !this.isScopeCurrent())
         return;
-      this.releases = releases;
+      this.#releasesGeneration += 1;
+      this.#releasePages = Math.max(1, loaded.pages);
+      this.releases = loaded.items;
+      this.releasesHaveMore = loaded.hasMore;
       this.releasesLoaded = true;
     } catch (caught) {
       this.releasesLoadFailed = true;
       throw caught;
     } finally {
       this.releasesLoading = false;
+    }
+  }
+  async loadMoreReleases(): Promise<void> {
+    if (this.releasesLoadingMore || !this.releasesHaveMore) return;
+    const generation = this.#releasesGeneration;
+    this.releasesLoadingMore = true;
+    try {
+      const page = await loadRepositoryReleases(
+        this.namespace,
+        this.name,
+        this.scope,
+        this.#releasePages + 1,
+        true,
+      );
+      if (
+        this.#destroyed ||
+        !this.isScopeCurrent() ||
+        generation !== this.#releasesGeneration
+      )
+        return;
+      const loaded = appendPage(
+        { items: this.releases, pages: this.#releasePages, hasMore: true },
+        page,
+      );
+      this.#releasePages = loaded.pages;
+      this.releases = loaded.items;
+      this.releasesHaveMore = loaded.hasMore;
+    } catch (caught) {
+      toast.error(errorMessage(caught));
+    } finally {
+      this.releasesLoadingMore = false;
     }
   }
   async createRelease(

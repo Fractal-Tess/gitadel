@@ -306,8 +306,8 @@ describe("repository data cache", () => {
         "/api/v1/repositories/acme/widgets/assignable-users",
         "/api/v1/repositories/acme/widgets/history?rev=main&page=1&per_page=30",
         "/api/v1/repositories/acme/widgets/issue-labels",
-        "/api/v1/repositories/acme/widgets/issues",
-        "/api/v1/repositories/acme/widgets/releases",
+        "/api/v1/repositories/acme/widgets/issues?page=1&per_page=100",
+        "/api/v1/repositories/acme/widgets/releases?page=1&per_page=100",
       ].sort(),
     );
   });
