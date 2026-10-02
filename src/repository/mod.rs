@@ -27,6 +27,7 @@ mod registry;
 mod releases;
 mod resources;
 mod signature;
+mod source_archive;
 mod ssh;
 mod statuses;
 mod topics;
