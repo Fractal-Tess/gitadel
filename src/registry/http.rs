@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
@@ -9,7 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::any,
 };
-use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, DbErr, Statement};
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
@@ -841,49 +839,80 @@ async fn catalog(
     let parameters = parameters(query)?;
     let size = page_size(&parameters)?;
     let last = parameter(&parameters, "last").unwrap_or("");
-    let mut names = BTreeSet::new();
-    let mut pages = repository::Entity::find()
-        .filter(repository::Column::DeletedAt.is_null())
-        .order_by_asc(repository::Column::Id)
-        .paginate(state.repositories.identity().database(), 128);
-    while let Some(repositories) = pages.fetch_and_next().await.map_err(|error| {
-        tracing::error!(%error, "Registry catalog query failed");
-        RegistryError::internal()
-    })? {
-        for repository in repositories {
-            if !state
-                .repositories
-                .can_access(&repository, actor, Permission::Read)
-                .await
-                .map_err(|_| RegistryError::internal())?
-            {
-                continue;
-            }
-            for suffix in state.store.list_images(repository.id).await? {
-                let name = if suffix.is_empty() {
-                    format!("{}/{}", repository.namespace, repository.name)
-                } else {
-                    format!("{}/{}/{}", repository.namespace, repository.name, suffix)
-                };
-                if name.as_str() > last && parse_image_name(&name).is_ok() {
-                    names.insert(name);
-                    if names.len() > size + 1 {
-                        names.pop_last();
-                    }
-                }
-            }
-        }
-    }
-    let more = names.len() > size;
-    if more {
-        names.pop_last();
-    }
-    let names: Vec<_> = names.into_iter().collect();
+    let (names, more) = catalog_page(state.repositories.identity().database(), actor, last, size)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "Registry catalog query failed");
+            RegistryError::internal()
+        })?;
     let mut response = Json(serde_json::json!({"repositories": names})).into_response();
     if more && let Some(last) = names.last() {
         next_link(&mut response, "/v2/_catalog", size, last)?;
     }
     Ok(response)
+}
+
+/// One page of image names the actor may pull, in name order after `last`,
+/// and whether more follow.
+///
+/// The catalog is reachable without credentials, so its cost must not grow
+/// with the number of repositories: readability, the `last` cursor, ordering,
+/// and the page limit are all applied by one statement over the images that
+/// exist, rather than by an access query and an image listing per repository.
+///
+/// The readability rule restates `RepositoryState::can_access` for
+/// `Permission::Read` and has to change with it.
+async fn catalog_page(
+    database: &DatabaseConnection,
+    actor: Option<Uuid>,
+    last: &str,
+    size: usize,
+) -> Result<(Vec<String>, bool), DbErr> {
+    let mut readable = "r.visibility = 'public'".to_owned();
+    if actor.is_some() {
+        readable.push_str(
+            " OR r.namespace IN (SELECT slug FROM namespaces WHERE kind = 'user' AND user_id = ?1) \
+             OR (r.id IN (SELECT repository_id FROM repository_collaborators WHERE user_id = ?1) \
+                 AND r.namespace IN (SELECT slug FROM namespaces WHERE kind = 'user')) \
+             OR r.namespace IN (SELECT slug FROM namespaces WHERE kind = 'organization' \
+                 AND organization_id IN \
+                     (SELECT organization_id FROM organization_members WHERE user_id = ?1))",
+        );
+    }
+    let sql = format!(
+        "SELECT image FROM (\
+             SELECT r.namespace || '/' || r.name || \
+                    CASE WHEN i.name = '' THEN '' ELSE '/' || i.name END AS image \
+             FROM registry_images i JOIN repositories r ON r.id = i.repository_id \
+             WHERE r.deleted_at IS NULL AND ({readable})\
+         ) WHERE image > ?2 ORDER BY image LIMIT ?3"
+    );
+    let limit = size as u64 + 1;
+    let mut names = Vec::with_capacity(size + 1);
+    let mut cursor = last.to_owned();
+    loop {
+        let rows = database
+            .query_all_raw(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                &sql,
+                [actor.into(), cursor.as_str().into(), limit.into()],
+            ))
+            .await?;
+        let fetched = rows.len() as u64;
+        for row in rows {
+            cursor = row.try_get::<String>("", "image")?;
+            // Rows written by an older layout may not name a pullable image.
+            if names.len() <= size && parse_image_name(&cursor).is_ok() {
+                names.push(cursor.clone());
+            }
+        }
+        if names.len() > size || fetched < limit {
+            break;
+        }
+    }
+    let more = names.len() > size;
+    names.truncate(size);
+    Ok((names, more))
 }
 
 async fn referrers(
@@ -956,5 +985,190 @@ mod tests {
             HeaderValue::from_static("bytes 0-3/4"),
         );
         assert!(upload_range(&headers).is_err());
+    }
+
+    mod catalog {
+        use chrono::Utc;
+        use sea_orm::{ActiveModelTrait as _, IntoActiveModel as _, Set};
+
+        use super::super::*;
+        use crate::{
+            actions::test_support,
+            entity::{
+                namespace, organization, organization_member, registry_image, repository,
+                repository_collaborator, user,
+            },
+        };
+
+        async fn repository_with_images(
+            database: &DatabaseConnection,
+            owner: &user::Model,
+            namespace: &str,
+            name: &str,
+            visibility: &str,
+            images: &[&str],
+        ) -> repository::Model {
+            let mut active = test_support::repository(database, owner, name)
+                .await
+                .into_active_model();
+            active.namespace = Set(namespace.to_owned());
+            active.visibility = Set(visibility.to_owned());
+            let repository = active.update(database).await.unwrap();
+            for image in images {
+                registry_image::ActiveModel {
+                    id: Set(Uuid::new_v4()),
+                    repository_id: Set(repository.id),
+                    name: Set((*image).to_owned()),
+                    created_at: Set(Utc::now()),
+                }
+                .insert(database)
+                .await
+                .unwrap();
+            }
+            repository
+        }
+
+        async fn names(database: &DatabaseConnection, actor: Option<Uuid>) -> Vec<String> {
+            catalog_page(database, actor, "", MAX_PAGE_SIZE)
+                .await
+                .unwrap()
+                .0
+        }
+
+        #[tokio::test]
+        async fn lists_only_images_the_actor_may_read() {
+            let database = test_support::database().await;
+            let alice = test_support::owner(&database, "alice").await;
+            let bob = test_support::owner(&database, "bob").await;
+            let carol = test_support::owner(&database, "carol").await;
+            let now = Utc::now();
+            let team = organization::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                slug: Set("team".to_owned()),
+                display_name: Set("Team".to_owned()),
+                avatar_updated_at: Set(None),
+                created_at: Set(now),
+                updated_at: Set(now),
+            }
+            .insert(&database)
+            .await
+            .unwrap();
+            namespace::ActiveModel {
+                slug: Set("team".to_owned()),
+                kind: Set("organization".to_owned()),
+                user_id: Set(None),
+                organization_id: Set(Some(team.id)),
+                created_at: Set(now),
+            }
+            .insert(&database)
+            .await
+            .unwrap();
+            organization_member::ActiveModel {
+                organization_id: Set(team.id),
+                user_id: Set(carol.id),
+                role: Set("member".to_owned()),
+                created_at: Set(now),
+            }
+            .insert(&database)
+            .await
+            .unwrap();
+
+            repository_with_images(&database, &alice, "alice", "open", "public", &["", "tools"])
+                .await;
+            repository_with_images(&database, &alice, "alice", "secret", "private", &[""]).await;
+            let shared =
+                repository_with_images(&database, &alice, "alice", "shared", "private", &["api"])
+                    .await;
+            repository_with_images(&database, &alice, "team", "internal", "private", &[""]).await;
+            repository_with_images(&database, &alice, "alice", "empty", "public", &[]).await;
+            let deleted =
+                repository_with_images(&database, &alice, "alice", "gone", "public", &[""]).await;
+            let mut deleted = deleted.into_active_model();
+            deleted.deleted_at = Set(Some(now));
+            deleted.update(&database).await.unwrap();
+            repository_collaborator::ActiveModel {
+                repository_id: Set(shared.id),
+                user_id: Set(bob.id),
+                role: Set("read".to_owned()),
+                created_at: Set(now),
+            }
+            .insert(&database)
+            .await
+            .unwrap();
+
+            assert_eq!(
+                names(&database, None).await,
+                ["alice/open", "alice/open/tools"]
+            );
+            assert_eq!(
+                names(&database, Some(alice.id)).await,
+                [
+                    "alice/open",
+                    "alice/open/tools",
+                    "alice/secret",
+                    "alice/shared/api"
+                ]
+            );
+            assert_eq!(
+                names(&database, Some(bob.id)).await,
+                ["alice/open", "alice/open/tools", "alice/shared/api"]
+            );
+            assert_eq!(
+                names(&database, Some(carol.id)).await,
+                ["alice/open", "alice/open/tools", "team/internal"]
+            );
+        }
+
+        #[tokio::test]
+        async fn pages_in_name_order_across_repositories() {
+            let database = test_support::database().await;
+            let alice = test_support::owner(&database, "alice").await;
+            // "alice/app-two" sorts between "alice/app" and "alice/app/web",
+            // so a page boundary can fall inside one repository's images.
+            repository_with_images(&database, &alice, "alice", "app", "public", &["", "web"]).await;
+            repository_with_images(&database, &alice, "alice", "app-two", "public", &[""]).await;
+            repository_with_images(&database, &alice, "alice", "zeta", "public", &[""]).await;
+
+            let (first, more) = catalog_page(&database, None, "", 2).await.unwrap();
+            assert_eq!(first, ["alice/app", "alice/app-two"]);
+            assert!(more);
+
+            let (second, more) = catalog_page(&database, None, "alice/app-two", 2)
+                .await
+                .unwrap();
+            assert_eq!(second, ["alice/app/web", "alice/zeta"]);
+            assert!(!more);
+
+            let (rest, more) = catalog_page(&database, None, "alice/zeta", 2)
+                .await
+                .unwrap();
+            assert!(rest.is_empty());
+            assert!(!more);
+        }
+
+        #[tokio::test]
+        async fn unpullable_names_do_not_shorten_a_page() {
+            let database = test_support::database().await;
+            let alice = test_support::owner(&database, "alice").await;
+            repository_with_images(
+                &database,
+                &alice,
+                "alice",
+                "app",
+                "public",
+                &["", "Bad Name", "also bad", "web", "worker"],
+            )
+            .await;
+
+            let (page, more) = catalog_page(&database, None, "", 2).await.unwrap();
+            assert_eq!(page, ["alice/app", "alice/app/web"]);
+            assert!(more);
+
+            let (page, more) = catalog_page(&database, None, "alice/app/web", 2)
+                .await
+                .unwrap();
+            assert_eq!(page, ["alice/app/worker"]);
+            assert!(!more);
+        }
     }
 }

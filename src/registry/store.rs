@@ -310,6 +310,7 @@ impl RegistryStore {
     }
 
     /// Image names of a repository, sorted.
+    #[cfg(test)]
     pub async fn list_images(&self, repository_id: Uuid) -> Result<Vec<String>, StoreError> {
         Ok(registry_image::Entity::find()
             .filter(registry_image::Column::RepositoryId.eq(repository_id))
