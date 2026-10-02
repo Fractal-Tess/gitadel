@@ -70,7 +70,15 @@
     { value: "0 2 * * 0", label: "Every Sunday at 02:00 UTC" },
     { value: CUSTOM_SCHEDULE, label: "Custom cron" },
   ];
+  const BACKUP_DEADLINE = 10 * 60 * 1_000;
+  // A restore replaces every repository, so it may run far longer than a
+  // backup; the server must at least have stopped well before that.
+  const RESTORE_SHUTDOWN_DEADLINE = 2 * 60 * 1_000;
+  const RESTORE_DEADLINE = 60 * 60 * 1_000;
   class BackupProgressFailure extends Error {}
+
+  // Aborted when the page is left, which ends every poll started here.
+  const lifetime = new AbortController();
 
   let providerCatalog = $state.raw<BackupProviderCatalogItem[]>([]);
   let providers = $state.raw<BackupProvider[]>([]);
@@ -130,11 +138,16 @@
   let createSafetyBackup = $state(true);
   let confirmReplacement = $state(false);
   let working = $state(false);
+  // Set from the moment a restore is accepted until the page reloads.
+  let restoring = $state(false);
   let error = $state<string | null>(null);
 
   onMount(() => {
     void initialize();
-    return () => progressSource?.close();
+    return () => {
+      lifetime.abort();
+      progressSource?.close();
+    };
   });
 
   async function initialize() {
@@ -193,12 +206,34 @@
     };
   }
 
-  async function fetchSnapshots(providerId = selectedProviderId) {
+  async function fetchSnapshots(
+    providerId = selectedProviderId,
+    init: RequestInit = {},
+  ) {
     if (!providerId) return [];
     return requestJson(
       `${providerPath(providerId)}/backups`,
       z.array(backupSnapshotSchema),
+      init,
     );
+  }
+
+  /** Resolves after `milliseconds`, or at once when the page is left. */
+  function pause(milliseconds: number): Promise<void> {
+    const signal = lifetime.signal;
+    return new Promise((resolve) => {
+      if (signal.aborted) {
+        resolve();
+        return;
+      }
+      const finish = () => {
+        window.clearTimeout(timer);
+        signal.removeEventListener("abort", finish);
+        resolve();
+      };
+      const timer = window.setTimeout(finish, milliseconds);
+      signal.addEventListener("abort", finish);
+    });
   }
 
   function openCreateProvider() {
@@ -396,17 +431,20 @@
   }
 
   async function waitForBackup(key: string, providerId: string) {
-    const deadline = Date.now() + 10 * 60 * 1_000;
-    await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+    const signal = lifetime.signal;
+    const deadline = Date.now() + BACKUP_DEADLINE;
+    await pause(1_500);
     while (Date.now() < deadline) {
+      signal.throwIfAborted();
       if (progressFailure) throw new BackupProgressFailure(progressFailure);
       try {
-        const updated = await fetchSnapshots(providerId);
+        const updated = await fetchSnapshots(providerId, { signal });
         if (updated.some((snapshot) => snapshot.key === key)) {
           snapshots = updated;
           return;
         }
       } catch (caught) {
+        signal.throwIfAborted();
         if (
           caught instanceof ApiFailure &&
           ![404, 502, 503].includes(caught.status)
@@ -415,7 +453,7 @@
         }
         // The full server is unavailable while the maintenance server reports progress.
       }
-      await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+      await pause(1_000);
     }
     throw new Error("Backup creation did not finish within 10 minutes.");
   }
@@ -497,19 +535,52 @@
     });
   }
 
+  /**
+   * Reloads once the restored server answers again. A healthy answer only
+   * counts after the server was seen down, since the server keeps answering
+   * for a moment before the restore stops it.
+   */
   async function waitForRestart() {
-    await new Promise((resolve) => window.setTimeout(resolve, 1_500));
-    for (;;) {
-      try {
-        const response = await fetch("/healthz", { cache: "no-store" });
-        if (response.ok) {
+    const signal = lifetime.signal;
+    const started = Date.now();
+    let wentDown = false;
+    restoring = true;
+    try {
+      await pause(1_500);
+      while (!signal.aborted) {
+        const healthy = await isHealthy(signal);
+        if (signal.aborted) return;
+        if (!healthy) {
+          wentDown = true;
+        } else if (wentDown) {
           window.location.reload();
           return;
         }
-      } catch {
-        // The server is expected to be unavailable during maintenance.
+        const elapsed = Date.now() - started;
+        if (!wentDown && elapsed > RESTORE_SHUTDOWN_DEADLINE) {
+          error =
+            "The restore was scheduled, but Gitadel did not stop to run it. Check the server logs, then reload this page.";
+          return;
+        }
+        if (elapsed > RESTORE_DEADLINE) {
+          error =
+            "Gitadel did not come back within an hour of starting the restore. Check the server logs, then reload this page.";
+          return;
+        }
+        await pause(1_000);
       }
-      await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+    } finally {
+      restoring = false;
+    }
+  }
+
+  async function isHealthy(signal: AbortSignal): Promise<boolean> {
+    try {
+      const response = await fetch("/healthz", { cache: "no-store", signal });
+      return response.ok;
+    } catch {
+      // The server is expected to be unavailable during maintenance.
+      return false;
     }
   }
 
@@ -523,6 +594,8 @@
       await task();
       return true;
     } catch (caught) {
+      // Nothing is left to report to once the page has been closed.
+      if (lifetime.signal.aborted) return false;
       const message =
         caught instanceof ApiFailure || caught instanceof Error
           ? caught.message
@@ -1069,17 +1142,29 @@
             I understand that all current instance data will be replaced.
           </span>
         </label>
+        {#if restoring}
+          <p
+            class="flex items-center gap-2 text-sm text-muted-foreground"
+            role="status"
+          >
+            <Spinner />
+            Restoring. This page reloads when Gitadel is back.
+          </p>
+        {/if}
         <div class="flex justify-end gap-2">
           <Button
             type="button"
             variant="outline"
-            disabled={working}
+            disabled={working || restoring}
             onclick={() => (preflight = null)}>Cancel</Button
           >
           <Button
             type="button"
             variant="destructive"
-            disabled={working || !password || !confirmReplacement}
+            disabled={working ||
+              restoring ||
+              !password ||
+              !confirmReplacement}
             onclick={() => void restoreBackup()}
           >
             Restore this backup
