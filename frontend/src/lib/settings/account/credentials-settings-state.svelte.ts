@@ -16,7 +16,7 @@ import {
 } from "$lib/api/account.js";
 import { webauthnCreationSchema } from "$lib/api/auth.js";
 import {
-  ApiFailure,
+  errorMessage,
   jsonBody,
   requestEmpty,
   requestJson,
@@ -189,10 +189,7 @@ export class CredentialsSettingsState {
       return true;
     } catch (caught) {
       if (!this.current(scope)) return false;
-      const message =
-        caught instanceof ApiFailure || caught instanceof Error
-          ? caught.message
-          : "The request failed.";
+      const message = errorMessage(caught);
       toast.error(message);
       return false;
     } finally {

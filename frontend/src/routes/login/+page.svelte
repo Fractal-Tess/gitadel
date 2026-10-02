@@ -15,7 +15,12 @@
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
-  import { ApiFailure, jsonBody, requestJson } from "$lib/api/transport.js";
+  import {
+    ApiFailure,
+    errorMessage,
+    jsonBody,
+    requestJson,
+  } from "$lib/api/transport.js";
   import {
     authResponseSchema,
     passwordLoginResponseSchema,
@@ -78,11 +83,7 @@
       // for the validated `returnTo` target.
       await app.refreshAuth();
     } catch (caught) {
-      toast.error(
-        caught instanceof ApiFailure || caught instanceof Error
-          ? caught.message
-          : "Sign in failed.",
-      );
+      toast.error(errorMessage(caught, "Sign in failed."));
     } finally {
       working = false;
     }

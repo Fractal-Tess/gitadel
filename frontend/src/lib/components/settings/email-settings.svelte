@@ -15,7 +15,7 @@
     testEmailSchema,
     type SmtpStatus,
   } from "$lib/api/email.js";
-  import { ApiFailure, jsonBody, requestJson } from "$lib/api/transport.js";
+  import { errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
 
   let status = $state.raw<SmtpStatus | null>(null);
   let loadError = $state<string | null>(null);
@@ -28,17 +28,11 @@
     none: "Unencrypted",
   } as const;
 
-  function message(caught: unknown, fallback: string) {
-    return caught instanceof ApiFailure || caught instanceof Error
-      ? caught.message
-      : fallback;
-  }
-
   onMount(async () => {
     try {
       status = await requestJson("/api/v1/admin/smtp", smtpStatusSchema);
     } catch (caught) {
-      loadError = message(caught, "Could not load email settings.");
+      loadError = errorMessage(caught, "Could not load email settings.");
     }
   });
 
@@ -56,7 +50,7 @@
       );
       toast.success(`Test email accepted for ${result.delivered_to}.`);
     } catch (caught) {
-      toast.error(message(caught, "The test email failed."));
+      toast.error(errorMessage(caught, "The test email failed."));
     } finally {
       sending = false;
     }

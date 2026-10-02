@@ -12,7 +12,7 @@
   import { Spinner } from "$lib/components/ui/spinner/index.js";
 
   import {
-    ApiFailure,
+    errorMessage,
     jsonBody,
     requestEmpty,
     requestJson,
@@ -62,12 +62,6 @@
     return () => clearTimeout(pollTimer);
   });
 
-  function message(caught: unknown, fallback: string): string {
-    return caught instanceof ApiFailure || caught instanceof Error
-      ? caught.message
-      : fallback;
-  }
-
   async function load(background = false): Promise<void> {
     if (!id) return;
     if (!background) loading = true;
@@ -79,7 +73,7 @@
       loadError = null;
     } catch (caught) {
       if (!background) {
-        loadError = message(caught, "Could not load this import.");
+        loadError = errorMessage(caught, "Could not load this import.");
       }
     } finally {
       if (!background) loading = false;
@@ -98,7 +92,7 @@
       );
       token = "";
     } catch (caught) {
-      toast.error(message(caught, "Could not retry this import."));
+      toast.error(errorMessage(caught, "Could not retry this import."));
     } finally {
       working = false;
     }
@@ -115,7 +109,7 @@
       await load(true);
     } catch (caught) {
       toast.error(
-        message(caught, "Could not cancel queued repositories."),
+        errorMessage(caught, "Could not cancel queued repositories."),
       );
     } finally {
       working = false;

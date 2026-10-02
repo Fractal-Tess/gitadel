@@ -9,7 +9,12 @@ import {
   clearRepositoryDataCache,
 } from "$lib/repository/repository-data-cache.js";
 import { clearRepositoryPreload } from "$lib/repository/repository-preload.js";
-import { ApiFailure, jsonBody, requestJson } from "$lib/api/transport.js";
+import {
+  ApiFailure,
+  errorMessage,
+  jsonBody,
+  requestJson,
+} from "$lib/api/transport.js";
 import {
   refsSchema,
   treeSchema,
@@ -21,7 +26,6 @@ import type { AuthStatus } from "$lib/api/auth.js";
 import type { AppState } from "$lib/state/app-state.svelte.js";
 import { copyText } from "$lib/clipboard.js";
 import {
-  errorMessage,
   repositoryApi,
   type RepositoryFeatureContext,
 } from "./state/shared.js";

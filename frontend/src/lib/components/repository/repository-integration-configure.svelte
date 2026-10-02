@@ -24,11 +24,7 @@
   import * as Select from "$lib/components/ui/select/index.js";
   import { Separator } from "$lib/components/ui/separator/index.js";
   import { Switch } from "$lib/components/ui/switch/index.js";
-  import {
-    ApiFailure,
-    jsonBody,
-    requestJson,
-  } from "$lib/api/transport.js";
+  import { errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
   import {
     dokployCreatedEnvironmentSchema,
     dokployRemoteCatalogSchema,
@@ -102,12 +98,6 @@
     void load();
   });
 
-  function errorMessage(error: unknown): string {
-    return error instanceof ApiFailure
-      ? error.message
-      : "Could not reach Gitadel.";
-  }
-
   async function load() {
     loading = true;
     loadError = null;
@@ -119,7 +109,7 @@
       showSetup = !parsed?.success;
       await loadCatalog();
     } catch (error) {
-      loadError = errorMessage(error);
+      loadError = errorMessage(error, "Could not reach Gitadel.");
     } finally {
       loading = false;
     }
@@ -133,8 +123,8 @@
         dokployRemoteCatalogSchema,
       );
     } catch (error) {
-      if (!link) loadError = errorMessage(error);
-      else operationError = errorMessage(error);
+      if (!link) loadError = errorMessage(error, "Could not reach Gitadel.");
+      else operationError = errorMessage(error, "Could not reach Gitadel.");
     } finally {
       catalogLoading = false;
     }
@@ -276,7 +266,7 @@
         };
         environmentProjectId = createdProject.id;
       }
-      toast.error(errorMessage(error));
+      toast.error(errorMessage(error, "Could not reach Gitadel."));
     } finally {
       working = false;
     }
@@ -336,7 +326,7 @@
       showSetup = false;
       toast.success(`${selectedResource.name} is connected.`);
     } catch (error) {
-      toast.error(errorMessage(error));
+      toast.error(errorMessage(error, "Could not reach Gitadel."));
     } finally {
       working = false;
     }
@@ -366,7 +356,7 @@
       showSetup = false;
       toast.success(`${resourceName} was created and connected.`);
     } catch (error) {
-      toast.error(errorMessage(error));
+      toast.error(errorMessage(error, "Could not reach Gitadel."));
     } finally {
       working = false;
     }
@@ -388,7 +378,7 @@
       );
     } catch (error) {
       detail = previous;
-      toast.error(errorMessage(error));
+      toast.error(errorMessage(error, "Could not reach Gitadel."));
     } finally {
       working = false;
     }
@@ -406,7 +396,7 @@
       );
       toast.success(result.summary);
     } catch (error) {
-      toast.error(errorMessage(error));
+      toast.error(errorMessage(error, "Could not reach Gitadel."));
     } finally {
       working = false;
     }
@@ -438,7 +428,7 @@
         "The Dokploy resource was unlinked. It was not deleted from Dokploy.",
       );
     } catch (error) {
-      toast.error(errorMessage(error));
+      toast.error(errorMessage(error, "Could not reach Gitadel."));
     } finally {
       working = false;
     }

@@ -7,7 +7,11 @@
     pendingInvitationSchema,
     type PendingInvitation,
   } from "$lib/api/admin-users.js";
-  import { ApiFailure, requestEmpty, requestJson } from "$lib/api/transport.js";
+  import {
+    errorMessage,
+    requestEmpty,
+    requestJson,
+  } from "$lib/api/transport.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import { Spinner } from "$lib/components/ui/spinner/index.js";
 
@@ -36,19 +40,13 @@
         error = null;
       })
       .catch((caught: unknown) => {
-        if (!controller.signal.aborted) error = messageOf(caught);
+        if (!controller.signal.aborted) error = errorMessage(caught);
       })
       .finally(() => {
         if (!controller.signal.aborted) loading = false;
       });
     return () => controller.abort();
   });
-
-  function messageOf(caught: unknown): string {
-    return caught instanceof ApiFailure || caught instanceof Error
-      ? caught.message
-      : "The request failed.";
-  }
 
   async function revoke(invitation: PendingInvitation) {
     revokingId = invitation.id;
@@ -60,7 +58,7 @@
       invitations = invitations.filter((item) => item.id !== invitation.id);
       toast.success("Invitation revoked.");
     } catch (caught) {
-      toast.error(messageOf(caught));
+      toast.error(errorMessage(caught));
     } finally {
       revokingId = null;
     }

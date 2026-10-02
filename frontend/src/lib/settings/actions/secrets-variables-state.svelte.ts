@@ -9,19 +9,13 @@ import {
   type ActionVariable,
 } from "$lib/api/actions.js";
 import {
-  ApiFailure,
+  errorMessage,
   jsonBody,
   requestEmpty,
   requestJson,
 } from "$lib/api/transport.js";
 
 export type ActionValueKind = "secrets" | "variables";
-
-function message(caught: unknown): string {
-  return caught instanceof ApiFailure || caught instanceof Error
-    ? caught.message
-    : "The request failed.";
-}
 
 function byName<T extends { name: string }>(left: T, right: T): number {
   return left.name.localeCompare(right.name);
@@ -57,7 +51,7 @@ export class ActionsSecretsVariablesState {
       this.secrets = secrets.secrets;
       this.variables = variables.variables;
     } catch (caught) {
-      this.loadError = message(caught);
+      this.loadError = errorMessage(caught);
     } finally {
       this.loading = false;
     }
@@ -96,7 +90,7 @@ export class ActionsSecretsVariablesState {
       toast.success(kind === "secrets" ? "Secret saved." : "Variable saved.");
       return true;
     } catch (caught) {
-      toast.error(message(caught));
+      toast.error(errorMessage(caught));
       return false;
     } finally {
       this.pending = false;
@@ -118,7 +112,7 @@ export class ActionsSecretsVariablesState {
         kind === "secrets" ? "Secret deleted." : "Variable deleted.",
       );
     } catch (caught) {
-      toast.error(message(caught));
+      toast.error(errorMessage(caught));
     } finally {
       this.pending = false;
     }

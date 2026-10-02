@@ -9,8 +9,7 @@
     notificationPreferencesSchema,
     type NotificationPreferences,
   } from "$lib/api/email.js";
-  import { jsonBody, requestJson } from "$lib/api/transport.js";
-  import { errorMessage } from "$lib/repository/state/shared.js";
+  import { errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
 
   type PreferenceKey = "issues" | "issue_comments" | "action_failures";
 

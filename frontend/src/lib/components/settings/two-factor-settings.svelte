@@ -12,7 +12,7 @@
     type TwoFactorStatus,
   } from "$lib/api/auth.js";
   import {
-    ApiFailure,
+    errorMessage,
     jsonBody,
     requestEmpty,
     requestJson,
@@ -50,18 +50,12 @@
     void loadStatus();
   });
 
-  function messageOf(caught: unknown): string {
-    return caught instanceof ApiFailure || caught instanceof Error
-      ? caught.message
-      : "The request failed.";
-  }
-
   async function loadStatus() {
     try {
       status = await requestJson("/api/v1/me/two-factor", twoFactorStatusSchema);
       loadError = null;
     } catch (caught) {
-      loadError = messageOf(caught);
+      loadError = errorMessage(caught);
     }
   }
 
@@ -70,7 +64,7 @@
     try {
       await task();
     } catch (caught) {
-      toast.error(messageOf(caught));
+      toast.error(errorMessage(caught));
     } finally {
       working = false;
     }

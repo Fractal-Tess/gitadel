@@ -4,7 +4,7 @@
 
   import * as Alert from "$lib/components/ui/alert/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
-  import { ApiFailure, jsonBody, requestEmpty } from "$lib/api/transport.js";
+  import { errorMessage, jsonBody, requestEmpty } from "$lib/api/transport.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
   const app = useAppState();
@@ -27,10 +27,7 @@
       outcome = "verified";
     } catch (caught) {
       outcome = "failed";
-      message =
-        caught instanceof ApiFailure || caught instanceof Error
-          ? caught.message
-          : "The address could not be verified.";
+      message = errorMessage(caught, "The address could not be verified.");
     } finally {
       working = false;
     }

@@ -10,7 +10,7 @@
   import { Input } from "$lib/components/ui/input/index.js";
   import { passwordResetAcceptedSchema } from "$lib/api/email.js";
   import {
-    ApiFailure,
+    errorMessage,
     jsonBody,
     requestEmpty,
     requestJson,
@@ -31,9 +31,7 @@
   let validationError = $state<string | null>(null);
 
   function failure(caught: unknown, fallback: string): string {
-    return caught instanceof ApiFailure || caught instanceof Error
-      ? caught.message
-      : fallback;
+    return errorMessage(caught, fallback);
   }
 
   async function requestReset(event: SubmitEvent): Promise<void> {

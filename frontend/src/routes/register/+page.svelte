@@ -13,7 +13,7 @@
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
-  import { ApiFailure, jsonBody, requestJson } from "$lib/api/transport.js";
+  import { errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
   import { authResponseSchema } from "$lib/api/auth.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
@@ -50,11 +50,7 @@
       await app.refreshAuth();
       await goto(resolve("/"));
     } catch (caught) {
-      toast.error(
-        caught instanceof ApiFailure || caught instanceof Error
-          ? caught.message
-          : "Could not create the account.",
-      );
+      toast.error(errorMessage(caught, "Could not create the account."));
     } finally {
       working = false;
     }

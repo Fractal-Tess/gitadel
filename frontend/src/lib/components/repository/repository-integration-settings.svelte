@@ -9,7 +9,7 @@
   import PlugZap from "@lucide/svelte/icons/plug-zap";
 
   import {
-    ApiFailure,
+    errorMessage,
     jsonBody,
     requestEmpty,
     requestJson,
@@ -90,12 +90,6 @@
   function stagedSourcePath() {
     if (!stagedConnection) throw new Error("No connection is selected.");
     return `${namespaceIntegrationPath(stagedConnection.id)}/source`;
-  }
-
-  function errorMessage(caught: unknown, fallback: string) {
-    return caught instanceof ApiFailure || caught instanceof Error
-      ? caught.message
-      : fallback;
   }
 
   $effect(() => {

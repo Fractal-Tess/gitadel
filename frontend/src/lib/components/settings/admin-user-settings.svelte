@@ -11,7 +11,11 @@
     adminUserSchema,
     type AdminUser,
   } from "$lib/api/admin-users.js";
-  import { ApiFailure, requestEmpty, requestJson } from "$lib/api/transport.js";
+  import {
+    errorMessage,
+    requestEmpty,
+    requestJson,
+  } from "$lib/api/transport.js";
   import * as Alert from "$lib/components/ui/alert/index.js";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Badge } from "$lib/components/ui/badge/index.js";
@@ -68,19 +72,13 @@
         error = null;
       })
       .catch((caught: unknown) => {
-        if (!controller.signal.aborted) error = messageOf(caught);
+        if (!controller.signal.aborted) error = errorMessage(caught);
       })
       .finally(() => {
         if (!controller.signal.aborted) loading = false;
       });
     return () => controller.abort();
   });
-
-  function messageOf(caught: unknown): string {
-    return caught instanceof ApiFailure || caught instanceof Error
-      ? caught.message
-      : "The request failed.";
-  }
 
   function applySearch() {
     offset = 0;
@@ -101,7 +99,7 @@
       );
       toast.success(`${user.username} can sign in again.`);
     } catch (caught) {
-      toast.error(messageOf(caught));
+      toast.error(errorMessage(caught));
     } finally {
       busyUsername = null;
     }
@@ -143,7 +141,7 @@
       dialogOpen = false;
       pending = null;
     } catch (caught) {
-      toast.error(messageOf(caught));
+      toast.error(errorMessage(caught));
     } finally {
       busyUsername = null;
     }

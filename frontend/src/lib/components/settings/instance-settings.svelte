@@ -12,7 +12,7 @@
   import { Input } from "$lib/components/ui/input/index.js";
   import { Textarea } from "$lib/components/ui/textarea/index.js";
   import {
-    ApiFailure,
+    errorMessage,
     jsonBody,
     requestEmpty,
     requestJson,
@@ -60,11 +60,7 @@
       faviconInputVersion += 1;
       toast.success(`${theme === "light" ? "Light" : "Dark"} favicon saved.`);
     } catch (caught) {
-      toast.error(
-        caught instanceof ApiFailure || caught instanceof Error
-          ? caught.message
-          : "Could not save the favicon.",
-      );
+      toast.error(errorMessage(caught, "Could not save the favicon."));
     } finally {
       working = false;
     }
@@ -82,11 +78,7 @@
         `${theme === "light" ? "Light" : "Dark"} favicon restored to the default.`,
       );
     } catch (caught) {
-      toast.error(
-        caught instanceof ApiFailure || caught instanceof Error
-          ? caught.message
-          : "Could not restore the favicon.",
-      );
+      toast.error(errorMessage(caught, "Could not restore the favicon."));
     } finally {
       working = false;
     }
@@ -114,11 +106,7 @@
       }
       toast.success("Settings saved automatically.");
     } catch (caught) {
-      toast.error(
-        caught instanceof ApiFailure || caught instanceof Error
-          ? caught.message
-          : "Could not save instance settings.",
-      );
+      toast.error(errorMessage(caught, "Could not save instance settings."));
     } finally {
       savingSettings = false;
     }

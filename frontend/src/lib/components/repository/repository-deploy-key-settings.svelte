@@ -9,6 +9,7 @@
     type DeployKey,
   } from "$lib/api/repository-security.js";
   import {
+    errorMessage,
     jsonBody,
     requestEmpty,
     requestJson,
@@ -20,7 +21,7 @@
   import { Switch } from "$lib/components/ui/switch/index.js";
   import { Textarea } from "$lib/components/ui/textarea/index.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
-  import { errorMessage, repositoryApi } from "$lib/repository/state/shared.js";
+  import { repositoryApi } from "$lib/repository/state/shared.js";
 
   let { state: repository }: { state: RepositoryPageState } = $props();
 

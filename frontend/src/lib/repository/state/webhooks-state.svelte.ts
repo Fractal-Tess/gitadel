@@ -6,10 +6,15 @@ import {
   type Webhook,
   type WebhookDelivery,
 } from "$lib/api/webhooks.js";
-import { jsonBody, requestEmpty, requestJson } from "$lib/api/transport.js";
+import {
+  errorMessage,
+  jsonBody,
+  requestEmpty,
+  requestJson,
+} from "$lib/api/transport.js";
 import { loadRepositoryWebhooks } from "$lib/repository/repository-data-cache.js";
 import type { RepositoryFeatureContext } from "./shared.js";
-import { errorMessage, repositoryHooksApi } from "./shared.js";
+import { repositoryHooksApi } from "./shared.js";
 
 type WebhookCallbacks = {
   setError(message: string): void;

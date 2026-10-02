@@ -7,10 +7,15 @@ import {
   type IconCandidates,
   type Repository,
 } from "$lib/api/repositories.js";
-import { jsonBody, requestEmpty, requestJson } from "$lib/api/transport.js";
+import {
+  errorMessage,
+  jsonBody,
+  requestEmpty,
+  requestJson,
+} from "$lib/api/transport.js";
 import { blobToBase64 } from "$lib/avatar-crop.js";
 import type { RepositoryFeatureContext } from "./shared.js";
-import { errorMessage, repositoryApi } from "./shared.js";
+import { repositoryApi } from "./shared.js";
 
 type SettingsCallbacks = {
   setError(message: string): void;

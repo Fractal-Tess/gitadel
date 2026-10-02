@@ -5,8 +5,11 @@
   import UserRound from "@lucide/svelte/icons/user-round";
 
   import { avatarUrl } from "$lib/api/account.js";
-  import { memberSuggestionSchema, type MemberSuggestion } from "$lib/api/organizations.js";
-  import { requestJson } from "$lib/api/transport.js";
+  import {
+    memberSuggestionSchema,
+    type MemberSuggestion,
+  } from "$lib/api/organizations.js";
+  import { errorMessage, requestJson } from "$lib/api/transport.js";
   import * as Avatar from "$lib/components/ui/avatar/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Command from "$lib/components/ui/command/index.js";
@@ -86,8 +89,7 @@
       if (caught instanceof DOMException && caught.name === "AbortError")
         return;
       suggestions = [];
-      searchError =
-        caught instanceof Error ? caught.message : "Could not search users.";
+      searchError = errorMessage(caught, "Could not search users.");
     } finally {
       if (requestController === controller) {
         requestController = undefined;

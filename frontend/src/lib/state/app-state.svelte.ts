@@ -17,6 +17,7 @@ import {
   type InstanceSettings,
 } from "$lib/api/instance.js";
 import {
+  errorMessage,
   jsonBody,
   onUnauthenticated,
   requestJson,
@@ -93,8 +94,7 @@ export class AppState {
       this.#initializedAt = Date.now();
       return status;
     } catch (caught) {
-      this.error =
-        caught instanceof Error ? caught.message : "Could not load Gitadel.";
+      this.error = errorMessage(caught, "Could not load Gitadel.");
       throw caught;
     } finally {
       this.loading = false;
@@ -248,8 +248,7 @@ export class AppState {
       this.#initializedAt = Date.now();
       return status;
     } catch (caught) {
-      this.error =
-        caught instanceof Error ? caught.message : "Could not load Gitadel.";
+      this.error = errorMessage(caught, "Could not load Gitadel.");
       throw caught;
     } finally {
       this.loading = false;

@@ -12,7 +12,7 @@
     type AuthenticationConfiguration,
   } from "$lib/api/sso.js";
   import {
-    ApiFailure,
+    errorMessage,
     jsonBody,
     requestEmpty,
     requestJson,
@@ -58,15 +58,7 @@
     void load();
   });
 
-  function message(caught: unknown, fallback: string): string {
-    return caught instanceof ApiFailure || caught instanceof Error
-      ? caught.message
-      : fallback;
-  }
-
-  async function load(
-    scope = app.authorizationScope,
-  ): Promise<void> {
+  async function load(scope = app.authorizationScope): Promise<void> {
     loading = true;
     error = null;
     try {
@@ -75,7 +67,7 @@
         loadOidcProviders(scope),
       ]);
     } catch (caught) {
-      error = message(caught, "Could not load authentication settings.");
+      error = errorMessage(caught, "Could not load authentication settings.");
     } finally {
       loading = false;
     }
@@ -100,7 +92,9 @@
       await app.refreshAuth();
       toast.success("Authentication methods updated.");
     } catch (caught) {
-      toast.error(message(caught, "Could not update authentication methods."));
+      toast.error(
+        errorMessage(caught, "Could not update authentication methods."),
+      );
       await load();
     } finally {
       working = false;
@@ -158,7 +152,9 @@
         editing ? "Identity provider updated." : "Identity provider added.",
       );
     } catch (caught) {
-      toast.error(message(caught, "Could not save the identity provider."));
+      toast.error(
+        errorMessage(caught, "Could not save the identity provider."),
+      );
     } finally {
       working = false;
     }
@@ -193,7 +189,7 @@
       toast.success(`${provider.name} ${enabled ? "enabled" : "disabled"}.`);
     } catch (caught) {
       toast.error(
-        message(
+        errorMessage(
           caught,
           `Could not ${enabled ? "enable" : "disable"} ${provider.name}.`,
         ),
@@ -220,7 +216,9 @@
       pendingRemove = null;
       toast.success("Identity provider removed.");
     } catch (caught) {
-      toast.error(message(caught, "Could not remove the identity provider."));
+      toast.error(
+        errorMessage(caught, "Could not remove the identity provider."),
+      );
     } finally {
       working = false;
     }

@@ -4,10 +4,15 @@ import {
   releaseSchema,
   type Release,
 } from "$lib/api/releases.js";
-import { jsonBody, requestEmpty, requestJson } from "$lib/api/transport.js";
+import {
+  errorMessage,
+  jsonBody,
+  requestEmpty,
+  requestJson,
+} from "$lib/api/transport.js";
 import { loadRepositoryReleases } from "$lib/repository/repository-data-cache.js";
 import type { RepositoryFeatureContext } from "./shared.js";
-import { errorMessage, repositoryApi } from "./shared.js";
+import { repositoryApi } from "./shared.js";
 
 type ReleasesCallbacks = {
   setError(message: string): void;

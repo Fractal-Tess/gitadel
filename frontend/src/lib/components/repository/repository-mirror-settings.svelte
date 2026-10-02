@@ -7,7 +7,7 @@
   import { Spinner } from "$lib/components/ui/spinner/index.js";
 
   import {
-    ApiFailure,
+    errorMessage,
     jsonBody,
     requestEmpty,
     requestJson,
@@ -53,12 +53,6 @@
     ),
   );
 
-
-  function message(caught: unknown): string {
-    return caught instanceof ApiFailure || caught instanceof Error
-      ? caught.message
-      : "The mirror request failed.";
-  }
   const selectedIdentity = $derived(
     compatibleIdentities.find((identity) => identity.id === identityId) ?? null,
   );
@@ -95,7 +89,7 @@
       identities = loadedIdentities;
       scheduleRefresh();
     } catch (caught) {
-      error = message(caught);
+      error = errorMessage(caught, "The mirror request failed.");
     } finally {
       loading = false;
     }
@@ -115,7 +109,7 @@
       applyMirror(next);
       toast.success("Mirror settings saved.");
     } catch (caught) {
-      toast.error(message(caught));
+      toast.error(errorMessage(caught, "The mirror request failed."));
     } finally {
       saving = false;
     }
@@ -133,7 +127,7 @@
       toast.success("Mirror synchronization started.");
       scheduleRefresh();
     } catch (caught) {
-      toast.error(message(caught));
+      toast.error(errorMessage(caught, "The mirror request failed."));
       syncing = false;
     }
   }
@@ -152,7 +146,7 @@
       toast.success("Mirror converted to a standard repository.");
       repository.navigate("overview");
     } catch (caught) {
-      toast.error(message(caught));
+      toast.error(errorMessage(caught, "The mirror request failed."));
     } finally {
       converting = false;
     }

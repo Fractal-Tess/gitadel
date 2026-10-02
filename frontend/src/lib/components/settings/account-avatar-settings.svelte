@@ -8,11 +8,7 @@
   import * as Avatar from "$lib/components/ui/avatar/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Card from "$lib/components/ui/card/index.js";
-  import {
-    ApiFailure,
-    jsonBody,
-    requestEmpty,
-  } from "$lib/api/transport.js";
+  import { errorMessage, jsonBody, requestEmpty } from "$lib/api/transport.js";
   import { avatarUrl } from "$lib/api/account.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
@@ -43,9 +39,7 @@
       toast.success("Profile picture removed");
     } catch (caught) {
       toast.error(
-        caught instanceof ApiFailure || caught instanceof Error
-          ? caught.message
-          : "The profile picture could not be removed.",
+        errorMessage(caught, "The profile picture could not be removed."),
       );
     } finally {
       removing = false;

@@ -12,14 +12,19 @@ import {
   type IssueLabel,
   type IssueUser,
 } from "$lib/api/issues.js";
-import { jsonBody, requestEmpty, requestJson } from "$lib/api/transport.js";
+import {
+  errorMessage,
+  jsonBody,
+  requestEmpty,
+  requestJson,
+} from "$lib/api/transport.js";
 import {
   loadRepositoryAssignableUsers,
   loadRepositoryIssueLabels,
   loadRepositoryIssues,
 } from "$lib/repository/repository-data-cache.js";
 import type { RepositoryFeatureContext } from "./shared.js";
-import { errorMessage, repositoryApi } from "./shared.js";
+import { repositoryApi } from "./shared.js";
 
 type IssuesCallbacks = {
   setError(message: string): void;

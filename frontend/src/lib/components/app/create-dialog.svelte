@@ -22,7 +22,7 @@
   import { Textarea } from "$lib/components/ui/textarea/index.js";
   import * as ToggleGroup from "$lib/components/ui/toggle-group/index.js";
 
-  import { ApiFailure, jsonBody, requestJson } from "$lib/api/transport.js";
+  import { errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
   import {
     mirrorIdentitiesSchema,
     type MirrorIdentity,
@@ -122,12 +122,6 @@
     void app.refreshOrganizations().catch(() => undefined);
   });
 
-  function message(caught: unknown, fallback: string): string {
-    return caught instanceof ApiFailure || caught instanceof Error
-      ? caught.message
-      : fallback;
-  }
-
   function identitiesPath(target: string): string {
     return `/api/v1/namespaces/${encodeURIComponent(target)}/mirror-identities`;
   }
@@ -166,7 +160,10 @@
       );
       mirrorIdentities = loaded.flat();
     } catch (caught) {
-      mirrorLoadError = message(caught, "Could not load mirror identities.");
+      mirrorLoadError = errorMessage(
+        caught,
+        "Could not load mirror identities.",
+      );
     } finally {
       mirrorOptionsLoading = false;
     }
@@ -269,7 +266,7 @@
         }),
       );
     } catch (caught) {
-      toast.error(message(caught, "Could not create repository."));
+      toast.error(errorMessage(caught, "Could not create repository."));
     } finally {
       creating = false;
     }
@@ -295,7 +292,7 @@
       organizationDisplayName = "";
       await goto(resolve("/[namespace]", { namespace: organization.slug }));
     } catch (caught) {
-      toast.error(message(caught, "Could not create organization."));
+      toast.error(errorMessage(caught, "Could not create organization."));
     } finally {
       creating = false;
     }

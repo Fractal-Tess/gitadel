@@ -4,7 +4,7 @@
   import { Spinner } from "$lib/components/ui/spinner/index.js";
 
   import {
-    ApiFailure,
+    errorMessage,
     jsonBody,
     requestEmpty,
     requestJson,
@@ -75,12 +75,6 @@
     void load();
   });
 
-  function message(caught: unknown, fallback: string) {
-    return caught instanceof ApiFailure || caught instanceof Error
-      ? caught.message
-      : fallback;
-  }
-
   function integrationPath(slug: string, id: string) {
     return `/api/v1/namespaces/${encodeURIComponent(slug)}/integrations/${encodeURIComponent(id)}`;
   }
@@ -104,7 +98,10 @@
           providerCatalog = integrationResponse.providers;
       }
     } catch (caught) {
-      loadError = message(caught, "Could not load the integration catalog.");
+      loadError = errorMessage(
+        caught,
+        "Could not load the integration catalog.",
+      );
     } finally {
       loading = false;
     }
@@ -179,7 +176,10 @@
       );
       updateSourceSummary(card, sourceConnection);
     } catch (caught) {
-      sourceError = message(caught, "Could not load the repository source.");
+      sourceError = errorMessage(
+        caught,
+        "Could not load the repository source.",
+      );
     } finally {
       sourceLoading = false;
     }
@@ -201,7 +201,9 @@
       );
       updateSourceSummary(card, sourceConnection);
     } catch (caught) {
-      toast.error(message(caught, "Could not connect the Dokploy source."));
+      toast.error(
+        errorMessage(caught, "Could not connect the Dokploy source."),
+      );
     } finally {
       sourceWorking = false;
     }
@@ -223,7 +225,7 @@
       );
       updateSourceSummary(card, sourceConnection);
     } catch (caught) {
-      toast.error(message(caught, "Could not create the Dokploy source."));
+      toast.error(errorMessage(caught, "Could not create the Dokploy source."));
     } finally {
       sourceWorking = false;
     }
@@ -239,7 +241,9 @@
       updateSourceSummary(card, null);
       await loadSource(editing);
     } catch (caught) {
-      toast.error(message(caught, "Could not disconnect the Dokploy source."));
+      toast.error(
+        errorMessage(caught, "Could not disconnect the Dokploy source."),
+      );
     } finally {
       sourceWorking = false;
     }
@@ -348,7 +352,7 @@
       updateCard(card.target.slug, updated);
     } catch (caught) {
       toast.error(
-        message(caught, `Could not update ${card.integration.name}.`),
+        errorMessage(caught, `Could not update ${card.integration.name}.`),
       );
     } finally {
       working[id] = false;
@@ -385,7 +389,7 @@
       pendingRemoveCard = null;
     } catch (caught) {
       toast.error(
-        message(caught, `Could not remove ${card.integration.name}.`),
+        errorMessage(caught, `Could not remove ${card.integration.name}.`),
       );
       removeDialogOpen = false;
     } finally {

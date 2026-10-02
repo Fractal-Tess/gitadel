@@ -1,5 +1,5 @@
 import { toast } from "svelte-sonner";
-import { ApiFailure, jsonBody, requestJson } from "$lib/api/transport.js";
+import { errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
 import { invitationSchema, type AuditEvent } from "$lib/api/instance.js";
 import {
   loadAdminActivity,
@@ -50,10 +50,7 @@ export class AdminSettingsState {
         sequence === this.#loadSequence &&
         this.app.authorizationScope === scope
       ) {
-        this.error =
-          caught instanceof ApiFailure || caught instanceof Error
-            ? caught.message
-            : "The request failed.";
+        this.error = errorMessage(caught);
       }
     } finally {
       if (
@@ -104,10 +101,7 @@ export class AdminSettingsState {
     try {
       await task();
     } catch (caught) {
-      const message =
-        caught instanceof ApiFailure || caught instanceof Error
-          ? caught.message
-          : "The request failed.";
+      const message = errorMessage(caught);
       if (failureTarget === "inline") {
         this.error = message;
       } else {

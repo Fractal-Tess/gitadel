@@ -4,7 +4,7 @@
   import { onMount } from "svelte";
 
   import {
-    ApiFailure,
+    errorMessage,
     jsonBody,
     requestEmpty,
     requestJson,
@@ -67,12 +67,6 @@
     void load();
   });
 
-  function message(caught: unknown, fallback: string): string {
-    return caught instanceof ApiFailure || caught instanceof Error
-      ? caught.message
-      : fallback;
-  }
-
   function identitiesPath(slug: string): string {
     return `/api/v1/namespaces/${encodeURIComponent(slug)}/mirror-identities`;
   }
@@ -91,7 +85,7 @@
       if (app.authorizationScope !== scope) return;
       for (const response of responses) identities[response.slug] = response.values;
     } catch (caught) {
-      loadError = message(caught, "Could not load mirror identities.");
+      loadError = errorMessage(caught, "Could not load mirror identities.");
     } finally {
       loading = false;
     }
@@ -149,7 +143,7 @@
       token = "";
       modalOpen = false;
     } catch (caught) {
-      toast.error(message(caught, "Could not save the mirror identity."));
+      toast.error(errorMessage(caught, "Could not save the mirror identity."));
     } finally {
       saving = false;
     }
@@ -171,7 +165,7 @@
       removeDialogOpen = false;
     } catch (caught) {
       toast.error(
-        message(caught, `Could not remove ${card.identity.name}.`),
+        errorMessage(caught, `Could not remove ${card.identity.name}.`),
       );
       removeDialogOpen = false;
     } finally {

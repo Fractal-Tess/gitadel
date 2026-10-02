@@ -6,6 +6,7 @@
   import ZoomOut from "@lucide/svelte/icons/zoom-out";
   import type { Attachment } from "svelte/attachments";
 
+  import { errorMessage } from "$lib/api/transport.js";
   import {
     clampCropOffset,
     coverScale,
@@ -130,10 +131,7 @@
       offsetY = 0;
     } catch (caught) {
       if (sequence === decodeSequence) {
-        error =
-          caught instanceof Error
-            ? caught.message
-            : "This image could not be opened.";
+        error = errorMessage(caught, "This image could not be opened.");
       }
     } finally {
       if (!adopted) URL.revokeObjectURL(nextUrl);
@@ -221,10 +219,7 @@
     try {
       blob = await renderAvatarPng(image, cropSize, zoom, offsetX, offsetY);
     } catch (caught) {
-      error =
-        caught instanceof Error
-          ? caught.message
-          : "The profile picture could not be saved.";
+      error = errorMessage(caught, "The profile picture could not be saved.");
       saving = false;
       return;
     }
@@ -234,9 +229,7 @@
       setOpen(false);
     } catch (caught) {
       toast.error(
-        caught instanceof Error
-          ? caught.message
-          : "The profile picture could not be saved.",
+        errorMessage(caught, "The profile picture could not be saved."),
       );
     } finally {
       saving = false;

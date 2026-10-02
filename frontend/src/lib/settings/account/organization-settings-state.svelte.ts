@@ -7,7 +7,7 @@ import {
   type Organization,
 } from "$lib/api/organizations.js";
 import {
-  ApiFailure,
+  errorMessage,
   jsonBody,
   requestEmpty,
   requestJson,
@@ -83,10 +83,10 @@ export class OrganizationSettingsState {
       this.members = members;
     } catch (caught) {
       if (!this.current(scope)) return;
-      this.membersLoadError =
-        caught instanceof ApiFailure || caught instanceof Error
-          ? caught.message
-          : "Could not load organization members.";
+      this.membersLoadError = errorMessage(
+        caught,
+        "Could not load organization members.",
+      );
       throw caught;
     } finally {
       if (this.current(scope)) this.membersLoading = false;
@@ -143,10 +143,7 @@ export class OrganizationSettingsState {
       return true;
     } catch (caught) {
       if (!this.current(scope)) return false;
-      const message =
-        caught instanceof ApiFailure || caught instanceof Error
-          ? caught.message
-          : "The request failed.";
+      const message = errorMessage(caught);
       toast.error(message);
       return false;
     } finally {

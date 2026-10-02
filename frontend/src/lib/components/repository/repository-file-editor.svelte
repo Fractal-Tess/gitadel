@@ -8,13 +8,13 @@
   import Pencil from "@lucide/svelte/icons/pencil";
   import { toast } from "svelte-sonner";
 
+  import { errorMessage } from "$lib/api/transport.js";
   import MaterialFileIcon from "$lib/components/repository/material-file-icon.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
-  import { errorMessage } from "$lib/repository/state/shared.js";
 
   let { state: pageState }: { state: RepositoryPageState } = $props();
 

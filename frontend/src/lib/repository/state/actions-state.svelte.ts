@@ -12,10 +12,10 @@ import {
   type ActionRuns,
   type ActionWorkflows,
 } from "$lib/api/actions.js";
-import { jsonBody, requestJson } from "$lib/api/transport.js";
+import { errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
 import { loadRepositoryActionRuns } from "$lib/repository/repository-data-cache.js";
 import type { RepositoryFeatureContext } from "./shared.js";
-import { errorMessage, repositoryActionsApi } from "./shared.js";
+import { repositoryActionsApi } from "./shared.js";
 
 type ActionsCallbacks = {
   setError(message: string): void;

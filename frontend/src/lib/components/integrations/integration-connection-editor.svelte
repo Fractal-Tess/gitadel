@@ -7,6 +7,7 @@
   import ExternalLink from "@lucide/svelte/icons/external-link";
   import Eye from "@lucide/svelte/icons/eye";
   import EyeOff from "@lucide/svelte/icons/eye-off";
+  import { errorMessage } from "$lib/api/transport.js";
   import { Spinner } from "$lib/components/ui/spinner/index.js";
   import PlugZap from "@lucide/svelte/icons/plug-zap";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
@@ -157,10 +158,6 @@
     };
   });
 
-  function message(caught: unknown, fallback: string) {
-    return caught instanceof Error ? caught.message : fallback;
-  }
-
   function providerLogo(slug: string) {
     return slug === "dokploy" ? "/integrations/dokploy.svg" : null;
   }
@@ -189,7 +186,9 @@
       try {
         apiKey = await onreveal();
       } catch (caught) {
-        toast.error(message(caught, "Could not reveal the stored API key."));
+        toast.error(
+          errorMessage(caught, "Could not reveal the stored API key."),
+        );
         return;
       } finally {
         revealing = false;
@@ -204,7 +203,7 @@
     try {
       await onsave({ target, provider, name, url, internalUrl, apiKey });
     } catch (caught) {
-      toast.error(message(caught, "Could not save the integration."));
+      toast.error(errorMessage(caught, "Could not save the integration."));
     } finally {
       saving = false;
   }
@@ -235,7 +234,7 @@
         toast.success(successMessage);
       }
     } catch (caught) {
-      toast.error(message(caught, "The connection test failed."));
+      toast.error(errorMessage(caught, "The connection test failed."));
     } finally {
       testing = false;
   }

@@ -12,14 +12,13 @@
     commitIdentitySchema,
     type CommitIdentity,
   } from "$lib/api/profile.js";
-  import { jsonBody, requestJson } from "$lib/api/transport.js";
+  import { errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
   import { Badge } from "$lib/components/ui/badge/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Card from "$lib/components/ui/card/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
   import * as Select from "$lib/components/ui/select/index.js";
-  import { errorMessage } from "$lib/repository/state/shared.js";
 
   const DEFAULT_EMAIL = "";
 

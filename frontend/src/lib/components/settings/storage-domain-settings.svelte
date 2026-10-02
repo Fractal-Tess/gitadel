@@ -18,7 +18,7 @@
   import { Spinner } from "$lib/components/ui/spinner/index.js";
   import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
   import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
-  import { ApiFailure, jsonBody, requestJson } from "$lib/api/transport.js";
+  import { errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
   import {
     LOCAL_STORAGE_TARGET_ID,
     storageDomainMigrationSchema,
@@ -153,7 +153,7 @@
       if (app.authorizationScope !== scope || domain !== name) return;
       applyStatus(loadedTargets, loadedStatus, scope);
     } catch (caught) {
-      if (app.authorizationScope === scope) error = message(caught);
+      if (app.authorizationScope === scope) error = errorMessage(caught);
     } finally {
       if (app.authorizationScope === scope) loading = false;
     }
@@ -202,7 +202,7 @@
           : loaded;
     } catch (caught) {
       if (version === usageRequestVersion && app.authorizationScope === scope) {
-        usageError = message(caught);
+        usageError = errorMessage(caught);
       }
     } finally {
       if (version === usageRequestVersion) {
@@ -258,7 +258,7 @@
       watchMigration(response.operation_id, scope);
     } catch (caught) {
       working = false;
-      toast.error(message(caught));
+      toast.error(errorMessage(caught));
     }
   }
 
@@ -331,7 +331,7 @@
       status = updatedStatus;
       await loadUsage(scope, name, { ...filters }, false);
     } catch (caught) {
-      if (app.authorizationScope === scope) error = message(caught);
+      if (app.authorizationScope === scope) error = errorMessage(caught);
     }
   }
 
@@ -362,12 +362,6 @@
       value /= 1024;
     }
     return `${value >= 10 || unit === "B" ? value.toFixed(0) : value.toFixed(1)} ${unit}`;
-  }
-
-  function message(caught: unknown) {
-    return caught instanceof ApiFailure || caught instanceof Error
-      ? caught.message
-      : "The request failed.";
   }
 </script>
 

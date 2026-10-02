@@ -8,7 +8,7 @@ import type {
   PasskeySummary,
   SshKey,
 } from "$lib/api/account.js";
-import { requestEmpty } from "$lib/api/transport.js";
+import { errorMessage, requestEmpty } from "$lib/api/transport.js";
 import type { AuthorizationCacheScope } from "$lib/cache-scope.js";
 import {
   invalidateAdminActivity,
@@ -147,8 +147,7 @@ export class AccountSettingsState {
         sequence === this.#loadSequence &&
         this.app.authorizationScope === scope
       ) {
-        this.error =
-          caught instanceof Error ? caught.message : "The request failed.";
+        this.error = errorMessage(caught);
       }
     } finally {
       if (
@@ -166,8 +165,7 @@ export class AccountSettingsState {
       await this.app.refreshAuth();
       await goto(resolve("/login"));
     } catch (caught) {
-      this.error =
-        caught instanceof Error ? caught.message : "The request failed.";
+      this.error = errorMessage(caught);
       toast.error(this.error);
     }
   }

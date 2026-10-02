@@ -19,7 +19,7 @@
   import * as Alert from "$lib/components/ui/alert/index.js";
   import * as Empty from "$lib/components/ui/empty/index.js";
 
-  import { ApiFailure, requestEmpty } from "$lib/api/transport.js";
+  import { errorMessage, requestEmpty } from "$lib/api/transport.js";
   import type { RepositoryOverviewItem } from "$lib/api/repositories.js";
   import {
     invalidateExplore,
@@ -103,12 +103,6 @@
     return filtered;
   });
 
-  function message(caught: unknown): string {
-    if (caught instanceof ApiFailure || caught instanceof Error)
-      return caught.message;
-    return "Could not load repositories.";
-  }
-
   const dateFormatter = new Intl.DateTimeFormat(undefined, {
     month: "short",
     day: "numeric",
@@ -152,7 +146,7 @@
         hasNextPage = overview.has_next;
         return true;
       } catch (caught) {
-        loadMoreError = message(caught);
+        loadMoreError = errorMessage(caught, "Could not load repositories.");
         return false;
       } finally {
         loadingMore = false;
@@ -184,7 +178,7 @@
       hasNextPage = overview.has_next;
       error = null;
     } catch (caught) {
-      loadMoreError = message(caught);
+      loadMoreError = errorMessage(caught, "Could not load repositories.");
     } finally {
       refreshingFirstPage = false;
       if (search.trim() || filter === "favorites") {
@@ -265,7 +259,7 @@
         item.id === repository.id ? { ...item, favorited } : item,
       );
     } catch (caught) {
-      toast.error(message(caught));
+      toast.error(errorMessage(caught, "Could not load repositories."));
     } finally {
       favoritePending = favoritePending.filter((id) => id !== repository.id);
     }
@@ -292,8 +286,9 @@
         nextPage = overview.page + 1;
         hasNextPage = overview.has_next;
       } catch (caught) {
-        if (cachedExplore) loadMoreError = message(caught);
-        else error = message(caught);
+        if (cachedExplore)
+          loadMoreError = errorMessage(caught, "Could not load repositories.");
+        else error = errorMessage(caught, "Could not load repositories.");
       } finally {
         loading = false;
         refreshingFirstPage = false;

@@ -8,7 +8,7 @@
   import { toast } from "svelte-sonner";
 
   import type { ThemePreference } from "$lib/api/auth.js";
-  import { ApiFailure } from "$lib/api/transport.js";
+  import { errorMessage } from "$lib/api/transport.js";
   import * as DropdownMenu from "$lib/components/ui/dropdown-menu/index.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
@@ -24,11 +24,7 @@
     try {
       await app.updateThemePreference(next);
     } catch (error) {
-      toast.error(
-        error instanceof ApiFailure || error instanceof Error
-          ? error.message
-          : "Could not save the theme preference.",
-      );
+      toast.error(errorMessage(error, "Could not save the theme preference."));
     } finally {
       working = false;
     }

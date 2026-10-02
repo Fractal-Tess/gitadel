@@ -15,11 +15,7 @@
     integritySettingsSchema,
     type IntegritySettings,
   } from "$lib/api/instance.js";
-  import {
-    ApiFailure,
-    jsonBody,
-    requestJson,
-  } from "$lib/api/transport.js";
+  import { errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
   const app = useAppState();
@@ -70,7 +66,7 @@
       schedule = loaded.schedule;
     } catch (caught) {
       if (version !== loadVersion) return;
-      toast.error(message(caught, "Could not load integrity settings."));
+      toast.error(errorMessage(caught, "Could not load integrity settings."));
     } finally {
       if (version === loadVersion) loading = false;
     }
@@ -93,16 +89,10 @@
       schedule = saved.schedule;
       toast.success("Integrity settings saved.");
     } catch (caught) {
-      toast.error(message(caught, "Could not save integrity settings."));
+      toast.error(errorMessage(caught, "Could not save integrity settings."));
     } finally {
       saving = false;
     }
-  }
-
-  function message(caught: unknown, fallback: string) {
-    return caught instanceof ApiFailure || caught instanceof Error
-      ? caught.message
-      : fallback;
   }
 
   function formatDate(value: string) {

@@ -7,7 +7,7 @@
   import { toast } from "svelte-sonner";
 
   import { refsSchema, repositorySchema } from "$lib/api/repositories.js";
-  import { jsonBody, requestJson } from "$lib/api/transport.js";
+  import { errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
@@ -83,9 +83,7 @@
         refs.branches.find((candidate) => candidate.name === branch)
           ?.commit_oid ?? null;
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Could not load branches.",
-      );
+      toast.error(errorMessage(error, "Could not load branches."));
     } finally {
       loading = false;
     }
@@ -120,9 +118,7 @@
         })}?view=overview&path=${encodeURIComponent(targetPath)}&rev=${encodeURIComponent(branch)}`,
       );
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Could not create file.",
-      );
+      toast.error(errorMessage(error, "Could not create file."));
     } finally {
       saving = false;
     }

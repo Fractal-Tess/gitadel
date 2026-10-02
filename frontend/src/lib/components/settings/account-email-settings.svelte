@@ -10,11 +10,11 @@
   import { Input } from "$lib/components/ui/input/index.js";
   import { emailStatusSchema, type EmailStatus } from "$lib/api/email.js";
   import {
+    errorMessage,
     jsonBody,
     requestEmpty,
     requestJson,
   } from "$lib/api/transport.js";
-  import { errorMessage } from "$lib/repository/state/shared.js";
 
   let status = $state.raw<EmailStatus | null>(null);
   let loadError = $state<string | null>(null);

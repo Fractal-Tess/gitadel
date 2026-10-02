@@ -16,7 +16,7 @@
   import type { PinnedRepositories } from "$lib/api/profile.js";
   import { repositorySchema } from "$lib/api/repositories.js";
   import type { Repository } from "$lib/api/repositories.js";
-  import { ApiFailure, jsonBody, requestJson } from "$lib/api/transport.js";
+  import { errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
@@ -117,9 +117,7 @@
       if (sequence !== saveSequence) return;
       selected = previous;
       toast.error(
-        caught instanceof ApiFailure || caught instanceof Error
-          ? caught.message
-          : "Could not save the pinned repositories.",
+        errorMessage(caught, "Could not save the pinned repositories."),
       );
     }
   }

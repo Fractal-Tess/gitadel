@@ -34,6 +34,7 @@
   import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
   import {
     ApiFailure,
+    errorMessage,
     jsonBody,
     requestEmpty,
     requestJson,
@@ -597,10 +598,7 @@
     } catch (caught) {
       // Nothing is left to report to once the page has been closed.
       if (lifetime.signal.aborted) return false;
-      const message =
-        caught instanceof ApiFailure || caught instanceof Error
-          ? caught.message
-          : "The request failed.";
+      const message = errorMessage(caught);
       if (
         caught instanceof BackupProgressFailure ||
         failureTarget === "inline"

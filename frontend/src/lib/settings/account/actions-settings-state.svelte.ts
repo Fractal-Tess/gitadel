@@ -7,7 +7,7 @@ import {
   type ActionRunner,
 } from "$lib/api/actions.js";
 import {
-  ApiFailure,
+  errorMessage,
   jsonBody,
   requestEmpty,
   requestJson,
@@ -85,12 +85,11 @@ export class ActionsSettingsState {
           loadErrors[runnerScope.key] = null;
         } catch (caught) {
           failures += 1;
-          loaded[runnerScope.key] =
-            this.actionRunners[runnerScope.key] ?? [];
-          loadErrors[runnerScope.key] =
-            caught instanceof ApiFailure || caught instanceof Error
-              ? caught.message
-              : `Could not load runners for ${runnerScope.label}.`;
+          loaded[runnerScope.key] = this.actionRunners[runnerScope.key] ?? [];
+          loadErrors[runnerScope.key] = errorMessage(
+            caught,
+            `Could not load runners for ${runnerScope.label}.`,
+          );
         }
       }),
     );
@@ -120,10 +119,10 @@ export class ActionsSettingsState {
       this.actionRegistration = registration;
     } catch (caught) {
       if (!this.current(authorizationScope)) return;
-      const message =
-        caught instanceof ApiFailure || caught instanceof Error
-          ? caught.message
-          : "Could not create the runner registration token.";
+      const message = errorMessage(
+        caught,
+        "Could not create the runner registration token.",
+      );
       toast.error(message);
     } finally {
       this.actionsWorking[runnerScope.key] = false;
@@ -152,10 +151,7 @@ export class ActionsSettingsState {
       return true;
     } catch (caught) {
       if (!this.current(authorizationScope)) return false;
-      const message =
-        caught instanceof ApiFailure || caught instanceof Error
-          ? caught.message
-          : "Could not remove the runner.";
+      const message = errorMessage(caught, "Could not remove the runner.");
       toast.error(message);
       return false;
     } finally {

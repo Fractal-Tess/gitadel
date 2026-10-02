@@ -16,7 +16,7 @@
     type StorageTargetKind,
   } from "$lib/api/storage.js";
   import {
-    ApiFailure,
+    errorMessage,
     jsonBody,
     requestEmpty,
     requestJson,
@@ -114,7 +114,7 @@
       const loaded = await loadStorageTargets(scope);
       if (app.authorizationScope === scope) targets = loaded;
     } catch (caught) {
-      if (app.authorizationScope === scope) error = message(caught);
+      if (app.authorizationScope === scope) error = errorMessage(caught);
     } finally {
       if (app.authorizationScope === scope) loading = false;
     }
@@ -197,7 +197,7 @@
     try {
       await task();
     } catch (caught) {
-      toast.error(message(caught));
+      toast.error(errorMessage(caught));
     } finally {
       working = false;
     }
@@ -214,12 +214,6 @@
     region = "us-east-1";
     prefix = "gitadel-lfs";
     testedFingerprint = null;
-  }
-
-  function message(caught: unknown) {
-    return caught instanceof ApiFailure || caught instanceof Error
-      ? caught.message
-      : "The request failed.";
   }
 
   function targetDetail(target: StorageTarget) {
@@ -244,7 +238,7 @@
       );
       setStorageTargets(app.authorizationScope, targets);
     } catch (caught) {
-      toast.error(message(caught));
+      toast.error(errorMessage(caught));
     } finally {
       measuring = null;
     }

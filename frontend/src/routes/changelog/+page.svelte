@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import ScrollText from "@lucide/svelte/icons/scroll-text";
 
-  import { ApiFailure, requestJson } from "$lib/api/transport.js";
+  import { errorMessage, requestJson } from "$lib/api/transport.js";
   import { changelogSchema } from "$lib/api/instance.js";
   import { trustedHtml } from "$lib/repository/format.js";
   import * as Alert from "$lib/components/ui/alert/index.js";
@@ -25,10 +25,7 @@
         version = changelog.application_version;
         html = changelog.rendered_html;
       } catch (caught) {
-        error =
-          caught instanceof ApiFailure || caught instanceof Error
-            ? caught.message
-            : "Could not load the changelog.";
+        error = errorMessage(caught, "Could not load the changelog.");
       } finally {
         loading = false;
       }

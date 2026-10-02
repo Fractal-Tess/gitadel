@@ -14,13 +14,13 @@ import {
   type Tree,
   treeSchema,
 } from "$lib/api/repositories.js";
-import { requestJson } from "$lib/api/transport.js";
+import { errorMessage, requestJson } from "$lib/api/transport.js";
 import { loadRepositoryHistory } from "$lib/repository/repository-data-cache.js";
 import { takePreloadedRepositoryOverview } from "$lib/repository/repository-preload.js";
 import { escapeHtml, languageLabel } from "$lib/repository/format.js";
 import { highlight } from "$lib/repository/syntax-highlight.js";
 import type { RepositoryFeatureContext } from "./shared.js";
-import { repositoryApi, errorMessage } from "./shared.js";
+import { repositoryApi } from "./shared.js";
 
 type BrowserCallbacks = {
   setError(message: string): void;

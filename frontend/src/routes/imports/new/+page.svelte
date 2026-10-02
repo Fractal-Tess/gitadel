@@ -11,11 +11,7 @@
   import { toast } from "svelte-sonner";
   import SiGitlab from "@icons-pack/svelte-simple-icons/icons/SiGitlab";
 
-  import {
-    ApiFailure,
-    jsonBody,
-    requestJson,
-  } from "$lib/api/transport.js";
+  import { errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
   import {
     importDiscoverySchema,
     repositoryImportSchema,
@@ -138,12 +134,6 @@
     return remote.startsWith("ssh://") || /^git@[^:]+:.+/.test(remote);
   }
 
-  function message(caught: unknown, fallback: string): string {
-    return caught instanceof ApiFailure || caught instanceof Error
-      ? caught.message
-      : fallback;
-  }
-
   async function loadIdentities(currentNamespace: string): Promise<void> {
     const sequence = ++identityLoadSequence;
     identitiesLoading = true;
@@ -159,7 +149,7 @@
     } catch (caught) {
       if (sequence !== identityLoadSequence) return;
       identities = [];
-      identityLoadError = message(
+      identityLoadError = errorMessage(
         caught,
         "Could not load repository identities.",
       );
@@ -214,7 +204,7 @@
       discovery = result;
     } catch (caught) {
       toast.error(
-        message(caught, "Could not load repositories from the source."),
+        errorMessage(caught, "Could not load repositories from the source."),
       );
     } finally {
       connecting = false;
@@ -252,7 +242,9 @@
       );
       await goto(resolve("/imports/[id]", { id: result.id }));
     } catch (caught) {
-      toast.error(message(caught, "Could not start the repository import."));
+      toast.error(
+        errorMessage(caught, "Could not start the repository import."),
+      );
     } finally {
       importing = false;
     }
@@ -284,7 +276,9 @@
       );
       await goto(resolve("/imports/[id]", { id: result.id }));
     } catch (caught) {
-      toast.error(message(caught, "Could not start the repository import."));
+      toast.error(
+        errorMessage(caught, "Could not start the repository import."),
+      );
     } finally {
       importing = false;
     }

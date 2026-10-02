@@ -2,7 +2,7 @@ import { toast } from "svelte-sonner";
 
 import { authResponseSchema } from "$lib/api/auth.js";
 import {
-  ApiFailure,
+  errorMessage,
   jsonBody,
   requestEmpty,
   requestJson,
@@ -99,10 +99,7 @@ export class ProfileSettingsState {
       await task();
     } catch (caught) {
       if (!this.current(scope)) return;
-      const message =
-        caught instanceof ApiFailure || caught instanceof Error
-          ? caught.message
-          : "The request failed.";
+      const message = errorMessage(caught);
       toast.error(message);
     } finally {
       this.working = false;
@@ -160,10 +157,7 @@ export class PasswordSettingsState {
       await task();
     } catch (caught) {
       if (!this.current(scope)) return;
-      const message =
-        caught instanceof ApiFailure || caught instanceof Error
-          ? caught.message
-          : "The request failed.";
+      const message = errorMessage(caught);
       toast.error(message);
     } finally {
       this.working = false;

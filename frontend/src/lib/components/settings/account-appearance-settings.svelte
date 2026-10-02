@@ -8,12 +8,12 @@
   import { toast } from "svelte-sonner";
 
   import type { ThemePreference } from "$lib/api/auth.js";
+  import { errorMessage } from "$lib/api/transport.js";
   import * as Card from "$lib/components/ui/card/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import * as Select from "$lib/components/ui/select/index.js";
   import { Switch } from "$lib/components/ui/switch/index.js";
   import { motion } from "$lib/motion.svelte.js";
-  import { errorMessage } from "$lib/repository/state/shared.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
   const THEMES: { value: ThemePreference; label: string }[] = [

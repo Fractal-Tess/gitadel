@@ -3,6 +3,7 @@
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import CloudUpload from "@lucide/svelte/icons/cloud-upload";
   import HardDrive from "@lucide/svelte/icons/hard-drive";
+  import { errorMessage } from "$lib/api/transport.js";
   import { Spinner } from "$lib/components/ui/spinner/index.js";
   import { toast } from "svelte-sonner";
 
@@ -116,10 +117,6 @@
     step = "details";
   }
 
-  function message(caught: unknown, fallback: string) {
-    return caught instanceof Error ? caught.message : fallback;
-  }
-
   async function test() {
     testing = true;
     testToken = null;
@@ -131,7 +128,7 @@
       testedFingerprint = tested;
       toast.success(response.message);
     } catch (caught) {
-      toast.error(message(caught, "Could not test the backup provider."));
+      toast.error(errorMessage(caught, "Could not test the backup provider."));
     } finally {
       testing = false;
     }
@@ -143,7 +140,7 @@
     try {
       await onsave(value());
     } catch (caught) {
-      toast.error(message(caught, "Could not save the backup provider."));
+      toast.error(errorMessage(caught, "Could not save the backup provider."));
     } finally {
       saving = false;
     }

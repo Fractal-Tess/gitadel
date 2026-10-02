@@ -9,7 +9,7 @@
 
   import { blobToBase64 } from "$lib/avatar-crop.js";
   import {
-    ApiFailure,
+    errorMessage,
     jsonBody,
     requestEmpty,
     requestJson,
@@ -42,12 +42,6 @@
     organizationAvatarUrl(organization.slug, organization.avatar_updated_at),
   );
 
-  function message(caught: unknown, fallback: string): string {
-    return caught instanceof ApiFailure || caught instanceof Error
-      ? caught.message
-      : fallback;
-  }
-
   async function saveProfile(): Promise<void> {
     const currentSlug = organization.slug;
     savingProfile = true;
@@ -71,7 +65,7 @@
       }
     } catch (caught) {
       toast.error(
-        message(caught, "The organization profile could not be updated."),
+        errorMessage(caught, "The organization profile could not be updated."),
       );
     } finally {
       savingProfile = false;
@@ -102,7 +96,7 @@
       toast.success("Organization picture removed");
     } catch (caught) {
       toast.error(
-        message(caught, "The organization picture could not be removed."),
+        errorMessage(caught, "The organization picture could not be removed."),
       );
     } finally {
       removing = false;
@@ -121,7 +115,9 @@
       toast.success(`${organization.slug} was deleted`);
       await goto(resolve("/"));
     } catch (caught) {
-      toast.error(message(caught, "The organization could not be deleted."));
+      toast.error(
+        errorMessage(caught, "The organization could not be deleted."),
+      );
     } finally {
       deleting = false;
     }
