@@ -4,7 +4,7 @@ use std::{
     fs::File,
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::{Arc, LazyLock},
+    sync::{Arc, LazyLock, Mutex as StdMutex, PoisonError},
     time::{Duration as StdDuration, Instant},
 };
 
@@ -41,7 +41,7 @@ use sley_diff_merge::{
 };
 use tokei::{Config as TokeiConfig, LanguageType};
 use tokio::{
-    sync::{OwnedSemaphorePermit, Semaphore},
+    sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore},
     task::JoinSet,
 };
 
@@ -1650,11 +1650,71 @@ pub async fn stats(
     if let Some(cached) = state.cached_stats(repository.id, &commit_oid).await? {
         return Ok(Json(cached));
     }
+    // A miss counts every line of the tree. Requests for the same commit wait
+    // for one computation, and that computation takes an analysis slot like
+    // the overview's, so a burst of misses cannot occupy every blocking thread.
+    let _flight = single_flight(format!("stats:{}:{commit_oid}", repository.id)).await;
+    let _permit = state
+        .analysis_slots
+        .acquire()
+        .await
+        .map_err(ApiError::internal)?;
+    if let Some(cached) = state.cached_stats(repository.id, &commit_oid).await? {
+        return Ok(Json(cached));
+    }
     let computed = read_git(path, move |git| compute_stats(git, tree_oid)).await?;
     state
         .cache_stats(repository.id, &commit_oid, &computed)
         .await?;
     Ok(Json(computed))
+}
+
+/// Computations in progress, by key, for [`single_flight`].
+static IN_FLIGHT: LazyLock<StdMutex<HashMap<String, Arc<Mutex<()>>>>> =
+    LazyLock::new(StdMutex::default);
+
+/// Held by the one caller allowed to compute the value for a key.
+struct FlightGuard {
+    key: String,
+    lock: Option<Arc<Mutex<()>>>,
+    held: Option<OwnedMutexGuard<()>>,
+}
+
+/// Wait until no other caller is computing the value for `key`.
+///
+/// The holder computes and caches; a caller that waited re-checks the cache
+/// once it gets the guard and finds the holder's result there.
+async fn single_flight(key: String) -> FlightGuard {
+    let lock = Arc::clone(
+        IN_FLIGHT
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(key.clone())
+            .or_default(),
+    );
+    // Built before waiting, so a caller that gives up still tidies the map.
+    let mut guard = FlightGuard {
+        key,
+        lock: Some(Arc::clone(&lock)),
+        held: None,
+    };
+    guard.held = Some(lock.lock_owned().await);
+    guard
+}
+
+impl Drop for FlightGuard {
+    fn drop(&mut self) {
+        let mut in_flight = IN_FLIGHT.lock().unwrap_or_else(PoisonError::into_inner);
+        self.held = None;
+        self.lock = None;
+        // Only the map still refers to the lock: nobody holds or awaits it.
+        if in_flight
+            .get(&self.key)
+            .is_some_and(|lock| Arc::strong_count(lock) == 1)
+        {
+            in_flight.remove(&self.key);
+        }
+    }
 }
 
 pub(super) async fn read_repository_overview(
@@ -2513,7 +2573,7 @@ mod tests {
     use super::{
         ArchiveFileWriter, BrowseQuery, MAX_SOURCE_ARCHIVE_BYTES, SshCommitSignature,
         count_reachable_commits, if_none_match, metered_body, raw_blob_permits,
-        read_submodule_metadata, verify_ssh_commit_signature,
+        read_submodule_metadata, single_flight, verify_ssh_commit_signature,
     };
     use crate::repository::resources::test_support::instance;
 
@@ -2918,6 +2978,78 @@ mod tests {
         git.commit_file("other.txt", b"x\n", COMMIT_DATE);
         let response = request(conditional(&etag)).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn stats_miss_waits_for_an_analysis_slot_and_a_hit_does_not() {
+        let instance = instance().await;
+        let (_, git) = instance.git_repository("project").await;
+        git.commit_file("main.rs", b"fn main() {}\n", COMMIT_DATE);
+        let request = || {
+            super::stats(
+                State(instance.state.clone()),
+                project(),
+                HeaderMap::new(),
+                CookieJar::new(),
+                browse(""),
+            )
+        };
+
+        // With every analysis slot taken, a miss queues instead of computing.
+        let slots = Arc::clone(&instance.state.analysis_slots);
+        let busy = Arc::clone(&slots)
+            .acquire_many_owned(u32::try_from(slots.available_permits()).unwrap())
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), request())
+                .await
+                .is_err()
+        );
+        drop(busy);
+
+        let computed = request().await.unwrap().0;
+        assert_eq!(computed.len(), 1);
+        assert_eq!(computed[0].language, "Rust");
+        assert_eq!(computed[0].code, 1);
+
+        // The result is cached now, so no slot is needed to serve it.
+        let _busy = Arc::clone(&slots)
+            .acquire_many_owned(u32::try_from(slots.available_permits()).unwrap())
+            .await
+            .unwrap();
+        let cached = tokio::time::timeout(Duration::from_secs(10), request())
+            .await
+            .expect("a cache hit does not wait for a slot")
+            .unwrap()
+            .0;
+        assert_eq!(cached[0].code, 1);
+    }
+
+    #[tokio::test]
+    async fn single_flight_admits_one_holder_per_key() {
+        let key = format!("test:{}", Uuid::new_v4());
+        let first = single_flight(key.clone()).await;
+        // A different key is independent of the held one.
+        drop(single_flight(format!("{key}:other")).await);
+
+        let mut second = Box::pin(single_flight(key.clone()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut second)
+                .await
+                .is_err()
+        );
+        drop(first);
+        let second = tokio::time::timeout(Duration::from_secs(10), second)
+            .await
+            .expect("the waiter proceeds once the holder is done");
+        drop(second);
+
+        // A waiter that gives up, and the last holder, leave nothing behind.
+        let holder = single_flight(key.clone()).await;
+        drop(Box::pin(single_flight(key.clone())));
+        drop(holder);
+        assert!(!super::IN_FLIGHT.lock().unwrap().contains_key(&key));
     }
 
     #[test]
