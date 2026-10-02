@@ -682,14 +682,23 @@ pub async fn download_asset(
             ApiError::internal(error)
         }
     })?;
-    let _ = release_asset::Entity::update_many()
+    // A failed counter update must not fail the download, but it is a
+    // database write going wrong and should not pass unnoticed.
+    if let Err(error) = release_asset::Entity::update_many()
         .col_expr(
             release_asset::Column::DownloadCount,
             sea_orm::sea_query::Expr::col(release_asset::Column::DownloadCount).add(1),
         )
         .filter(release_asset::Column::Id.eq(asset.id))
         .exec(state.identity().database())
-        .await;
+        .await
+    {
+        tracing::error!(
+            %error,
+            asset_id = %asset.id,
+            "could not record release asset download"
+        );
+    }
     let mut response = Response::new(Body::from_stream(ReaderStream::new(file)));
     let content_type = HeaderValue::from_str(&asset.content_type)
         .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
@@ -971,6 +980,10 @@ async fn writable_release_repository(
             .run
             .actor_id
             .ok_or_else(|| ApiError::forbidden("The workflow run has no actor."))?;
+        // The job token stands in for the membership check, not for the
+        // repository's own state: a repository archived or turned into a
+        // mirror while the job runs is read-only for the job too.
+        ensure_accepts_writes(&repository)?;
         return Ok((repository, actor_id));
     }
     let (actor, repository) = state
@@ -984,6 +997,17 @@ async fn writable_release_repository(
         )
         .await?;
     Ok((repository, actor.user.id))
+}
+
+/// The repository states [`RepositoryState::authorize`] refuses writes in.
+fn ensure_accepts_writes(repository: &repository::Model) -> Result<(), ApiError> {
+    if repository.archived_at.is_some() {
+        return Err(ApiError::forbidden("Archived repositories are read-only."));
+    }
+    if repository.mirrored {
+        return Err(ApiError::forbidden("Mirrored repositories are read-only."));
+    }
+    Ok(())
 }
 
 async fn readable_repository(
@@ -1285,5 +1309,57 @@ fn ascii_download_name(value: &str) -> String {
         "download".to_owned()
     } else {
         value
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{http::StatusCode, response::IntoResponse as _};
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    use super::ensure_accepts_writes;
+    use crate::entity::repository;
+
+    fn repository() -> repository::Model {
+        let now = Utc::now();
+        repository::Model {
+            id: Uuid::new_v4(),
+            namespace: "alice".to_owned(),
+            name: "project".to_owned(),
+            description: None,
+            website_url: None,
+            visibility: "private".to_owned(),
+            object_format: "sha1".to_owned(),
+            mirrored: false,
+            default_branch: Some("main".to_owned()),
+            issue_counter: 0,
+            storage_key: Uuid::new_v4(),
+            created_by: Uuid::new_v4(),
+            archived_at: None,
+            deleted_at: None,
+            icon_updated_at: None,
+            icon_source: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn job_tokens_cannot_write_releases_to_read_only_repositories() {
+        assert!(ensure_accepts_writes(&repository()).is_ok());
+
+        let archived = repository::Model {
+            archived_at: Some(Utc::now()),
+            ..repository()
+        };
+        let mirrored = repository::Model {
+            mirrored: true,
+            ..repository()
+        };
+        for read_only in [archived, mirrored] {
+            let error = ensure_accepts_writes(&read_only).expect_err("reject the write");
+            assert_eq!(error.into_response().status(), StatusCode::FORBIDDEN);
+        }
     }
 }
