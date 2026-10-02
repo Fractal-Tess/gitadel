@@ -623,32 +623,21 @@ async fn synchronize_inner(
     let mirror = find_mirror(repository.id, state.identity().database()).await?;
     let attempted_at = Utc::now();
     let path = state.repository_path(repository);
-    validate_remote_url(&mirror.remote_url)?;
-    let github = match (&mirror.github_owner, &mirror.github_repository) {
-        (Some(owner), Some(name)) => Some(github_mirror::GithubRepository {
-            owner: owner.clone(),
-            name: name.clone(),
-        }),
-        _ => github_mirror::identify(&mirror.remote_url),
+    let preflight = match preflight(state, repository, &mirror, attempted_at).await {
+        Ok(preflight) => preflight,
+        Err(error) => {
+            // Record the failure and move the schedule on exactly as a failed
+            // fetch does; otherwise the scheduler would retry the mirror on
+            // every tick without ever showing why.
+            record_preflight_failure(state, mirror, attempted_at, &error).await;
+            return Err(error);
+        }
     };
-    let authentication = authentication(
-        state,
-        &repository.namespace,
-        &mirror.remote_url,
-        mirror.identity_id,
-        github.is_some(),
-    )
-    .await?;
-    let native_auth = native_remote::NativeAuthentication {
-        username: authentication.basic.as_ref().map(|value| value.0.clone()),
-        secret: authentication.basic.as_ref().map(|value| value.1.clone()),
-        ssh_private_key: authentication.ssh_private_key.clone(),
-        ssh_known_hosts: None,
-    };
-    if let Some(id) = mirror.identity_id {
-        mark_repository_identity_used(state.identity(), &repository.namespace, id, attempted_at)
-            .await?;
-    }
+    let Preflight {
+        github,
+        authentication,
+        native_auth,
+    } = preflight;
     let sync_result =
         native_remote::synchronize(state, &path, &mirror.remote_url, native_auth).await;
     if sync_result.is_ok()
@@ -673,14 +662,7 @@ async fn synchronize_inner(
         _ => None,
     };
     let completed_at = Utc::now();
-    let next_sync_at = mirror
-        .schedule
-        .as_deref()
-        .map(|expression| {
-            schedule::next_occurrence(expression, completed_at)
-                .map_err(|error| ApiError::bad_request(format!("Mirror schedule {error}.")))
-        })
-        .transpose()?;
+    let next_sync_at = next_sync_after(&mirror, completed_at);
     let mut active = mirror.into_active_model();
     active.last_attempted_at = Set(Some(attempted_at));
     active.next_sync_at = Set(next_sync_at);
@@ -732,6 +714,96 @@ async fn synchronize_inner(
     sync_result.map_err(|error| ApiError::bad_request(format!("Mirror sync failed: {error}")))?;
     state.queue_repository_analysis(repository.id).await;
     Ok(mirror)
+}
+
+struct Preflight {
+    github: Option<github_mirror::GithubRepository>,
+    authentication: GitAuthentication,
+    native_auth: native_remote::NativeAuthentication,
+}
+
+/// Everything a synchronization needs before it contacts the remote.
+async fn preflight(
+    state: &RepositoryState,
+    repository: &repository::Model,
+    mirror: &repository_mirror::Model,
+    attempted_at: DateTime<Utc>,
+) -> Result<Preflight, ApiError> {
+    validate_remote_url(&mirror.remote_url)?;
+    let github = match (&mirror.github_owner, &mirror.github_repository) {
+        (Some(owner), Some(name)) => Some(github_mirror::GithubRepository {
+            owner: owner.clone(),
+            name: name.clone(),
+        }),
+        _ => github_mirror::identify(&mirror.remote_url),
+    };
+    let authentication = authentication(
+        state,
+        &repository.namespace,
+        &mirror.remote_url,
+        mirror.identity_id,
+        github.is_some(),
+    )
+    .await?;
+    let native_auth = native_remote::NativeAuthentication {
+        username: authentication.basic.as_ref().map(|value| value.0.clone()),
+        secret: authentication.basic.as_ref().map(|value| value.1.clone()),
+        ssh_private_key: authentication.ssh_private_key.clone(),
+        ssh_known_hosts: None,
+    };
+    if let Some(id) = mirror.identity_id {
+        mark_repository_identity_used(state.identity(), &repository.namespace, id, attempted_at)
+            .await?;
+    }
+    Ok(Preflight {
+        github,
+        authentication,
+        native_auth,
+    })
+}
+
+/// The mirror's next scheduled run after `after`. A stored expression that no
+/// longer parses yields no next run rather than leaving the mirror due on
+/// every scheduler tick.
+fn next_sync_after(
+    mirror: &repository_mirror::Model,
+    after: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    let expression = mirror.schedule.as_deref()?;
+    match schedule::next_occurrence(expression, after) {
+        Ok(next) => Some(next),
+        Err(error) => {
+            tracing::error!(
+                %error,
+                repository_id = %mirror.repository_id,
+                "mirror schedule is invalid; scheduled synchronization is paused"
+            );
+            None
+        }
+    }
+}
+
+async fn record_preflight_failure(
+    state: &RepositoryState,
+    mirror: repository_mirror::Model,
+    attempted_at: DateTime<Utc>,
+    error: &ApiError,
+) {
+    let repository_id = mirror.repository_id;
+    let now = Utc::now();
+    let next_sync_at = next_sync_after(&mirror, now);
+    let mut active = mirror.into_active_model();
+    active.last_attempted_at = Set(Some(attempted_at));
+    active.next_sync_at = Set(next_sync_at);
+    active.updated_at = Set(now);
+    active.last_error = Set(Some(truncate(&error.to_string(), MAX_ERROR_LENGTH)));
+    if let Err(update_error) = active.update(state.identity().database()).await {
+        tracing::error!(
+            error = %update_error,
+            %repository_id,
+            "could not record mirror synchronization failure"
+        );
+    }
 }
 
 async fn find_mirror(
@@ -1585,6 +1657,48 @@ mod tests {
                 mirror.is_some(),
                 "conversion must not proceed while synchronizing"
             );
+
+            tokio::fs::remove_dir_all(&environment._root).await.ok();
+        }
+
+        #[tokio::test]
+        async fn failures_before_the_fetch_are_recorded_and_advance_the_schedule() {
+            use sea_orm::IntoActiveModel as _;
+
+            let environment = environment().await;
+            let account = seed_account(&environment.database).await;
+            let repository =
+                seed_repository(&environment.database, &account, "upstream", true).await;
+            seed_mirror(&environment.database, &repository, &account).await;
+            // A remote the validator refuses, so the attempt ends before any
+            // network access.
+            let due = Utc::now() - chrono::Duration::minutes(5);
+            let mut stored = repository_mirror::Entity::find_by_id(repository.id)
+                .one(&environment.database)
+                .await
+                .unwrap()
+                .unwrap()
+                .into_active_model();
+            stored.remote_url = Set("http://insecure.example/repository.git".to_owned());
+            stored.next_sync_at = Set(Some(due));
+            stored.update(&environment.database).await.unwrap();
+
+            let started = Utc::now();
+            let result = try_synchronize(&environment.state, &repository, None).await;
+
+            assert!(result.is_err());
+            let mirror = repository_mirror::Entity::find_by_id(repository.id)
+                .one(&environment.database)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(mirror.last_error.is_some(), "the failure must be visible");
+            assert!(mirror.last_attempted_at.unwrap() >= started);
+            assert!(
+                mirror.next_sync_at.unwrap() > started,
+                "the mirror must not stay due on every scheduler tick"
+            );
+            assert!(!environment.state.mirror_syncing.contains(repository.id));
 
             tokio::fs::remove_dir_all(&environment._root).await.ok();
         }
