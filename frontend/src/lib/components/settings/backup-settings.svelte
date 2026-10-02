@@ -447,11 +447,12 @@
         signal.throwIfAborted();
         if (
           caught instanceof ApiFailure &&
-          ![404, 502, 503].includes(caught.status)
+          ![0, 404, 502, 503].includes(caught.status)
         ) {
           throw caught;
         }
-        // The full server is unavailable while the maintenance server reports progress.
+        // The full server is unavailable while the maintenance server reports
+        // progress; status 0 is a request that reached neither.
       }
       await pause(1_000);
     }

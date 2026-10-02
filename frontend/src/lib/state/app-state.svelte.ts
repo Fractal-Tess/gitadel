@@ -16,7 +16,11 @@ import {
   instanceSettingsSchema,
   type InstanceSettings,
 } from "$lib/api/instance.js";
-import { jsonBody, requestJson } from "$lib/api/transport.js";
+import {
+  jsonBody,
+  onUnauthenticated,
+  requestJson,
+} from "$lib/api/transport.js";
 import type { AuthorizationCacheScope } from "$lib/cache-scope.js";
 import type { Organization } from "$lib/api/organizations.js";
 import {
@@ -54,6 +58,7 @@ export class AppState {
   #initializedAt = 0;
   #organizationsFor: string | null = null;
   #initializing: Promise<AuthStatus> | null = null;
+  #sessionCheck: Promise<void> | null = null;
 
   async initialize(): Promise<AuthStatus> {
     if (
@@ -217,6 +222,21 @@ export class AppState {
     }
   }
 
+  /**
+   * Called when a request is refused for lack of a session. Re-reading the
+   * status lets the route guard send a signed-out viewer to the sign-in page
+   * with a way back, instead of each failed request reporting on its own.
+   */
+  handleUnauthenticated(): void {
+    if (!this.authStatus?.authenticated || this.#sessionCheck) return;
+    this.#sessionCheck = this.refreshAuth()
+      .then(() => undefined)
+      .catch(() => undefined)
+      .finally(() => {
+        this.#sessionCheck = null;
+      });
+  }
+
   async refreshAuth(): Promise<AuthStatus> {
     this.loading = true;
     this.error = null;
@@ -278,6 +298,7 @@ export class AppState {
 export function provideAppState(): AppState {
   const state = new AppState();
   setContext(APP_STATE, state);
+  onUnauthenticated(() => state.handleUnauthenticated());
   return state;
 }
 
