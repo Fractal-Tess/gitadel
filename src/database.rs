@@ -1,7 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
-use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection};
+use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 
 use crate::{
@@ -9,6 +12,8 @@ use crate::{
     filesystem::{create_private_directory, open_private_file, protect_file},
     migration::Migrator,
 };
+
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub async fn connect_and_migrate(settings: &DatabaseSettings) -> Result<DatabaseConnection> {
     let database_path = sqlite_file_path(&settings.url);
@@ -24,13 +29,7 @@ pub async fn connect_and_migrate(settings: &DatabaseSettings) -> Result<Database
         );
     }
 
-    let mut options = ConnectOptions::new(&settings.url);
-    options.sqlx_logging(false);
-    // A single SQLite writer connection makes transaction boundaries deterministic and
-    // ensures every operation inherits these connection-local safety pragmas.
-    options.max_connections(1);
-
-    let connection = Database::connect(options)
+    let connection = Database::connect(connect_options(&settings.url))
         .await
         .with_context(|| format!("could not connect to database {}", settings.url))?;
     if let Some(path) = database_path.as_deref() {
@@ -38,18 +37,29 @@ pub async fn connect_and_migrate(settings: &DatabaseSettings) -> Result<Database
             .await
             .with_context(|| format!("could not protect database {}", path.display()))?;
     }
-    connection
-        .execute_unprepared(
-            "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;",
-        )
-        .await
-        .context("could not configure SQLite concurrency guarantees")?;
 
     Migrator::up(&connection, None)
         .await
         .context("could not apply database migrations")?;
 
     Ok(connection)
+}
+
+fn connect_options(url: &str) -> ConnectOptions {
+    let mut options = ConnectOptions::new(url);
+    options.sqlx_logging(false);
+    // A single SQLite writer connection makes transaction boundaries deterministic.
+    options.max_connections(1);
+    // `foreign_keys` and `busy_timeout` are connection-local, so they are part
+    // of the connect options: the pool replaces its connection when it ages
+    // out, and a pragma issued once after startup would not follow it.
+    options.map_sqlx_sqlite_opts(|sqlite| {
+        sqlite
+            .foreign_keys(true)
+            .pragma("journal_mode", "WAL")
+            .busy_timeout(BUSY_TIMEOUT)
+    });
+    options
 }
 
 fn sqlite_file_path(url: &str) -> Option<PathBuf> {
@@ -65,9 +75,49 @@ fn sqlite_file_path(url: &str) -> Option<PathBuf> {
 mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
+    use sea_orm::{ConnectionTrait as _, Statement};
     use uuid::Uuid;
 
     use super::*;
+
+    async fn pragma(connection: &DatabaseConnection, name: &str, column: &str) -> String {
+        let row = connection
+            .query_one_raw(Statement::from_string(
+                connection.get_database_backend(),
+                format!("SELECT CAST({column} AS TEXT) AS value FROM pragma_{name}"),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        row.try_get::<String>("", "value").unwrap()
+    }
+
+    #[tokio::test]
+    async fn every_pooled_connection_is_opened_with_the_safety_pragmas() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("gitadel-database-pragma-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root)?;
+        let url = format!("sqlite://{}?mode=rwc", root.join("gitadel.db").display());
+        // The pool's connection is retired after every use, so each statement
+        // below runs on a connection no earlier statement configured.
+        let mut options = connect_options(&url);
+        options.map_sqlx_sqlite_pool_opts(|pool| pool.max_lifetime(Duration::ZERO));
+        let connection = Database::connect(options).await?;
+
+        for _ in 0..2 {
+            assert_eq!(
+                pragma(&connection, "foreign_keys", "foreign_keys").await,
+                "1"
+            );
+            assert_eq!(pragma(&connection, "busy_timeout", "timeout").await, "5000");
+            assert_eq!(
+                pragma(&connection, "journal_mode", "journal_mode").await,
+                "wal"
+            );
+        }
+        connection.close().await?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn database_creation_uses_owner_only_modes() -> Result<()> {
