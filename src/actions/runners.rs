@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 use chrono::{Duration, Utc};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
-    QueryOrder, Set, TransactionTrait,
+    QueryOrder, Set, TransactionTrait, sea_query::Query,
 };
 use uuid::Uuid;
 
@@ -232,40 +232,30 @@ pub(crate) async fn claim(
     let approved: Vec<String> = serde_json::from_str(&runner.approved_labels).map_err(|_| {
         RunnerError::InvalidRegistration("stored runner labels are invalid".to_owned())
     })?;
-    let repository_ids = if let Some(namespace) = runner.namespace.as_deref() {
-        repository::Entity::find()
-            .filter(repository::Column::Namespace.eq(namespace))
-            .filter(repository::Column::DeletedAt.is_null())
-            .all(&transaction)
-            .await?
-            .into_iter()
-            .map(|repository| repository.id)
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    if runner.namespace.is_some() && repository_ids.is_empty() {
-        transaction.commit().await?;
-        return Ok(None);
-    }
-    let run_ids = if runner.namespace.is_some() {
-        action_run::Entity::find()
-            .filter(action_run::Column::RepositoryId.is_in(repository_ids))
-            .all(&transaction)
-            .await?
-            .into_iter()
-            .map(|run| run.id)
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    if runner.namespace.is_some() && run_ids.is_empty() {
-        transaction.commit().await?;
-        return Ok(None);
-    }
+    // Only queued jobs are candidates, and a namespace runner is limited to
+    // its owner's live repositories inside the same statement. Listing run
+    // IDs first grew with the namespace's whole history and eventually
+    // exceeded SQLite's bound-variable limit.
     let mut select = action_job::Entity::find().filter(action_job::Column::Status.eq("queued"));
-    if runner.namespace.is_some() {
-        select = select.filter(action_job::Column::RunId.is_in(run_ids));
+    if let Some(namespace) = runner.namespace.as_deref() {
+        select = select.filter(
+            action_job::Column::RunId.in_subquery(
+                Query::select()
+                    .column(action_run::Column::Id)
+                    .from(action_run::Entity)
+                    .and_where(
+                        action_run::Column::RepositoryId.in_subquery(
+                            Query::select()
+                                .column(repository::Column::Id)
+                                .from(repository::Entity)
+                                .and_where(repository::Column::Namespace.eq(namespace))
+                                .and_where(repository::Column::DeletedAt.is_null())
+                                .to_owned(),
+                        ),
+                    )
+                    .to_owned(),
+            ),
+        );
     }
     if let Some(handle) = handle {
         select = select.filter(action_job::Column::Id.eq(handle));
@@ -584,5 +574,91 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(token.expires_at > now + Duration::hours(5));
+    }
+
+    async fn namespace_runner(
+        database: &DatabaseConnection,
+        namespace: &str,
+        owner_id: Uuid,
+    ) -> action_runner::Model {
+        let now = Utc::now();
+        action_runner::ActiveModel {
+            id: Default::default(),
+            uuid: Set(Uuid::new_v4().to_string()),
+            namespace: Set(Some(namespace.to_owned())),
+            name: Set(format!("{namespace}-runner")),
+            token_hash: Set(tokens::digest(&format!("{namespace}-runner-token"))),
+            approved_labels: Set("[\"docker\"]".to_owned()),
+            version: Set(REQUIRED_RUNNER_VERSION.to_owned()),
+            ephemeral: Set(false),
+            disabled_at: Set(None),
+            deleted_at: Set(None),
+            last_seen_at: Set(Some(now)),
+            created_by: Set(Some(owner_id)),
+            created_at: Set(now),
+        }
+        .insert(database)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn namespace_runner_claims_with_a_long_run_history() {
+        use sea_orm::ConnectionTrait as _;
+
+        let database = database().await;
+        let alice = owner(&database, "alice").await;
+        let now = Utc::now();
+        let (run_id, job) = queued_job(&database, "alice", alice, now).await;
+        // More finished runs than SQLite accepts as bound variables in one
+        // statement, which is what listing every run ID used to need.
+        database
+            .execute_unprepared(&format!(
+                "WITH RECURSIVE history(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM history WHERE n < 40000) \
+                 INSERT INTO action_runs (id, repository_id, number, workflow_path, workflow_name, event, \
+                 ref_name, before_sha, after_sha, actor_id, status, event_json, run_attempt, created_at) \
+                 SELECT randomblob(16), repository_id, number + n, workflow_path, workflow_name, event, \
+                 ref_name, before_sha, after_sha, actor_id, 'success', event_json, run_attempt, created_at \
+                 FROM action_runs, history WHERE id = x'{}'",
+                run_id.simple()
+            ))
+            .await
+            .unwrap();
+        let runner = namespace_runner(&database, "alice", alice).await;
+
+        let claimed = claim(&database, &runner, Uuid::new_v4(), None, 300)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(claimed.job.id, job.id);
+    }
+
+    #[tokio::test]
+    async fn namespace_runner_skips_jobs_of_deleted_repositories() {
+        let database = database().await;
+        let alice = owner(&database, "alice").await;
+        let now = Utc::now();
+        let (run_id, _) = queued_job(&database, "alice", alice, now).await;
+        let run = action_run::Entity::find_by_id(run_id)
+            .one(&database)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut deleted = repository::Entity::find_by_id(run.repository_id)
+            .one(&database)
+            .await
+            .unwrap()
+            .unwrap()
+            .into_active_model();
+        deleted.deleted_at = Set(Some(now));
+        deleted.update(&database).await.unwrap();
+        let runner = namespace_runner(&database, "alice", alice).await;
+
+        let claimed = claim(&database, &runner, Uuid::new_v4(), None, 300)
+            .await
+            .unwrap();
+
+        assert!(claimed.is_none());
     }
 }
