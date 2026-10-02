@@ -143,7 +143,11 @@ pub(crate) async fn serve_actions_scheduler(state: ActionsState) -> anyhow::Resu
         tokio::select! {
             () = state.shutdown.cancelled() => return Ok(()),
             _ = interval.tick() => {
-                runs::maintain(&state).await?;
+                // A transient database error must not end this future: the
+                // server treats that as fatal. The next tick retries.
+                if let Err(error) = runs::maintain(&state).await {
+                    tracing::error!(%error, "actions run maintenance failed");
+                }
                 if let Err(error) = artifacts::cleanup(&state).await {
                     tracing::warn!(%error, "actions artifact cleanup failed");
                 }

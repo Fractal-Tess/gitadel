@@ -47,14 +47,17 @@ pub(crate) async fn serve_mirror_scheduler(state: RepositoryState) -> Result<(),
             }
         };
         for mirror in due {
-            let Some(repository) = repository::Entity::find_by_id(mirror.repository_id)
+            let repository = match repository::Entity::find_by_id(mirror.repository_id)
                 .one(state.identity().database())
                 .await
-                .inspect_err(|error| {
+            {
+                Ok(Some(repository)) => repository,
+                Ok(None) => continue,
+                Err(error) => {
+                    // Transient; the mirror stays due and the next tick retries.
                     tracing::error!(%error, repository_id = %mirror.repository_id, "could not load scheduled mirror repository");
-                })?
-            else {
-                continue;
+                    continue;
+                }
             };
             let worker_state = state.clone();
             let task_state = worker_state.clone();

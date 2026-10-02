@@ -18,16 +18,30 @@ use sley_core::{AtomicCancel, CancelFlag, ObjectFormat};
 use tokio::{fs, task, time};
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const SCHEDULER_RETRY: Duration = Duration::from_secs(60);
 
 pub(crate) async fn serve_integrity_scheduler(state: RepositoryState) -> Result<()> {
     let mut settings_changed = state.identity().subscribe_integrity_settings();
 
     loop {
-        let settings = instance::Entity::find_by_id(1)
+        // A failed tick must not end this future: the server treats that as
+        // fatal. Only a closed settings channel is unrecoverable.
+        let settings = match instance::Entity::find_by_id(1)
             .one(state.identity().database())
             .await
-            .context("could not load repository integrity settings")?
-            .context("instance settings row is missing")?;
+        {
+            Ok(Some(settings)) => settings,
+            Ok(None) => {
+                tracing::error!("instance settings row is missing; retrying integrity schedule");
+                retry_or_settings_change(&mut settings_changed).await?;
+                continue;
+            }
+            Err(error) => {
+                tracing::error!(%error, "could not load repository integrity settings; retrying");
+                retry_or_settings_change(&mut settings_changed).await?;
+                continue;
+            }
+        };
 
         if !settings.integrity_checks_enabled {
             settings_changed
@@ -39,9 +53,22 @@ pub(crate) async fn serve_integrity_scheduler(state: RepositoryState) -> Result<
 
         let now = Utc::now();
         let expression = settings.integrity_check_schedule;
-        let next = schedule::next_occurrence(&expression, now).with_context(|| {
-            format!("could not schedule repository integrity checks: {expression}")
-        })?;
+        let next = match schedule::next_occurrence(&expression, now) {
+            Ok(next) => next,
+            Err(error) => {
+                // Only a settings change can repair a bad stored expression.
+                tracing::error!(
+                    %error,
+                    %expression,
+                    "could not schedule repository integrity checks; waiting for new settings"
+                );
+                settings_changed
+                    .changed()
+                    .await
+                    .context("repository integrity settings channel closed")?;
+                continue;
+            }
+        };
         let wait = tokio::time::sleep((next - now).to_std().unwrap_or_default());
         tokio::pin!(wait);
 
@@ -54,6 +81,18 @@ pub(crate) async fn serve_integrity_scheduler(state: RepositoryState) -> Result<
             changed = settings_changed.changed() => {
                 changed.context("repository integrity settings channel closed")?;
             }
+        }
+    }
+}
+
+/// Waits out a transient failure, returning early when the settings change.
+async fn retry_or_settings_change(
+    settings_changed: &mut tokio::sync::watch::Receiver<u64>,
+) -> Result<()> {
+    tokio::select! {
+        () = tokio::time::sleep(SCHEDULER_RETRY) => Ok(()),
+        changed = settings_changed.changed() => {
+            changed.context("repository integrity settings channel closed")
         }
     }
 }
