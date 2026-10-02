@@ -133,21 +133,12 @@
 
   async function loginWithPasskey(): Promise<void> {
     await runLogin(async () => {
-      console.info("[passkey] requesting discoverable login challenge", {
-        secureContext: globalThis.isSecureContext,
-        publicKeyCredentialAvailable:
-          typeof PublicKeyCredential !== "undefined",
-      });
       const challenge = await requestJson(
         "/api/v1/auth/passkeys/login/start",
         webauthnRequestSchema,
         { method: "POST" },
       );
       const options = requestOptions(challenge.options.publicKey);
-      console.info("[passkey] discoverable login challenge received", {
-        allowedCredentialCount: options.allowCredentials?.length ?? 0,
-        rpId: options.rpId,
-      });
       const credential = await getCredential(options);
       await requestJson(
         "/api/v1/auth/passkeys/login/finish",
@@ -157,7 +148,6 @@
           body: jsonBody({ challenge_id: challenge.challenge_id, credential }),
         },
       );
-      console.info("[passkey] discoverable login accepted");
       return "passkey";
     });
   }
