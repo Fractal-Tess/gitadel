@@ -110,8 +110,13 @@ impl RefGuard {
             (RuleKind::Branch, short)
         } else if let Some(short) = name.strip_prefix("refs/tags/") {
             (RuleKind::Tag, short)
-        } else {
+        } else if name.starts_with("refs/") {
             return RefCheck::Allowed;
+        } else {
+            // `HEAD` would be followed through its symref to a branch no rule
+            // was checked against, and one-level names such as `shallow` or
+            // `packed-refs` are repository files rather than refs.
+            return RefCheck::Rejected("ref names must start with `refs/`".to_owned());
         };
         let mut fast_forward = None;
         for rule in self
@@ -710,6 +715,25 @@ mod tests {
             guard.check("refs/notes/main", false, true),
             RefCheck::Allowed
         );
+    }
+
+    #[test]
+    fn names_outside_the_refs_namespace_are_rejected_even_without_rules() {
+        for guard in [
+            RefGuard::default(),
+            RefGuard::for_tests(vec![test_rule("branch", "main")], None, true, &[]),
+        ] {
+            for name in ["HEAD", "shallow", "packed-refs", "config", "heads/main", ""] {
+                assert!(
+                    matches!(guard.check(name, false, false), RefCheck::Rejected(_)),
+                    "{name:?} must be rejected"
+                );
+            }
+            assert_eq!(
+                guard.check("refs/notes/commits", true, false),
+                RefCheck::Allowed
+            );
+        }
     }
 
     #[test]

@@ -763,6 +763,46 @@ mod tests {
     }
 
     #[test]
+    fn pushes_to_names_outside_refs_are_rejected_before_any_ref_is_written() {
+        let server = TestDirectory::new("server");
+        let client = TestDirectory::new("client");
+        GitRepository::init_bare(&server.0).unwrap();
+        GitRepository::init_bare(&client.0).unwrap();
+        let base = commit(&server.0, "main", None, "base.txt");
+        let unrelated = commit(&client.0, "main", None, "unrelated.txt");
+        // Point HEAD at the protected branch so a `HEAD` command would be
+        // followed through the symref.
+        std::fs::write(server.0.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        for guard in [main_guard(), RefGuard::default()] {
+            let body = request(
+                &[
+                    (base.to_hex(), unrelated.to_hex(), "HEAD"),
+                    (ZERO.to_owned(), unrelated.to_hex(), "shallow"),
+                    (ZERO.to_owned(), unrelated.to_hex(), "packed-refs"),
+                ],
+                Some(pack(&client.0, unrelated)),
+            );
+            let (outcome, report) = push(&server.0, &guard, body);
+
+            for name in ["HEAD", "shallow", "packed-refs"] {
+                assert!(
+                    report.contains(&format!("ng {name} ref names must start with `refs/`")),
+                    "{report}"
+                );
+            }
+            assert!(!outcome.landed);
+            assert_eq!(tip(&server.0, "main"), Some(base));
+            assert_eq!(
+                std::fs::read_to_string(server.0.join("HEAD")).unwrap(),
+                "ref: refs/heads/main\n"
+            );
+            assert!(!server.0.join("shallow").exists());
+            assert!(!server.0.join("packed-refs").exists());
+        }
+    }
+
+    #[test]
     fn unprotected_force_push_still_lands() {
         let server = TestDirectory::new("server");
         let client = TestDirectory::new("client");
