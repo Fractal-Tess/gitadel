@@ -180,11 +180,20 @@ export class AppState {
         return organizations;
       }
       this.#organizationsFor = username;
-      this.organizations = organizations;
+      // An unchanged list keeps its identity so readers are not invalidated
+      // by a refresh that found nothing new.
+      if (
+        JSON.stringify(this.organizations) !== JSON.stringify(organizations)
+      ) {
+        this.organizations = organizations;
+      }
       updateOrganizations(scope, organizations);
       return organizations;
     }
-    return [];
+    // Another refresh for the same viewer finished first and advanced the
+    // scope. The state already holds its copy, and this answer is as true, so
+    // a caller deciding on it is not told the viewer has no organizations.
+    return this.authStatus?.user?.username === username ? organizations : [];
   }
 
   addOrganization(organization: Organization): void {

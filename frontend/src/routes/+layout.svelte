@@ -5,6 +5,7 @@
   import { page } from "$app/state";
   import { resolve } from "$app/paths";
   import { ModeWatcher, mode } from "mode-watcher";
+  import { untrack } from "svelte";
 
   import AppHeader from "$lib/components/app/app-header.svelte";
   import AppRail from "$lib/components/app/app-rail.svelte";
@@ -91,10 +92,16 @@
   });
 
   $effect(() => {
+    // Only the address and the session re-run the guard. It refreshes the
+    // organization list itself, so tracking that list here would make each
+    // refresh schedule the next one.
     const url = page.url;
-    const sequence = ++guardSequence;
-    ready = canRenderWhileGuarding(url);
-    void guardRoute(url, sequence);
+    void app.authStatus;
+    untrack(() => {
+      const sequence = ++guardSequence;
+      ready = canRenderWhileGuarding(url);
+      void guardRoute(url, sequence);
+    });
   });
 
   function canRenderWhileGuarding(url: URL) {
