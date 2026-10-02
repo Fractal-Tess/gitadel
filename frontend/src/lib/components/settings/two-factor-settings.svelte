@@ -3,6 +3,7 @@
   import ShieldCheck from "@lucide/svelte/icons/shield-check";
   import { toast } from "svelte-sonner";
 
+  import { copyText } from "$lib/clipboard.js";
   import {
     recoveryCodesSchema,
     twoFactorEnrollmentSchema,
@@ -141,7 +142,7 @@
   async function copyRecoveryCodes() {
     if (!recoveryCodes) return;
     try {
-      await navigator.clipboard.writeText(recoveryCodes.join("\n"));
+      await copyText(recoveryCodes.join("\n"));
       toast.success("Recovery codes copied");
     } catch {
       toast.error("Could not copy the recovery codes", {

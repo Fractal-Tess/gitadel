@@ -5,6 +5,7 @@
   import Trash2 from "@lucide/svelte/icons/trash-2";
   import { toast } from "svelte-sonner";
 
+  import { copyText } from "$lib/clipboard.js";
   import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
   import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -31,19 +32,7 @@
 
   async function copyCredential(value: string, label: string) {
     try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(value);
-      } else {
-        const carrier = document.createElement("textarea");
-        carrier.value = value;
-        carrier.setAttribute("readonly", "");
-        carrier.style.position = "fixed";
-        carrier.style.opacity = "0";
-        document.body.append(carrier);
-        carrier.select();
-        document.execCommand("copy");
-        carrier.remove();
-      }
+      await copyText(value);
       toast.success(`${label} copied`);
     } catch {
       toast.error(`Could not copy the ${label.toLowerCase()}`, {

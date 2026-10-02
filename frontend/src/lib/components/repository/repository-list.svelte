@@ -12,6 +12,7 @@
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
   import Settings2 from "@lucide/svelte/icons/settings-2";
   import X from "@lucide/svelte/icons/x";
+  import { copyText } from "$lib/clipboard.js";
   import RepositoryActivityChart from "$lib/components/repository/repository-activity-chart.svelte";
   import RepositoryIcon from "$lib/components/repository/repository-icon.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -228,21 +229,7 @@
   ): Promise<void> {
     const url = cloneUrl(repository, target);
     try {
-      // A self-hosted instance is often reached over plain HTTP, where
-      // navigator.clipboard is undefined, so fall back to a selection copy.
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(url);
-      } else {
-        const carrier = document.createElement("textarea");
-        carrier.value = url;
-        carrier.setAttribute("readonly", "");
-        carrier.style.position = "fixed";
-        carrier.style.opacity = "0";
-        document.body.append(carrier);
-        carrier.select();
-        document.execCommand("copy");
-        carrier.remove();
-      }
+      await copyText(url);
 
       toast.success(`${target.toUpperCase()} clone URL copied`, {
         description: url,

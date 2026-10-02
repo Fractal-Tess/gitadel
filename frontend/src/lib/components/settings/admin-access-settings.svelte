@@ -4,7 +4,9 @@
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
   import ShieldCheck from "@lucide/svelte/icons/shield-check";
   import UserPlus from "@lucide/svelte/icons/user-plus";
+  import { toast } from "svelte-sonner";
 
+  import { copyText } from "$lib/clipboard.js";
   import AdminPendingInvitations from "$lib/components/settings/admin-pending-invitations.svelte";
   import * as Alert from "$lib/components/ui/alert/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -69,6 +71,17 @@
         .join(" ")
     );
   }
+
+  async function copyInvitation() {
+    try {
+      await copyText(state.invitation ?? "");
+      toast.success("Invitation token copied");
+    } catch {
+      toast.error("Could not copy the invitation token", {
+        description: "Select the token and copy it manually.",
+      });
+    }
+  }
 </script>
 
 {#if state.error}
@@ -124,8 +137,7 @@
               <Button
                 variant="ghost"
                 size="icon-sm"
-                onclick={() =>
-                  navigator.clipboard.writeText(state.invitation ?? "")}
+                onclick={() => void copyInvitation()}
                 aria-label="Copy invitation token"
               >
                 <Clipboard class="size-3.5" />

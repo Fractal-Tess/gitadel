@@ -12,6 +12,7 @@
   import { onMount } from "svelte";
   import { toast } from "svelte-sonner";
 
+  import { copyText } from "$lib/clipboard.js";
   import AccountCommitIdentitySettings from "$lib/components/settings/account-commit-identity-settings.svelte";
   import AccountAppearanceSettings from "$lib/components/settings/account-appearance-settings.svelte";
   import AccountAvatarSettings from "$lib/components/settings/account-avatar-settings.svelte";
@@ -103,25 +104,13 @@
     }
 
   }
-  async function copyText(
+  async function copyWithToast(
     value: string,
     label: string,
     failureDescription: string,
   ) {
     try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(value);
-      } else {
-        const carrier = document.createElement("textarea");
-        carrier.value = value;
-        carrier.setAttribute("readonly", "");
-        carrier.style.position = "fixed";
-        carrier.style.opacity = "0";
-        document.body.append(carrier);
-        carrier.select();
-        document.execCommand("copy");
-        carrier.remove();
-      }
+      await copyText(value);
       toast.success(`${label} copied`);
     } catch {
       toast.error(`Could not copy the ${label.toLowerCase()}`, {
@@ -133,7 +122,7 @@
   async function copyCreatedToken() {
     const token = credentials.createdToken;
     if (!token) return;
-    await copyText(
+    await copyWithToast(
       token,
       "API token",
       "Select the token and copy it manually.",
@@ -505,7 +494,7 @@
                 variant="outline"
                 class="gap-2"
                 onclick={() =>
-                  copyText(
+                  copyWithToast(
                     key.public_key,
                     "SSH public key",
                     "Copy the key from its original file and try again.",

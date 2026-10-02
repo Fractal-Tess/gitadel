@@ -1,8 +1,10 @@
 <script lang="ts">
   import Copy from "@lucide/svelte/icons/copy";
   import GitBranch from "@lucide/svelte/icons/git-branch";
+  import { toast } from "svelte-sonner";
   import { MediaQuery } from "svelte/reactivity";
 
+  import { copyText } from "$lib/clipboard.js";
   import RepositoryContent from "$lib/components/repository/repository-content.svelte";
   import RepositoryTree from "$lib/components/repository/repository-tree.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -35,6 +37,17 @@ git push -u origin main`;
 git branch -M main
 git push -u origin main`;
   }
+
+  async function copyCommands(commands: string) {
+    try {
+      await copyText(commands);
+      toast.success("Git commands copied");
+    } catch {
+      toast.error("Could not copy the commands", {
+        description: "Select the commands and copy them manually.",
+      });
+    }
+  }
 </script>
 
 {#snippet commandBlock(commands: string)}
@@ -47,7 +60,7 @@ git push -u origin main`;
       size="icon-sm"
       variant="outline"
       aria-label="Copy Git commands"
-      onclick={() => void navigator.clipboard.writeText(commands)}
+      onclick={() => void copyCommands(commands)}
     >
       <Copy class="size-3.5" />
     </Button>
