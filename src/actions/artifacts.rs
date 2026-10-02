@@ -726,14 +726,21 @@ async fn upload(
         ));
     }
     if let Err(error) = fs::rename(&temporary, &path).await {
-        let _ = action_artifact::Entity::update_many()
+        if let Err(release_error) = action_artifact::Entity::update_many()
             .col_expr(
                 action_artifact::Column::SizeBytes,
                 Expr::col(action_artifact::Column::SizeBytes).sub(additional_bytes),
             )
             .filter(action_artifact::Column::Id.eq(row.id))
             .exec(database(&state))
-            .await;
+            .await
+        {
+            tracing::error!(
+                artifact_id = %row.id,
+                error = %release_error,
+                "could not release reserved artifact size after a failed upload"
+            );
+        }
         let _ = fs::remove_file(&temporary).await;
         return Err(ApiError::internal(error));
     }

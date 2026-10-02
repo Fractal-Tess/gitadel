@@ -630,7 +630,9 @@ async fn run_items(
     let mut active = import.clone().into_active_model();
     active.reset(repository_import::Column::State);
     active.reset(repository_import::Column::UpdatedAt);
-    let _ = active.update(state.identity().database()).await;
+    if let Err(error) = active.update(state.identity().database()).await {
+        tracing::error!(import_id = %import.id, %error, "could not mark repository import as running");
+    }
     for queued_item in items {
         let Ok(Some(mut item)) = repository_import_item::Entity::find_by_id(queued_item.id)
             .one(state.identity().database())
@@ -755,6 +757,7 @@ async fn run_items(
             Err(error) => Err(error),
         };
 
+        let item_id = item.id;
         let mut active = item.into_active_model();
         active.updated_at = Set(Utc::now());
         match result {
@@ -767,7 +770,9 @@ async fn run_items(
                 active.last_error = Set(Some(error.to_string()));
             }
         }
-        let _ = active.update(state.identity().database()).await;
+        if let Err(error) = active.update(state.identity().database()).await {
+            tracing::error!(import_id = %import.id, %item_id, %error, "could not record repository import item result");
+        }
     }
     let all = match repository_import_item::Entity::find()
         .filter(repository_import_item::Column::ImportId.eq(import.id))
@@ -779,10 +784,13 @@ async fn run_items(
             tracing::error!(import_id = %import.id, %error, "could not finalize repository import");
             import.state = "completed_with_errors".to_owned();
             import.updated_at = Utc::now();
+            let import_id = import.id;
             let mut active = import.into_active_model();
             active.reset(repository_import::Column::State);
             active.reset(repository_import::Column::UpdatedAt);
-            let _ = active.update(state.identity().database()).await;
+            if let Err(error) = active.update(state.identity().database()).await {
+                tracing::error!(%import_id, %error, "could not record repository import state");
+            }
             return;
         }
     };
@@ -799,10 +807,14 @@ async fn run_items(
     }
     .to_owned();
     import.updated_at = Utc::now();
+    let import_id = import.id;
+    let final_state = import.state.clone();
     let mut active = import.into_active_model();
     active.reset(repository_import::Column::State);
     active.reset(repository_import::Column::UpdatedAt);
-    let _ = active.update(state.identity().database()).await;
+    if let Err(error) = active.update(state.identity().database()).await {
+        tracing::error!(%import_id, state = %final_state, %error, "could not record final repository import state");
+    }
 }
 
 async fn discover_remote(
