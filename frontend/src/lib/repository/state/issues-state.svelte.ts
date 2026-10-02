@@ -43,6 +43,8 @@ export class RepositoryIssuesState {
   issueComments = $state.raw<IssueComment[]>([]);
   issueLabels = $state.raw<IssueLabel[]>([]);
   assignableUsers = $state.raw<IssueUser[]>([]);
+  /** Set once a load succeeds, so an empty list is not mistaken for unloaded. */
+  assignableUsersLoaded = $state(false);
   issuesLoading = $state(false);
   issuesLoaded = $state(false);
   issuePending = $state(false);
@@ -115,8 +117,10 @@ export class RepositoryIssuesState {
       this.name,
       this.scope,
     );
-    if (!init.signal?.aborted && !this.#destroyed && this.isScopeCurrent())
+    if (!init.signal?.aborted && !this.#destroyed && this.isScopeCurrent()) {
       this.assignableUsers = users;
+      this.assignableUsersLoaded = true;
+    }
   }
   async createIssue(values: {
     title: string;

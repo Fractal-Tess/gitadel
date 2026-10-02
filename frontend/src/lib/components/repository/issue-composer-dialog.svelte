@@ -49,7 +49,7 @@
       open &&
       canManage &&
       repository.authStatus?.authenticated &&
-      !repository.issues.assignableUsers.length
+      !repository.issues.assignableUsersLoaded
     ) {
       void repository.issues.loadAssignableUsers().catch(() => undefined);
     }
