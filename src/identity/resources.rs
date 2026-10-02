@@ -19,10 +19,8 @@ use super::{
     random_secret, validate_name, validate_slug,
 };
 use crate::entity::{
-    action_runner, action_runner_registration_token, action_secret, action_variable, api_token,
-    audit_event, namespace, namespace_integration, namespace_mirror_identity, organization,
-    organization_member, repository, repository_alias, repository_deploy_key, repository_import,
-    repository_import_item, ssh_key as ssh_key_entity, user,
+    api_token, audit_event, namespace, organization, organization_member, repository_deploy_key,
+    ssh_key as ssh_key_entity, user,
 };
 
 #[derive(Serialize)]
@@ -497,71 +495,7 @@ async fn update_organization_profile(
         .insert(transaction)
         .await?;
 
-        repository::Entity::update_many()
-            .col_expr(repository::Column::Namespace, Expr::value(&next_slug))
-            .filter(repository::Column::Namespace.eq(current_slug))
-            .exec(transaction)
-            .await?;
-        namespace_integration::Entity::update_many()
-            .col_expr(
-                namespace_integration::Column::Namespace,
-                Expr::value(&next_slug),
-            )
-            .filter(namespace_integration::Column::Namespace.eq(current_slug))
-            .exec(transaction)
-            .await?;
-        namespace_mirror_identity::Entity::update_many()
-            .col_expr(
-                namespace_mirror_identity::Column::Namespace,
-                Expr::value(&next_slug),
-            )
-            .filter(namespace_mirror_identity::Column::Namespace.eq(current_slug))
-            .exec(transaction)
-            .await?;
-        action_runner::Entity::update_many()
-            .col_expr(action_runner::Column::Namespace, Expr::value(&next_slug))
-            .filter(action_runner::Column::Namespace.eq(current_slug))
-            .exec(transaction)
-            .await?;
-        action_secret::Entity::update_many()
-            .col_expr(action_secret::Column::Namespace, Expr::value(&next_slug))
-            .filter(action_secret::Column::Namespace.eq(current_slug))
-            .exec(transaction)
-            .await?;
-        action_variable::Entity::update_many()
-            .col_expr(action_variable::Column::Namespace, Expr::value(&next_slug))
-            .filter(action_variable::Column::Namespace.eq(current_slug))
-            .exec(transaction)
-            .await?;
-        action_runner_registration_token::Entity::update_many()
-            .col_expr(
-                action_runner_registration_token::Column::Namespace,
-                Expr::value(&next_slug),
-            )
-            .filter(action_runner_registration_token::Column::Namespace.eq(current_slug))
-            .exec(transaction)
-            .await?;
-        repository_import::Entity::update_many()
-            .col_expr(
-                repository_import::Column::TargetNamespace,
-                Expr::value(&next_slug),
-            )
-            .filter(repository_import::Column::TargetNamespace.eq(current_slug))
-            .exec(transaction)
-            .await?;
-        repository_import_item::Entity::update_many()
-            .col_expr(
-                repository_import_item::Column::TargetNamespace,
-                Expr::value(&next_slug),
-            )
-            .filter(repository_import_item::Column::TargetNamespace.eq(current_slug))
-            .exec(transaction)
-            .await?;
-        repository_alias::Entity::update_many()
-            .col_expr(repository_alias::Column::Namespace, Expr::value(&next_slug))
-            .filter(repository_alias::Column::Namespace.eq(current_slug))
-            .exec(transaction)
-            .await?;
+        super::auth::move_namespace_resources(transaction, current_slug, &next_slug).await?;
         namespace::Entity::delete_by_id(current_slug)
             .exec(transaction)
             .await?;
@@ -945,7 +879,10 @@ mod tests {
     use sea_orm_migration::MigratorTrait;
 
     use super::*;
-    use crate::migration::Migrator;
+    use crate::{
+        entity::{action_runner, namespace_integration, namespace_mirror_identity, repository},
+        migration::Migrator,
+    };
 
     #[tokio::test]
     async fn organization_slug_update_moves_namespace_resources() {

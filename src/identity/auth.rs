@@ -10,8 +10,8 @@ use axum_extra::extract::cookie::CookieJar;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, Set, TransactionTrait, sea_query::Expr,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseTransaction, EntityTrait,
+    PaginatorTrait, QueryFilter, QueryOrder, Set, TransactionTrait, sea_query::Expr,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -24,7 +24,11 @@ use super::{
     ApiError, IdentityState, RegistrationChallenge, UserResponse, hash_password, hash_secret,
     random_secret, validate_name, validate_slug, verify_password,
 };
-use crate::entity::{invitation, namespace, passkey, repository, session, user};
+use crate::entity::{
+    action_runner, action_runner_registration_token, action_secret, action_variable, invitation,
+    namespace, namespace_integration, namespace_mirror_identity, namespace_pin, passkey,
+    repository, repository_alias, repository_import, repository_import_item, session, user,
+};
 
 #[derive(Serialize)]
 pub struct AuthStatusResponse {
@@ -433,42 +437,50 @@ pub(super) fn require_browser_session(via_api_token: bool) -> Result<(), ApiErro
     Ok(())
 }
 
+/// Point every row that names a namespace by slug at its new slug.
+///
+/// Shared by user and organisation renames so the two cannot drift apart: a
+/// table missed here keeps referencing the old slug, which either fails the
+/// rename on a foreign key or silently orphans the rows. The caller owns the
+/// `namespaces` row itself.
+pub(super) async fn move_namespace_resources<C: ConnectionTrait>(
+    connection: &C,
+    current_slug: &str,
+    next_slug: &str,
+) -> Result<(), sea_orm::DbErr> {
+    macro_rules! move_rows {
+        ($($entity:ident . $column:ident),+ $(,)?) => {$(
+            $entity::Entity::update_many()
+                .col_expr($entity::Column::$column, Expr::value(next_slug))
+                .filter($entity::Column::$column.eq(current_slug))
+                .exec(connection)
+                .await?;
+        )+};
+    }
+    move_rows!(
+        repository.Namespace,
+        repository_alias.Namespace,
+        repository_import.TargetNamespace,
+        repository_import_item.TargetNamespace,
+        namespace_integration.Namespace,
+        namespace_mirror_identity.Namespace,
+        namespace_pin.Namespace,
+        action_runner.Namespace,
+        action_runner_registration_token.Namespace,
+        action_secret.Namespace,
+        action_variable.Namespace,
+    );
+    Ok(())
+}
+
 async fn rename_account(
     state: &IdentityState,
     account: user::Model,
     username: String,
 ) -> Result<user::Model, ApiError> {
     let transaction = state.database().begin().await?;
-    if namespace::Entity::find_by_id(&username)
-        .one(&transaction)
-        .await?
-        .is_some()
-    {
-        return Err(ApiError::conflict("That username is already in use."));
-    }
-
-    transaction
-        .execute_unprepared("PRAGMA defer_foreign_keys = ON")
-        .await?;
-    repository::Entity::update_many()
-        .col_expr(repository::Column::Namespace, Expr::value(username.clone()))
-        .filter(repository::Column::Namespace.eq(&account.username))
-        .exec(&transaction)
-        .await?;
-    let namespace_update = namespace::Entity::update_many()
-        .col_expr(namespace::Column::Slug, Expr::value(username.clone()))
-        .filter(namespace::Column::UserId.eq(account.id))
-        .exec(&transaction)
-        .await?;
-    if namespace_update.rows_affected != 1 {
-        return Err(ApiError::internal("the user namespace is missing"));
-    }
-
     let previous_username = account.username.clone();
-    let mut active: user::ActiveModel = account.into();
-    active.username = Set(username.clone());
-    active.updated_at = Set(Utc::now());
-    let account = active.update(&transaction).await?;
+    let account = rename_user_namespace(&transaction, account, &username).await?;
     state
         .audit_on(
             &transaction,
@@ -479,6 +491,41 @@ async fn rename_account(
         .await?;
     transaction.commit().await?;
     Ok(account)
+}
+
+/// Rename a user and their personal namespace inside the caller's transaction.
+async fn rename_user_namespace(
+    transaction: &DatabaseTransaction,
+    account: user::Model,
+    username: &str,
+) -> Result<user::Model, ApiError> {
+    if namespace::Entity::find_by_id(username)
+        .one(transaction)
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::conflict("That username is already in use."));
+    }
+
+    // The slug is a primary key that other tables reference, so the children
+    // and the parent cannot both be valid until every statement has run.
+    transaction
+        .execute_unprepared("PRAGMA defer_foreign_keys = ON")
+        .await?;
+    move_namespace_resources(transaction, &account.username, username).await?;
+    let namespace_update = namespace::Entity::update_many()
+        .col_expr(namespace::Column::Slug, Expr::value(username))
+        .filter(namespace::Column::UserId.eq(account.id))
+        .exec(transaction)
+        .await?;
+    if namespace_update.rows_affected != 1 {
+        return Err(ApiError::internal("the user namespace is missing"));
+    }
+
+    let mut active: user::ActiveModel = account.into();
+    active.username = Set(username.to_owned());
+    active.updated_at = Set(Utc::now());
+    Ok(active.update(transaction).await?)
 }
 
 #[derive(Deserialize)]
@@ -1015,5 +1062,198 @@ fn invalid_credentials() -> ApiError {
         status: StatusCode::UNAUTHORIZED,
         code: "invalid_credentials",
         message: "The username or credential was not accepted.".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::{ConnectOptions, Database, DatabaseConnection, NotSet};
+    use sea_orm_migration::MigratorTrait;
+
+    use super::*;
+    use crate::{actions::test_support, migration::Migrator};
+
+    async fn database() -> DatabaseConnection {
+        let mut options = ConnectOptions::new("sqlite::memory:");
+        options.max_connections(1).sqlx_logging(false);
+        let database = Database::connect(options).await.unwrap();
+        database
+            .execute_unprepared("PRAGMA foreign_keys = ON")
+            .await
+            .unwrap();
+        Migrator::up(&database, None).await.unwrap();
+        database
+    }
+
+    /// Every namespace-scoped table a personal namespace can own rows in.
+    async fn namespace_resources(database: &DatabaseConnection, owner: &user::Model) {
+        let now = Utc::now();
+        let slug = owner.username.clone();
+        let repository = test_support::repository(database, owner, "project").await;
+        repository_alias::ActiveModel {
+            namespace: Set(slug.clone()),
+            name: Set("former-name".to_owned()),
+            repository_id: Set(repository.id),
+            created_at: Set(now),
+        }
+        .insert(database)
+        .await
+        .unwrap();
+        namespace_pin::ActiveModel {
+            namespace: Set(slug.clone()),
+            repository_id: Set(repository.id),
+            position: Set(0),
+            created_at: Set(now),
+        }
+        .insert(database)
+        .await
+        .unwrap();
+        namespace_integration::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            namespace: Set(slug.clone()),
+            provider: Set("dokploy".to_owned()),
+            name: Set("Dokploy".to_owned()),
+            enabled: Set(true),
+            url: Set("https://dokploy.example".to_owned()),
+            api_key: Set("secret".to_owned()),
+            dokploy_internal_url: Set(None),
+            created_at: Set(now),
+            updated_at: Set(now),
+        }
+        .insert(database)
+        .await
+        .unwrap();
+        namespace_mirror_identity::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            namespace: Set(slug.clone()),
+            name: Set("Mirror token".to_owned()),
+            kind: Set("token".to_owned()),
+            username: Set(None),
+            secret: Set("secret".to_owned()),
+            provider: Set(Some("github".to_owned())),
+            instance_url: Set(Some("https://api.github.com".to_owned())),
+            public_key: Set(None),
+            fingerprint: Set(None),
+            last_used_at: Set(None),
+            created_at: Set(now),
+            updated_at: Set(now),
+        }
+        .insert(database)
+        .await
+        .unwrap();
+        action_runner::ActiveModel {
+            id: NotSet,
+            uuid: Set(Uuid::new_v4().to_string()),
+            namespace: Set(Some(slug.clone())),
+            name: Set("runner".to_owned()),
+            token_hash: Set("runner-token".to_owned()),
+            approved_labels: Set("[]".to_owned()),
+            version: Set("test".to_owned()),
+            ephemeral: Set(false),
+            disabled_at: Set(None),
+            deleted_at: Set(None),
+            last_seen_at: Set(None),
+            created_by: Set(Some(owner.id)),
+            created_at: Set(now),
+        }
+        .insert(database)
+        .await
+        .unwrap();
+        action_runner_registration_token::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            token_hash: Set("registration-token".to_owned()),
+            namespace: Set(Some(slug.clone())),
+            runner_name: Set("runner".to_owned()),
+            approved_labels: Set("[]".to_owned()),
+            expires_at: Set(now),
+            used_at: Set(None),
+            created_by: Set(Some(owner.id)),
+            created_at: Set(now),
+        }
+        .insert(database)
+        .await
+        .unwrap();
+        action_secret::ActiveModel {
+            id: NotSet,
+            repository_id: Set(None),
+            namespace: Set(Some(slug.clone())),
+            name: Set("TOKEN".to_owned()),
+            sealed: Set(vec![1, 2, 3]),
+            updated_by: Set(Some(owner.id)),
+            created_at: Set(now),
+            updated_at: Set(now),
+        }
+        .insert(database)
+        .await
+        .unwrap();
+        action_variable::ActiveModel {
+            id: NotSet,
+            repository_id: Set(None),
+            namespace: Set(Some(slug)),
+            name: Set("REGION".to_owned()),
+            value: Set("eu".to_owned()),
+            updated_by: Set(Some(owner.id)),
+            created_at: Set(now),
+            updated_at: Set(now),
+        }
+        .insert(database)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn user_rename_moves_every_namespace_resource() {
+        let database = database().await;
+        let owner = test_support::owner(&database, "old-name").await;
+        namespace_resources(&database, &owner).await;
+
+        let transaction = database.begin().await.unwrap();
+        let renamed = rename_user_namespace(&transaction, owner, "new-name")
+            .await
+            .unwrap();
+        // Deferred foreign keys are checked here: a missed table fails the commit.
+        transaction.commit().await.unwrap();
+
+        assert_eq!(renamed.username, "new-name");
+        assert!(
+            namespace::Entity::find_by_id("old-name")
+                .one(&database)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        macro_rules! namespace_of {
+            ($entity:ident) => {
+                $entity::Entity::find()
+                    .one(&database)
+                    .await
+                    .unwrap()
+                    .map(|row| Option::<String>::from(row.namespace))
+            };
+        }
+        let moved = Some(Some("new-name".to_owned()));
+        assert_eq!(namespace_of!(repository), moved);
+        assert_eq!(namespace_of!(repository_alias), moved);
+        assert_eq!(namespace_of!(namespace_pin), moved);
+        assert_eq!(namespace_of!(namespace_integration), moved);
+        assert_eq!(namespace_of!(namespace_mirror_identity), moved);
+        assert_eq!(namespace_of!(action_runner), moved);
+        assert_eq!(namespace_of!(action_runner_registration_token), moved);
+        assert_eq!(namespace_of!(action_secret), moved);
+        assert_eq!(namespace_of!(action_variable), moved);
+    }
+
+    #[tokio::test]
+    async fn user_rename_refuses_a_slug_another_namespace_owns() {
+        let database = database().await;
+        let owner = test_support::owner(&database, "old-name").await;
+        test_support::owner(&database, "taken").await;
+
+        let transaction = database.begin().await.unwrap();
+        assert!(
+            rename_user_namespace(&transaction, owner, "taken")
+                .await
+                .is_err()
+        );
     }
 }
