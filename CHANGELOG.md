@@ -4,6 +4,78 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-10-04
+
+A hardening release from a full review of the server and the web interface: a protection bypass, several ways the server could stall or fall over, stored credentials, and a long list of smaller fixes in the API and the interface.
+
+### Security
+
+- Pushes to `HEAD` or to any ref name outside `refs/` are refused. A push to `HEAD` used to be resolved to the default branch without consulting its protection rules, and one-level names such as `packed-refs` were written into the repository directory.
+- Requests that rely on the session cookie are refused when the browser reports that they come from another site, including another port or subdomain of the same host. API tokens and requests without `Sec-Fetch-Site` or `Origin` headers are unaffected.
+- Integration URLs may not point at the Gitadel host itself (loopback), at link-local addresses such as cloud metadata endpoints, or contain a query, fragment, or credentials. Private networks stay allowed. A Dokploy instance on the same machine must now be addressed by a non-loopback address.
+- Markdown can no longer apply the interface's own CSS classes or claim its element ids. Ids in rendered Markdown are prefixed with `user-content-`, and in-page links follow.
+- Stalled Git HTTP clients are dropped after two minutes of silence, and at most 64 Git HTTP services run at once; a client can no longer hold every worker thread by opening clones it never finishes.
+- Disabling an account takes effect immediately for its open SSH connections and issued LFS tokens.
+- Passkeys can only be deleted from a browser session, not with an API token.
+- Git, LFS, and API responses no longer reveal whether a private repository exists to callers who cannot read it.
+- Actions jobs can no longer publish releases to a repository that was archived or turned into a mirror while they ran.
+- Commit emails must be confirmed from an emailed link before commits written with them count on your profile or can author browser commits. An unconfirmed claim no longer blocks the address's real owner, and confirming removes other accounts' unconfirmed claims. Instances without `[smtp]` keep accepting addresses immediately and say so in the interface. Addresses added before this release stay confirmed. `POST /api/v1/me/commit-emails/{email}/verification` resends the link.
+- Dokploy API keys, mirror credentials, webhook secrets, OIDC client secrets, and authenticator seeds are stored encrypted under the instance's SSH host key, as Actions secrets already were. Existing values are converted on first start. Replacing the host key makes these unreadable; the interface then names the setting to enter again. Keep the host key in backups, which the built-in backup already does.
+- OAuth access tokens expire 30 days after they are issued (`expires_in` in the token response); tokens issued earlier stop working 30 days after the upgrade. There is no refresh grant, so applications run the authorization flow again. **Authorized applications** under Account settings → API tokens lists them and revokes an application's tokens; `GET`/`DELETE /api/v1/me/authorizations[/{client_id}]` do the same.
+- Behind a reverse proxy, `server.trusted_proxies` (CIDR list; `GITADEL_TRUSTED_PROXIES`) makes sign-in rate limits, audit events, and SSO and two-factor challenge binding use the client address from `X-Forwarded-For` instead of the proxy's. Forwarded headers from other peers are ignored. The sign-in limiter also keys account lockout on the account and the source, so one source can no longer lock an account for everyone, buckets IPv6 sources by /64, and evicts quiet entries instead of refusing new ones when full.
+- Deleting a deploy key, or making it read-only, takes effect on already-open SSH connections.
+- A Git client that stops reading its response is disconnected after two minutes instead of holding a service slot for thirty.
+- A storage target no longer claims a directory that holds unrelated files.
+
+### Added
+
+- Webhook deliveries that fail with a network error, a timeout, a rate limit, or a server error are retried up to five times, after 1, 5, 15, and 45 minutes. Other 4xx answers and test pings fail at once. Deliveries report `attempts` and `next_attempt_at`.
+- `GET .../issues` and `GET .../releases` accept `page` and `per_page` (100 by default and at most) and report the number of matches in `X-Total-Count`. The body is still a plain array. The web interface loads 100 at a time with **Load more**, and `gtd issue list` and `gtd release list` page through the whole list.
+- `GET /api/v1/audit` accepts `offset` and `before` (an event id), and the activity log in Administration can load events older than the latest 100.
+- Raw files and file views carry an `ETag` and answer a matching `If-None-Match` with `304 Not Modified`.
+- A CI workflow type-checks, lints, tests, and builds every push to `main` and every pull request.
+- `audit.retention_days` (`GITADEL_AUDIT_RETENTION_DAYS`, default `0` = keep forever) removes older audit events hourly.
+- `GET /api/v1/repositories?q=` and the overview endpoint search namespace, name, and description on the server. The command palette, pin editor, and repository list use it once an instance has more than 200 accessible repositories; smaller instances keep instant client-side filtering.
+
+### Changed
+
+- Activity graphs are computed once per change to a repository's branches instead of once per day and per window, and the commits behind a day are cached the same way.
+- The commit history page caches each commit's line counts instead of diffing up to 100 commits on every view. History and diff requests are limited to four at a time, and an oversized diff stops rendering at its size limit.
+- Issue and release lists load in a fixed number of queries instead of several per row.
+- Language statistics are computed once per commit, under the same concurrency limit as the rest of repository analysis.
+- Large raw downloads share a 256 MiB memory budget instead of each holding a whole file in memory unbounded.
+- Git packs, binary downloads, and archives are no longer compressed a second time in transit.
+- Namespace runners ask for work with one scoped query instead of loading every repository and run, and the registry catalog is built with one query.
+- Shutdown finishes within 30 seconds: connections and background tasks that have not drained by then are dropped.
+- Expired sessions are removed hourly, and audit events are indexed by action.
+- An expired session in the web interface sends you to sign-in and back to the page you were on, and a lost connection reads as such instead of "Failed to fetch".
+- File, backup, and storage sizes are shown one way everywhere, in binary units with at most one decimal (`1.5 GiB`).
+- Issue and release lists in the web interface are cached for up to five minutes, like commit history.
+- Hot read paths (repository lists, profiles, issue and release lists, cache lookups) run on a read-only SQLite pool of four connections, so background writes no longer queue in front of page loads. Writes keep the single writer connection.
+- A panic in one request no longer terminates the server and every in-flight clone or push (release builds unwind instead of aborting).
+- Per-day commit lists and per-commit line statistics have their own cache kinds; the entries written under borrowed kinds are dropped on upgrade and recomputed on demand.
+
+### Fixed
+
+- A transient database error in the mirror, Actions, or integrity scheduler stopped the whole server.
+- A mirror synchronization cancelled midway stayed "running" until the server restarted.
+- A mirror whose credential or address had become invalid was retried every 30 seconds without ever showing an error. The failure is now recorded and the mirror waits for its next scheduled run.
+- Renaming a user who owned integrations, mirror identities, runners, or Actions secrets and variables failed. Profile pins now follow user and organization renames too.
+- Namespace runners stopped receiving jobs once an instance had accumulated a long run history.
+- Signing in through SSO failed for a new user whose preferred name matched an organization.
+- Opening an organization's members, runners, integrations, or mirror credentials page requested the organization list endlessly, and the issue composer did the same for assignable users in a repository without any.
+- Signing in returns you to the page that asked for it, including repository pages.
+- Copy buttons work when Gitadel is served over plain HTTP.
+- The backup page no longer reloads by itself after you leave it, and reports a restore that never starts or never finishes.
+- An import in progress keeps updating until it finishes; it used to be polled once.
+- SQLite safety settings are applied to every database connection rather than only the first.
+- Failed state writes during imports, artifact uploads, and release downloads are logged instead of discarded.
+- A release asset upload that failed midway left its partial file in the release directory.
+
+### Removed
+
+- Eighteen unused interface component sets and the five frontend dependencies only they used.
+
 ## [0.22.0] - 2026-09-30
 
 ### Added
