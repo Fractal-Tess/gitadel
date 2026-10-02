@@ -20,7 +20,9 @@ use axum_extra::extract::cookie::CookieJar;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use comrak::{Options, markdown_to_html};
 use russh::keys::ssh_key::{HashAlg, PublicKey, SshSig};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+use sea_orm::{
+    ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, sea_query::OnConflict,
+};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
 use sley::{
@@ -1467,7 +1469,7 @@ pub async fn history(
     let page = query.page.max(1);
     let per_page = query.per_page.clamp(1, 100);
     let path = state.repository_path(&repository);
-    let mut response = read_git(path.clone(), move |git| {
+    let (selected, has_next) = read_git(path.clone(), move |git| {
         let tip = git.peel_to_commit_oid(git.rev_parse(&revision)?)?;
         let start = (page - 1).saturating_mul(per_page);
         let end = start.saturating_add(per_page + 1);
@@ -1490,15 +1492,24 @@ pub async fn history(
         )?;
         let has_next = selected.len() > per_page;
         selected.truncate(per_page);
-        let stats = commit_line_stats(git, &selected);
+        Ok((selected, has_next))
+    })
+    .await?;
+    // A commit's diff against its parent never changes, so only the commits
+    // nobody has listed before cost a rename-detecting diff.
+    let mut stats = cached_commit_line_stats(&state, repository.id, &selected).await?;
+    let missing = selected
+        .iter()
+        .filter(|oid| !stats.contains_key(&oid.to_hex()))
+        .copied()
+        .collect::<Vec<_>>();
+    let (commits, computed) = read_git(path, move |git| {
+        let computed = commit_line_stats(git, &missing);
         let tags = tag_decorations(git)?;
         let commits = selected
             .into_iter()
             .map(|oid| {
-                let (insertions, deletions) = stats.get(&oid.to_hex()).copied().unwrap_or_default();
                 commit_response(git, oid).map(|mut response| {
-                    response.insertions = insertions;
-                    response.deletions = deletions;
                     if let Some(found) = tags.get(&response.oid) {
                         response.refs = found.clone();
                     }
@@ -1506,14 +1517,22 @@ pub async fn history(
                 })
             })
             .collect::<sley::Result<Vec<_>>>()?;
-        Ok(HistoryResponse {
-            commits,
-            page,
-            per_page,
-            has_next,
-        })
+        Ok((commits, computed))
     })
     .await?;
+    cache_commit_line_stats(&state, repository.id, &computed).await?;
+    stats.extend(computed);
+    let mut response = HistoryResponse {
+        commits,
+        page,
+        per_page,
+        has_next,
+    };
+    for commit in &mut response.commits {
+        let lines = stats.get(&commit.oid).copied().unwrap_or_default();
+        commit.insertions = lines.insertions;
+        commit.deletions = lines.deletions;
+    }
     attach_release_refs(&state, &repository, &mut response.commits).await?;
     attach_commit_verifications(&state, &mut response.commits).await?;
     Ok(Json(response))
@@ -2254,14 +2273,104 @@ pub(super) fn normalize_browse_path(path: &str) -> Result<String, ApiError> {
 fn commit_line_stats(
     repository: &GitRepository,
     wanted: &[ObjectId],
-) -> BTreeMap<String, (usize, usize)> {
+) -> HashMap<String, CommitLineStats> {
     wanted
         .iter()
         .filter_map(|oid| diff_tree_stats(repository, *oid).map(|stats| (oid.to_hex(), stats)))
         .collect()
 }
 
-fn diff_tree_stats(repository: &GitRepository, oid: ObjectId) -> Option<(usize, usize)> {
+/// What a commit changed against its first parent.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+struct CommitLineStats {
+    insertions: usize,
+    deletions: usize,
+    files: usize,
+}
+
+/// The cache key of a commit's [`CommitLineStats`]. The cache table only
+/// admits the kinds it was created with, so these share the commit-count
+/// kind, whose own keys are bare commit ids.
+fn line_stats_key(oid: &str) -> String {
+    format!("diff:{oid}")
+}
+
+/// The cached line stats among `oids`, by commit id.
+async fn cached_commit_line_stats(
+    state: &RepositoryState,
+    repository_id: uuid::Uuid,
+    oids: &[ObjectId],
+) -> Result<HashMap<String, CommitLineStats>, ApiError> {
+    let keys = oids
+        .iter()
+        .map(|oid| line_stats_key(&oid.to_hex()))
+        .collect::<Vec<_>>();
+    let now = Utc::now();
+    let mut stats = HashMap::with_capacity(keys.len());
+    for keys in keys.chunks(resources::IN_QUERY_CHUNK) {
+        let entries = repository_cache_entry::Entity::find()
+            .filter(repository_cache_entry::Column::RepositoryId.eq(repository_id))
+            .filter(repository_cache_entry::Column::Kind.eq(super::CACHE_KIND_COMMIT_COUNT))
+            .filter(repository_cache_entry::Column::CacheKey.is_in(keys.iter().cloned()))
+            .filter(repository_cache_entry::Column::ExpiresAt.gt(now))
+            .all(state.identity().database())
+            .await?;
+        for entry in entries {
+            // An unreadable entry is recomputed and overwritten.
+            if let Some(oid) = entry.cache_key.strip_prefix("diff:")
+                && let Ok(lines) = serde_json::from_str(&entry.payload_json)
+            {
+                stats.insert(oid.to_owned(), lines);
+            }
+        }
+    }
+    Ok(stats)
+}
+
+async fn cache_commit_line_stats(
+    state: &RepositoryState,
+    repository_id: uuid::Uuid,
+    stats: &HashMap<String, CommitLineStats>,
+) -> Result<(), ApiError> {
+    if stats.is_empty() {
+        return Ok(());
+    }
+    let now = Utc::now();
+    let expires_at = now
+        + chrono::Duration::from_std(super::ANALYSIS_CACHE_LIFETIME).map_err(ApiError::internal)?;
+    let entries = stats
+        .iter()
+        .map(|(oid, lines)| {
+            Ok(repository_cache_entry::ActiveModel {
+                repository_id: Set(repository_id),
+                kind: Set(super::CACHE_KIND_COMMIT_COUNT.to_owned()),
+                cache_key: Set(line_stats_key(oid)),
+                payload_json: Set(serde_json::to_string(lines).map_err(ApiError::internal)?),
+                expires_at: Set(expires_at),
+                created_at: Set(now),
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    repository_cache_entry::Entity::insert_many(entries)
+        .on_conflict(
+            OnConflict::columns([
+                repository_cache_entry::Column::RepositoryId,
+                repository_cache_entry::Column::Kind,
+                repository_cache_entry::Column::CacheKey,
+            ])
+            .update_columns([
+                repository_cache_entry::Column::PayloadJson,
+                repository_cache_entry::Column::ExpiresAt,
+                repository_cache_entry::Column::CreatedAt,
+            ])
+            .to_owned(),
+        )
+        .exec(state.identity().database())
+        .await?;
+    Ok(())
+}
+
+fn diff_tree_stats(repository: &GitRepository, oid: ObjectId) -> Option<CommitLineStats> {
     let commit = repository.read_commit(&oid).ok()?;
     let options = DiffNameStatusOptions {
         detect_renames: true,
@@ -2289,15 +2398,17 @@ fn diff_tree_stats(repository: &GitRepository, oid: ObjectId) -> Option<(usize, 
     let stats =
         collect_diff_stat_entries(&entries, repository.object_database(), None, false, None)
             .ok()?;
-    let mut insertions = 0;
-    let mut deletions = 0;
+    let mut lines = CommitLineStats {
+        files: stats.len(),
+        ..CommitLineStats::default()
+    };
     for stat in stats {
         if let LineStats::Text { inserted, deleted } = stat.stats {
-            insertions += inserted;
-            deletions += deleted;
+            lines.insertions += inserted;
+            lines.deletions += deleted;
         }
     }
-    Some((insertions, deletions))
+    Some(lines)
 }
 
 fn commit_response(repository: &GitRepository, oid: ObjectId) -> sley::Result<CommitResponse> {
@@ -2807,7 +2918,7 @@ mod tests {
     use axum_extra::extract::cookie::CookieJar;
     use chrono::{Duration as ChronoDuration, NaiveDate, Utc};
     use russh::keys::ssh_key::{HashAlg, LineEnding, PrivateKey, private::Ed25519Keypair};
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
     use sley::{
         BString, CommitObject, GitObjectType, ObjectId, ReachableCommitOptions, ReferenceTarget,
         Repository as GitRepository, StreamControl, TreeEditor,
@@ -2816,9 +2927,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ArchiveFileWriter, AuthorActivity, BrowseQuery, DayCommitResponse,
-        MAX_SOURCE_ARCHIVE_BYTES, SshCommitSignature, authored_on, commit_authorship,
-        count_reachable_commits, if_none_match, metered_body, raw_blob_permits,
+        ArchiveFileWriter, AuthorActivity, BrowseQuery, CommitLineStats, DayCommitResponse,
+        HistoryQuery, MAX_SOURCE_ARCHIVE_BYTES, SshCommitSignature, authored_on, commit_authorship,
+        count_reachable_commits, if_none_match, line_stats_key, metered_body, raw_blob_permits,
         read_commits_authored_on, read_repository_overview, read_submodule_metadata, single_flight,
         verify_ssh_commit_signature,
     };
@@ -3500,6 +3611,72 @@ mod tests {
             .unwrap();
         assert_eq!(oids(&commits), expected);
         assert_eq!(history_cache_rows(&instance, ":day:").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn history_line_stats_are_computed_once_per_commit() {
+        let instance = instance().await;
+        let (repository, git) = instance.git_repository("project").await;
+        let first = git.commit_file("notes.txt", b"one\ntwo\n", COMMIT_DATE);
+        let second = git.commit_file("notes.txt", b"one\nthree\nfour\n", COMMIT_DATE);
+        let request = || async {
+            super::history(
+                State(instance.state.clone()),
+                project(),
+                HeaderMap::new(),
+                CookieJar::new(),
+                Query(HistoryQuery {
+                    rev: None,
+                    page: 1,
+                    per_page: 30,
+                }),
+            )
+            .await
+            .unwrap()
+            .0
+            .commits
+            .into_iter()
+            .map(|commit| (commit.oid, (commit.insertions, commit.deletions)))
+            .collect::<BTreeMap<_, _>>()
+        };
+        let cached = || async {
+            repository_cache_entry::Entity::find()
+                .filter(repository_cache_entry::Column::RepositoryId.eq(repository.id))
+                .filter(repository_cache_entry::Column::CacheKey.starts_with("diff:"))
+                .all(&instance.database)
+                .await
+                .unwrap()
+        };
+
+        let lines = request().await;
+        assert_eq!(lines[&first], (2, 0));
+        assert_eq!(lines[&second], (2, 1));
+        let rows = cached().await;
+        assert_eq!(rows.len(), 2);
+        let stored = rows
+            .iter()
+            .find(|row| row.cache_key == line_stats_key(&second))
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<CommitLineStats>(&stored.payload_json).unwrap(),
+            CommitLineStats {
+                insertions: 2,
+                deletions: 1,
+                files: 1
+            }
+        );
+
+        // A listed commit is served from its entry, which a marker proves, and
+        // only the commit added since is diffed.
+        let mut marked: repository_cache_entry::ActiveModel = stored.clone().into();
+        marked.payload_json = Set(r#"{"insertions":70,"deletions":7,"files":1}"#.to_owned());
+        marked.update(&instance.database).await.unwrap();
+        let third = git.commit_file("more.txt", b"new\n", COMMIT_DATE);
+        let lines = request().await;
+        assert_eq!(lines[&first], (2, 0));
+        assert_eq!(lines[&second], (70, 7));
+        assert_eq!(lines[&third], (1, 0));
+        assert_eq!(cached().await.len(), 3);
     }
 
     #[tokio::test]
