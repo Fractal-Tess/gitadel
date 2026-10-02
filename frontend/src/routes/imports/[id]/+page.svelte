@@ -2,6 +2,7 @@
   import { goto } from "$app/navigation";
   import { resolve } from "$app/paths";
   import { page } from "$app/state";
+  import { untrack } from "svelte";
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import CheckCircle2 from "@lucide/svelte/icons/check-circle-2";
   import CircleDashed from "@lucide/svelte/icons/circle-dashed";
@@ -37,6 +38,9 @@
   let token = $state("");
   let loadError = $state<string | null>(null);
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
+  // Counts every request that may replace `batch`; only the latest one does,
+  // so a slow poll cannot overwrite a newer answer or another import's page.
+  let loadSequence = 0;
 
   const active = $derived(
     batch?.state === "queued" || batch?.state === "running",
@@ -52,11 +56,15 @@
   );
 
   $effect(() => {
-    id;
-    void load();
+    // Only another import reloads; `load` reads state of its own.
+    void id;
+    untrack(() => void load());
   });
 
   $effect(() => {
+    // Each answer schedules the next poll. `active` alone would not: it stays
+    // true from one answer to the next, so the effect would run only once.
+    void batch;
     clearTimeout(pollTimer);
     if (active) pollTimer = setTimeout(() => void load(true), 1_500);
     return () => clearTimeout(pollTimer);
@@ -64,19 +72,25 @@
 
   async function load(background = false): Promise<void> {
     if (!id) return;
-    if (!background) loading = true;
+    const sequence = ++loadSequence;
+    // A poll that overtakes a first load takes over its duties.
+    const quiet = background && !loading;
+    if (!quiet) loading = true;
     try {
-      batch = await requestJson(
+      const next = await requestJson(
         `/api/v1/repository-imports/${encodeURIComponent(id)}`,
         repositoryImportSchema,
       );
+      if (sequence !== loadSequence) return;
+      batch = next;
       loadError = null;
     } catch (caught) {
-      if (!background) {
+      if (sequence !== loadSequence) return;
+      if (!quiet) {
         loadError = errorMessage(caught, "Could not load this import.");
       }
     } finally {
-      if (!background) loading = false;
+      if (sequence === loadSequence) loading = false;
     }
   }
 
@@ -84,13 +98,17 @@
     if (!token.trim()) return;
     working = true;
     loadError = null;
+    const sequence = ++loadSequence;
     try {
-      batch = await requestJson(
+      const next = await requestJson(
         `/api/v1/repository-imports/${encodeURIComponent(id)}/retry`,
         repositoryImportSchema,
         { method: "POST", body: jsonBody({ token }) },
       );
       token = "";
+      if (sequence !== loadSequence) return;
+      batch = next;
+      loading = false;
     } catch (caught) {
       toast.error(errorMessage(caught, "Could not retry this import."));
     } finally {

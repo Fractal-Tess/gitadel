@@ -50,11 +50,22 @@
     void loadStatus();
   });
 
+  // Only the latest request may set `status`: the load on mount can still be
+  // in flight when an action finishes and reads the status again.
+  let statusSequence = 0;
+
   async function loadStatus() {
+    const sequence = ++statusSequence;
     try {
-      status = await requestJson("/api/v1/me/two-factor", twoFactorStatusSchema);
+      const next = await requestJson(
+        "/api/v1/me/two-factor",
+        twoFactorStatusSchema,
+      );
+      if (sequence !== statusSequence) return;
+      status = next;
       loadError = null;
     } catch (caught) {
+      if (sequence !== statusSequence) return;
       loadError = errorMessage(caught);
     }
   }
