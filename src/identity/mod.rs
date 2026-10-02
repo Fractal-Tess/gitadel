@@ -214,7 +214,7 @@ impl ApiError {
     }
 
     pub fn internal(error: impl std::fmt::Display) -> Self {
-        tracing::error!(%error, "identity request failed");
+        tracing::error!(%error, "request failed with an internal error");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "internal_error",
