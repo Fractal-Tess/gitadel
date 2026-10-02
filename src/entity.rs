@@ -1123,6 +1123,8 @@ pub mod repository_webhook_delivery {
         pub status: String,
         pub attempt_count: i32,
         pub attempted_at: Option<DateTimeUtc>,
+        /// When a pending delivery may next be attempted; `None` means now.
+        pub next_attempt_at: Option<DateTimeUtc>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

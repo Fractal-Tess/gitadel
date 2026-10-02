@@ -17,8 +17,8 @@ use chrono::{DateTime, Utc};
 use futures_util::TryStreamExt as _;
 use hmac::{Hmac, KeyInit as _, Mac};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, ExprTrait, QueryFilter,
-    QueryOrder, QuerySelect, Set, TransactionTrait, sea_query::Expr,
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, ExprTrait,
+    QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait, sea_query::Expr,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -58,6 +58,11 @@ pub(crate) const WEBHOOK_EVENTS: &[&str] = &[
     "issue_comment",
     "workflow_run",
 ];
+/// How many times one delivery is attempted before it is recorded as failed.
+const WEBHOOK_MAX_ATTEMPTS: i32 = 5;
+/// A delivery claimed this long ago without finishing belonged to a worker
+/// that died; requests themselves time out after ten seconds.
+const WEBHOOK_STALE_AFTER_SECONDS: i64 = 60;
 const DEFAULT_WEBHOOK_EVENT: &str = "push";
 static WEBHOOK_DELIVERY_SLOTS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(WEBHOOK_DELIVERY_CONCURRENCY)));
@@ -144,6 +149,10 @@ pub struct WebhookDeliveryResponse {
     duration_ms: i32,
     payload: Value,
     response_body: Option<String>,
+    /// Attempts made so far, including the one in flight.
+    attempts: i32,
+    /// When a delivery that is waiting to be retried is next attempted.
+    next_attempt_at: Option<chrono::DateTime<Utc>>,
 }
 
 impl WebhookDeliveryResponse {
@@ -168,6 +177,8 @@ impl WebhookDeliveryResponse {
             duration_ms: delivery.duration_ms,
             payload: serde_json::from_str(&delivery.payload).unwrap_or(Value::Null),
             response_body: delivery.response_body,
+            attempts: delivery.attempt_count,
+            next_attempt_at: delivery.next_attempt_at,
         }
     }
 }
@@ -767,6 +778,7 @@ async fn insert_delivery(
         status: Set("pending".to_owned()),
         attempt_count: Set(0),
         attempted_at: Set(None),
+        next_attempt_at: Set(None),
     }
     .insert(state.identity().database())
     .await?;
@@ -775,26 +787,12 @@ async fn insert_delivery(
 
 pub(super) async fn process_pending_deliveries(state: &RepositoryState) -> Result<(), ApiError> {
     let database = state.identity().database();
-    let stale = Utc::now() - chrono::Duration::minutes(1);
-    repository_webhook_delivery::Entity::update_many()
-        .col_expr(
-            repository_webhook_delivery::Column::Status,
-            Expr::value("pending"),
-        )
-        .filter(repository_webhook_delivery::Column::Status.eq("delivering"))
-        .filter(repository_webhook_delivery::Column::AttemptedAt.lt(stale))
-        .exec(database)
-        .await?;
+    recover_stale_deliveries(database, Utc::now()).await?;
     loop {
         let Ok(permit) = Arc::clone(&WEBHOOK_DELIVERY_SLOTS).try_acquire_owned() else {
             break;
         };
-        let Some(delivery) = repository_webhook_delivery::Entity::find()
-            .filter(repository_webhook_delivery::Column::Status.eq("pending"))
-            .order_by_asc(repository_webhook_delivery::Column::CreatedAt)
-            .one(database)
-            .await?
-        else {
+        let Some(delivery) = next_due_delivery(database, Utc::now()).await? else {
             break;
         };
         let claimed = repository_webhook_delivery::Entity::update_many()
@@ -897,10 +895,73 @@ async fn finish_delivery(
     duration_ms: i32,
     response_body: Option<String>,
 ) -> Result<(), ApiError> {
-    let database = state.identity().database();
+    record_attempt(
+        state.identity().database(),
+        hook,
+        delivery,
+        response_status,
+        duration_ms,
+        response_body,
+        Utc::now(),
+    )
+    .await
+}
+
+/// How long to wait after the given number of failed attempts, or `None` once
+/// the delivery has used every attempt. Five attempts span about an hour:
+/// immediately, then after 1, 5, 15, and 45 minutes.
+fn retry_delay(attempt_count: i32) -> Option<chrono::Duration> {
+    let minutes = match attempt_count {
+        ..=1 => 1,
+        2 => 5,
+        3 => 15,
+        4 => 45,
+        _ => return None,
+    };
+    (attempt_count < WEBHOOK_MAX_ATTEMPTS).then(|| chrono::Duration::minutes(minutes))
+}
+
+/// Whether another attempt could plausibly succeed. A receiver that answers
+/// with a client error has seen the payload and refused it, so resending the
+/// same bytes is pointless; a timeout, connection failure, rate limit, or
+/// server error is worth waiting out.
+fn is_retryable(event: &str, response_status: Option<i32>) -> bool {
+    // A ping is a manual connectivity check whose result should be immediate.
+    if event == "ping" {
+        return false;
+    }
+    match response_status {
+        None => true,
+        Some(status) => matches!(status, 408 | 425 | 429) || status >= 500,
+    }
+}
+
+/// Record the outcome of one attempt: completed, failed for good, or back in
+/// the outbox with the time of its next attempt.
+async fn record_attempt(
+    database: &DatabaseConnection,
+    hook: &repository_webhook::Model,
+    delivery: &repository_webhook_delivery::Model,
+    response_status: Option<i32>,
+    duration_ms: i32,
+    response_body: Option<String>,
+    now: DateTime<Utc>,
+) -> Result<(), ApiError> {
     let successful = response_status.is_some_and(|status| (200..300).contains(&status));
+    let retry_at = (!successful && is_retryable(&delivery.event, response_status))
+        .then(|| retry_delay(delivery.attempt_count))
+        .flatten()
+        .map(|delay| now + delay);
+    let status = if successful {
+        "completed"
+    } else if retry_at.is_some() {
+        "pending"
+    } else {
+        "failed"
+    };
     let mut active: repository_webhook_delivery::ActiveModel = delivery.clone().into();
-    active.status = Set(if successful { "completed" } else { "failed" }.to_owned());
+    active.status = Set(status.to_owned());
+    active.next_attempt_at = Set(retry_at);
     active.response_status = Set(response_status);
     active.response_body = Set(response_body.as_ref().map(|body| {
         body.chars()
@@ -911,13 +972,68 @@ async fn finish_delivery(
     active.update(database).await?;
 
     let mut active_hook: repository_webhook::ActiveModel = hook.clone().into();
-    active_hook.last_delivery_at = Set(Some(Utc::now()));
+    active_hook.last_delivery_at = Set(Some(now));
     active_hook.last_response_status = Set(response_status);
     active_hook.last_response_message = Set(response_body
         .as_ref()
         .map(|body| body.chars().take(512).collect::<String>()));
     active_hook.update(database).await?;
     prune_deliveries(database, hook.id).await
+}
+
+/// Return deliveries whose worker died mid-request to the outbox, and give up
+/// on those that have already used every attempt so a delivery that keeps
+/// killing its worker cannot be retried forever.
+async fn recover_stale_deliveries(
+    database: &DatabaseConnection,
+    now: DateTime<Utc>,
+) -> Result<(), ApiError> {
+    let stale = now - chrono::Duration::seconds(WEBHOOK_STALE_AFTER_SECONDS);
+    repository_webhook_delivery::Entity::update_many()
+        .col_expr(
+            repository_webhook_delivery::Column::Status,
+            Expr::value("failed"),
+        )
+        .col_expr(
+            repository_webhook_delivery::Column::ResponseBody,
+            Expr::value("The delivery was interrupted before it finished."),
+        )
+        .filter(repository_webhook_delivery::Column::Status.eq("delivering"))
+        .filter(repository_webhook_delivery::Column::AttemptedAt.lt(stale))
+        .filter(repository_webhook_delivery::Column::AttemptCount.gte(WEBHOOK_MAX_ATTEMPTS))
+        .exec(database)
+        .await?;
+    repository_webhook_delivery::Entity::update_many()
+        .col_expr(
+            repository_webhook_delivery::Column::Status,
+            Expr::value("pending"),
+        )
+        .col_expr(
+            repository_webhook_delivery::Column::NextAttemptAt,
+            Expr::value(Option::<DateTime<Utc>>::None),
+        )
+        .filter(repository_webhook_delivery::Column::Status.eq("delivering"))
+        .filter(repository_webhook_delivery::Column::AttemptedAt.lt(stale))
+        .exec(database)
+        .await?;
+    Ok(())
+}
+
+/// The oldest pending delivery whose next attempt is due.
+async fn next_due_delivery(
+    database: &DatabaseConnection,
+    now: DateTime<Utc>,
+) -> Result<Option<repository_webhook_delivery::Model>, ApiError> {
+    Ok(repository_webhook_delivery::Entity::find()
+        .filter(repository_webhook_delivery::Column::Status.eq("pending"))
+        .filter(
+            Condition::any()
+                .add(repository_webhook_delivery::Column::NextAttemptAt.is_null())
+                .add(repository_webhook_delivery::Column::NextAttemptAt.lte(now)),
+        )
+        .order_by_asc(repository_webhook_delivery::Column::CreatedAt)
+        .one(database)
+        .await?)
 }
 
 async fn prune_deliveries(database: &DatabaseConnection, webhook_id: Uuid) -> Result<(), ApiError> {
@@ -1330,10 +1446,288 @@ mod tests {
             status: "pending".to_owned(),
             attempt_count: 0,
             attempted_at: None,
+            next_attempt_at: None,
         };
 
         let response = WebhookDeliveryResponse::new(delivery);
 
         assert_eq!(response.status, "pending");
+    }
+
+    #[test]
+    fn retries_back_off_for_about_an_hour_then_stop() {
+        let delays = (1..=WEBHOOK_MAX_ATTEMPTS)
+            .map(|attempt| retry_delay(attempt).map(|delay| delay.num_minutes()))
+            .collect::<Vec<_>>();
+        assert_eq!(delays, [Some(1), Some(5), Some(15), Some(45), None]);
+        assert_eq!(retry_delay(WEBHOOK_MAX_ATTEMPTS + 3), None);
+    }
+
+    #[test]
+    fn only_transient_failures_are_retried() {
+        for status in [None, Some(408), Some(429), Some(500), Some(502), Some(503)] {
+            assert!(is_retryable("push", status), "{status:?}");
+        }
+        for status in [
+            Some(301),
+            Some(400),
+            Some(401),
+            Some(404),
+            Some(410),
+            Some(422),
+        ] {
+            assert!(!is_retryable("push", status), "{status:?}");
+        }
+        assert!(!is_retryable("ping", None));
+        assert!(!is_retryable("ping", Some(503)));
+    }
+
+    async fn hook(database: &DatabaseConnection) -> repository_webhook::Model {
+        let owner = crate::actions::test_support::owner(database, "owner").await;
+        let repository =
+            crate::actions::test_support::repository(database, &owner, "project").await;
+        let now = Utc::now();
+        repository_webhook::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            repository_id: Set(repository.id),
+            url: Set("https://example.com/hook".to_owned()),
+            secret: Set(None),
+            active: Set(true),
+            created_at: Set(now),
+            updated_at: Set(now),
+            last_delivery_at: Set(None),
+            last_response_status: Set(None),
+            last_response_message: Set(None),
+            events: Set("push".to_owned()),
+        }
+        .insert(database)
+        .await
+        .unwrap()
+    }
+
+    async fn delivery(
+        database: &DatabaseConnection,
+        hook: &repository_webhook::Model,
+        event: &str,
+        created_at: DateTime<Utc>,
+    ) -> repository_webhook_delivery::Model {
+        repository_webhook_delivery::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            webhook_id: Set(hook.id),
+            event: Set(event.to_owned()),
+            payload: Set("{}".to_owned()),
+            response_status: Set(None),
+            response_body: Set(None),
+            duration_ms: Set(0),
+            created_at: Set(created_at),
+            status: Set("pending".to_owned()),
+            attempt_count: Set(0),
+            attempted_at: Set(None),
+            next_attempt_at: Set(None),
+        }
+        .insert(database)
+        .await
+        .unwrap()
+    }
+
+    /// What the worker does when it picks a delivery up.
+    async fn claim(
+        database: &DatabaseConnection,
+        delivery: repository_webhook_delivery::Model,
+        now: DateTime<Utc>,
+    ) -> repository_webhook_delivery::Model {
+        let attempt_count = delivery.attempt_count + 1;
+        let mut active: repository_webhook_delivery::ActiveModel = delivery.into();
+        active.status = Set("delivering".to_owned());
+        active.attempt_count = Set(attempt_count);
+        active.attempted_at = Set(Some(now));
+        active.update(database).await.unwrap()
+    }
+
+    async fn reload(database: &DatabaseConnection, id: Uuid) -> repository_webhook_delivery::Model {
+        repository_webhook_delivery::Entity::find_by_id(id)
+            .one(database)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn failed_delivery_is_retried_with_backoff_until_attempts_run_out() {
+        let database = crate::actions::test_support::database().await;
+        let hook = hook(&database).await;
+        let mut now = Utc::now();
+        let queued = delivery(&database, &hook, "push", now).await;
+        let id = queued.id;
+
+        for (attempt, minutes) in [(1, 1), (2, 5), (3, 15), (4, 45)] {
+            let due = next_due_delivery(&database, now).await.ok().unwrap();
+            assert_eq!(
+                due.as_ref().map(|due| due.id),
+                Some(id),
+                "attempt {attempt}"
+            );
+            let claimed = claim(&database, due.unwrap(), now).await;
+            record_attempt(
+                &database,
+                &hook,
+                &claimed,
+                Some(503),
+                12,
+                Some("down".to_owned()),
+                now,
+            )
+            .await
+            .ok()
+            .unwrap();
+
+            let waiting = reload(&database, id).await;
+            assert_eq!(waiting.status, "pending");
+            assert_eq!(waiting.attempt_count, attempt);
+            assert_eq!(waiting.response_status, Some(503));
+            assert_eq!(
+                waiting.next_attempt_at,
+                Some(now + chrono::Duration::minutes(minutes))
+            );
+            assert_eq!(WebhookDeliveryResponse::new(waiting).status, "pending");
+            // Not due a moment before the scheduled time, due at it.
+            let early = now + chrono::Duration::minutes(minutes) - chrono::Duration::seconds(1);
+            assert!(
+                next_due_delivery(&database, early)
+                    .await
+                    .ok()
+                    .unwrap()
+                    .is_none()
+            );
+            now += chrono::Duration::minutes(minutes);
+        }
+
+        let due = next_due_delivery(&database, now)
+            .await
+            .ok()
+            .unwrap()
+            .unwrap();
+        let claimed = claim(&database, due, now).await;
+        record_attempt(
+            &database,
+            &hook,
+            &claimed,
+            None,
+            0,
+            Some("timed out".to_owned()),
+            now,
+        )
+        .await
+        .ok()
+        .unwrap();
+        let failed = reload(&database, id).await;
+        assert_eq!(failed.status, "failed");
+        assert_eq!(failed.attempt_count, WEBHOOK_MAX_ATTEMPTS);
+        assert_eq!(failed.next_attempt_at, None);
+        assert!(
+            next_due_delivery(&database, now + chrono::Duration::days(1))
+                .await
+                .ok()
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn retried_delivery_completes_when_the_receiver_recovers() {
+        let database = crate::actions::test_support::database().await;
+        let hook = hook(&database).await;
+        let now = Utc::now();
+        let queued = delivery(&database, &hook, "push", now).await;
+        let claimed = claim(&database, queued, now).await;
+        record_attempt(
+            &database,
+            &hook,
+            &claimed,
+            None,
+            0,
+            Some("refused".to_owned()),
+            now,
+        )
+        .await
+        .ok()
+        .unwrap();
+
+        let later = now + chrono::Duration::minutes(1);
+        let due = next_due_delivery(&database, later)
+            .await
+            .ok()
+            .unwrap()
+            .unwrap();
+        let claimed = claim(&database, due, later).await;
+        record_attempt(&database, &hook, &claimed, Some(204), 8, None, later)
+            .await
+            .ok()
+            .unwrap();
+
+        let completed = reload(&database, claimed.id).await;
+        assert_eq!(completed.status, "completed");
+        assert_eq!(completed.attempt_count, 2);
+        assert_eq!(completed.next_attempt_at, None);
+        assert_eq!(WebhookDeliveryResponse::new(completed).status, "ok");
+    }
+
+    #[tokio::test]
+    async fn rejected_deliveries_and_pings_fail_without_retry() {
+        let database = crate::actions::test_support::database().await;
+        let hook = hook(&database).await;
+        let now = Utc::now();
+        for (event, status) in [("push", Some(404)), ("ping", Some(503)), ("ping", None)] {
+            let queued = delivery(&database, &hook, event, now).await;
+            let claimed = claim(&database, queued, now).await;
+            record_attempt(&database, &hook, &claimed, status, 3, None, now)
+                .await
+                .ok()
+                .unwrap();
+            let finished = reload(&database, claimed.id).await;
+            assert_eq!(finished.status, "failed", "{event} {status:?}");
+            assert_eq!(finished.next_attempt_at, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupted_deliveries_are_requeued_only_while_attempts_remain() {
+        let database = crate::actions::test_support::database().await;
+        let hook = hook(&database).await;
+        let now = Utc::now();
+        let started = now - chrono::Duration::minutes(5);
+
+        let recoverable = claim(
+            &database,
+            delivery(&database, &hook, "push", started).await,
+            started,
+        )
+        .await;
+        let mut exhausted: repository_webhook_delivery::ActiveModel =
+            delivery(&database, &hook, "push", started).await.into();
+        exhausted.status = Set("delivering".to_owned());
+        exhausted.attempt_count = Set(WEBHOOK_MAX_ATTEMPTS);
+        exhausted.attempted_at = Set(Some(started));
+        let exhausted = exhausted.update(&database).await.unwrap();
+        let in_flight = claim(
+            &database,
+            delivery(&database, &hook, "push", now).await,
+            now,
+        )
+        .await;
+
+        recover_stale_deliveries(&database, now).await.ok().unwrap();
+
+        assert_eq!(reload(&database, recoverable.id).await.status, "pending");
+        assert_eq!(reload(&database, exhausted.id).await.status, "failed");
+        assert_eq!(reload(&database, in_flight.id).await.status, "delivering");
+        assert_eq!(
+            next_due_delivery(&database, now)
+                .await
+                .ok()
+                .unwrap()
+                .map(|due| due.id),
+            Some(recoverable.id)
+        );
     }
 }

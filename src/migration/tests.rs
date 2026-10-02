@@ -405,3 +405,51 @@ async fn storage_domain_migration_keeps_selected_targets_and_history() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn webhook_retry_migration_leaves_queued_deliveries_due() {
+    use crate::entity::repository_webhook_delivery;
+
+    let mut options = ConnectOptions::new("sqlite::memory:");
+    options.max_connections(1);
+    let database = Database::connect(options).await.unwrap();
+    let before = super::Migrator::migrations()
+        .iter()
+        .position(|migration| migration.name() == "m20261002_000076_webhook_delivery_retries")
+        .unwrap();
+    super::Migrator::up(&database, Some(before as u32))
+        .await
+        .unwrap();
+    let owner = crate::actions::test_support::owner(&database, "owner").await;
+    let repository = crate::actions::test_support::repository(&database, &owner, "project").await;
+    let webhook_id = Uuid::new_v4();
+    let delivery_id = Uuid::new_v4();
+    let at = "'2026-09-01T00:00:00+00:00'";
+    // The delivery entity names the new column, so the old table is written with SQL.
+    for statement in [
+        format!(
+            "INSERT INTO repository_webhooks (id, repository_id, url, secret, active, created_at, \
+             updated_at, events) VALUES (x'{}', x'{}', 'https://example.com/hook', NULL, 1, {at}, {at}, 'push')",
+            webhook_id.simple(),
+            repository.id.simple()
+        ),
+        format!(
+            "INSERT INTO repository_webhook_deliveries (id, webhook_id, event, payload, duration_ms, \
+             created_at, status, attempt_count) VALUES (x'{}', x'{}', 'push', '{{}}', 0, {at}, 'pending', 0)",
+            delivery_id.simple(),
+            webhook_id.simple()
+        ),
+    ] {
+        database.execute_unprepared(&statement).await.unwrap();
+    }
+
+    super::Migrator::up(&database, None).await.unwrap();
+
+    let delivery = repository_webhook_delivery::Entity::find_by_id(delivery_id)
+        .one(&database)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(delivery.status, "pending");
+    assert_eq!(delivery.next_attempt_at, None);
+}
