@@ -14,14 +14,10 @@
   } from "$lib/api/transport.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import { Spinner } from "$lib/components/ui/spinner/index.js";
+  import { formatDateTime } from "$lib/format.js";
 
   // Bumped by the parent whenever it creates an invitation.
   let { version }: { version: unknown } = $props();
-
-  const timestampFormatter = new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
 
   let invitations = $state.raw<PendingInvitation[]>([]);
   let loading = $state(true);
@@ -92,14 +88,10 @@
         <li class="flex flex-wrap items-center justify-between gap-3 py-3">
           <div class="min-w-0 text-sm">
             <p class="font-medium">
-              Expires {timestampFormatter.format(
-                new Date(invitation.expires_at),
-              )}
+              Expires {formatDateTime(invitation.expires_at)}
             </p>
             <p class="mt-0.5 text-xs text-muted-foreground">
-              Created {timestampFormatter.format(
-                new Date(invitation.created_at),
-              )}
+              Created {formatDateTime(invitation.created_at)}
               {#if invitation.created_by}
                 by {invitation.created_by}
               {/if}

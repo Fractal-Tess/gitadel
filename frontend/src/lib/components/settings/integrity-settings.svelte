@@ -16,6 +16,7 @@
     type IntegritySettings,
   } from "$lib/api/instance.js";
   import { errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
+  import { formatDateTime } from "$lib/format.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
   const app = useAppState();
@@ -94,13 +95,6 @@
       saving = false;
     }
   }
-
-  function formatDate(value: string) {
-    return new Intl.DateTimeFormat(undefined, {
-      dateStyle: "medium",
-      timeStyle: "short",
-    }).format(new Date(value));
-  }
 </script>
 
 <Card.Root data-integrity-settings>
@@ -172,7 +166,7 @@
               <dt class="text-xs text-muted-foreground">Last completed check</dt>
               <dd class="font-medium">
                 {settings?.last_checked_at
-                  ? formatDate(settings.last_checked_at)
+                  ? formatDateTime(settings.last_checked_at)
                   : "No completed checks yet"}
               </dd>
               {#if settings?.last_result}

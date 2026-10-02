@@ -14,36 +14,16 @@
   import * as Alert from "$lib/components/ui/alert/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Empty from "$lib/components/ui/empty/index.js";
+  import { formatBytes, formatDateTime } from "$lib/format.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
 
   let { state: repository }: { state: RepositoryPageState } = $props();
-  const sizeFormatter = new Intl.NumberFormat(undefined, {
-    maximumFractionDigits: 1,
-  });
-  const dateFormatter = new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
-  const sizeUnits = ["B", "KiB", "MiB", "GiB"] as const;
 
   let logElement: HTMLPreElement | null = $state(null);
   let followLog = $state(true);
   let selectedJob = $derived(
     repository.actions.actionRun?.jobs.find((job) => job.id === repository.actionJobId),
   );
-
-  function formatDate(value: string) {
-    return dateFormatter.format(new Date(value));
-  }
-
-  function formatSize(bytes: number) {
-    if (bytes <= 0) return "0 B";
-    const exponent = Math.min(
-      Math.floor(Math.log(bytes) / Math.log(1024)),
-      sizeUnits.length - 1,
-    );
-    return `${sizeFormatter.format(bytes / 1024 ** exponent)} ${sizeUnits[exponent]}`;
-  }
 
   function updateFollowLog() {
     if (!logElement) return;
@@ -302,8 +282,8 @@
               <div class="min-w-0">
                 <p class="truncate font-medium">{artifact.name}</p>
                 <p class="mt-1 text-xs text-muted-foreground">
-                  {formatSize(artifact.size_bytes)} · Expires
-                  {formatDate(artifact.expires_at)}
+                  {formatBytes(artifact.size_bytes)} · Expires
+                  {formatDateTime(artifact.expires_at)}
                 </p>
               </div>
               <Button
@@ -381,7 +361,7 @@
             >
               <GitCommit class="size-3" />{run.after_sha.slice(0, 12)} · {actionEventLabel(
                 run.event,
-              )} · {formatDate(run.created_at)}
+              )} · {formatDateTime(run.created_at)}
             </span>
             {#if run.failure_summary}
               <span class="mt-2 block text-sm text-destructive"

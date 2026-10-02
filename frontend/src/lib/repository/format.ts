@@ -1,12 +1,9 @@
 import { buttonVariants } from "$lib/components/ui/button/index.js";
 import { copyText } from "$lib/clipboard.js";
+import { formatBytes, formatDateTime } from "$lib/format.js";
 import { cn } from "$lib/utils.js";
 
 const MAX_MARKDOWN_HIGHLIGHT_CHARACTERS = 50_000;
-const DATE_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
-  dateStyle: "medium",
-  timeStyle: "short",
-});
 const DAY_FORMATTER = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
 });
@@ -117,19 +114,18 @@ const LANGUAGE_LABELS: Record<string, string> = {
   yaml: "YAML",
 };
 
+/** Formats a commit time, which Git reports in seconds. */
 export function formatDate(timestamp: number): string {
-  return DATE_TIME_FORMATTER.format(new Date(timestamp * 1000));
+  return formatDateTime(timestamp * 1000);
 }
 
 export function formatDay(date: string): string {
   return DAY_FORMATTER.format(new Date(date));
 }
 
+/** A file size, blank for entries such as directories that have none. */
 export function formatSize(size: number | null): string {
-  if (size === null) return "";
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  return size === null ? "" : formatBytes(size);
 }
 
 function languageForName(name: string): string | null {

@@ -33,6 +33,7 @@
     type StorageTarget,
     type StorageUsageDetail,
   } from "$lib/api/storage.js";
+  import { formatBytes } from "$lib/format.js";
   import {
     invalidateAdminActivity,
     loadStorageDomain,
@@ -350,18 +351,6 @@
     return field.unit === "bytes"
       ? formatBytes(value ?? 0)
       : (value ?? 0).toLocaleString();
-  }
-
-  function formatBytes(bytes: number) {
-    const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let value = bytes;
-    let unit = units[0];
-    for (const candidate of units) {
-      unit = candidate;
-      if (value < 1024 || candidate === units.at(-1)) break;
-      value /= 1024;
-    }
-    return `${value >= 10 || unit === "B" ? value.toFixed(0) : value.toFixed(1)} ${unit}`;
   }
 </script>
 

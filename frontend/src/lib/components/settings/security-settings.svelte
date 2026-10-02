@@ -31,6 +31,7 @@
   import * as Popover from "$lib/components/ui/popover/index.js";
   import * as Select from "$lib/components/ui/select/index.js";
   import { Textarea } from "$lib/components/ui/textarea/index.js";
+  import { formatDateTime } from "$lib/format.js";
   import type { CredentialsSettingsState } from "$lib/settings/account/credentials-settings-state.svelte.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
   import type {
@@ -56,10 +57,6 @@
     view: "account" | "authentication" | "ssh-keys" | "api-tokens";
   } = $props();
   const app = useAppState();
-  const timestampFormatter = new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
   let browserSupportsPasskeys = $state(true);
   const passkeysEnabled = $derived(
     app.authStatus?.authentication.passkey_enabled ?? true,
@@ -159,10 +156,6 @@
     return expiresAt
       ? `Expires ${new Date(expiresAt).toLocaleDateString()}`
       : "Never expires";
-  }
-
-  function formatTimestamp(value: string | null): string {
-    return value ? timestampFormatter.format(new Date(value)) : "Never";
   }
 </script>
 
@@ -471,7 +464,7 @@
                 <dt class="text-muted-foreground">Created</dt>
                 <dd class="mt-0.5">
                   <time datetime={key.created_at}>
-                    {formatTimestamp(key.created_at)}
+                    {formatDateTime(key.created_at)}
                   </time>
                 </dd>
               </div>
@@ -480,7 +473,7 @@
                 <dd class="mt-0.5">
                   {#if key.last_used_at}
                     <time datetime={key.last_used_at}>
-                      {formatTimestamp(key.last_used_at)}
+                      {formatDateTime(key.last_used_at)}
                     </time>
                   {:else}
                     Never
@@ -618,7 +611,7 @@
                   <dt class="text-muted-foreground">Created</dt>
                   <dd class="mt-0.5">
                     <time datetime={token.created_at}>
-                      {formatTimestamp(token.created_at)}
+                      {formatDateTime(token.created_at)}
                     </time>
                   </dd>
                 </span>
@@ -627,7 +620,7 @@
                   <dd class="mt-0.5">
                     {#if token.last_used_at}
                       <time datetime={token.last_used_at}>
-                        {formatTimestamp(token.last_used_at)}
+                        {formatDateTime(token.last_used_at)}
                       </time>
                     {:else}
                       Never

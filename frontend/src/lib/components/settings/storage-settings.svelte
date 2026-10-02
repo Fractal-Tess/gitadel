@@ -30,6 +30,7 @@
   import * as Select from "$lib/components/ui/select/index.js";
   import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
   import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
+  import { formatBytes } from "$lib/format.js";
   import {
     invalidateAdminActivity,
     loadStorageTargets,
@@ -269,18 +270,6 @@
         capacity.available_bytes,
       )} free of ${formatBytes(capacity.total_bytes)}`,
     };
-  }
-
-  function formatBytes(bytes: number) {
-    const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let value = bytes;
-    let unit = units[0];
-    for (const candidate of units) {
-      unit = candidate;
-      if (value < 1024 || candidate === units.at(-1)) break;
-      value /= 1024;
-    }
-    return `${value >= 10 || unit === "B" ? value.toFixed(0) : value.toFixed(1)} ${unit}`;
   }
 
   function formatMeasuredAt(value: string) {

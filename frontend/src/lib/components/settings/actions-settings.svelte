@@ -17,6 +17,7 @@
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
+  import { formatDateTime } from "$lib/format.js";
   import type {
     ActionRunnerScope,
     ActionsSettingsState,
@@ -153,17 +154,6 @@
   function runnerStatus(runner: ActionRunner) {
     if (runner.incompatibility) return "Incompatible";
     return runner.status === "online" ? "Online" : "Offline";
-  }
-
-  function formatDate(value: string | null) {
-    if (!value) return "Never connected";
-    const date = new Date(value);
-    return Number.isNaN(date.getTime())
-      ? value
-      : new Intl.DateTimeFormat(undefined, {
-          dateStyle: "medium",
-          timeStyle: "short",
-        }).format(date);
   }
 </script>
 
@@ -348,7 +338,12 @@
           </div>
           <div class="grid gap-1 sm:grid-cols-[8rem_1fr] sm:gap-4">
             <dt class="text-muted-foreground">Last seen</dt>
-            <dd>{formatDate(configuring.runner.last_seen_at)}</dd>
+            <dd>
+              {formatDateTime(
+                configuring.runner.last_seen_at,
+                "Never connected",
+              )}
+            </dd>
           </div>
         </dl>
         <p class="text-xs leading-5 text-muted-foreground">

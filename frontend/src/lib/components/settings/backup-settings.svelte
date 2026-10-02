@@ -54,6 +54,7 @@
     type RestorePreflight,
   } from "$lib/api/backups.js";
   import { z } from "zod";
+  import { formatBytes, formatDateTime } from "$lib/format.js";
   import {
     clearBackupSettingsCache,
     loadBackupSettings,
@@ -624,24 +625,6 @@
     );
   }
 
-  function formatBytes(bytes: number) {
-    if (bytes < 1_024) return `${bytes} B`;
-    const units = ["KiB", "MiB", "GiB", "TiB"];
-    let value = bytes / 1_024;
-    let unit = units[0];
-    for (const next of units.slice(1)) {
-      if (value < 1_024) break;
-      value /= 1_024;
-      unit = next;
-    }
-    return `${value.toFixed(value >= 10 ? 1 : 2)} ${unit}`;
-  }
-
-  function formatDate(value: string) {
-    const date = new Date(value);
-    return Number.isNaN(date.valueOf()) ? value : date.toLocaleString();
-  }
-
   function modeForSchedule(schedule: string | null) {
     if (schedule === null) return "";
     return SCHEDULE_OPTIONS.some(
@@ -722,7 +705,7 @@
           statusLabel={provider.schedule ? "Scheduled" : "Ready"}
           statusHealthy
           detailLabel={provider.schedule
-            ? `Next ${provider.next_backup_at ? formatDate(provider.next_backup_at) : "run pending"}`
+            ? `Next ${provider.next_backup_at ? formatDateTime(provider.next_backup_at) : "run pending"}`
             : null}
           selected={provider.id === selectedProviderId}
           onselect={() => void selectProvider(provider)}
@@ -864,7 +847,7 @@
                   {#if scheduleDirty}
                     Save the schedule to calculate the next run.
                   {:else if settings.next_backup_at}
-                    {formatDate(settings.next_backup_at)}
+                    {formatDateTime(settings.next_backup_at)}
                   {:else}
                     Not scheduled
                   {/if}
@@ -981,7 +964,7 @@
                 <div class="mt-2 flex flex-wrap gap-1.5">
                   <Badge variant="outline">
                     <CalendarDays data-icon="inline-start" />
-                    {formatDate(snapshot.created_at)}
+                    {formatDateTime(snapshot.created_at)}
                   </Badge>
                   <Badge variant="outline">
                     <HardDrive data-icon="inline-start" />
@@ -1062,7 +1045,9 @@
         >
           <div>
             <dt class="text-xs text-muted-foreground">Created</dt>
-            <dd class="mt-1 font-medium">{formatDate(preflight.created_at)}</dd>
+            <dd class="mt-1 font-medium">
+              {formatDateTime(preflight.created_at)}
+            </dd>
           </div>
           <div>
             <dt class="text-xs text-muted-foreground">Verified files</dt>

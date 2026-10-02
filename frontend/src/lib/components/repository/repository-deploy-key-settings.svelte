@@ -20,6 +20,7 @@
   import { Input } from "$lib/components/ui/input/index.js";
   import { Switch } from "$lib/components/ui/switch/index.js";
   import { Textarea } from "$lib/components/ui/textarea/index.js";
+  import { formatDateTime } from "$lib/format.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
   import { repositoryApi } from "$lib/repository/state/shared.js";
 
@@ -58,14 +59,6 @@
       });
     return () => controller.abort();
   });
-
-  function formatDate(value: string | null) {
-    if (!value) return "Never used";
-    return new Intl.DateTimeFormat(undefined, {
-      dateStyle: "medium",
-      timeStyle: "short",
-    }).format(new Date(value));
-  }
 
   async function createKey() {
     creating = true;
@@ -146,8 +139,8 @@
                   {key.fingerprint}
                 </p>
                 <p class="mt-1 text-xs text-muted-foreground">
-                  Added {formatDate(key.created_at)} · {key.last_used_at
-                    ? `Last used ${formatDate(key.last_used_at)}`
+                  Added {formatDateTime(key.created_at)} · {key.last_used_at
+                    ? `Last used ${formatDateTime(key.last_used_at)}`
                     : "Never used"}
                 </p>
               </div>

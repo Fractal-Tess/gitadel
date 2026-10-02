@@ -23,6 +23,7 @@
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import * as Select from "$lib/components/ui/select/index.js";
+  import { formatDateTime } from "$lib/format.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
 
   let { state: repository }: { state: RepositoryPageState } = $props();
@@ -56,14 +57,6 @@
   const selectedIdentity = $derived(
     compatibleIdentities.find((identity) => identity.id === identityId) ?? null,
   );
-
-  function formatTimestamp(value: string | null): string {
-    if (!value) return "Never";
-    return new Intl.DateTimeFormat(undefined, {
-      dateStyle: "medium",
-      timeStyle: "short",
-    }).format(new Date(value));
-  }
 
   function applyMirror(next: RepositoryMirror): void {
     mirror = next;
@@ -220,14 +213,14 @@
           <div>
             <dt class="text-muted-foreground">Last successful sync</dt>
             <dd class="mt-0.5 font-medium">
-              {formatTimestamp(mirror.last_synced_at)}
+              {formatDateTime(mirror.last_synced_at)}
             </dd>
           </div>
           <div>
             <dt class="text-muted-foreground">Next scheduled sync</dt>
             <dd class="mt-0.5 font-medium">
               {mirror.schedule
-                ? formatTimestamp(mirror.next_sync_at)
+                ? formatDateTime(mirror.next_sync_at)
                 : "Manual only"}
             </dd>
           </div>
@@ -252,7 +245,7 @@
           <p class="text-xs text-muted-foreground">
             {mirror.syncing
               ? "Synchronization is running."
-              : `Last attempted ${formatTimestamp(mirror.last_attempted_at)}.`}
+              : `Last attempted ${formatDateTime(mirror.last_attempted_at)}.`}
           </p>
           <Button
             type="button"

@@ -12,6 +12,7 @@
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
+  import { formatDateTime } from "$lib/format.js";
   import type { OAuthSettingsState } from "$lib/settings/account/oauth-settings-state.svelte.js";
 
   let {
@@ -24,11 +25,6 @@
   let createDialogOpen = $state(false);
   let revokeDialogOpen = $state(false);
   let pendingApplication = $state<{ id: string; name: string } | null>(null);
-
-  const timestampFormatter = new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
 
   async function copyCredential(value: string, label: string) {
     try {
@@ -187,7 +183,7 @@
             <dt class="text-muted-foreground">Created</dt>
             <dd class="mt-0.5">
               <time datetime={application.created_at}>
-                {timestampFormatter.format(new Date(application.created_at))}
+                {formatDateTime(application.created_at)}
               </time>
             </dd>
           </div>

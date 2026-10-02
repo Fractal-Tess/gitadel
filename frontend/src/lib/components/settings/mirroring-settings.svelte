@@ -18,6 +18,7 @@
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
+  import { formatDateTime } from "$lib/format.js";
   import { takeNamespaceMirrorSettings } from "$lib/namespace-preload.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
@@ -31,10 +32,6 @@
   } = $props();
 
   const app = useAppState();
-  const timestampFormatter = new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
   const targets = $derived<Target[]>(namespace ? [namespace] : []);
 
   let identities = $state<Record<string, MirrorIdentity[]>>({});
@@ -182,10 +179,6 @@
       forgejo: "Forgejo",
     }[provider];
   }
-
-  function formatTimestamp(value: string | null): string {
-    return value ? timestampFormatter.format(new Date(value)) : "Never";
-  }
 </script>
 
 <section class="space-y-6" aria-labelledby="mirror-identities-heading">
@@ -240,7 +233,7 @@
           enabled={true}
           statusLabel="Available"
           statusHealthy={true}
-          detailLabel={`Last used ${formatTimestamp(card.identity.last_used_at)}`}
+          detailLabel={`Last used ${formatDateTime(card.identity.last_used_at)}`}
           busy={working[card.identity.id]}
           configureLabel="Configure"
           onconfigure={() => openEdit(card)}

@@ -16,6 +16,7 @@
   import { Button } from "$lib/components/ui/button/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
   import ReleaseComposerDialog from "$lib/components/repository/release-composer-dialog.svelte";
+  import { formatDateTime } from "$lib/format.js";
   import { formatSize, trustedHtml } from "$lib/repository/format.js";
   import type { Release } from "$lib/api/releases.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
@@ -73,13 +74,6 @@
     });
     return `${path}?${new URLSearchParams({ rev: oid })}`;
   }
-
-  function publishedDate(value: string) {
-    return new Intl.DateTimeFormat(undefined, {
-      dateStyle: "medium",
-      timeStyle: "short",
-    }).format(new Date(value));
-  }
 </script>
 
 <div class="mx-auto max-w-5xl">
@@ -136,7 +130,7 @@
             >
             <p class="flex items-start gap-2 leading-5">
               <CalendarDays class="mt-0.5 size-3.5 shrink-0" />
-              <span>{publishedDate(release.published_at)}</span>
+              <span>{formatDateTime(release.published_at)}</span>
             </p>
           </div>
 
