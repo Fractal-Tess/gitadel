@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod access_tests;
 mod browser;
 mod deploy_keys;
 mod files;
@@ -398,11 +400,23 @@ impl RepositoryState {
         let key = lfs_token_key(token);
         let now = Instant::now();
         let authorization = self.lfs_tokens.read().await.get(&key).copied()?;
-        (authorization.expires_at > now
-            && authorization.repository_id == repository_id
-            && (permission == LfsPermission::Read
-                || authorization.permission == LfsPermission::Write))
-            .then_some(authorization.user_id)
+        if authorization.expires_at <= now
+            || authorization.repository_id != repository_id
+            || (permission == LfsPermission::Write
+                && authorization.permission != LfsPermission::Write)
+        {
+            return None;
+        }
+        // The token outlives the request that issued it, so an account
+        // disabled since then must not keep using it.
+        match self.identity.user_is_enabled(authorization.user_id).await {
+            Ok(true) => Some(authorization.user_id),
+            Ok(false) => None,
+            Err(error) => {
+                tracing::error!(%error, "could not verify the account behind an LFS token");
+                None
+            }
+        }
     }
 
     async fn cached_value<T>(

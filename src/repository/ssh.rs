@@ -228,6 +228,25 @@ impl russh::server::Handler for SshHandler {
         let Some(actor) = self.actor else {
             return reject(channel_id, session, "Authentication required.\n");
         };
+        // The connection may have been open since before the account was
+        // disabled; authentication alone is checked only once per connection.
+        if let Some(user_id) = actor.user() {
+            match self.state.identity().user_is_enabled(user_id).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.actor = None;
+                    return reject(channel_id, session, "This account is disabled.\n");
+                }
+                Err(error) => {
+                    tracing::error!(%error, "could not verify the SSH account");
+                    return reject(
+                        channel_id,
+                        session,
+                        "Authentication could not be verified.\n",
+                    );
+                }
+            }
+        }
         let actor_user_id = actor.attributed_user();
         let Some(channel_state) = self.channels.remove(&channel_id) else {
             return reject(channel_id, session, "Invalid SSH channel.\n");

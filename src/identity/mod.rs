@@ -853,6 +853,13 @@ impl IdentityState {
         self.session_user(jar).await
     }
 
+    /// Whether the account exists and is not disabled. Callers that keep a
+    /// principal beyond one request (an open SSH connection, an LFS token)
+    /// re-check it here before each use.
+    pub(crate) async fn user_is_enabled(&self, id: Uuid) -> Result<bool, ApiError> {
+        Ok(self.enabled_user(id).await?.is_some())
+    }
+
     async fn enabled_user(&self, id: Uuid) -> Result<Option<user::Model>, ApiError> {
         Ok(user::Entity::find_by_id(id)
             .filter(user::Column::DisabledAt.is_null())
