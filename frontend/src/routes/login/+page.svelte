@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { goto } from "$app/navigation";
   import { resolve } from "$app/paths";
   import { page } from "$app/state";
   import Eye from "@lucide/svelte/icons/eye";
@@ -23,6 +22,7 @@
     webauthnRequestSchema,
   } from "$lib/api/auth.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
+  import { safeReturnTo } from "$lib/return-to.js";
   import { getCredential, requestOptions } from "$lib/webauthn.js";
 
   type LoginMethod = "password" | "passkey" | `sso:${string}`;
@@ -74,16 +74,9 @@
       const method = await task();
       if (!method) return;
       recordLastLoginMethod(method);
+      // The layout's route guard sees the new session and leaves this page
+      // for the validated `returnTo` target.
       await app.refreshAuth();
-      const returnTo = page.url.searchParams.get("returnTo");
-      if (
-        returnTo?.startsWith("/login/oauth/authorize?") ||
-        returnTo?.startsWith("/settings")
-      ) {
-        window.location.assign(returnTo);
-      } else {
-        await goto(resolve("/"));
-      }
     } catch (caught) {
       toast.error(
         caught instanceof ApiFailure || caught instanceof Error
@@ -170,7 +163,7 @@
   }
 
   function ssoHref(providerId: string): string {
-    const returnTo = page.url.searchParams.get("returnTo") ?? "/";
+    const returnTo = safeReturnTo(page.url.searchParams.get("returnTo"));
     const query = new URLSearchParams({ returnTo });
     return `/api/v1/auth/oidc/${encodeURIComponent(providerId)}/start?${query}`;
   }

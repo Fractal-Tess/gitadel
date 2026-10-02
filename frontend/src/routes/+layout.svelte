@@ -16,6 +16,7 @@
   import * as Sidebar from "$lib/components/ui/sidebar/index.js";
   import { Toaster } from "$lib/components/ui/sonner/index.js";
   import { motion } from "$lib/motion.svelte.js";
+  import { isServerRoute, safeReturnTo } from "$lib/return-to.js";
   import { provideAppState } from "$lib/state/app-state.svelte.js";
   import { provideShellState } from "$lib/state/shell-state.svelte.js";
 
@@ -187,19 +188,13 @@
         }
       }
       if (url.pathname === "/login" && status.authenticated) {
-        const returnTo = url.searchParams.get("returnTo");
-        if (returnTo?.startsWith("/login/oauth/authorize?")) {
-          // Server-side route: a client-side goto would hand the OAuth
-          // authorize path to the SPA router, which has no such page.
-          window.location.assign(returnTo);
-        } else if (
-          returnTo?.startsWith("/settings") ||
-          returnTo?.startsWith("/-/") ||
-          (returnTo && managedNamespace(returnTo.split("?")[0] ?? "") !== null)
-        ) {
+        // The one place that leaves the sign-in page: both a completed
+        // sign-in and a visit while already signed in arrive here.
+        const returnTo = safeReturnTo(url.searchParams.get("returnTo"));
+        if (isServerRoute(returnTo)) {
           window.location.assign(returnTo);
         } else {
-          await goto(resolve("/"), { replaceState: true });
+          await goto(returnTo, { replaceState: true });
         }
         return;
       }
