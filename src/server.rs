@@ -165,6 +165,11 @@ async fn request_context(request: Request, next: Next) -> Response {
     response
 }
 
+/// How long shutdown waits for open HTTP connections to drain, and then for
+/// background tasks to finish, before giving up on them. Without a bound a
+/// single stalled connection holds the process until the supervisor kills it.
+const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(30);
+
 pub enum ServerExit {
     Shutdown,
     Maintenance(Box<MaintenanceAction>),
@@ -287,7 +292,7 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
                 () = shutdown_signal() => {}
                 () = http_shutdown.cancelled() => {}
             }
-            graceful_handle.graceful_shutdown(None);
+            graceful_handle.graceful_shutdown(Some(SHUTDOWN_DEADLINE));
         });
         let result = if let Some(tls) = tls {
             axum_server::from_tcp_rustls(listener, tls)
@@ -456,7 +461,19 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
         let _ = integrity_scheduler.await;
     }
     repository_state.close_tasks();
-    repository_state.wait_for_tasks().await;
+    if matches!(&outcome, Ok(ServerExit::Maintenance(_))) {
+        // Maintenance rewrites the data the tasks work on, so it must not
+        // start while any of them is still running.
+        repository_state.wait_for_tasks().await;
+    } else if tokio::time::timeout(SHUTDOWN_DEADLINE, repository_state.wait_for_tasks())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            deadline_seconds = SHUTDOWN_DEADLINE.as_secs(),
+            "background tasks did not finish before the shutdown deadline"
+        );
+    }
     if matches!(&outcome, Ok(ServerExit::Maintenance(_))) {
         repository_state
             .registry_storage()
