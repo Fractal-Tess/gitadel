@@ -468,29 +468,39 @@ async fn available_username(
     if base.is_empty() {
         base = "sso-user".to_owned();
     }
-    if user::Entity::find()
-        .filter(user::Column::Username.eq(&base))
-        .count(transaction)
-        .await?
-        == 0
-    {
+    if !username_taken(transaction, &base).await? {
         return Ok(base);
     }
     for _ in 0..16 {
         let suffix = &Uuid::new_v4().simple().to_string()[..8];
         let candidate = format!("{base}-{suffix}");
-        if user::Entity::find()
-            .filter(user::Column::Username.eq(&candidate))
-            .count(transaction)
-            .await?
-            == 0
-        {
+        if !username_taken(transaction, &candidate).await? {
             return Ok(candidate);
         }
     }
     Err(ApiError::internal(
         "could not allocate a username for the OIDC identity",
     ))
+}
+
+/// A username doubles as the personal namespace slug, and organisations share
+/// that slug space, so a name is taken when either table already holds it.
+async fn username_taken(
+    transaction: &DatabaseTransaction,
+    candidate: &str,
+) -> Result<bool, ApiError> {
+    if user::Entity::find()
+        .filter(user::Column::Username.eq(candidate))
+        .count(transaction)
+        .await?
+        > 0
+    {
+        return Ok(true);
+    }
+    Ok(namespace::Entity::find_by_id(candidate)
+        .one(transaction)
+        .await?
+        .is_some())
 }
 
 #[derive(Serialize)]
@@ -899,5 +909,66 @@ mod tests {
         assert_eq!(validated.issuer_url, "https://identity.example/realm");
         assert_eq!(validated.client_id, "gitadel");
         assert_eq!(validated.client_secret.as_deref(), Some("existing-secret"));
+    }
+
+    #[tokio::test]
+    async fn provisioned_usernames_avoid_organization_namespaces() {
+        let database = crate::actions::test_support::database().await;
+        let now = Utc::now();
+        let organization_id = Uuid::new_v4();
+        crate::entity::organization::ActiveModel {
+            id: Set(organization_id),
+            slug: Set("acme".to_owned()),
+            display_name: Set("Acme".to_owned()),
+            avatar_updated_at: Set(None),
+            created_at: Set(now),
+            updated_at: Set(now),
+        }
+        .insert(&database)
+        .await
+        .unwrap();
+        namespace::ActiveModel {
+            slug: Set("acme".to_owned()),
+            kind: Set("organization".to_owned()),
+            user_id: Set(None),
+            organization_id: Set(Some(organization_id)),
+            created_at: Set(now),
+        }
+        .insert(&database)
+        .await
+        .unwrap();
+        crate::actions::test_support::owner(&database, "taken").await;
+
+        let transaction = database.begin().await.unwrap();
+        let beside_organization = available_username(&transaction, "acme@example.com")
+            .await
+            .ok()
+            .unwrap();
+        let beside_user = available_username(&transaction, "taken")
+            .await
+            .ok()
+            .unwrap();
+        let free = available_username(&transaction, "New.Person@example.com")
+            .await
+            .ok()
+            .unwrap();
+
+        assert!(
+            beside_organization.starts_with("acme-"),
+            "{beside_organization}"
+        );
+        assert!(beside_user.starts_with("taken-"), "{beside_user}");
+        assert_eq!(free, "new-person");
+        // The chosen name must be insertable as a namespace.
+        namespace::ActiveModel {
+            slug: Set(beside_organization),
+            kind: Set("user".to_owned()),
+            user_id: Set(None),
+            organization_id: Set(None),
+            created_at: Set(now),
+        }
+        .insert(&transaction)
+        .await
+        .unwrap();
     }
 }
