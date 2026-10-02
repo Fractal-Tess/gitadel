@@ -1,4 +1,4 @@
-use std::{path::Path, time::Duration};
+use std::{collections::HashSet, path::Path, sync::Arc, time::Duration};
 
 use axum::{
     Json,
@@ -131,11 +131,7 @@ impl PreparedMirror {
 
 impl MirrorResponse {
     async fn new(mirror: repository_mirror::Model, state: &RepositoryState) -> Self {
-        let syncing = state
-            .mirror_syncing
-            .lock()
-            .await
-            .contains(&mirror.repository_id);
+        let syncing = state.mirror_syncing.contains(mirror.repository_id);
         Self {
             remote_url: mirror.remote_url,
             identity_id: mirror.identity_id,
@@ -452,17 +448,12 @@ async fn convert(
     // Standard repositories have no mirror row and fail through the same
     // lookup the other mirror endpoints use.
     let _mirror = find_mirror(repository.id, state.identity().database()).await?;
-    {
-        let mut syncing = state.mirror_syncing.lock().await;
-        if !syncing.insert(repository.id) {
-            return Err(ApiError::conflict(
-                "The repository is currently synchronizing.",
-            ));
-        }
-    }
-    let result = convert_inner(state, repository, actor_user_id).await;
-    state.mirror_syncing.lock().await.remove(&repository.id);
-    result
+    let Some(_busy) = state.mirror_syncing.claim(repository.id) else {
+        return Err(ApiError::conflict(
+            "The repository is currently synchronizing.",
+        ));
+    };
+    convert_inner(state, repository, actor_user_id).await
 }
 
 async fn convert_inner(
@@ -550,27 +541,78 @@ async fn convert_inner(
     Ok(())
 }
 
+/// Repositories with a mirror operation in flight.
+#[derive(Clone, Default)]
+pub(super) struct MirrorBusySet(Arc<std::sync::Mutex<HashSet<Uuid>>>);
+
+impl MirrorBusySet {
+    fn ids(&self) -> std::sync::MutexGuard<'_, HashSet<Uuid>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn contains(&self, repository_id: Uuid) -> bool {
+        self.ids().contains(&repository_id)
+    }
+
+    /// Marks the repository busy until the returned claim is dropped, which
+    /// also covers a handler future cancelled in the middle of the operation.
+    fn claim(&self, repository_id: Uuid) -> Option<MirrorBusy> {
+        self.ids().insert(repository_id).then(|| MirrorBusy {
+            set: self.clone(),
+            repository_id,
+        })
+    }
+}
+
+struct MirrorBusy {
+    set: MirrorBusySet,
+    repository_id: Uuid,
+}
+
+impl Drop for MirrorBusy {
+    fn drop(&mut self) {
+        self.set.ids().remove(&self.repository_id);
+    }
+}
+
+/// The outcome of asking for a synchronization.
+pub(super) enum Synchronization {
+    Completed(Box<repository_mirror::Model>),
+    /// Another synchronization or a conversion holds the repository.
+    AlreadyRunning,
+}
+
 pub(super) async fn synchronize(
     state: &RepositoryState,
     repository: &repository::Model,
     actor_user_id: Option<Uuid>,
 ) -> Result<repository_mirror::Model, ApiError> {
+    match try_synchronize(state, repository, actor_user_id).await? {
+        Synchronization::Completed(mirror) => Ok(*mirror),
+        Synchronization::AlreadyRunning => Err(ApiError::conflict(
+            "Mirror synchronization is already running.",
+        )),
+    }
+}
+
+pub(super) async fn try_synchronize(
+    state: &RepositoryState,
+    repository: &repository::Model,
+    actor_user_id: Option<Uuid>,
+) -> Result<Synchronization, ApiError> {
     let _permit = state
         .mirror_slots
         .acquire()
         .await
         .map_err(ApiError::internal)?;
-    {
-        let mut syncing = state.mirror_syncing.lock().await;
-        if !syncing.insert(repository.id) {
-            return Err(ApiError::conflict(
-                "Mirror synchronization is already running.",
-            ));
-        }
-    }
-    let result = synchronize_inner(state, repository, actor_user_id).await;
-    state.mirror_syncing.lock().await.remove(&repository.id);
-    result
+    let Some(_busy) = state.mirror_syncing.claim(repository.id) else {
+        return Ok(Synchronization::AlreadyRunning);
+    };
+    synchronize_inner(state, repository, actor_user_id)
+        .await
+        .map(|mirror| Synchronization::Completed(Box::new(mirror)))
 }
 
 async fn synchronize_inner(
@@ -1180,7 +1222,10 @@ mod tests {
             },
             identity::{IdentityState, SCOPE_WRITE, hash_secret},
             migration::Migrator,
-            repository::{RepositoryState, mirrors::convert_mirror},
+            repository::{
+                RepositoryState,
+                mirrors::{MirrorBusySet, Synchronization, convert_mirror, try_synchronize},
+            },
         };
 
         const TOKEN: &str = "conversion-test-token";
@@ -1521,12 +1566,11 @@ mod tests {
             let repository =
                 seed_repository(&environment.database, &account, "upstream", true).await;
             seed_mirror(&environment.database, &repository, &account).await;
-            environment
+            let _busy = environment
                 .state
                 .mirror_syncing
-                .lock()
-                .await
-                .insert(repository.id);
+                .claim(repository.id)
+                .unwrap();
 
             let error = request_conversion(&environment.state, "upstream")
                 .await
@@ -1542,6 +1586,49 @@ mod tests {
                 "conversion must not proceed while synchronizing"
             );
 
+            tokio::fs::remove_dir_all(&environment._root).await.ok();
+        }
+
+        #[tokio::test]
+        async fn busy_claim_is_released_when_its_future_is_cancelled() {
+            let busy = MirrorBusySet::default();
+            let id = Uuid::new_v4();
+            let task_busy = busy.clone();
+            let (claimed, wait) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let _claim = task_busy.claim(id).unwrap();
+                claimed.send(()).unwrap();
+                std::future::pending::<()>().await;
+            });
+            wait.await.unwrap();
+            assert!(busy.contains(id));
+            assert!(busy.claim(id).is_none());
+
+            task.abort();
+            let _ = task.await;
+
+            assert!(!busy.contains(id));
+            assert!(busy.claim(id).is_some());
+        }
+
+        #[tokio::test]
+        async fn synchronize_reports_a_busy_mirror_as_a_typed_outcome() {
+            let environment = environment().await;
+            let account = seed_account(&environment.database).await;
+            let repository =
+                seed_repository(&environment.database, &account, "upstream", true).await;
+            seed_mirror(&environment.database, &repository, &account).await;
+            let _busy = environment
+                .state
+                .mirror_syncing
+                .claim(repository.id)
+                .unwrap();
+
+            let outcome = try_synchronize(&environment.state, &repository, None)
+                .await
+                .unwrap();
+
+            assert!(matches!(outcome, Synchronization::AlreadyRunning));
             tokio::fs::remove_dir_all(&environment._root).await.ok();
         }
 

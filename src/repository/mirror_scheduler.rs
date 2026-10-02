@@ -62,8 +62,8 @@ pub(crate) async fn serve_mirror_scheduler(state: RepositoryState) -> Result<(),
             let worker_state = state.clone();
             let task_state = worker_state.clone();
             task_state.spawn_task(async move {
-                if let Err(error) = mirrors::synchronize(&worker_state, &repository, None).await
-                    && error.to_string() != "Mirror synchronization is already running."
+                // A mirror that is already synchronizing is not a failure.
+                if let Err(error) = mirrors::try_synchronize(&worker_state, &repository, None).await
                 {
                     tracing::warn!(
                         %error,
