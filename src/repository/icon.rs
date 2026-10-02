@@ -19,12 +19,12 @@ use sley::{GitObjectType, Repository as GitRepository};
 
 use super::{
     Permission, RepositoryState,
-    browser::read_git,
+    browser::{read_git, readable_repository},
     image::{render_thumbnail, resolve_image_content},
 };
 use crate::{
     entity::{repository, repository_icon, repository_icon_candidate, repository_icon_scan},
-    identity::{ApiError, SCOPE_READ, SCOPE_WRITE},
+    identity::{ApiError, SCOPE_WRITE},
 };
 
 pub const MAX_ICON_REQUEST_BYTES: usize = 6 * 1024 * 1024;
@@ -111,15 +111,7 @@ pub async fn public_icon(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Response, ApiError> {
-    let repository = state.find(&namespace, &name).await?;
-    let user_id = state
-        .identity()
-        .optional_user(&headers, &jar, SCOPE_READ)
-        .await?
-        .map(|account| account.id);
-    state
-        .authorize(&repository, user_id, Permission::Read)
-        .await?;
+    let repository = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
 
     let icon = repository_icon::Entity::find_by_id(repository.id)
         .one(state.identity().database())
@@ -1144,25 +1136,6 @@ fn normalize_candidate_path(path: &str) -> Result<String, ApiError> {
         return Err(ApiError::bad_request("Invalid repository icon path."));
     }
     Ok(path.to_owned())
-}
-
-async fn readable_repository(
-    state: &RepositoryState,
-    headers: &HeaderMap,
-    jar: &CookieJar,
-    namespace: &str,
-    name: &str,
-) -> Result<repository::Model, ApiError> {
-    let repository = state.find(namespace, name).await?;
-    let user_id = state
-        .identity()
-        .optional_user(headers, jar, SCOPE_READ)
-        .await?
-        .map(|account| account.id);
-    state
-        .authorize(&repository, user_id, Permission::Read)
-        .await?;
-    Ok(repository)
 }
 
 async fn upsert_scan(

@@ -817,6 +817,29 @@ pub(super) async fn backfill_legacy_empty_defaults(
     Ok(())
 }
 
+impl RepositoryState {
+    /// The repository at `namespace/name` when the caller may read it, with
+    /// the caller's id when they are signed in. Anonymous callers reach
+    /// public repositories only.
+    pub(crate) async fn readable_repository(
+        &self,
+        headers: &HeaderMap,
+        jar: &CookieJar,
+        namespace: &str,
+        name: &str,
+    ) -> Result<(repository::Model, Option<Uuid>), ApiError> {
+        let repository = self.find(namespace, name).await?;
+        let user_id = self
+            .identity()
+            .optional_user(headers, jar, SCOPE_READ)
+            .await?
+            .map(|account| account.id);
+        self.authorize(&repository, user_id, Permission::Read)
+            .await?;
+        Ok((repository, user_id))
+    }
+}
+
 pub async fn get_repository(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,

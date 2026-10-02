@@ -29,7 +29,7 @@ use crate::{
         organization_member, repository, repository_collaborator, repository_issue, user,
     },
     filesystem::create_private_directory_async,
-    identity::{ApiError, SCOPE_READ, SCOPE_WRITE},
+    identity::{ApiError, SCOPE_WRITE},
 };
 
 const MAX_ISSUE_TITLE_LENGTH: usize = 255;
@@ -1038,7 +1038,9 @@ pub async fn download_attachment(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Response, ApiError> {
-    let repository = readable_issue_repository(&state, &headers, &jar, &namespace, &name).await?;
+    let (repository, _) = state
+        .readable_repository(&headers, &jar, &namespace, &name)
+        .await?;
     let attachment = issue_attachment::Entity::find_by_id(attachment_id)
         .filter(issue_attachment::Column::RepositoryId.eq(repository.id))
         .one(state.identity().database())
@@ -1304,38 +1306,13 @@ async fn issue_context(
     namespace: &str,
     name: &str,
 ) -> Result<(repository::Model, Option<Uuid>, bool), ApiError> {
-    let repository = state.find(namespace, name).await?;
-    let viewer_id = state
-        .identity()
-        .optional_user(headers, jar, SCOPE_READ)
-        .await?
-        .map(|viewer| viewer.id);
-    state
-        .authorize(&repository, viewer_id, Permission::Read)
+    let (repository, viewer_id) = state
+        .readable_repository(headers, jar, namespace, name)
         .await?;
     let can_write = state
         .can_access(&repository, viewer_id, Permission::Write)
         .await?;
     Ok((repository, viewer_id, can_write))
-}
-
-async fn readable_issue_repository(
-    state: &RepositoryState,
-    headers: &HeaderMap,
-    jar: &CookieJar,
-    namespace: &str,
-    name: &str,
-) -> Result<repository::Model, ApiError> {
-    let repository = state.find(namespace, name).await?;
-    let user_id = state
-        .identity()
-        .optional_user(headers, jar, SCOPE_READ)
-        .await?
-        .map(|actor| actor.id);
-    state
-        .authorize(&repository, user_id, Permission::Read)
-        .await?;
-    Ok(repository)
 }
 
 async fn bind_issue_attachments<C>(

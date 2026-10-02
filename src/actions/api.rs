@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    entity::{action_artifact, action_job, action_job_log, action_run, action_runner, repository},
+    entity::{action_artifact, action_job, action_job_log, action_run, action_runner},
     identity::{ApiError, AuthenticatedUser, SCOPE_READ, SCOPE_WRITE},
     repository::Permission,
 };
@@ -150,7 +150,10 @@ async fn list_runs(
     jar: CookieJar,
     Query(query): Query<RunsQuery>,
 ) -> Result<Json<RunListResponse>, ApiError> {
-    let (repository, _) = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
+    let (repository, _) = state
+        .repository()
+        .readable_repository(&headers, &jar, &namespace, &name)
+        .await?;
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(25).clamp(1, 100);
     let mut select =
@@ -210,8 +213,10 @@ async fn run_detail(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<RunDetailResponse>, ApiError> {
-    let (repository, user_id) =
-        readable_repository(&state, &headers, &jar, &namespace, &name).await?;
+    let (repository, user_id) = state
+        .repository()
+        .readable_repository(&headers, &jar, &namespace, &name)
+        .await?;
     let run = owned_run(&state, repository.id, run_id).await?;
     let diagnostic = run.diagnostic.clone();
     let can_write = state
@@ -377,7 +382,10 @@ async fn job_logs(
     jar: CookieJar,
     Query(query): Query<LogsQuery>,
 ) -> Result<Json<LogsResponse>, ApiError> {
-    let (repository, _) = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
+    let (repository, _) = state
+        .repository()
+        .readable_repository(&headers, &jar, &namespace, &name)
+        .await?;
     owned_run(&state, repository.id, run_id).await?;
     let job = action_job::Entity::find_by_id(job_id)
         .filter(action_job::Column::RunId.eq(run_id))
@@ -491,7 +499,10 @@ async fn statuses(
     jar: CookieJar,
     Query(query): Query<StatusesQuery>,
 ) -> Result<Json<StatusesResponse>, ApiError> {
-    let (repository, _) = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
+    let (repository, _) = state
+        .repository()
+        .readable_repository(&headers, &jar, &namespace, &name)
+        .await?;
     let oids = parse_status_oids(&query.oids)?;
     let database = state.repository().identity().database();
     let mut external =
@@ -827,27 +838,6 @@ async fn remove_runner_for_scope(
     Ok(Json(runner_response(&state, runner)))
 }
 
-async fn readable_repository(
-    state: &ActionsState,
-    headers: &HeaderMap,
-    jar: &CookieJar,
-    namespace: &str,
-    name: &str,
-) -> Result<(repository::Model, Option<Uuid>), ApiError> {
-    let repository = state.repository().find(namespace, name).await?;
-    let user_id = state
-        .repository()
-        .identity()
-        .optional_user(headers, jar, SCOPE_READ)
-        .await?
-        .map(|user| user.id);
-    state
-        .repository()
-        .authorize(&repository, user_id, Permission::Read)
-        .await?;
-    Ok((repository, user_id))
-}
-
 async fn owned_run(
     state: &ActionsState,
     repository_id: Uuid,
@@ -883,7 +873,10 @@ async fn list_run_artifacts(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<ArtifactListResponse>, ApiError> {
-    let (repository, _) = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
+    let (repository, _) = state
+        .repository()
+        .readable_repository(&headers, &jar, &namespace, &name)
+        .await?;
     let run = owned_run(&state, repository.id, run_id).await?;
     let visible = artifacts::run_scope(state.repository().identity().database(), run.id).await?;
     let rows = action_artifact::Entity::find()
@@ -928,7 +921,10 @@ async fn download_run_artifact(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Response, ApiError> {
-    let (repository, _) = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
+    let (repository, _) = state
+        .repository()
+        .readable_repository(&headers, &jar, &namespace, &name)
+        .await?;
     let _run = owned_run(&state, repository.id, run_id).await?;
     let visible = artifacts::run_scope(state.repository().identity().database(), run_id).await?;
     let artifact = action_artifact::Entity::find_by_id(artifact_id)

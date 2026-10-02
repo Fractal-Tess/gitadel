@@ -41,13 +41,13 @@ use tokei::{Config as TokeiConfig, LanguageType};
 use tokio::task::JoinSet;
 
 use super::{
-    Permission, RepositoryState,
+    RepositoryState,
     resources::{self, accessible_repositories},
 };
 use crate::{
     entity::{repository, repository_release, ssh_key as ssh_key_entity, user},
     filesystem::{create_private_directory_async, open_private_file},
-    identity::{ApiError, SCOPE_READ},
+    identity::ApiError,
 };
 
 const MAX_TEXT_BLOB_BYTES: usize = 2 * 1024 * 1024;
@@ -1745,6 +1745,8 @@ pub(super) async fn warm_repository_analysis(
     Ok(())
 }
 
+/// [`RepositoryState::readable_repository`] for handlers that do not need to
+/// know who is asking.
 pub(super) async fn readable_repository(
     state: &RepositoryState,
     headers: &HeaderMap,
@@ -1752,14 +1754,8 @@ pub(super) async fn readable_repository(
     namespace: &str,
     name: &str,
 ) -> Result<repository::Model, ApiError> {
-    let repository = state.find(namespace, name).await?;
-    let user_id = state
-        .identity()
-        .optional_user(headers, jar, SCOPE_READ)
-        .await?
-        .map(|account| account.id);
-    state
-        .authorize(&repository, user_id, Permission::Read)
+    let (repository, _) = state
+        .readable_repository(headers, jar, namespace, name)
         .await?;
     Ok(repository)
 }

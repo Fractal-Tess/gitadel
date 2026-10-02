@@ -22,11 +22,14 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
 
-use super::{Permission, RepositoryState, browser::read_git};
+use super::{
+    Permission, RepositoryState,
+    browser::{read_git, readable_repository},
+};
 use crate::{
     actions::tokens,
     entity::{repository, repository_commit_status, user},
-    identity::{ApiError, SCOPE_READ, SCOPE_WRITE},
+    identity::{ApiError, SCOPE_WRITE},
 };
 
 const STATES: [&str; 4] = ["pending", "success", "error", "failure"];
@@ -373,25 +376,6 @@ async fn writable_repository(
         return Err(ApiError::forbidden("Archived repositories are read-only."));
     }
     Ok((repository, actor_id))
-}
-
-async fn readable_repository(
-    state: &RepositoryState,
-    headers: &HeaderMap,
-    jar: &CookieJar,
-    namespace: &str,
-    name: &str,
-) -> Result<repository::Model, ApiError> {
-    let repository = state.find(namespace, name).await?;
-    let user_id = state
-        .identity()
-        .optional_user(headers, jar, SCOPE_READ)
-        .await?
-        .map(|actor| actor.id);
-    state
-        .authorize(&repository, user_id, Permission::Read)
-        .await?;
-    Ok(repository)
 }
 
 #[cfg(test)]

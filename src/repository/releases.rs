@@ -20,7 +20,9 @@ use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use super::{
-    Permission, RepositoryState, browser, render_markdown,
+    Permission, RepositoryState,
+    browser::{self, readable_repository},
+    render_markdown,
     webhook_events::{self, ChangeAction},
 };
 use crate::{
@@ -1008,25 +1010,6 @@ fn ensure_accepts_writes(repository: &repository::Model) -> Result<(), ApiError>
         return Err(ApiError::forbidden("Mirrored repositories are read-only."));
     }
     Ok(())
-}
-
-async fn readable_repository(
-    state: &RepositoryState,
-    headers: &HeaderMap,
-    jar: &CookieJar,
-    namespace: &str,
-    name: &str,
-) -> Result<repository::Model, ApiError> {
-    let repository = state.find(namespace, name).await?;
-    let user_id = state
-        .identity()
-        .optional_user(headers, jar, SCOPE_READ)
-        .await?
-        .map(|actor| actor.id);
-    state
-        .authorize(&repository, user_id, Permission::Read)
-        .await?;
-    Ok(repository)
 }
 
 async fn find_release(
