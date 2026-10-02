@@ -28,7 +28,10 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
-use tower_http::{compression::CompressionLayer, trace::TraceLayer};
+use tower_http::{
+    compression::{CompressionLayer, DefaultPredicate, Predicate},
+    trace::TraceLayer,
+};
 use tracing::info;
 
 use crate::{
@@ -165,6 +168,44 @@ async fn request_context(request: Request, next: Next) -> Response {
     response
 }
 
+/// Content types that gain nothing from transport compression: Git packs and
+/// archives are already compressed, and `application/octet-stream` carries
+/// LFS objects, release assets, and artifacts, which are large and usually
+/// compressed too. Matched as prefixes.
+const UNCOMPRESSED_CONTENT_TYPES: &[&str] = &[
+    "application/x-git-",
+    "application/octet-stream",
+    "application/zip",
+    "application/gzip",
+    "application/x-gzip",
+    "application/zstd",
+    "application/x-xz",
+    "application/x-bzip2",
+    "application/x-7z-compressed",
+];
+
+/// The default response compression rules, minus the content types above.
+#[derive(Clone, Copy)]
+struct Compressible;
+
+impl Predicate for Compressible {
+    fn should_compress<B>(&self, response: &axum::http::Response<B>) -> bool
+    where
+        B: axum::body::HttpBody,
+    {
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        !UNCOMPRESSED_CONTENT_TYPES.iter().any(|excluded| {
+            content_type
+                .get(..excluded.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(excluded))
+        }) && DefaultPredicate::new().should_compress(response)
+    }
+}
+
 /// How long shutdown waits for open HTTP connections to drain, and then for
 /// background tasks to finish, before giving up on them. Without a bound a
 /// single stalled connection holds the process until the supervisor kills it.
@@ -269,7 +310,7 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
         .nest("/api/actions", actions_state.protocol_router())
         .merge(repository::git_http_router().with_state(git_http_state))
         .fallback(get(frontend))
-        .layer(CompressionLayer::new())
+        .layer(CompressionLayer::new().compress_when(Compressible))
         .layer(middleware::from_fn_with_state(
             crate::registry::router(repository_state.clone()),
             dispatch_registry,
@@ -753,6 +794,51 @@ mod tests {
         let document = frontend_content_security_policy(b"<script>window.x = 1</script>")
             .expect("document policy");
         assert_eq!(image_directive(document.to_str().unwrap()), expected);
+    }
+
+    async fn content_encoding(content_type: &'static str) -> Option<HeaderValue> {
+        let app =
+            Router::new()
+                .route(
+                    "/",
+                    get(move || async move {
+                        ([(header::CONTENT_TYPE, content_type)], vec![b'a'; 4096])
+                    }),
+                )
+                .layer(CompressionLayer::new().compress_when(Compressible));
+        let request = Request::builder()
+            .uri("/")
+            .header(header::ACCEPT_ENCODING, "gzip")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        response.headers().get(header::CONTENT_ENCODING).cloned()
+    }
+
+    #[tokio::test]
+    async fn packs_binaries_and_archives_are_served_uncompressed() {
+        for content_type in [
+            "application/x-git-upload-pack-result",
+            "application/x-git-receive-pack-result",
+            "application/octet-stream",
+            "Application/Octet-Stream",
+            "application/zip",
+            "application/gzip",
+            "image/png",
+        ] {
+            assert_eq!(content_encoding(content_type).await, None, "{content_type}");
+        }
+        for content_type in [
+            "application/json",
+            "text/html; charset=utf-8",
+            "image/svg+xml",
+        ] {
+            assert_eq!(
+                content_encoding(content_type).await,
+                Some(HeaderValue::from_static("gzip")),
+                "{content_type}"
+            );
+        }
     }
 
     #[test]
