@@ -66,7 +66,7 @@ use crate::{
     entity::{api_token, audit_event, namespace, oauth_access_token, session, ssh_key, user},
 };
 
-const SESSION_COOKIE: &str = "gitadel_session";
+pub(crate) const SESSION_COOKIE: &str = "gitadel_session";
 pub const SCOPE_READ: i32 = 1;
 pub const SCOPE_WRITE: i32 = 1 << 1;
 pub const SCOPE_SSH_KEYS: i32 = 1 << 2;

@@ -9,7 +9,7 @@ use axum::{
     Json, Router,
     body::{Body, Bytes},
     extract::{ConnectInfo, Path, Request, State},
-    http::{HeaderName, HeaderValue, StatusCode, Uri, header},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{
         IntoResponse, Response,
@@ -211,6 +211,90 @@ impl Predicate for Compressible {
 /// single stalled connection holds the process until the supervisor kills it.
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(30);
 
+/// The origin of the configured public URL, e.g. `https://git.example.com`.
+#[derive(Clone)]
+struct PublicOrigin(std::sync::Arc<str>);
+
+/// Whether a request that would be authenticated by the session cookie was
+/// started by another site.
+///
+/// The session cookie is `SameSite=Lax`, which still lets a page on another
+/// port or subdomain of the same site send state-changing requests with it.
+/// Only cookie-authenticated mutations are checked: a request carrying an
+/// `Authorization` header never falls back to the cookie, so tokens and the
+/// Git, LFS, registry, and runner protocols are unaffected, as is anything
+/// sent before a session exists (sign-in, registration, the OIDC callback).
+/// A request with neither `Sec-Fetch-Site` nor `Origin` passes, which keeps
+/// non-browser clients and old browsers working.
+fn is_cross_site_cookie_request(
+    method: &Method,
+    headers: &HeaderMap,
+    authority: Option<&str>,
+    public_origin: &str,
+) -> bool {
+    if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+        || headers.contains_key(header::AUTHORIZATION)
+        || axum_extra::extract::cookie::CookieJar::from_headers(headers)
+            .get(identity::SESSION_COOKIE)
+            .is_none()
+    {
+        return false;
+    }
+    if let Some(site) = headers.get("sec-fetch-site") {
+        match site.as_bytes() {
+            // The browser itself vouches for the request; no need to compare
+            // origins, which a proxy that rewrites `Host` could confuse.
+            b"same-origin" => return false,
+            // Started by the user directly, such as from the address bar.
+            b"none" => {}
+            _ => return true,
+        }
+    }
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return false;
+    };
+    let Ok(origin) = origin.to_str() else {
+        return true;
+    };
+    if origin.eq_ignore_ascii_case(public_origin) {
+        return false;
+    }
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .or(authority);
+    let origin_host = origin.split_once("://").map(|(_, host)| host);
+    !matches!(
+        (origin_host, host),
+        (Some(origin_host), Some(host)) if origin_host.eq_ignore_ascii_case(host)
+    )
+}
+
+async fn reject_cross_site_cookie_requests(
+    State(PublicOrigin(public_origin)): State<PublicOrigin>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if is_cross_site_cookie_request(
+        request.method(),
+        request.headers(),
+        request
+            .uri()
+            .authority()
+            .map(|authority| authority.as_str()),
+        &public_origin,
+    ) {
+        tracing::warn!(
+            method = %request.method(),
+            path = request.uri().path(),
+            "refused a cross-site request carrying the session cookie"
+        );
+        return identity::ApiError::forbidden("Cross-site requests are not allowed.")
+            .into_response();
+    }
+    next.run(request).await
+}
+
 pub enum ServerExit {
     Shutdown,
     Maintenance(Box<MaintenanceAction>),
@@ -314,6 +398,17 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
         .layer(middleware::from_fn_with_state(
             crate::registry::router(repository_state.clone()),
             dispatch_registry,
+        ))
+        .layer(middleware::from_fn_with_state(
+            PublicOrigin(
+                settings
+                    .server
+                    .public_url
+                    .origin()
+                    .ascii_serialization()
+                    .into(),
+            ),
+            reject_cross_site_cookie_requests,
         ))
         .layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn(request_context));
@@ -839,6 +934,150 @@ mod tests {
                 "{content_type}"
             );
         }
+    }
+
+    const PUBLIC_ORIGIN: &str = "https://git.example.com";
+
+    fn cross_site(method: Method, headers: &[(&'static str, &str)]) -> bool {
+        let mut map = HeaderMap::new();
+        for (name, value) in headers {
+            map.insert(*name, HeaderValue::from_str(value).unwrap());
+        }
+        is_cross_site_cookie_request(&method, &map, None, PUBLIC_ORIGIN)
+    }
+
+    const SESSION: (&str, &str) = ("cookie", "theme=dark; gitadel_session=secret");
+
+    #[test]
+    fn cookie_mutations_from_other_sites_are_refused() {
+        // Another port or subdomain of the same site.
+        assert!(cross_site(
+            Method::POST,
+            &[SESSION, ("sec-fetch-site", "same-site")]
+        ));
+        assert!(cross_site(
+            Method::DELETE,
+            &[SESSION, ("sec-fetch-site", "cross-site")]
+        ));
+        assert!(cross_site(
+            Method::POST,
+            &[
+                SESSION,
+                ("host", "git.example.com"),
+                ("origin", "https://git.example.com:8443"),
+            ]
+        ));
+        assert!(cross_site(
+            Method::POST,
+            &[
+                SESSION,
+                ("host", "git.example.com"),
+                ("origin", "https://evil.example.com")
+            ]
+        ));
+        assert!(cross_site(
+            Method::POST,
+            &[SESSION, ("host", "git.example.com"), ("origin", "null")]
+        ));
+        // A user-initiated request still has its Origin checked.
+        assert!(cross_site(
+            Method::POST,
+            &[
+                SESSION,
+                ("sec-fetch-site", "none"),
+                ("host", "git.example.com"),
+                ("origin", "https://evil.example.com"),
+            ]
+        ));
+    }
+
+    #[test]
+    fn same_origin_and_non_browser_requests_pass() {
+        // Browsers on the instance itself.
+        assert!(!cross_site(
+            Method::POST,
+            &[
+                SESSION,
+                ("sec-fetch-site", "same-origin"),
+                ("origin", PUBLIC_ORIGIN)
+            ]
+        ));
+        assert!(!cross_site(
+            Method::POST,
+            &[SESSION, ("origin", PUBLIC_ORIGIN)]
+        ));
+        // Reached under a host other than the configured public URL.
+        assert!(!cross_site(
+            Method::POST,
+            &[
+                SESSION,
+                ("host", "kiwi.netbird.cloud:3030"),
+                ("origin", "http://kiwi.netbird.cloud:3030"),
+            ]
+        ));
+        // curl with a cookie jar and old browsers send neither header.
+        assert!(!cross_site(Method::POST, &[SESSION]));
+        // Safe methods are never checked.
+        assert!(!cross_site(
+            Method::GET,
+            &[SESSION, ("sec-fetch-site", "cross-site")]
+        ));
+        assert!(!cross_site(
+            Method::HEAD,
+            &[SESSION, ("sec-fetch-site", "cross-site")]
+        ));
+    }
+
+    #[test]
+    fn requests_not_authenticated_by_the_session_cookie_pass() {
+        // Tokens: API clients, Git, LFS, registry, and runners.
+        assert!(!cross_site(
+            Method::POST,
+            &[
+                SESSION,
+                ("authorization", "Bearer token"),
+                ("sec-fetch-site", "cross-site"),
+                ("origin", "https://evil.example.com"),
+            ]
+        ));
+        // No session yet: sign-in, registration, an identity provider posting
+        // back to the OIDC callback.
+        assert!(!cross_site(
+            Method::POST,
+            &[
+                ("cookie", "gitadel_oidc_transaction=abc"),
+                ("sec-fetch-site", "cross-site"),
+                ("origin", "https://idp.example.com"),
+            ]
+        ));
+        assert!(!cross_site(
+            Method::POST,
+            &[("sec-fetch-site", "cross-site")]
+        ));
+    }
+
+    #[tokio::test]
+    async fn cross_site_cookie_mutation_is_answered_with_403() {
+        let app = Router::new()
+            .route("/delete", axum::routing::post(|| async { "deleted" }))
+            .layer(middleware::from_fn_with_state(
+                PublicOrigin(PUBLIC_ORIGIN.into()),
+                reject_cross_site_cookie_requests,
+            ));
+        let request = |site: &'static str| {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/delete")
+                .header(header::COOKIE, "gitadel_session=secret")
+                .header("sec-fetch-site", site)
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let refused = app.clone().oneshot(request("same-site")).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        let allowed = app.oneshot(request("same-origin")).await.unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
     }
 
     #[test]
