@@ -1359,3 +1359,88 @@ pub(crate) async fn require_admin(
     }
     Ok(actor)
 }
+
+/// How often audit events past `audit.retention_days` are removed.
+const AUDIT_RETENTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+/// Removes audit events older than `retention_days`. A retention of `0`
+/// keeps every event and removes nothing.
+pub(crate) async fn prune_audit_events<C: ConnectionTrait>(
+    connection: &C,
+    retention_days: i64,
+    now: DateTime<Utc>,
+) -> Result<u64, sea_orm::DbErr> {
+    if retention_days <= 0 {
+        return Ok(0);
+    }
+    let cutoff = now - chrono::Duration::days(retention_days);
+    Ok(audit_event::Entity::delete_many()
+        .filter(audit_event::Column::CreatedAt.lt(cutoff))
+        .exec(connection)
+        .await?
+        .rows_affected)
+}
+
+/// Hourly audit retention sweep. Returns at once when retention is off, so
+/// an instance that keeps everything never runs the query.
+pub(crate) async fn serve_audit_retention(state: IdentityState) {
+    let retention_days = state
+        .runtime_settings()
+        .map(|settings| settings.audit.retention_days)
+        .unwrap_or(0);
+    if retention_days <= 0 {
+        return;
+    }
+    let mut interval = tokio::time::interval(AUDIT_RETENTION_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        match prune_audit_events(state.database(), retention_days, Utc::now()).await {
+            Ok(0) => {}
+            Ok(removed) => tracing::info!(removed, retention_days, "removed expired audit events"),
+            Err(error) => tracing::warn!(%error, "could not remove expired audit events"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::{ConnectOptions, Database, PaginatorTrait as _};
+    use sea_orm_migration::MigratorTrait as _;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn audit_events_are_pruned_only_past_a_positive_retention() {
+        let mut options = ConnectOptions::new("sqlite::memory:");
+        options.max_connections(1);
+        let database = Database::connect(options).await.unwrap();
+        crate::migration::Migrator::up(&database, None)
+            .await
+            .unwrap();
+        let now = Utc::now();
+        for days_ago in [40, 10] {
+            audit_event::ActiveModel {
+                actor_user_id: Set(None),
+                action: Set(format!("test.{days_ago}")),
+                target: Set(None),
+                remote_address: Set(None),
+                created_at: Set(now - chrono::Duration::days(days_ago)),
+                ..Default::default()
+            }
+            .insert(&database)
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(prune_audit_events(&database, 0, now).await.unwrap(), 0);
+        assert_eq!(
+            audit_event::Entity::find().count(&database).await.unwrap(),
+            2
+        );
+        assert_eq!(prune_audit_events(&database, 30, now).await.unwrap(), 1);
+        let remaining = audit_event::Entity::find().all(&database).await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].action, "test.10");
+    }
+}

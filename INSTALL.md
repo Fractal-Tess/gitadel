@@ -412,6 +412,20 @@ GITADEL__SSH__BIND=0.0.0.0:2222
 
 Common command-line options also have aliases including `GITADEL_CONFIG`, `GITADEL_BIND`, `GITADEL_PUBLIC_URL`, and `GITADEL_DATABASE_URL`. Run `gitadel --help` for the complete list and defaults.
 
+### Audit retention
+
+Every sign-in, token use, and administrative change is recorded in the audit
+history, which is kept forever by default. To cap it, set a retention in days;
+an hourly sweep then removes older events:
+
+```toml
+[audit]
+retention_days = 365
+```
+
+The equivalents are `--audit-retention-days`, `GITADEL_AUDIT_RETENTION_DAYS`,
+or `GITADEL__AUDIT__RETENTION_DAYS`. `0` keeps every event.
+
 ### Git over HTTP
 
 Gitadel serves the Smart HTTP protocol on the same origin as the web interface. Use the HTTPS clone URL shown on a repository page:

@@ -71,6 +71,10 @@ pub struct Cli {
     #[arg(long, env = "GITADEL_SSH_HOST_KEY", value_name = "PATH")]
     ssh_host_key: Option<PathBuf>,
 
+    /// Days to keep audit events before the hourly sweep removes them; 0 keeps them forever.
+    #[arg(long, env = "GITADEL_AUDIT_RETENTION_DAYS", value_name = "DAYS")]
+    audit_retention_days: Option<i64>,
+
     /// Create the initial administrator without starting the HTTP server.
     #[arg(long, env = "GITADEL_BOOTSTRAP_ADMIN", value_name = "USERNAME")]
     bootstrap_admin: Option<String>,
@@ -195,9 +199,19 @@ pub struct Settings {
     pub backup: BackupSettings,
     #[serde(default)]
     pub actions: ActionsSettings,
+    #[serde(default)]
+    pub audit: AuditSettings,
     /// Outgoing mail. Email features stay hidden when this is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smtp: Option<SmtpSettings>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AuditSettings {
+    /// Audit events older than this many days are removed by an hourly
+    /// sweep. `0`, the default, keeps every event.
+    pub retention_days: i64,
 }
 
 /// How the SMTP connection is secured.
@@ -455,6 +469,7 @@ impl Default for Settings {
             },
             backup: BackupSettings::default(),
             actions: ActionsSettings::default(),
+            audit: AuditSettings::default(),
             smtp: None,
         }
     }
@@ -548,12 +563,16 @@ impl Settings {
         if let Some(ssh_host_key) = &cli.ssh_host_key {
             settings.ssh.host_key.clone_from(ssh_host_key);
         }
+        if let Some(retention_days) = cli.audit_retention_days {
+            settings.audit.retention_days = retention_days;
+        }
 
         if let Some(s3) = &settings.backup.s3 {
             validate_s3_settings(s3)?;
         }
         validate_server_settings(&settings.server)?;
         validate_actions_settings(&settings.actions)?;
+        validate_audit_settings(&settings.audit)?;
         if let Some(smtp) = &settings.smtp {
             validate_smtp_settings(smtp)?;
         }
@@ -561,6 +580,14 @@ impl Settings {
         Ok(settings)
     }
 }
+fn validate_audit_settings(settings: &AuditSettings) -> Result<()> {
+    ensure!(
+        (0..=36_500).contains(&settings.retention_days),
+        "audit.retention_days must be between 0 (keep forever) and 36500"
+    );
+    Ok(())
+}
+
 fn validate_server_settings(settings: &ServerSettings) -> Result<()> {
     if settings.tls.is_some() {
         ensure!(
@@ -854,6 +881,33 @@ mod tests {
         assert_eq!(
             configured.storage.registry_root,
             PathBuf::from("/srv/registry")
+        );
+    }
+
+    #[test]
+    fn audit_retention_keeps_everything_by_default_and_follows_the_command_line() {
+        let config =
+            std::env::temp_dir().join(format!("gitadel-missing-{}.toml", uuid::Uuid::new_v4()));
+        let config = config.to_str().expect("temporary path is UTF-8");
+        let defaults = Settings::load(&Cli::parse_from(["gitadel", "--config", config])).unwrap();
+        assert_eq!(defaults.audit.retention_days, 0);
+        let configured = Settings::load(&Cli::parse_from([
+            "gitadel",
+            "--config",
+            config,
+            "--audit-retention-days",
+            "90",
+        ]))
+        .unwrap();
+        assert_eq!(configured.audit.retention_days, 90);
+        assert!(
+            Settings::load(&Cli::parse_from([
+                "gitadel",
+                "--config",
+                config,
+                "--audit-retention-days=-1",
+            ]))
+            .is_err()
         );
     }
 }

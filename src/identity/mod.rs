@@ -13,7 +13,7 @@ mod sso;
 mod two_factor;
 mod users;
 
-pub(crate) use admin::require_admin;
+pub(crate) use admin::{require_admin, serve_audit_retention};
 pub(crate) use email::verified_mailbox;
 pub(crate) use integrations::{authorize_namespace, validate_name as validate_integration_name};
 pub(crate) use mirror_identities::{

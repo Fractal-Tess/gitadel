@@ -451,6 +451,8 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
     let mut integrity_scheduler = tokio::spawn(repository::serve_integrity_scheduler(
         repository_state.clone(),
     ));
+    // Only logs, never fails: it is stopped with the rest rather than joined.
+    let audit_retention = tokio::spawn(identity::serve_audit_retention(identity_state.clone()));
     let mut backup_scheduler = tokio::spawn(archive::serve_backup_scheduler(identity_state));
     let mut actions_scheduler =
         tokio::spawn(actions::serve_actions_scheduler(actions_state.clone()));
@@ -578,6 +580,8 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
             )
         }
     };
+    audit_retention.abort();
+    let _ = audit_retention.await;
     if completed != Some(CompletedService::Http) {
         let _ = http.await;
     }
