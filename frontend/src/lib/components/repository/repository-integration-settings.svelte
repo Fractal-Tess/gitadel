@@ -8,23 +8,22 @@
   import GitBranch from "@lucide/svelte/icons/git-branch";
   import PlugZap from "@lucide/svelte/icons/plug-zap";
 
+  import { errorMessage } from "$lib/api/transport.js";
   import {
-    errorMessage,
-    jsonBody,
-    requestEmpty,
-    requestJson,
-  } from "$lib/api/transport.js";
-  import {
-    integrationCredentialSchema,
-    integrationSourceConnectionSchema,
-    integrationTestResultSchema,
-    dokployResourceLinkSchema,
-    namespaceIntegrationSchema,
-    repositoryIntegrationSchema,
-    repositoryIntegrationsSchema,
+    connectionAfterBinding,
+    connectionConfigured,
+    connectionFromCreated,
+    createNamespaceConnection,
+    createRepositoryIntegration,
+    describeIntegration,
+    integrationStatus,
+    linkedDokployResource,
+    loadRepositoryIntegrations,
+    removeRepositoryIntegration,
+    resourceKindLabel,
+    testNamespaceConnection,
+    updateRepositoryIntegration,
     type IntegrationProvider,
-    type IntegrationSourceConnection,
-    type NamespaceIntegration,
     type RepositoryIntegration,
     type RepositoryIntegrationConnection,
   } from "$lib/api/integrations.js";
@@ -42,6 +41,7 @@
   import { Separator } from "$lib/components/ui/separator/index.js";
   import { Spinner } from "$lib/components/ui/spinner/index.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
+  import { StagedConnectionState } from "$lib/repository/state/integrations-state.svelte.js";
 
   let { state: repository }: { state: RepositoryPageState } = $props();
 
@@ -64,11 +64,6 @@
     "connections",
   );
   let editorRevision = $state(0);
-  let stagedConnection = $state<NamespaceIntegration | null>(null);
-  let sourceConnection = $state<IntegrationSourceConnection | null>(null);
-  let sourceLoading = $state(false);
-  let sourceWorking = $state(false);
-  let sourceError = $state<string | null>(null);
   let removeOpen = $state(false);
   let pendingRemove = $state<RepositoryIntegration | null>(null);
   const availableConnections = $derived(
@@ -78,18 +73,33 @@
     connections.find((connection) => connection.id === formConnection) ?? null,
   );
 
-  function integrationsPath(repoNamespace: string, repoName: string) {
-    return `/api/v1/repos/${encodeURIComponent(repoNamespace)}/${encodeURIComponent(repoName)}/integrations`;
-  }
+  /** A connection created from this dialog while its source is connected. */
+  const staged = new StagedConnectionState(() => namespace, {
+    onbinding(connection, binding) {
+      connections = connections.map((candidate) =>
+        candidate.id === connection.id
+          ? connectionAfterBinding(candidate, connection, binding)
+          : candidate,
+      );
+      if (binding?.ready) {
+        const ready = connections.find(
+          (candidate) => candidate.id === connection.id,
+        );
+        if (ready) selectConnection(ready);
+      }
+    },
+    onsaved(updated) {
+      connections = connections.map((connection) =>
+        connection.id === updated.id
+          ? { ...connection, name: updated.name }
+          : connection,
+      );
+    },
+  });
 
-  function namespaceIntegrationPath(id: string) {
+  function requireNamespace(): string {
     if (!namespace) throw new Error("The repository namespace is unavailable.");
-    return `/api/v1/namespaces/${encodeURIComponent(namespace)}/integrations/${encodeURIComponent(id)}`;
-  }
-
-  function stagedSourcePath() {
-    if (!stagedConnection) throw new Error("No connection is selected.");
-    return `${namespaceIntegrationPath(stagedConnection.id)}/source`;
+    return namespace;
   }
 
   $effect(() => {
@@ -103,7 +113,8 @@
       return;
     }
 
-    const path = integrationsPath(namespace, name);
+    const repoNamespace = namespace;
+    const repoName = name;
     const current = identity;
     let cancelled = false;
     integrationIdentity = current;
@@ -116,7 +127,10 @@
 
     async function load() {
       try {
-        const response = await requestJson(path, repositoryIntegrationsSchema);
+        const response = await loadRepositoryIntegrations(
+          repoNamespace,
+          repoName,
+        );
         if (cancelled || integrationIdentity !== current) return;
         integrations = response.integrations;
         connections = response.connections;
@@ -138,9 +152,7 @@
   function openCreate() {
     formConnection = "";
     formName = "";
-    stagedConnection = null;
-    sourceConnection = null;
-    sourceError = null;
+    staged.reset();
     createStep = "connections";
     createOpen = true;
   }
@@ -157,232 +169,53 @@
   }
 
   async function testNewConnection(value: ConnectionEditorValue) {
-    if (!namespace) throw new Error("The repository namespace is unavailable.");
-    return requestJson(
-      `/api/v1/namespaces/${encodeURIComponent(namespace)}/integrations/test`,
-      integrationTestResultSchema,
-      {
-        method: "POST",
-        body: jsonBody({
-          provider: value.provider,
-          url: value.url,
-          api_key: value.apiKey,
-        }),
-      },
-    );
+    return testNamespaceConnection(requireNamespace(), {
+      provider: value.provider,
+      url: value.url,
+      api_key: value.apiKey,
+    });
   }
 
   async function createConnection(value: ConnectionEditorValue) {
-    if (!namespace) throw new Error("The repository namespace is unavailable.");
-    const created = await requestJson(
-      `/api/v1/namespaces/${encodeURIComponent(namespace)}/integrations`,
-      namespaceIntegrationSchema,
-      {
-        method: "POST",
-        body: jsonBody({
-          provider: value.provider,
-          name: value.name,
-          url: value.url,
-          internal_url: value.internalUrl,
-          api_key: value.apiKey,
-        }),
-      },
+    const created = await createNamespaceConnection(requireNamespace(), {
+      provider: value.provider,
+      name: value.name,
+      url: value.url,
+      internal_url: value.internalUrl,
+      api_key: value.apiKey,
+    });
+    const { connection, sourceRequired } = connectionFromCreated(
+      created,
+      providers,
     );
-    const sourceRequired =
-      providers.find((provider) => provider.slug === created.provider)
-        ?.source_required ?? false;
-    const connection: RepositoryIntegrationConnection = {
-      id: created.id,
-      provider: created.provider,
-      provider_name: created.provider_name,
-      name: created.name,
-      configured:
-        created.enabled && (!sourceRequired || created.source?.ready === true),
-    };
     connections = [...connections, connection];
     if (!sourceRequired) {
       selectConnection(connection);
       return;
     }
-    stagedConnection = created;
-    sourceConnection = null;
-    sourceError = null;
+    staged.stage(created);
     editorRevision += 1;
     createStep = "source";
-    await loadStagedSource();
+    await staged.load();
   }
 
-  function updateStagedSource(response: IntegrationSourceConnection | null) {
-    sourceConnection = response;
-    if (!stagedConnection) return;
-    const binding = response?.binding;
-    stagedConnection = {
-      ...stagedConnection,
-      source: binding
-        ? {
-            id: binding.id,
-            name: binding.name,
-            managed: binding.managed,
-            ready: binding.ready,
-          }
-        : undefined,
-    };
-    connections = connections.map((connection) =>
-      connection.id === stagedConnection?.id
-        ? {
-            ...connection,
-            name: stagedConnection.name,
-            configured: stagedConnection.enabled && binding?.ready === true,
-          }
-        : connection,
-    );
-    if (binding?.ready) {
-      const connection = connections.find(
-        (candidate) => candidate.id === stagedConnection?.id,
-      );
-      if (connection) selectConnection(connection);
-    }
-  }
-
-  async function loadStagedSource() {
-    if (!stagedConnection) return;
-    sourceLoading = true;
-    sourceError = null;
-    try {
-      updateStagedSource(
-        await requestJson(
-          stagedSourcePath(),
-          integrationSourceConnectionSchema,
-        ),
-      );
-    } catch (caught) {
-      sourceError = errorMessage(
-        caught,
-        "Could not load the repository source.",
-      );
-    } finally {
-      sourceLoading = false;
-    }
-  }
-
-  async function bindStagedSource(sourceId: string) {
-    sourceWorking = true;
-    sourceError = null;
-    try {
-      updateStagedSource(
-        await requestJson(
-          stagedSourcePath(),
-          integrationSourceConnectionSchema,
-          {
-            method: "POST",
-            body: jsonBody({ action: "bind", source_id: sourceId }),
-          },
-        ),
-      );
-    } catch (caught) {
-      toast.error(
-        errorMessage(caught, "Could not connect the Dokploy source."),
-      );
-    } finally {
-      sourceWorking = false;
-    }
-  }
-
-  async function createStagedSource(sourceName: string) {
-    sourceWorking = true;
-    sourceError = null;
-    try {
-      updateStagedSource(
-        await requestJson(
-          stagedSourcePath(),
-          integrationSourceConnectionSchema,
-          {
-            method: "POST",
-            body: jsonBody({ action: "create", name: sourceName }),
-          },
-        ),
-      );
-    } catch (caught) {
-      toast.error(
-        errorMessage(caught, "Could not create the Dokploy source."),
-      );
-    } finally {
-      sourceWorking = false;
-    }
-  }
-
-  async function disconnectStagedSource() {
-    sourceWorking = true;
-    sourceError = null;
-    try {
-      await requestEmpty(stagedSourcePath(), { method: "DELETE" });
-      updateStagedSource(null);
-      await loadStagedSource();
-    } catch (caught) {
-      toast.error(
-        errorMessage(caught, "Could not disconnect the Dokploy source."),
-      );
-    } finally {
-      sourceWorking = false;
-    }
-  }
-
-  async function saveStagedConnection(value: ConnectionEditorValue) {
-    if (!stagedConnection) throw new Error("No connection is selected.");
-    const updated = await requestJson(
-      namespaceIntegrationPath(stagedConnection.id),
-      namespaceIntegrationSchema,
-      {
-        method: "PUT",
-        body: jsonBody({
-          name: value.name,
-          url: value.url,
-          internal_url: value.internalUrl,
-          api_key: value.apiKey || null,
-        }),
-      },
-    );
-    stagedConnection = updated;
-    connections = connections.map((connection) =>
-      connection.id === updated.id
-        ? { ...connection, name: updated.name }
-        : connection,
-    );
-  }
-
-  async function revealStagedCredential() {
-    if (!stagedConnection) throw new Error("No connection is selected.");
-    const credential = await requestJson(
-      `${namespaceIntegrationPath(stagedConnection.id)}/credential`,
-      integrationCredentialSchema,
-    );
-    return credential.api_key;
-  }
-
-  async function testStagedConnection() {
-    if (!stagedConnection) throw new Error("No connection is selected.");
-    return requestJson(
-      `${namespaceIntegrationPath(stagedConnection.id)}/test`,
-      integrationTestResultSchema,
-      { method: "POST" },
-    );
-  }
+  const loadStagedSource = () => staged.load();
+  const bindStagedSource = (sourceId: string) => staged.bind(sourceId);
+  const createStagedSource = (sourceName: string) => staged.create(sourceName);
+  const disconnectStagedSource = () => staged.disconnect();
+  const saveStagedConnection = (value: ConnectionEditorValue) =>
+    staged.save(value);
+  const revealStagedCredential = () => staged.reveal();
+  const testStagedConnection = () => staged.test();
 
   async function createIntegration() {
     if (!namespace || !name || !formConnection) return;
     creating = true;
     try {
-      const created = await requestJson(
-        integrationsPath(namespace, name),
-        repositoryIntegrationSchema,
-        {
-          method: "POST",
-          body: jsonBody({
-            integration_id: formConnection,
-            name: formName,
-          }),
-        },
-      );
+      const created = await createRepositoryIntegration(namespace, name, {
+        integration_id: formConnection,
+        name: formName,
+      });
       integrations = [...integrations, created];
       createOpen = false;
     } catch (caught) {
@@ -399,10 +232,11 @@
     if (!namespace || !name) return;
     working[integration.id] = true;
     try {
-      const updated = await requestJson(
-        `${integrationsPath(namespace, name)}/${encodeURIComponent(integration.id)}`,
-        repositoryIntegrationSchema,
-        { method: "PUT", body: jsonBody({ enabled }) },
+      const updated = await updateRepositoryIntegration(
+        namespace,
+        name,
+        integration.id,
+        { enabled },
       );
       const index = integrations.findIndex(
         (candidate) => candidate.id === integration.id,
@@ -427,10 +261,7 @@
     const integration = pendingRemove;
     working[integration.id] = true;
     try {
-      await requestEmpty(
-        `${integrationsPath(namespace, name)}/${encodeURIComponent(integration.id)}`,
-        { method: "DELETE" },
-      );
+      await removeRepositoryIntegration(namespace, name, integration.id);
       integrations = integrations.filter(
         (candidate) => candidate.id !== integration.id,
       );
@@ -444,48 +275,6 @@
     } finally {
       working[integration.id] = false;
     }
-  }
-
-  function linkedDokployResource(integration: RepositoryIntegration) {
-    if (integration.provider !== "dokploy" || !integration.resource)
-      return null;
-    const result = dokployResourceLinkSchema.safeParse(integration.resource);
-    return result.success ? result.data : null;
-  }
-
-  function connectionConfigured(integration: RepositoryIntegration) {
-    return (
-      connections.find(
-        (connection) => connection.id === integration.connection_id,
-      )?.configured ?? false
-    );
-  }
-
-  function integrationStatus(
-    integration: RepositoryIntegration,
-    resource: ReturnType<typeof linkedDokployResource>,
-  ) {
-    if (!connectionConfigured(integration)) return "Connection setup required";
-    if (!integration.enabled) return "Disabled";
-    if (resource) return "Push delivery on";
-    if (integration.repository_setup) return "Repository setup required";
-    return "Enabled";
-  }
-
-  function describe(integration: RepositoryIntegration) {
-    if (!connectionConfigured(integration)) {
-      return `${integration.connection_name} needs a repository source before deployments can run.`;
-    }
-    if (!integration.configured) {
-      return `${integration.connection_name} is currently disabled.`;
-    }
-    const resource = linkedDokployResource(integration);
-    if (resource) {
-      return `Source ${integration.enabled ? "enabled" : "disabled"} · ${resource.project_name} / ${resource.environment_name}`;
-    }
-    if (!integration.enabled) return "Disabled for this repository.";
-    if (!integration.repository_setup) return "Enabled for this repository.";
-    return "Setup required before push deployments can be enabled.";
   }
 </script>
 
@@ -521,7 +310,10 @@
       />
       {#each integrations as integration (integration.id)}
         {@const resource = linkedDokployResource(integration)}
-        {@const connectionReady = connectionConfigured(integration)}
+        {@const connectionReady = connectionConfigured(
+          connections,
+          integration,
+        )}
         <IntegrationConnectionCard
           name={resource?.name ?? integration.name}
           provider={integration.provider}
@@ -529,16 +321,22 @@
           subtitle={resource
             ? `${resource.project_name} / ${resource.environment_name}`
             : integration.connection_name}
-          description={describe(integration)}
-          statusLabel={integrationStatus(integration, resource)}
+          description={describeIntegration(
+            integration,
+            resource,
+            connectionReady,
+          )}
+          statusLabel={integrationStatus(
+            integration,
+            resource,
+            connectionReady,
+          )}
           statusHealthy={connectionReady && integration.enabled}
           enabled={integration.enabled}
           detailLabel={!connectionReady
             ? "Set up source"
             : resource
-              ? resource.kind === "application"
-                ? "Application"
-                : "Docker Compose"
+              ? resourceKindLabel(resource.kind)
               : "Setup required"}
           busy={working[integration.id]}
           onenabledchange={integration.configured && connectionReady
@@ -622,7 +420,7 @@
                 >Connection</span
               >
               <span class="truncate text-foreground">
-                {stagedConnection?.name ??
+                {staged.connection?.name ??
                   selectedConnection?.name ??
                   "Connection ready"}
               </span>
@@ -743,25 +541,25 @@
           ontest={testNewConnection}
         />
       {/key}
-    {:else if createStep === "source" && stagedConnection}
+    {:else if createStep === "source" && staged.connection}
       {#key editorRevision}
         <IntegrationConnectionEditor
           {providers}
           targets={namespace ? [{ slug: namespace, label: namespace }] : []}
           initialTarget={namespace ?? ""}
-          integration={stagedConnection}
+          integration={staged.connection}
           onsave={saveStagedConnection}
           oncancel={() => (createOpen = false)}
           onreveal={revealStagedCredential}
           ontest={testStagedConnection}
-          {sourceConnection}
-          {sourceLoading}
-          {sourceWorking}
-          {sourceError}
+          sourceConnection={staged.source}
+          sourceLoading={staged.loading}
+          sourceWorking={staged.working}
+          sourceError={staged.error}
           onrefreshsource={loadStagedSource}
           onbindsource={bindStagedSource}
           oncreatesource={createStagedSource}
-          ondisconnectsource={sourceConnection?.binding
+          ondisconnectsource={staged.source?.binding
             ? disconnectStagedSource
             : null}
         />
