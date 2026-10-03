@@ -37,6 +37,7 @@ use crate::{
     entity::{repository, repository_webhook, repository_webhook_delivery, session, user},
     identity::{ApiError, SCOPE_READ, SCOPE_WRITE},
     network::pinned_public_http_client,
+    secrets::{SecretCipher, SecretKind},
 };
 
 pub(super) type RefSnapshot = BTreeMap<String, String>;
@@ -290,9 +291,11 @@ pub async fn create_webhook(
     let endpoint = validate_endpoint(&request.config.url).await?;
     let secret = validate_secret(request.config.secret)?;
     let now = Utc::now();
+    let id = Uuid::new_v4();
+    let secret = seal_secret(state.identity().secret_cipher(), id, secret)?;
     let transaction = state.identity().database().begin().await?;
     let hook = repository_webhook::ActiveModel {
-        id: Set(Uuid::new_v4()),
+        id: Set(id),
         repository_id: Set(repository.id),
         url: Set(endpoint),
         secret: Set(secret),
@@ -356,7 +359,8 @@ pub async fn update_webhook(
             active.url = Set(validate_endpoint(&endpoint).await?);
         }
         if let Some(secret) = config.secret {
-            active.secret = Set(validate_secret(Some(secret))?);
+            let secret = validate_secret(Some(secret))?;
+            active.secret = Set(seal_secret(state.identity().secret_cipher(), id, secret)?);
         }
     }
     active.updated_at = Set(Utc::now());
@@ -890,7 +894,12 @@ async fn deliver(
         .header("x-gitadel-event", &delivery.event)
         .body(body.to_vec());
     if let Some(secret) = &hook.secret {
-        request = request.header("x-hub-signature-256", signature(secret, body)?);
+        let secret = state.identity().secret_cipher().open_text(
+            SecretKind::WebhookSecret,
+            &hook.id,
+            secret,
+        )?;
+        request = request.header("x-hub-signature-256", signature(&secret, body)?);
     }
 
     let started = Instant::now();
@@ -1166,6 +1175,21 @@ async fn validate_endpoint(value: &str) -> Result<String, ApiError> {
     Ok(endpoint.to_string())
 }
 
+/// The stored form of a webhook secret: sealed to the hook, or absent.
+fn seal_secret(
+    cipher: &SecretCipher,
+    hook_id: Uuid,
+    secret: Option<String>,
+) -> Result<Option<String>, ApiError> {
+    secret
+        .map(|secret| {
+            cipher
+                .seal_text(SecretKind::WebhookSecret, &hook_id, &secret)
+                .map_err(ApiError::internal)
+        })
+        .transpose()
+}
+
 fn validate_secret(secret: Option<String>) -> Result<Option<String>, ApiError> {
     let secret = secret.filter(|secret| !secret.is_empty());
     if secret.as_ref().is_some_and(|secret| secret.len() > 256) {
@@ -1436,6 +1460,28 @@ mod tests {
         );
         assert!(normalize_events(Some(&[])).is_err());
         assert!(normalize_events(Some(&events(&["pull_request"]))).is_err());
+    }
+
+    #[test]
+    fn webhook_secrets_are_stored_sealed_to_their_hook() {
+        let cipher = SecretCipher::for_tests();
+        let hook_id = Uuid::new_v4();
+        assert_eq!(seal_secret(&cipher, hook_id, None).unwrap(), None);
+        let stored = seal_secret(&cipher, hook_id, Some("hunter2".to_owned()))
+            .unwrap()
+            .unwrap();
+        assert!(stored.starts_with("v1:"));
+        assert_eq!(
+            cipher
+                .open_text(SecretKind::WebhookSecret, &hook_id, &stored)
+                .unwrap(),
+            "hunter2"
+        );
+        assert!(
+            cipher
+                .open_text(SecretKind::WebhookSecret, &Uuid::new_v4(), &stored)
+                .is_err()
+        );
     }
 
     #[test]

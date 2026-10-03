@@ -21,6 +21,7 @@ use super::{ApiError, IdentityState, SCOPE_READ, SCOPE_WRITE, integrations::auth
 use crate::{
     entity::{namespace_mirror_identity, repository, repository_import, repository_mirror},
     network::{normalize_public_https_origin, pinned_public_https_client},
+    secrets::SecretKind,
 };
 
 const MAX_IDENTITY_NAME_LENGTH: usize = 80;
@@ -114,13 +115,33 @@ pub(crate) async fn load_secret(
         .one(state.database())
         .await?
         .ok_or_else(|| ApiError::bad_request("The selected mirror identity no longer exists."))?;
+    let secret = open_secret(state, &identity)?;
     Ok(MirrorIdentitySecret {
         kind: identity.kind,
         username: identity.username,
-        secret: identity.secret,
+        secret,
         provider: identity.provider,
         instance_url: identity.instance_url,
     })
+}
+
+/// The stored form of an identity's token or password: sealed to its row.
+fn seal_secret(state: &IdentityState, id: Uuid, secret: &str) -> Result<String, ApiError> {
+    state
+        .secret_cipher()
+        .seal_text(SecretKind::MirrorIdentitySecret, &id, secret)
+        .map_err(ApiError::internal)
+}
+
+fn open_secret(
+    state: &IdentityState,
+    identity: &namespace_mirror_identity::Model,
+) -> Result<String, ApiError> {
+    Ok(state.secret_cipher().open_text(
+        SecretKind::MirrorIdentitySecret,
+        &identity.id,
+        &identity.secret,
+    )?)
 }
 
 pub(crate) async fn mark_identity_used(
@@ -216,14 +237,16 @@ async fn create_identity(
     let token = validate_token(&request.token)?;
     let (provider, server_url) = detect_provider(&request.server_url, &token).await?;
     let now = Utc::now();
+    let id = Uuid::new_v4();
+    let sealed = seal_secret(&state, id, &token)?;
     let transaction = state.database().begin().await?;
     let identity = namespace_mirror_identity::ActiveModel {
-        id: Set(Uuid::new_v4()),
+        id: Set(id),
         namespace: Set(namespace.clone()),
         name: Set(name),
         kind: Set("token".to_owned()),
         username: Set(None),
-        secret: Set(token),
+        secret: Set(sealed),
         provider: Set(Some(provider)),
         instance_url: Set(Some(server_url)),
         public_key: Set(None),
@@ -262,17 +285,16 @@ async fn update_identity(
         .await?
         .ok_or_else(ApiError::not_found)?;
     let name = validate_identity_name(&request.name)?;
-    let token = request
-        .token
-        .as_deref()
-        .map(validate_token)
-        .transpose()?
-        .unwrap_or_else(|| current.secret.clone());
+    let token = match request.token.as_deref() {
+        Some(token) => validate_token(token)?,
+        None => open_secret(&state, &current)?,
+    };
     let (provider, server_url) = detect_provider(&request.server_url, &token).await?;
+    let sealed = seal_secret(&state, id, &token)?;
     let transaction = state.database().begin().await?;
     let mut identity: namespace_mirror_identity::ActiveModel = current.into();
     identity.name = Set(name);
-    identity.secret = Set(token);
+    identity.secret = Set(sealed);
     identity.provider = Set(Some(provider));
     identity.instance_url = Set(Some(server_url));
     identity.updated_at = Set(Utc::now());

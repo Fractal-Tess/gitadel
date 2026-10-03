@@ -17,7 +17,10 @@ mod users;
 
 pub(crate) use admin::{require_admin, serve_audit_retention};
 pub(crate) use email::verified_mailbox;
-pub(crate) use integrations::{authorize_namespace, validate_name as validate_integration_name};
+pub(crate) use integrations::{
+    authorize_namespace, open_api_key as open_integration_api_key,
+    validate_name as validate_integration_name,
+};
 pub(crate) use mirror_identities::{
     load_secret as load_mirror_identity_secret, mark_identity_used as mark_repository_identity_used,
 };
@@ -66,6 +69,7 @@ use crate::{
     blob_store::{DomainStorage, targets::MeasuredUsage},
     config::{AuthSettings, Settings},
     entity::{api_token, audit_event, namespace, oauth_access_token, session, ssh_key, user},
+    secrets::SecretCipher,
 };
 
 pub(crate) const SESSION_COOKIE: &str = "gitadel_session";
@@ -214,6 +218,8 @@ pub struct IdentityState {
     integrity_settings_version: watch::Sender<u64>,
     dummy_password_hash: Arc<String>,
     mailer: crate::mail::Mailer,
+    /// Seals stored credentials; derived from the SSH host key in production.
+    secret_cipher: Arc<SecretCipher>,
 }
 
 pub(crate) struct ValidatedBackup {
@@ -348,6 +354,15 @@ impl IntoResponse for ApiError {
     }
 }
 
+impl From<crate::secrets::OpenError> for ApiError {
+    /// A stored secret sealed under a different host key. The message names
+    /// the setting so the operator knows what to enter again.
+    fn from(error: crate::secrets::OpenError) -> Self {
+        tracing::error!(%error, "could not open a stored secret");
+        Self::conflict(error.to_string())
+    }
+}
+
 impl From<sea_orm::DbErr> for ApiError {
     fn from(error: sea_orm::DbErr) -> Self {
         Self::internal(error)
@@ -432,6 +447,15 @@ impl IdentityState {
             Some(smtp) => crate::mail::Mailer::start(smtp)?,
             None => crate::mail::Mailer::disabled(),
         };
+        let secret_cipher = match runtime_settings.as_deref() {
+            Some(settings) => {
+                let host_key = crate::repository::load_ssh_host_key(&settings.ssh.host_key)?;
+                SecretCipher::from_host_key(&host_key)
+                    .map_err(|error| anyhow::anyhow!("could not derive the secret key: {error}"))?
+            }
+            // Only tests build a state without runtime settings.
+            None => SecretCipher::from_material(b"gitadel test secret cipher")?,
+        };
         Ok(Self {
             read_database: database.clone(),
             database,
@@ -456,7 +480,13 @@ impl IdentityState {
             integrity_settings_version: watch::channel(0).0,
             dummy_password_hash: Arc::new(dummy_password_hash),
             mailer,
+            secret_cipher: Arc::new(secret_cipher),
         })
+    }
+
+    /// Seals and opens stored credentials.
+    pub(crate) fn secret_cipher(&self) -> &SecretCipher {
+        &self.secret_cipher
     }
 
     pub fn database(&self) -> &DatabaseConnection {

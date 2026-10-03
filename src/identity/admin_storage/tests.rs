@@ -40,6 +40,8 @@ impl Fixture {
         settings.storage.repository_root = root.join("repositories");
         settings.storage.lfs_root = root.join("lfs");
         settings.storage.actions_artifact_root = root.join("actions");
+        // The identity state derives its secret key from the host key.
+        settings.ssh.host_key = root.join("ssh-host-key");
         let database = database::connect_and_migrate(&settings.database)
             .await
             .unwrap();

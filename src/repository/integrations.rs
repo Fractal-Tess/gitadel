@@ -120,10 +120,14 @@ async fn load_credential(
     namespace: &str,
     id: uuid::Uuid,
 ) -> Result<Option<namespace_integration::Model>, ApiError> {
-    Ok(namespace_integration::Entity::find_by_id(id)
+    namespace_integration::Entity::find_by_id(id)
         .filter(namespace_integration::Column::Namespace.eq(namespace))
         .one(state.identity().database())
-        .await?)
+        .await?
+        .map(|credential| {
+            crate::identity::open_integration_api_key(state.identity().secret_cipher(), credential)
+        })
+        .transpose()
 }
 
 async fn load_source(

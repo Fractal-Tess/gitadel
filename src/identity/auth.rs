@@ -156,8 +156,13 @@ pub async fn finish_two_factor_login(
         .await?;
 
     let transaction = state.database().begin().await?;
-    let Some(factor) =
-        super::two_factor::verify_second_factor(&transaction, user_id, &request.code).await?
+    let Some(factor) = super::two_factor::verify_second_factor(
+        &transaction,
+        state.secret_cipher(),
+        user_id,
+        &request.code,
+    )
+    .await?
     else {
         drop(transaction);
         state

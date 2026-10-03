@@ -1,16 +1,12 @@
 //! Actions secrets and variables at repository and namespace scope.
 //!
-//! Secrets are sealed with AES-256-GCM under a key derived from the SSH host
-//! key, which is already a persistent, private, backed-up instance secret.
-//! Secret values are write-only: the API only ever returns their names.
+//! Secrets are sealed by [`crate::secrets`] under a key derived from the SSH
+//! host key, bound to their scope and name. Secret values are write-only: the
+//! API only ever returns their names.
 //! Repository values override namespace values with the same name.
 
 use std::collections::{BTreeMap, HashMap};
 
-use aes_gcm::{
-    Aes256Gcm, KeyInit, Nonce,
-    aead::{Aead, Payload},
-};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -19,16 +15,14 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use chrono::Utc;
-use hmac::{Hmac, Mac};
-use russh::keys::{PrivateKey, ssh_encoding::Encode};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, IntoActiveModel, PaginatorTrait,
     QueryFilter, QueryOrder, Set,
 };
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 use uuid::Uuid;
 
+pub(crate) use crate::secrets::SecretCipher;
 use crate::{
     entity::{action_secret, action_variable, repository},
     identity::{ApiError, AuthenticatedUser, SCOPE_READ, SCOPE_WRITE},
@@ -37,86 +31,35 @@ use crate::{
 
 use super::ActionsState;
 
-const KEY_CONTEXT: &[u8] = b"gitadel actions secrets v1";
-const NONCE_BYTES: usize = 12;
 const MAX_NAME_BYTES: usize = 100;
 pub(crate) const MAX_VALUE_BYTES: usize = 64 * 1024;
 const MAX_ENTRIES_PER_SCOPE: u64 = 500;
 const RESERVED_PREFIXES: [&str; 3] = ["GITHUB_", "GITEA_", "FORGEJO_"];
 
-/// Seals and opens stored secret values.
-pub(crate) struct SecretCipher {
-    cipher: Aes256Gcm,
+/// Associated data that binds a sealed value to its scope and name.
+fn associated_data(scope: &Scope, name: &str) -> Vec<u8> {
+    // Namespace slugs change on rename, so bind to stable identifiers only.
+    let scope = match scope {
+        Scope::Repository(id) => format!("repository:{id}"),
+        Scope::Namespace(_) => "namespace".to_owned(),
+    };
+    format!("gitadel-actions-secret:v1:{scope}:{name}").into_bytes()
 }
 
-impl SecretCipher {
-    /// Derives the sealing key from the SSH host key's private key material.
-    ///
-    /// Replacing the host key makes previously stored secrets unreadable; they
-    /// must then be set again.
-    pub(crate) fn from_host_key(key: &PrivateKey) -> anyhow::Result<Self> {
-        let material = key
-            .key_data()
-            .encode_vec()
-            .map_err(|error| anyhow::anyhow!("could not encode the SSH host key: {error}"))?;
-        Self::from_material(&material)
-    }
+fn seal(
+    cipher: &SecretCipher,
+    scope: &Scope,
+    name: &str,
+    value: &str,
+) -> Result<Vec<u8>, ApiError> {
+    cipher
+        .seal_bytes(&associated_data(scope, name), value.as_bytes())
+        .map_err(ApiError::internal)
+}
 
-    fn from_material(material: &[u8]) -> anyhow::Result<Self> {
-        let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(KEY_CONTEXT)
-            .map_err(|_| anyhow::anyhow!("invalid secret key context"))?;
-        mac.update(material);
-        let key = mac.finalize().into_bytes();
-        let cipher = Aes256Gcm::new_from_slice(&key)
-            .map_err(|_| anyhow::anyhow!("invalid derived secret key length"))?;
-        Ok(Self { cipher })
-    }
-
-    fn associated_data(scope: &Scope, name: &str) -> Vec<u8> {
-        // Namespace slugs change on rename, so bind to stable identifiers only.
-        let scope = match scope {
-            Scope::Repository(id) => format!("repository:{id}"),
-            Scope::Namespace(_) => "namespace".to_owned(),
-        };
-        format!("gitadel-actions-secret:v1:{scope}:{name}").into_bytes()
-    }
-
-    fn seal(&self, scope: &Scope, name: &str, value: &str) -> Result<Vec<u8>, ApiError> {
-        let nonce_bytes: [u8; NONCE_BYTES] = rand::random();
-        let nonce = Nonce::from(nonce_bytes);
-        let aad = Self::associated_data(scope, name);
-        let ciphertext = self
-            .cipher
-            .encrypt(
-                &nonce,
-                Payload {
-                    msg: value.as_bytes(),
-                    aad: &aad,
-                },
-            )
-            .map_err(|_| ApiError::internal("could not seal the secret"))?;
-        let mut sealed = Vec::with_capacity(NONCE_BYTES + ciphertext.len());
-        sealed.extend_from_slice(&nonce_bytes);
-        sealed.extend_from_slice(&ciphertext);
-        Ok(sealed)
-    }
-
-    fn open(&self, scope: &Scope, name: &str, sealed: &[u8]) -> Option<String> {
-        let (nonce, ciphertext) = sealed.split_at_checked(NONCE_BYTES)?;
-        let nonce = Nonce::try_from(nonce).ok()?;
-        let aad = Self::associated_data(scope, name);
-        let plaintext = self
-            .cipher
-            .decrypt(
-                &nonce,
-                Payload {
-                    msg: ciphertext,
-                    aad: &aad,
-                },
-            )
-            .ok()?;
-        String::from_utf8(plaintext).ok()
-    }
+fn open(cipher: &SecretCipher, scope: &Scope, name: &str, sealed: &[u8]) -> Option<String> {
+    let plaintext = cipher.open_bytes(&associated_data(scope, name), sealed)?;
+    String::from_utf8(plaintext).ok()
 }
 
 #[derive(Clone, Debug)]
@@ -184,7 +127,7 @@ pub(crate) async fn job_values<C: ConnectionTrait>(
         (Scope::Repository(repository.id), repository_secrets),
     ] {
         for row in rows {
-            match cipher.open(&scope, &row.name, &row.sealed) {
+            match open(cipher, &scope, &row.name, &row.sealed) {
                 Some(value) => {
                     secrets.insert(row.name, value);
                 }
@@ -365,7 +308,7 @@ async fn set_secret(
     let name = validated_name(name)?;
     validated_value(value)?;
     let database = state.repository().identity().database();
-    let sealed = state.secret_cipher().seal(scope, &name, value)?;
+    let sealed = seal(state.secret_cipher(), scope, &name, value)?;
     let now = Utc::now();
     let existing = scoped_filter!(action_secret, action_secret::Entity::find(), scope)
         .filter(action_secret::Column::Name.eq(&name))
@@ -739,31 +682,35 @@ mod tests {
     fn sealed_secrets_round_trip_and_bind_to_scope_and_name() {
         let cipher = SecretCipher::from_material(b"host key material").unwrap();
         let repository = Scope::Repository(Uuid::new_v4());
-        let sealed = cipher.seal(&repository, "TOKEN", "hunter2").unwrap();
+        let sealed = seal(&cipher, &repository, "TOKEN", "hunter2").unwrap();
         assert!(!sealed.windows(7).any(|window| window == b"hunter2"));
         assert_eq!(
-            cipher.open(&repository, "TOKEN", &sealed).as_deref(),
+            open(&cipher, &repository, "TOKEN", &sealed).as_deref(),
             Some("hunter2")
         );
-        assert!(cipher.open(&repository, "OTHER", &sealed).is_none());
+        assert!(open(&cipher, &repository, "OTHER", &sealed).is_none());
         assert!(
-            cipher
-                .open(&Scope::Repository(Uuid::new_v4()), "TOKEN", &sealed)
-                .is_none()
+            open(
+                &cipher,
+                &Scope::Repository(Uuid::new_v4()),
+                "TOKEN",
+                &sealed
+            )
+            .is_none()
         );
         let other_key = SecretCipher::from_material(b"another host key").unwrap();
-        assert!(other_key.open(&repository, "TOKEN", &sealed).is_none());
-        assert!(cipher.open(&repository, "TOKEN", &sealed[..8]).is_none());
+        assert!(open(&other_key, &repository, "TOKEN", &sealed).is_none());
+        assert!(open(&cipher, &repository, "TOKEN", &sealed[..8]).is_none());
     }
 
     #[test]
     fn nonces_are_unique_per_seal() {
         let cipher = SecretCipher::from_material(b"host key material").unwrap();
         let scope = Scope::Namespace("team".to_owned());
-        let first = cipher.seal(&scope, "A", "same").unwrap();
-        let second = cipher.seal(&scope, "A", "same").unwrap();
+        let first = seal(&cipher, &scope, "A", "same").unwrap();
+        let second = seal(&cipher, &scope, "A", "same").unwrap();
         assert_ne!(first, second);
-        assert_eq!(cipher.open(&scope, "A", &first).as_deref(), Some("same"));
+        assert_eq!(open(&cipher, &scope, "A", &first).as_deref(), Some("same"));
     }
 
     async fn insert_secret(
@@ -780,7 +727,7 @@ mod tests {
             repository_id: Set(repository_id),
             namespace: Set(namespace),
             name: Set(name.to_owned()),
-            sealed: Set(cipher.seal(&scope, name, value).unwrap()),
+            sealed: Set(seal(cipher, &scope, name, value).unwrap()),
             updated_by: Set(None),
             created_at: Set(now),
             updated_at: Set(now),

@@ -28,7 +28,10 @@ use tokio::sync::Mutex;
 use url::Url;
 use uuid::Uuid;
 
-use crate::entity::{instance, namespace, oidc_identity, oidc_provider, passkey, user};
+use crate::{
+    entity::{instance, namespace, oidc_identity, oidc_provider, passkey, user},
+    secrets::SecretKind,
+};
 
 use super::{
     ApiError, IdentityState, SCOPE_READ, SCOPE_WRITE, hash_password, hash_secret, random_secret,
@@ -302,8 +305,15 @@ async fn oidc_client(
     let metadata = CoreProviderMetadata::discover_async(issuer, &oidc_http_client()?)
         .await
         .map_err(|error| ApiError::bad_request(format!("OIDC discovery failed: {error}")))?;
-    let secret = (!provider.client_secret.is_empty())
-        .then(|| ClientSecret::new(provider.client_secret.clone()));
+    let secret = if provider.client_secret.is_empty() {
+        None
+    } else {
+        Some(ClientSecret::new(state.secret_cipher().open_text(
+            SecretKind::OidcClientSecret,
+            &provider.id,
+            &provider.client_secret,
+        )?))
+    };
     let redirect_url = state
         .public_url()
         .join(&format!("api/v1/auth/oidc/{}/callback", provider.id))
@@ -672,12 +682,14 @@ pub async fn create_provider(
     let values = validate_provider_request(request, None)?;
     validate_discovery(&values.issuer_url).await?;
     let now = Utc::now();
+    let id = Uuid::new_v4();
+    let client_secret = seal_client_secret(&state, id, values.client_secret.as_deref())?;
     let provider = oidc_provider::ActiveModel {
-        id: Set(Uuid::new_v4()),
+        id: Set(id),
         name: Set(values.name),
         issuer_url: Set(values.issuer_url),
         client_id: Set(values.client_id),
-        client_secret: Set(values.client_secret.unwrap_or_default()),
+        client_secret: Set(client_secret),
         enabled: Set(values.enabled),
         auto_provision: Set(values.auto_provision),
         created_at: Set(now),
@@ -707,8 +719,13 @@ pub async fn update_provider(
         .one(state.database())
         .await?
         .ok_or_else(|| ApiError::bad_request("The identity provider does not exist."))?;
-    let values = validate_provider_request(request, Some(&current.client_secret))?;
+    let values = validate_provider_request(request, None)?;
     validate_discovery(&values.issuer_url).await?;
+    // An omitted secret keeps the stored one, in whatever form it is stored.
+    let client_secret = match values.client_secret.as_deref() {
+        Some(secret) => seal_client_secret(&state, provider_id, Some(secret))?,
+        None => current.client_secret.clone(),
+    };
     let transaction = state.database().begin().await?;
     let provider = oidc_provider::Entity::find_by_id(provider_id)
         .one(&transaction)
@@ -718,7 +735,7 @@ pub async fn update_provider(
     active.name = Set(values.name);
     active.issuer_url = Set(values.issuer_url);
     active.client_id = Set(values.client_id);
-    active.client_secret = Set(values.client_secret.unwrap_or_default());
+    active.client_secret = Set(client_secret);
     active.enabled = Set(values.enabled);
     active.auto_provision = Set(values.auto_provision);
     active.updated_at = Set(Utc::now());
@@ -820,6 +837,22 @@ fn validate_provider_request(
         Some(_) | None => existing_secret.map(str::to_owned),
     };
     Ok(request)
+}
+
+/// The stored form of a client secret: sealed to this provider, or empty for
+/// a public client.
+fn seal_client_secret(
+    state: &IdentityState,
+    provider_id: Uuid,
+    secret: Option<&str>,
+) -> Result<String, ApiError> {
+    match secret.filter(|secret| !secret.is_empty()) {
+        Some(secret) => state
+            .secret_cipher()
+            .seal_text(SecretKind::OidcClientSecret, &provider_id, secret)
+            .map_err(ApiError::internal),
+        None => Ok(String::new()),
+    }
 }
 
 async fn validate_discovery(issuer_url: &str) -> Result<(), ApiError> {

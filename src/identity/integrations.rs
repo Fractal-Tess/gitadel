@@ -28,6 +28,7 @@ use crate::identity::{hash_secret, random_secret};
 use crate::integrations::{
     Credential, PROVIDERS, Provider, RemoteSource, SourceApplication, TestReport, provider,
 };
+use crate::secrets::{SecretCipher, SecretKind};
 
 use super::{ApiError, AuthenticatedUser, IdentityState, SCOPE_READ, SCOPE_WRITE};
 
@@ -248,15 +249,17 @@ pub async fn create_integration(
     let api_key = validate_api_key(&request.api_key, true)?.expect("required key was validated");
     let internal_url = validate_url(&request.internal_url, "Gitadel")?;
     let now = Utc::now();
+    let id = Uuid::new_v4();
+    let sealed = seal_api_key(state.secret_cipher(), id, &api_key)?;
     let transaction = state.database().begin().await?;
     let integration = namespace_integration::ActiveModel {
-        id: Set(Uuid::new_v4()),
+        id: Set(id),
         namespace: Set(slug.clone()),
         provider: Set(provider.slug.to_owned()),
         name: Set(name),
         enabled: Set(true),
         url: Set(url),
-        api_key: Set(api_key),
+        api_key: Set(sealed),
         dokploy_internal_url: Set(Some(internal_url)),
         created_at: Set(now),
         updated_at: Set(now),
@@ -292,7 +295,7 @@ pub async fn update_integration(
 ) -> Result<Json<IntegrationResponse>, ApiError> {
     let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
     authorize_namespace(&state, &actor, &slug).await?;
-    let existing = owned_integration(state.database(), &slug, id).await?;
+    let existing = owned_integration(state.secret_cipher(), state.database(), &slug, id).await?;
     let provider = provider(&existing.provider).ok_or_else(ApiError::not_found)?;
     let binding = source_binding(state.database(), id).await?;
     let url = match request.url.as_deref() {
@@ -340,7 +343,7 @@ pub async fn update_integration(
     }
 
     let transaction = state.database().begin().await?;
-    let mut active = owned_integration(&transaction, &slug, id)
+    let mut active = stored_integration(&transaction, &slug, id)
         .await?
         .into_active_model();
     if let Some(name) = request.name {
@@ -353,7 +356,7 @@ pub async fn update_integration(
         active.url = Set(url);
     }
     if let Some(api_key) = api_key {
-        active.api_key = Set(api_key);
+        active.api_key = Set(seal_api_key(state.secret_cipher(), id, &api_key)?);
     }
     if let Some(internal_url) = internal_url {
         active.dokploy_internal_url = Set(Some(internal_url));
@@ -385,7 +388,7 @@ pub async fn delete_integration(
 ) -> Result<StatusCode, ApiError> {
     let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
     authorize_namespace(&state, &actor, &slug).await?;
-    let integration = owned_integration(state.database(), &slug, id).await?;
+    let integration = owned_integration(state.secret_cipher(), state.database(), &slug, id).await?;
     let binding = source_binding(state.database(), id).await?;
     if let Some(binding) = binding.as_ref() {
         let provider = provider(&integration.provider).ok_or_else(ApiError::not_found)?;
@@ -426,7 +429,7 @@ pub async fn get_integration_credential(
 > {
     let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
     authorize_namespace(&state, &actor, &slug).await?;
-    let stored = owned_integration(state.database(), &slug, id).await?;
+    let stored = owned_integration(state.secret_cipher(), state.database(), &slug, id).await?;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
         Json(IntegrationCredentialResponse {
@@ -443,7 +446,7 @@ pub async fn get_integration_source(
 ) -> Result<Json<SourceConnectionResponse>, ApiError> {
     let actor = state.authenticate(&headers, &jar, SCOPE_READ).await?;
     authorize_namespace(&state, &actor, &slug).await?;
-    let integration = owned_integration(state.database(), &slug, id).await?;
+    let integration = owned_integration(state.secret_cipher(), state.database(), &slug, id).await?;
     let provider = provider(&integration.provider).ok_or_else(ApiError::not_found)?;
     if !provider.source_required {
         return Err(ApiError::not_found());
@@ -474,7 +477,7 @@ pub async fn configure_integration_source(
 ) -> Result<(StatusCode, Json<SourceConnectionResponse>), ApiError> {
     let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
     authorize_namespace(&state, &actor, &slug).await?;
-    let integration = owned_integration(state.database(), &slug, id).await?;
+    let integration = owned_integration(state.secret_cipher(), state.database(), &slug, id).await?;
     let provider = provider(&integration.provider).ok_or_else(ApiError::not_found)?;
     if !provider.source_required {
         return Err(ApiError::not_found());
@@ -647,7 +650,7 @@ pub async fn disconnect_integration_source(
 ) -> Result<StatusCode, ApiError> {
     let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
     authorize_namespace(&state, &actor, &slug).await?;
-    let integration = owned_integration(state.database(), &slug, id).await?;
+    let integration = owned_integration(state.secret_cipher(), state.database(), &slug, id).await?;
     let provider = provider(&integration.provider).ok_or_else(ApiError::not_found)?;
     let binding = source_binding(state.database(), id)
         .await?
@@ -699,7 +702,7 @@ pub async fn test_integration(
 ) -> Result<Json<IntegrationTestResponse>, ApiError> {
     let actor = state.authenticate(&headers, &jar, SCOPE_READ).await?;
     authorize_namespace(&state, &actor, &slug).await?;
-    let stored = owned_integration(state.database(), &slug, id).await?;
+    let stored = owned_integration(state.secret_cipher(), state.database(), &slug, id).await?;
     let provider = provider(&stored.provider).ok_or_else(ApiError::not_found)?;
     let binding = source_binding(state.database(), id).await?;
     test_credential(
@@ -798,7 +801,8 @@ where
         .await?)
 }
 
-async fn owned_integration<C>(
+/// The stored row, with the API key still sealed.
+async fn stored_integration<C>(
     database: &C,
     namespace: &str,
     id: Uuid,
@@ -811,6 +815,40 @@ where
         .one(database)
         .await?
         .ok_or_else(ApiError::not_found)
+}
+
+/// The row with its API key opened for use.
+async fn owned_integration<C>(
+    cipher: &SecretCipher,
+    database: &C,
+    namespace: &str,
+    id: Uuid,
+) -> Result<namespace_integration::Model, ApiError>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    open_api_key(cipher, stored_integration(database, namespace, id).await?)
+}
+
+/// Replaces the sealed API key of a loaded row with its plain value, so
+/// callers can hand it to the provider. Fails with an error naming the
+/// integration when the key was sealed under another host key.
+pub(crate) fn open_api_key(
+    cipher: &SecretCipher,
+    mut integration: namespace_integration::Model,
+) -> Result<namespace_integration::Model, ApiError> {
+    integration.api_key = cipher.open_text(
+        SecretKind::DokployApiKey,
+        &integration.id,
+        &integration.api_key,
+    )?;
+    Ok(integration)
+}
+
+fn seal_api_key(cipher: &SecretCipher, id: Uuid, api_key: &str) -> Result<String, ApiError> {
+    cipher
+        .seal_text(SecretKind::DokployApiKey, &id, api_key)
+        .map_err(ApiError::internal)
 }
 
 /// Only a namespace's owner may read or change its credentials.

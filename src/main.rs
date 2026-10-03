@@ -17,6 +17,7 @@ mod network;
 mod registry;
 mod repository;
 mod schedule;
+mod secrets;
 mod server;
 mod storage;
 

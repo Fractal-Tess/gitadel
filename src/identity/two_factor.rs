@@ -27,7 +27,10 @@ use super::{
     AUTH_CHALLENGE_CAPACITY, AUTH_CHALLENGE_SOURCE_CAPACITY, ApiError, CHALLENGE_LIFETIME,
     IdentityState, SCOPE_READ, SCOPE_WRITE, hash_secret, remote_address, verify_password,
 };
-use crate::entity::{user_recovery_code, user_totp};
+use crate::{
+    entity::{user_recovery_code, user_totp},
+    secrets::{SecretCipher, SecretKind},
+};
 
 const TOTP_PERIOD_SECONDS: i64 = 30;
 const TOTP_DIGITS: u32 = 6;
@@ -132,10 +135,11 @@ pub async fn is_enabled<C: ConnectionTrait>(
 /// unused recovery codes second, consuming whichever one matched.
 pub async fn verify_second_factor<C: ConnectionTrait>(
     connection: &C,
+    cipher: &SecretCipher,
     user_id: Uuid,
     code: &str,
 ) -> Result<Option<SecondFactor>, ApiError> {
-    if verify_confirmed_totp(connection, user_id, code).await? {
+    if verify_confirmed_totp(connection, cipher, user_id, code).await? {
         return Ok(Some(SecondFactor::Totp));
     }
     let normalized = normalize_recovery_code(code);
@@ -157,6 +161,7 @@ pub async fn verify_second_factor<C: ConnectionTrait>(
 
 async fn verify_confirmed_totp<C: ConnectionTrait>(
     connection: &C,
+    cipher: &SecretCipher,
     user_id: Uuid,
     code: &str,
 ) -> Result<bool, ApiError> {
@@ -167,7 +172,7 @@ async fn verify_confirmed_totp<C: ConnectionTrait>(
     else {
         return Ok(false);
     };
-    let secret = decode_secret(&stored.secret)?;
+    let secret = decode_secret(cipher, user_id, &stored.secret)?;
     let Some(step) = verify_totp(&secret, code, Utc::now().timestamp(), stored.last_used_step)?
     else {
         return Ok(false);
@@ -264,9 +269,17 @@ pub async fn start_enrollment(
     user_totp::Entity::delete_by_id(actor.user.id)
         .exec(&transaction)
         .await?;
+    let sealed = state
+        .secret_cipher()
+        .seal_text(
+            SecretKind::TotpSecret,
+            &actor.user.id,
+            &URL_SAFE_NO_PAD.encode(secret),
+        )
+        .map_err(ApiError::internal)?;
     user_totp::ActiveModel {
         user_id: Set(actor.user.id),
-        secret: Set(URL_SAFE_NO_PAD.encode(secret)),
+        secret: Set(sealed),
         confirmed_at: Set(None),
         last_used_step: Set(None),
         created_at: Set(Utc::now()),
@@ -313,7 +326,7 @@ pub async fn confirm_enrollment(
         .await?
         .filter(|stored| stored.confirmed_at.is_none())
         .ok_or_else(|| ApiError::bad_request("Start two-factor enrollment first."))?;
-    let secret = decode_secret(&stored.secret)?;
+    let secret = decode_secret(state.secret_cipher(), actor.user.id, &stored.secret)?;
     let Some(step) = verify_totp(&secret, &request.code, Utc::now().timestamp(), None)? else {
         return Err(invalid_code());
     };
@@ -355,7 +368,7 @@ async fn reauthenticate<C: ConnectionTrait>(
         .enforce_account_auth_rate_limit(&format!("two-factor:{}", account.id), 8)
         .await?;
     if let Some(code) = request.code.filter(|code| !code.trim().is_empty()) {
-        if verify_confirmed_totp(connection, account.id, &code).await? {
+        if verify_confirmed_totp(connection, state.secret_cipher(), account.id, &code).await? {
             return Ok(());
         }
         return Err(invalid_code());
@@ -480,7 +493,10 @@ fn normalize_recovery_code(code: &str) -> String {
         .collect()
 }
 
-fn decode_secret(encoded: &str) -> Result<Vec<u8>, ApiError> {
+/// The raw seed from its stored form: sealed by the instance key (or plain
+/// text from before sealing existed), then base64.
+fn decode_secret(cipher: &SecretCipher, user_id: Uuid, stored: &str) -> Result<Vec<u8>, ApiError> {
+    let encoded = cipher.open_text(SecretKind::TotpSecret, &user_id, stored)?;
     URL_SAFE_NO_PAD.decode(encoded).map_err(ApiError::internal)
 }
 
@@ -680,10 +696,11 @@ mod tests {
             .unwrap();
         assert!(stored.iter().all(|row| !codes.contains(&row.code_hash)));
 
-        let first = verify_second_factor(&database, user_id, &codes[0])
+        let cipher = SecretCipher::for_tests();
+        let first = verify_second_factor(&database, &cipher, user_id, &codes[0])
             .await
             .unwrap();
-        let replay = verify_second_factor(&database, user_id, &codes[0])
+        let replay = verify_second_factor(&database, &cipher, user_id, &codes[0])
             .await
             .unwrap();
         assert_eq!((first, replay), (Some(SecondFactor::RecoveryCode), None));
@@ -705,13 +722,54 @@ mod tests {
         let step = Utc::now().timestamp().div_euclid(TOTP_PERIOD_SECONDS);
         let code = format!("{:06}", hotp(RFC_SECRET, step.unsigned_abs()).unwrap());
 
-        let first = verify_second_factor(&database, user_id, &code)
+        let cipher = SecretCipher::for_tests();
+        let first = verify_second_factor(&database, &cipher, user_id, &code)
             .await
             .unwrap();
-        let replay = verify_second_factor(&database, user_id, &code)
+        let replay = verify_second_factor(&database, &cipher, user_id, &code)
             .await
             .unwrap();
         assert_eq!((first, replay), (Some(SecondFactor::Totp), None));
+    }
+
+    #[tokio::test]
+    async fn sealed_totp_secrets_verify_and_a_replaced_key_names_the_setting() {
+        let (database, user_id) = database_with_user().await;
+        let cipher = SecretCipher::for_tests();
+        user_totp::ActiveModel {
+            user_id: Set(user_id),
+            secret: Set(cipher
+                .seal_text(
+                    SecretKind::TotpSecret,
+                    &user_id,
+                    &URL_SAFE_NO_PAD.encode(RFC_SECRET),
+                )
+                .unwrap()),
+            confirmed_at: Set(Some(Utc::now())),
+            last_used_step: Set(None),
+            created_at: Set(Utc::now()),
+        }
+        .insert(&database)
+        .await
+        .unwrap();
+        let step = Utc::now().timestamp().div_euclid(TOTP_PERIOD_SECONDS);
+        let code = format!("{:06}", hotp(RFC_SECRET, step.unsigned_abs()).unwrap());
+
+        let rotated = SecretCipher::from_material(b"replaced host key").unwrap();
+        let error = verify_second_factor(&database, &rotated, user_id, &code)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("authenticator secret of user {user_id}")),
+            "{error}"
+        );
+
+        let verified = verify_second_factor(&database, &cipher, user_id, &code)
+            .await
+            .unwrap();
+        assert_eq!(verified, Some(SecondFactor::Totp));
     }
 
     #[tokio::test]
