@@ -232,7 +232,12 @@ services.gitadel = {
     sessionLifetimeHours = 24 * 30;
     invitationLifetimeHours = 72;
   };
-  settings = { };
+  settings = {
+    # Behind nginx or Caddy on the same host; see "Reverse proxies".
+    server.trusted_proxies = [ "127.0.0.1" "::1" ];
+    # Keep a year of audit history; see "Audit retention".
+    audit.retention_days = 365;
+  };
 };
 ```
 
@@ -528,7 +533,7 @@ when a PEM certificate chain and private key are configured:
 ```toml
 [server]
 bind = "0.0.0.0:3030"
-public_url = "https://kiwi.netbird.cloud:3030"
+public_url = "https://gitadel.example.com:3030"
 
 [server.tls]
 certificate = "data/tls/gitadel.pem"
@@ -542,7 +547,7 @@ certificate for the names used by your browsers:
 mkdir -p data/tls
 mkcert -cert-file data/tls/gitadel.pem \
   -key-file data/tls/gitadel-key.pem \
-  kiwi.netbird.cloud localhost 127.0.0.1 ::1
+  gitadel.example.com localhost 127.0.0.1 ::1
 ```
 
 `mkcert -install` configures trust automatically on supported systems. On
@@ -554,8 +559,8 @@ certutil -A -d "sql:$HOME/.pki/nssdb" -t "C,," \
 ```
 
 Restart the browser after changing its trust database. Every other device that
-opens the NetBird URL must also trust `$(mkcert -CAROOT)/rootCA.pem`; never
-copy `rootCA-key.pem` or the Gitadel private key to another device.
+opens that URL must also trust `$(mkcert -CAROOT)/rootCA.pem`; never copy
+`rootCA-key.pem` or the Gitadel private key to another device.
 
 ## Container registry
 

@@ -65,7 +65,7 @@ commands free of machine-specific flags:
 ```toml
 [server]
 bind = "0.0.0.0:3030"
-public_url = "http://kiwi.netbird.cloud:3030"
+public_url = "http://gitadel.example.com:3030"
 
 [database]
 url = "sqlite://data/gitadel.db?mode=rwc"
@@ -79,6 +79,11 @@ registry_root = "data/registry"
 bind = "0.0.0.0:2222"
 host_key = "data/ssh-host-ed25519"
 ```
+
+Behind a reverse proxy add `trusted_proxies = ["10.0.0.0/8"]` under `[server]`
+so rate limits and audit events see the real client, and `[audit]
+retention_days = 365` caps the audit history; both default off. INSTALL.md
+documents every option.
 
 Any subset works; the rest falls back to the defaults. Per-run overrides use
 the CLI flags or their `GITADEL_*` environment variables, which win over the
