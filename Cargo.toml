@@ -26,7 +26,9 @@ path = "src/main.rs"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-panic = "abort"
+# Unwind so a panic in one request handler or `spawn_blocking` closure ends
+# that task alone instead of taking every in-flight clone and push with it.
+panic = "unwind"
 strip = "symbols"
 
 [dependencies]
