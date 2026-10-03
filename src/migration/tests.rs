@@ -477,3 +477,78 @@ async fn latest_audit_event_of_an_action_is_found_through_the_index() {
     assert!(plan.contains("idx-audit-event-action-id"), "{plan}");
     assert!(!plan.contains("TEMP B-TREE"), "{plan}");
 }
+
+#[tokio::test]
+async fn cache_kind_migration_drops_borrowed_kinds_and_admits_the_new_ones() {
+    use crate::entity::repository_cache_entry;
+
+    let mut options = ConnectOptions::new("sqlite::memory:");
+    options.max_connections(1);
+    let database = Database::connect(options).await.unwrap();
+    let before = super::Migrator::migrations()
+        .iter()
+        .position(|migration| migration.name() == "m20261003_000081_repository_cache_kinds")
+        .unwrap();
+    super::Migrator::up(&database, Some(before as u32))
+        .await
+        .unwrap();
+    let owner = crate::actions::test_support::owner(&database, "owner").await;
+    let repository = crate::actions::test_support::repository(&database, &owner, "project").await;
+    let now = chrono::Utc::now();
+    let entry = |kind: &str, key: &str| repository_cache_entry::ActiveModel {
+        repository_id: Set(repository.id),
+        kind: Set(kind.to_owned()),
+        cache_key: Set(key.to_owned()),
+        payload_json: Set("[]".to_owned()),
+        expires_at: Set(now + chrono::Duration::days(1)),
+        created_at: Set(now),
+    };
+    // Rows the day-commit and line-stat caches wrote under borrowed kinds,
+    // beside the rows those kinds legitimately own.
+    for (kind, key) in [
+        ("overview", "digest:v3:main"),
+        ("overview", "digest:day:2026-09-01"),
+        ("commit_count", "0123abcd"),
+        ("commit_count", "diff:0123abcd"),
+    ] {
+        entry(kind, key).insert(&database).await.unwrap();
+    }
+    for kind in ["day_commits", "commit_stats"] {
+        assert!(
+            entry(kind, "early").insert(&database).await.is_err(),
+            "{kind} is refused before the migration"
+        );
+    }
+
+    super::Migrator::up(&database, None).await.unwrap();
+
+    let mut remaining = repository_cache_entry::Entity::find()
+        .filter(repository_cache_entry::Column::RepositoryId.eq(repository.id))
+        .all(&database)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.kind, row.cache_key))
+        .collect::<Vec<_>>();
+    remaining.sort();
+    assert_eq!(
+        remaining,
+        vec![
+            ("commit_count".to_owned(), "0123abcd".to_owned()),
+            ("overview".to_owned(), "digest:v3:main".to_owned()),
+        ]
+    );
+    for kind in ["activity", "day_commits", "commit_stats"] {
+        entry(kind, "late").insert(&database).await.unwrap();
+    }
+    assert!(entry("bogus", "late").insert(&database).await.is_err());
+    let index = database
+        .query_one_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT name FROM sqlite_master WHERE type = 'index' \
+             AND name = 'idx_repository_cache_expiry'",
+        ))
+        .await
+        .unwrap();
+    assert!(index.is_some(), "the expiry index is recreated");
+}

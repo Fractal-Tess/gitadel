@@ -1203,9 +1203,7 @@ struct CommitLineStats {
     files: usize,
 }
 
-/// The cache key of a commit's [`CommitLineStats`]. The cache table only
-/// admits the kinds it was created with, so these share the commit-count
-/// kind, whose own keys are bare commit ids.
+/// The cache key of a commit's [`CommitLineStats`].
 fn line_stats_key(oid: &str) -> String {
     format!("diff:{oid}")
 }
@@ -1225,7 +1223,7 @@ async fn cached_commit_line_stats(
     for keys in keys.chunks(resources::IN_QUERY_CHUNK) {
         let entries = repository_cache_entry::Entity::find()
             .filter(repository_cache_entry::Column::RepositoryId.eq(repository_id))
-            .filter(repository_cache_entry::Column::Kind.eq(super::CACHE_KIND_COMMIT_COUNT))
+            .filter(repository_cache_entry::Column::Kind.eq(super::CACHE_KIND_COMMIT_STATS))
             .filter(repository_cache_entry::Column::CacheKey.is_in(keys.iter().cloned()))
             .filter(repository_cache_entry::Column::ExpiresAt.gt(now))
             .all(state.identity().database())
@@ -1258,7 +1256,7 @@ async fn cache_commit_line_stats(
         .map(|(oid, lines)| {
             Ok(repository_cache_entry::ActiveModel {
                 repository_id: Set(repository_id),
-                kind: Set(super::CACHE_KIND_COMMIT_COUNT.to_owned()),
+                kind: Set(super::CACHE_KIND_COMMIT_STATS.to_owned()),
                 cache_key: Set(line_stats_key(oid)),
                 payload_json: Set(serde_json::to_string(lines).map_err(ApiError::internal)?),
                 expires_at: Set(expires_at),

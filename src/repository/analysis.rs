@@ -490,9 +490,7 @@ enum WalkSlot {
     Acquire,
 }
 
-/// How long the commits authored on one day stay cached. The cache table only
-/// admits the kinds it was created with, so they are stored beside the
-/// overview, under the same kind, and told apart by their key.
+/// How long the commits authored on one day stay cached.
 const DAY_COMMITS_CACHE_LIFETIME: StdDuration = StdDuration::from_secs(7 * 24 * 60 * 60);
 
 /// The branches of a repository at one moment: what its history-derived
@@ -554,7 +552,10 @@ async fn prune_stale_history_caches(
 ) -> Result<(), ApiError> {
     repository_cache_entry::Entity::delete_many()
         .filter(repository_cache_entry::Column::RepositoryId.eq(repository_id))
-        .filter(repository_cache_entry::Column::Kind.eq(super::CACHE_KIND_OVERVIEW))
+        .filter(
+            repository_cache_entry::Column::Kind
+                .is_in([super::CACHE_KIND_OVERVIEW, super::CACHE_KIND_DAY_COMMITS]),
+        )
         .filter(repository_cache_entry::Column::CacheKey.not_like(format!("{}:%", tips.digest)))
         .exec(state.identity().database())
         .await?;
@@ -755,7 +756,7 @@ pub(super) async fn read_commits_authored_on(
             state
                 .cached_value::<Vec<CachedDayCommit>>(
                     repository.id,
-                    super::CACHE_KIND_OVERVIEW,
+                    super::CACHE_KIND_DAY_COMMITS,
                     &cache_key,
                 )
                 .await?
@@ -825,7 +826,7 @@ pub(super) async fn read_commits_authored_on(
     state
         .cache_value(
             repository.id,
-            super::CACHE_KIND_OVERVIEW,
+            super::CACHE_KIND_DAY_COMMITS,
             &cache_key,
             &commits
                 .iter()
@@ -1157,13 +1158,18 @@ mod tests {
     }
 
     /// Cached history entries whose key carries `marker`: `:v3:` for the
-    /// overview, `:day:` for one day's commits.
+    /// overview, `:day:` for one day's commits, each under its own kind.
     async fn history_cache_rows(
         instance: &TestInstance,
         marker: &str,
     ) -> Vec<repository_cache_entry::Model> {
+        let kind = if marker == ":day:" {
+            crate::repository::CACHE_KIND_DAY_COMMITS
+        } else {
+            crate::repository::CACHE_KIND_OVERVIEW
+        };
         repository_cache_entry::Entity::find()
-            .filter(repository_cache_entry::Column::Kind.eq(crate::repository::CACHE_KIND_OVERVIEW))
+            .filter(repository_cache_entry::Column::Kind.eq(kind))
             .filter(repository_cache_entry::Column::CacheKey.contains(marker))
             .all(&instance.database)
             .await

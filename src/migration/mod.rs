@@ -74,6 +74,7 @@ mod m20260930_000074_user_motion_preference;
 mod m20260930_000075_user_commit_identities;
 mod m20261002_000076_webhook_delivery_retries;
 mod m20261002_000077_audit_event_action_index;
+mod m20261003_000081_repository_cache_kinds;
 
 #[cfg(test)]
 mod tests;
@@ -161,6 +162,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260930_000075_user_commit_identities::Migration),
             Box::new(m20261002_000076_webhook_delivery_retries::Migration),
             Box::new(m20261002_000077_audit_event_action_index::Migration),
+            Box::new(m20261003_000081_repository_cache_kinds::Migration),
         ]
     }
 }

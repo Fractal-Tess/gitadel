@@ -155,6 +155,10 @@ const CACHE_KIND_OVERVIEW: &str = "overview";
 const CACHE_KIND_STATS: &str = "language_stats";
 const CACHE_KIND_COMMIT_COUNT: &str = "commit_count";
 const CACHE_KIND_SIZE: &str = "size";
+/// The commits authored on one day, keyed by branch digest and date.
+const CACHE_KIND_DAY_COMMITS: &str = "day_commits";
+/// What one commit changed against its first parent, keyed by commit id.
+const CACHE_KIND_COMMIT_STATS: &str = "commit_stats";
 const MIRROR_SYNC_CONCURRENCY: usize = 2;
 
 impl RepositoryState {
