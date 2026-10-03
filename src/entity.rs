@@ -674,6 +674,8 @@ pub mod oauth_access_token {
         pub scopes: i32,
         pub scope: String,
         pub created_at: DateTimeUtc,
+        /// There is no refresh grant, so a client re-authorises after this.
+        pub expires_at: DateTimeUtc,
         pub last_used_at: Option<DateTimeUtc>,
         pub revoked_at: Option<DateTimeUtc>,
     }
@@ -682,6 +684,19 @@ pub mod oauth_access_token {
     pub enum Relation {}
 
     impl ActiveModelBehavior for ActiveModel {}
+
+    /// Delete tokens that expired before `now` and report how many went.
+    /// Authentication already refuses them; this reclaims the rows.
+    pub async fn delete_expired<C: ConnectionTrait>(
+        connection: &C,
+        now: DateTimeUtc,
+    ) -> Result<u64, DbErr> {
+        Ok(Entity::delete_many()
+            .filter(Column::ExpiresAt.lt(now))
+            .exec(connection)
+            .await?
+            .rows_affected)
+    }
 }
 
 pub mod api_token {

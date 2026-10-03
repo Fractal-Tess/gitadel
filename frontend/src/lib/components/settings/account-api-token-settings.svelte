@@ -4,8 +4,16 @@
   import ChevronDown from "@lucide/svelte/icons/chevron-down";
   import Clipboard from "@lucide/svelte/icons/clipboard";
   import KeySquare from "@lucide/svelte/icons/key-square";
+  import ShieldCheck from "@lucide/svelte/icons/shield-check";
+  import { onMount } from "svelte";
   import { toast } from "svelte-sonner";
+  import { z } from "zod";
 
+  import {
+    authorizedApplicationSchema,
+    type AuthorizedApplication,
+  } from "$lib/api/account.js";
+  import { errorMessage, requestEmpty, requestJson } from "$lib/api/transport.js";
   import { copyText } from "$lib/clipboard.js";
   import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
   import CredentialRemovalDialog, {
@@ -27,6 +35,43 @@
   let tokenRevealOpen = $state(false);
   let deleteDialogOpen = $state(false);
   let pendingDeletion = $state<CredentialRemoval | null>(null);
+  let authorizations = $state.raw<AuthorizedApplication[] | null>(null);
+  let authorizationsError = $state<string | null>(null);
+  let revokingClientId = $state<string | null>(null);
+
+  onMount(loadAuthorizations);
+
+  async function loadAuthorizations(): Promise<void> {
+    try {
+      authorizations = await requestJson(
+        "/api/v1/me/authorizations",
+        z.array(authorizedApplicationSchema),
+      );
+      authorizationsError = null;
+    } catch (caught) {
+      authorizationsError = errorMessage(caught);
+    }
+  }
+
+  async function revokeAuthorization(
+    application: AuthorizedApplication,
+  ): Promise<void> {
+    revokingClientId = application.client_id;
+    try {
+      await requestEmpty(
+        `/api/v1/me/authorizations/${encodeURIComponent(application.client_id)}`,
+        { method: "DELETE" },
+      );
+      authorizations = (authorizations ?? []).filter(
+        (entry) => entry.client_id !== application.client_id,
+      );
+      toast.success(`${application.application_name} no longer has access`);
+    } catch (caught) {
+      toast.error(errorMessage(caught));
+    } finally {
+      revokingClientId = null;
+    }
+  }
 
   async function createApiToken() {
     credentials.createdToken = null;
@@ -146,6 +191,85 @@
       </article>
     {/each}
   </div>
+
+  <section
+    class="rounded-xl border bg-card/40 p-5 shadow-sm"
+    aria-labelledby="authorized-applications-heading"
+  >
+    <header class="flex items-start gap-3">
+      <ShieldCheck class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+      <div>
+        <h2 id="authorized-applications-heading" class="font-medium">
+          Authorized applications
+        </h2>
+        <p class="mt-1 text-xs leading-5 text-muted-foreground">
+          OAuth applications that hold access tokens for your account. Tokens
+          expire after 30 days and cannot be refreshed, so an application asks
+          again when it needs continued access. Revoking signs it out now.
+        </p>
+      </div>
+    </header>
+    {#if authorizationsError}
+      <p class="mt-4 text-sm text-destructive">{authorizationsError}</p>
+    {:else if authorizations === null}
+      <p class="mt-4 text-sm text-muted-foreground">
+        Loading authorized applications…
+      </p>
+    {:else if authorizations.length === 0}
+      <p class="mt-4 text-sm text-muted-foreground">
+        No application currently has access to your account.
+      </p>
+    {:else}
+      <ul class="motion-list mt-4 grid divide-y rounded-lg border">
+        {#each authorizations as application (application.client_id)}
+          <li class="grid gap-3 px-4 py-3 text-sm sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+            <div class="min-w-0">
+              <p class="truncate font-medium">{application.application_name}</p>
+              <p class="mt-0.5 truncate font-mono text-xs text-muted-foreground">
+                {application.client_id}
+              </p>
+              <dl class="mt-2 grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2">
+                <div>
+                  <dt class="text-muted-foreground">Scopes</dt>
+                  <dd>{application.scopes.join(", ")}</dd>
+                </div>
+                <div>
+                  <dt class="text-muted-foreground">Authorized</dt>
+                  <dd>
+                    <time datetime={application.created_at}>
+                      {formatDateTime(application.created_at)}
+                    </time>
+                  </dd>
+                </div>
+                <div>
+                  <dt class="text-muted-foreground">Last used</dt>
+                  <dd>{formatDateTime(application.last_used_at)}</dd>
+                </div>
+                <div>
+                  <dt class="text-muted-foreground">Expires</dt>
+                  <dd>
+                    <time datetime={application.expires_at}>
+                      {formatDateTime(application.expires_at)}
+                    </time>
+                  </dd>
+                </div>
+              </dl>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={revokingClientId !== null}
+              onclick={() => void revokeAuthorization(application)}
+            >
+              {revokingClientId === application.client_id
+                ? "Revoking…"
+                : "Revoke"}
+            </Button>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </section>
 
   <Dialog.Root bind:open={apiTokenDialogOpen}>
     <Dialog.Content

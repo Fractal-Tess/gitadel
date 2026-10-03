@@ -942,6 +942,7 @@ impl IdentityState {
             .filter(oauth_access_token::Column::RevokedAt.is_null())
             .one(&self.database)
             .await?
+            .filter(|token| token.expires_at > now)
             .ok_or_else(ApiError::unauthorized)?;
         if stored.scopes & required_scope != required_scope {
             return Err(ApiError::forbidden(
@@ -1410,6 +1411,11 @@ pub fn router() -> Router<IdentityState> {
         .route(
             "/me/oauth-applications/{id}",
             delete(oauth::delete_application),
+        )
+        .route("/me/authorizations", get(oauth::list_authorizations))
+        .route(
+            "/me/authorizations/{client_id}",
+            delete(oauth::revoke_authorization),
         )
         .route(
             "/organizations",

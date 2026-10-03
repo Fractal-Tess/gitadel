@@ -75,6 +75,7 @@ mod m20260930_000075_user_commit_identities;
 mod m20261002_000076_webhook_delivery_retries;
 mod m20261002_000077_audit_event_action_index;
 mod m20261003_000078_commit_email_verification;
+mod m20261003_000079_oauth_access_token_expiry;
 mod m20261003_000081_repository_cache_kinds;
 
 #[cfg(test)]
@@ -164,6 +165,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261002_000076_webhook_delivery_retries::Migration),
             Box::new(m20261002_000077_audit_event_action_index::Migration),
             Box::new(m20261003_000078_commit_email_verification::Migration),
+            Box::new(m20261003_000079_oauth_access_token_expiry::Migration),
             Box::new(m20261003_000081_repository_cache_kinds::Migration),
         ]
     }

@@ -34,7 +34,10 @@ use uuid::Uuid;
 use super::{Permission, RepositoryState, browser::read_git};
 use crate::{
     actions::ActionsState,
-    entity::{repository, repository_webhook, repository_webhook_delivery, session, user},
+    entity::{
+        oauth_access_token, repository, repository_webhook, repository_webhook_delivery, session,
+        user,
+    },
     identity::{ApiError, SCOPE_READ, SCOPE_WRITE},
     network::pinned_public_http_client,
     secrets::{SecretCipher, SecretKind},
@@ -852,9 +855,10 @@ pub(super) async fn process_pending_deliveries(state: &RepositoryState) -> Resul
     Ok(())
 }
 
-/// Remove expired browser sessions at most once per [`SESSION_SWEEP_INTERVAL_SECONDS`].
+/// Remove expired browser sessions and OAuth access tokens at most once per
+/// [`SESSION_SWEEP_INTERVAL_SECONDS`].
 ///
-/// Sessions have no worker of their own. The outbox is drained from the
+/// Neither has a worker of its own. The outbox is drained from the
 /// repository scheduler every thirty seconds, which makes it the nearest
 /// periodic tick; a failure is logged and never holds up deliveries.
 async fn sweep_expired_sessions(database: &DatabaseConnection) {
@@ -871,6 +875,11 @@ async fn sweep_expired_sessions(database: &DatabaseConnection) {
         Ok(0) => {}
         Ok(removed) => tracing::debug!(removed, "removed expired sessions"),
         Err(error) => tracing::warn!(%error, "could not remove expired sessions"),
+    }
+    match oauth_access_token::delete_expired(database, now).await {
+        Ok(0) => {}
+        Ok(removed) => tracing::debug!(removed, "removed expired OAuth access tokens"),
+        Err(error) => tracing::warn!(%error, "could not remove expired OAuth access tokens"),
     }
 }
 
