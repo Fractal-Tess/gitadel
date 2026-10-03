@@ -328,3 +328,78 @@ pub(super) fn validate_key(key: &str) -> Result<()> {
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{bucket, validate_key, validate_managed_key};
+    use crate::config::S3Settings;
+
+    fn settings(prefix: &str) -> S3Settings {
+        S3Settings {
+            endpoint: url::Url::parse("https://s3.example.test/").unwrap(),
+            bucket: "backups".to_owned(),
+            access_key: "access".to_owned(),
+            secret_key: "secret".to_owned(),
+            region: "eu-central-1".to_owned(),
+            prefix: prefix.to_owned(),
+        }
+    }
+
+    #[test]
+    fn keys_must_be_relative_object_names() {
+        for key in [
+            "backups/a.tar.zst",
+            "a",
+            "nested/deeper/b.tar.zst",
+            "spaces ok.tar.zst",
+        ] {
+            assert!(validate_key(key).is_ok(), "{key:?}");
+        }
+        for key in [
+            "",
+            "/absolute",
+            "trailing/",
+            "back\\slash",
+            "new\nline",
+            "tab\t",
+        ] {
+            assert!(validate_key(key).is_err(), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn managed_keys_stay_inside_the_prefix_and_look_like_archives() {
+        let prefixed = settings("gitadel/backups");
+        validate_managed_key(&prefixed, "gitadel/backups/2026-01-01.tar.zst").unwrap();
+        for key in [
+            // Outside the prefix, including a lookalike directory.
+            "2026-01-01.tar.zst",
+            "gitadel/backups-other/2026-01-01.tar.zst",
+            "other/gitadel/backups/2026-01-01.tar.zst",
+            // Inside the prefix but not an archive this code produces.
+            "gitadel/backups/2026-01-01.tar",
+            "gitadel/backups/notes.txt",
+            "gitadel/backups/",
+            "/gitadel/backups/2026-01-01.tar.zst",
+        ] {
+            assert!(validate_managed_key(&prefixed, key).is_err(), "{key:?}");
+        }
+
+        // Without a prefix any relative archive key in the bucket is managed.
+        let unprefixed = settings("");
+        validate_managed_key(&unprefixed, "2026-01-01.tar.zst").unwrap();
+        validate_managed_key(&unprefixed, "anywhere/2026-01-01.tar.zst").unwrap();
+        assert!(validate_managed_key(&unprefixed, "2026-01-01.zip").is_err());
+    }
+
+    #[test]
+    fn buckets_use_path_style_addressing_at_the_configured_endpoint() {
+        let bucket = bucket(&settings("backups")).unwrap();
+        assert_eq!(bucket.name(), "backups");
+        assert_eq!(bucket.region().to_string(), "eu-central-1");
+        assert!(bucket.is_path_style());
+        // A trailing slash on the endpoint must not produce a double slash.
+        assert_eq!(bucket.host(), "s3.example.test");
+        assert_eq!(bucket.url(), "https://s3.example.test/backups");
+    }
+}
