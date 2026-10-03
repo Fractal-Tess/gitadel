@@ -17,6 +17,10 @@
   import { repositorySchema } from "$lib/api/repositories.js";
   import type { Repository } from "$lib/api/repositories.js";
   import { errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
+  import {
+    searchRepositories,
+    serverSearchThreshold,
+  } from "$lib/navigation-cache.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
@@ -42,6 +46,13 @@
   /** The pins as the server last accepted them. */
   let saved: string[] = [];
   let loadError = $state<string | null>(null);
+  /**
+   * A namespace with many repositories is searched by the server; `null`
+   * while no search is typed or the namespace is small enough to filter here.
+   */
+  let serverMatches = $state.raw<Repository[] | null>(null);
+  let searching = $state(false);
+  const serverSearch = $derived(repositories.length > serverSearchThreshold);
 
   const byId = $derived(
     new Map(repositories.map((repository) => [repository.id, repository])),
@@ -52,14 +63,47 @@
       return repository ? [repository] : [];
     }),
   );
-  const available = $derived(
-    repositories.filter(
+  const available = $derived.by(() => {
+    const needle = query.trim().toLowerCase();
+    if (serverSearch && needle) {
+      return (serverMatches ?? []).filter(
+        (repository) => !selected.includes(repository.id),
+      );
+    }
+    return repositories.filter(
       (repository) =>
         !selected.includes(repository.id) &&
-        repository.name.toLowerCase().includes(query.trim().toLowerCase()),
-    ),
-  );
+        repository.name.toLowerCase().includes(needle),
+    );
+  });
   const full = $derived(selected.length >= limit);
+
+  $effect(() => {
+    const needle = query.trim();
+    if (!serverSearch || !needle) {
+      serverMatches = null;
+      searching = false;
+      return;
+    }
+    searching = true;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      searchRepositories(needle, namespace).then(
+        (found) => {
+          if (cancelled) return;
+          serverMatches = found;
+          searching = false;
+        },
+        () => {
+          if (!cancelled) searching = false;
+        },
+      );
+    }, 150);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  });
 
   // Each time the dialog opens, start from what is pinned now.
   $effect(() => {
@@ -73,12 +117,11 @@
     loadError = null;
     loading = true;
     let cancelled = false;
-    requestJson("/api/v1/repositories", z.array(repositorySchema)).then(
+    const own = new URLSearchParams({ namespace });
+    requestJson(`/api/v1/repositories?${own}`, z.array(repositorySchema)).then(
       (all) => {
         if (cancelled) return;
-        repositories = all.filter(
-          (repository) => repository.namespace === namespace,
-        );
+        repositories = all;
         loading = false;
       },
       (caught) => {
@@ -211,7 +254,7 @@
           }}
         />
         <div class="max-h-56 overflow-y-auto rounded-lg border">
-          {#if loading}
+          {#if loading || (searching && serverMatches === null)}
             <p class="p-3 text-sm text-muted-foreground">Loading…</p>
           {:else if loadError}
             <p class="p-3 text-sm text-destructive">{loadError}</p>

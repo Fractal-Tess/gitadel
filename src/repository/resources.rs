@@ -14,13 +14,13 @@ use crate::{
 };
 use axum::{
     Json,
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::IntoResponse,
 };
 use axum_extra::extract::cookie::CookieJar;
 use chrono::Utc;
-use sea_orm::sea_query::OnConflict;
+use sea_orm::sea_query::{Condition, Expr, LikeExpr, OnConflict};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, IntoActiveModel,
     QueryFilter, QueryOrder, Set, Statement, TransactionTrait,
@@ -93,12 +93,72 @@ impl RepositoryResponse {
     }
 }
 
+/// Longest search string applied to a repository list; the rest is ignored.
+const MAX_REPOSITORY_QUERY_CHARS: usize = 100;
+
+/// Narrows a repository list in SQL, beside the visibility predicate.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct RepositoryFilter {
+    /// Case-insensitive substring of the namespace, name, description, or
+    /// `namespace/name` path.
+    pub(super) q: Option<String>,
+    /// Exactly this namespace.
+    pub(super) namespace: Option<String>,
+}
+
+impl RepositoryFilter {
+    fn query(&self) -> Option<String> {
+        let query = self.q.as_deref()?.trim();
+        (!query.is_empty()).then(|| query.chars().take(MAX_REPOSITORY_QUERY_CHARS).collect())
+    }
+
+    fn condition(&self) -> Condition {
+        // Scoped: the trait also adds `max`/`min` to every integer.
+        use sea_orm::sea_query::ExprTrait as _;
+
+        let mut condition = Condition::all();
+        if let Some(namespace) = &self.namespace {
+            condition = condition.add(repository::Column::Namespace.eq(namespace));
+        }
+        if let Some(query) = self.query() {
+            let namespace = || Expr::col(repository::Column::Namespace);
+            let name = || Expr::col(repository::Column::Name);
+            let mut any = Condition::any()
+                .add(namespace().like(like_anywhere(&query)))
+                .add(name().like(like_anywhere(&query)))
+                .add(Expr::col(repository::Column::Description).like(like_anywhere(&query)));
+            if query.contains('/') {
+                let path = Expr::cust_with_exprs("? || '/' || ?", [namespace(), name()]);
+                any = any.add(path.like(like_anywhere(&query)));
+            }
+            condition = condition.add(any);
+        }
+        condition
+    }
+}
+
+/// `LIKE '%query%'` with the query's own wildcards taken literally. SQLite's
+/// `LIKE` ignores ASCII case, which is the case-insensitivity on offer.
+fn like_anywhere(query: &str) -> LikeExpr {
+    let mut pattern = String::with_capacity(query.len() + 2);
+    pattern.push('%');
+    for character in query.chars() {
+        if matches!(character, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push('%');
+    LikeExpr::new(pattern).escape('\\')
+}
+
 pub async fn list_repositories(
     State(state): State<RepositoryState>,
     headers: HeaderMap,
     jar: CookieJar,
+    Query(filter): Query<RepositoryFilter>,
 ) -> Result<Json<Vec<RepositoryResponse>>, ApiError> {
-    let accessible = accessible_repositories(&state, &headers, &jar).await?;
+    let accessible = accessible_repositories_matching(&state, &headers, &jar, &filter).await?;
     let repository_ids = accessible
         .repositories
         .iter()
@@ -159,6 +219,17 @@ pub(super) async fn accessible_repositories(
     headers: &HeaderMap,
     jar: &CookieJar,
 ) -> Result<AccessibleRepositories, ApiError> {
+    accessible_repositories_matching(state, headers, jar, &RepositoryFilter::default()).await
+}
+
+/// The repositories the caller may read that also match `filter`, newest
+/// first. The filter runs in the same query as the visibility predicate.
+pub(super) async fn accessible_repositories_matching(
+    state: &RepositoryState,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+    filter: &RepositoryFilter,
+) -> Result<AccessibleRepositories, ApiError> {
     let user_id = state
         .identity()
         .optional_user(headers, jar, SCOPE_READ)
@@ -179,6 +250,7 @@ pub(super) async fn accessible_repositories(
         let repositories = repository::Entity::find()
             .filter(repository::Column::DeletedAt.is_null())
             .filter(repository::Column::Visibility.eq("public"))
+            .filter(filter.condition())
             .order_by_desc(repository::Column::UpdatedAt)
             .all(database)
             .await?;
@@ -202,6 +274,7 @@ pub(super) async fn accessible_repositories(
         .all(database);
     let repositories = repository::Entity::find()
         .filter(repository::Column::DeletedAt.is_null())
+        .filter(filter.condition())
         .order_by_desc(repository::Column::UpdatedAt)
         .all(database);
     let (favorites, namespaces, memberships, collaborators, repositories) = tokio::try_join!(
@@ -1875,7 +1948,73 @@ mod tests {
     use sley::Repository as SleyRepository;
     use uuid::Uuid;
 
-    use super::{PageWindow, select_default_branch};
+    use super::{
+        PageWindow, RepositoryFilter, accessible_repositories_matching, select_default_branch,
+    };
+
+    #[tokio::test]
+    async fn repository_lists_are_filtered_in_sql_by_query_and_namespace() {
+        use axum::http::HeaderMap;
+        use axum_extra::extract::cookie::CookieJar;
+        use sea_orm::{ActiveModelTrait as _, IntoActiveModel as _, Set};
+
+        let instance = super::test_support::instance().await;
+        instance.repository("widgets").await;
+        let mut gadgets = instance.repository("gadgets").await.into_active_model();
+        gadgets.description = Set(Some("A Widget factory".to_owned()));
+        gadgets.update(&instance.database).await.unwrap();
+        instance.repository("plain_tools").await;
+        let names = |filter: RepositoryFilter| {
+            let state = &instance.state;
+            async move {
+                let mut names = accessible_repositories_matching(
+                    state,
+                    &HeaderMap::new(),
+                    &CookieJar::new(),
+                    &filter,
+                )
+                .await
+                .unwrap()
+                .repositories
+                .into_iter()
+                .map(|repository| repository.name)
+                .collect::<Vec<_>>();
+                names.sort();
+                names
+            }
+        };
+        let query = |q: &str| RepositoryFilter {
+            q: Some(q.to_owned()),
+            namespace: None,
+        };
+
+        assert_eq!(names(RepositoryFilter::default()).await.len(), 3);
+        // Case-insensitive, over name and description alike.
+        assert_eq!(names(query("WIDGET")).await, ["gadgets", "widgets"]);
+        // A path matches namespace/name together.
+        assert_eq!(names(query("alice/wid")).await, ["widgets"]);
+        // Whitespace is trimmed; wildcards are literal.
+        assert_eq!(names(query("  gadg ")).await, ["gadgets"]);
+        assert_eq!(names(query("plain_tools")).await, ["plain_tools"]);
+        assert!(names(query("%")).await.is_empty());
+        assert!(names(query("plain%tools")).await.is_empty());
+        assert_eq!(
+            names(RepositoryFilter {
+                q: Some("tools".to_owned()),
+                namespace: Some("alice".to_owned()),
+            })
+            .await,
+            ["plain_tools"]
+        );
+        assert!(
+            names(RepositoryFilter {
+                q: None,
+                namespace: Some("bob".to_owned()),
+            })
+            .await
+            .is_empty()
+        );
+    }
 
     #[test]
     fn page_window_defaults_and_clamps() {

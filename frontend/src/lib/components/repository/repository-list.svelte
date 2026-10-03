@@ -25,6 +25,7 @@
     invalidateExplore,
     peekExplore,
     refreshExplore,
+    serverSearchThreshold,
   } from "$lib/navigation-cache.js";
   import { languageColor } from "$lib/repository/language-colors.js";
   import {
@@ -87,6 +88,19 @@
 
   const explore = $derived(!namespace && filter === "all");
 
+  // Past the threshold the server narrows a search instead of every page
+  // being fetched and filtered here. Latched: swapping the pages for a server
+  // search empties the list, which must not flip the decision back.
+  let largeInstance = $state(false);
+  $effect(() => {
+    if (repositories.length > serverSearchThreshold) largeInstance = true;
+  });
+  const serverQuery = $derived(
+    largeInstance && search.trim() ? search.trim() : null,
+  );
+  /** The query the loaded pages were fetched with. */
+  let appliedQuery: string | null = null;
+
   let visibleRepositories = $derived.by(() => {
     const query = search.trim().toLowerCase();
     let filtered =
@@ -132,6 +146,7 @@
           repositoryPageSize,
           scope,
           namespace,
+          appliedQuery,
         );
         const loadedIds = new Set(
           repositories.map((repository) => repository.id),
@@ -156,8 +171,9 @@
     return activeLoadMore;
   }
 
+  // Stops once the instance proves large: the server takes over the search.
   async function loadAllRepositories() {
-    while (hasNextPage) {
+    while (hasNextPage && !largeInstance) {
       if (!(await loadMoreRepositories())) break;
     }
   }
@@ -172,6 +188,7 @@
         repositoryPageSize,
         scope,
         namespace,
+        appliedQuery,
       );
       repositories = overview.repositories;
       nextPage = overview.page + 1;
@@ -181,8 +198,41 @@
       loadMoreError = errorMessage(caught, "Could not load repositories.");
     } finally {
       refreshingFirstPage = false;
-      if (search.trim() || filter === "favorites") {
+      if ((search.trim() || filter === "favorites") && !serverQuery) {
         void loadAllRepositories();
+      }
+    }
+  }
+
+  /**
+   * Swaps the loaded pages for ones the server narrowed to `query`, or for
+   * the plain listing again when the search is cleared.
+   */
+  async function reloadWithQuery(query: string | null) {
+    refreshingFirstPage = true;
+    loadMoreError = null;
+    loadingMore = true;
+    try {
+      const overview = await refreshExplore(
+        1,
+        repositoryPageSize,
+        scope,
+        namespace,
+        query,
+      );
+      if (appliedQuery !== query) return;
+      repositories = overview.repositories;
+      nextPage = overview.page + 1;
+      hasNextPage = overview.has_next;
+      error = null;
+    } catch (caught) {
+      if (appliedQuery === query) {
+        loadMoreError = errorMessage(caught, "Could not load repositories.");
+      }
+    } finally {
+      if (appliedQuery === query) {
+        refreshingFirstPage = false;
+        loadingMore = false;
       }
     }
   }
@@ -266,11 +316,19 @@
   }
 
   // Filtering happens client-side, so a narrowed view needs every page loaded
-  // before it can claim to be complete.
+  // before it can claim to be complete; on a large instance the server
+  // narrows instead.
   $effect(() => {
-    if (loading) return;
+    if (loading || serverQuery) return;
     if (!search.trim() && filter !== "favorites") return;
     void loadAllRepositories();
+  });
+
+  $effect(() => {
+    const query = serverQuery;
+    if (loading || query === appliedQuery) return;
+    appliedQuery = query;
+    void reloadWithQuery(query);
   });
 
   onMount(() => {
@@ -294,7 +352,7 @@
         refreshingFirstPage = false;
         const shouldLoadMore = loadMoreQueued;
         loadMoreQueued = false;
-        if (search.trim() || filter === "favorites") {
+        if ((search.trim() || filter === "favorites") && !serverQuery) {
           void loadAllRepositories();
         } else if (shouldLoadMore) {
           void loadMoreRepositories();

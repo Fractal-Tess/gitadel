@@ -71,16 +71,25 @@ const exploreCache = new Map<
   CacheEntry<Awaited<ReturnType<typeof fetchExplore>>>
 >();
 
+/**
+ * Above this many accessible repositories a search is narrowed by the server
+ * (`?q=`) instead of every repository being fetched and filtered here. Below
+ * it the full index stays loaded, which keeps filtering instant.
+ */
+export const serverSearchThreshold = 200;
+
 function fetchExplore(
   page: number,
   perPage: number,
   namespace?: string | null,
+  q?: string | null,
 ) {
   const query = new URLSearchParams({
     page: String(page),
     per_page: String(perPage),
   });
   if (namespace) query.set("namespace", namespace);
+  if (q) query.set("q", q);
   return requestJson(
     `/api/v1/repositories/overview?${query}`,
     repositoryOverviewSchema,
@@ -92,8 +101,9 @@ function exploreKey(
   perPage: number,
   scope: AuthorizationCacheScope,
   namespace?: string | null,
+  q?: string | null,
 ) {
-  return scopedKey(scope, `${namespace ?? "*"}:${page}:${perPage}`);
+  return scopedKey(scope, `${namespace ?? "*"}:${page}:${perPage}:${q ?? ""}`);
 }
 
 const exploreRefreshes = new Map<string, ReturnType<typeof fetchExplore>>();
@@ -103,12 +113,13 @@ export function refreshExplore(
   perPage: number,
   scope: AuthorizationCacheScope,
   namespace?: string | null,
+  q?: string | null,
 ) {
-  const key = exploreKey(page, perPage, scope, namespace);
+  const key = exploreKey(page, perPage, scope, namespace, q);
   const active = exploreRefreshes.get(key);
   if (active) return active;
 
-  const refresh = fetchExplore(page, perPage, namespace).then((value) => {
+  const refresh = fetchExplore(page, perPage, namespace, q).then((value) => {
     if (exploreRefreshes.get(key) !== refresh) return value;
     exploreCache.delete(key);
     pruneCache(exploreCache);
@@ -136,8 +147,20 @@ export function peekExplore(
   perPage: number,
   scope: AuthorizationCacheScope,
   namespace?: string | null,
+  q?: string | null,
 ) {
-  return peek(exploreCache, exploreKey(page, perPage, scope, namespace));
+  return peek(exploreCache, exploreKey(page, perPage, scope, namespace, q));
+}
+
+/**
+ * Repositories whose namespace, name, description or path contains `q`,
+ * matched by the server. Not cached: callers debounce keystrokes and the
+ * answer changes with every character.
+ */
+export function searchRepositories(q: string, namespace?: string | null) {
+  const query = new URLSearchParams({ q });
+  if (namespace) query.set("namespace", namespace);
+  return requestJson(`/api/v1/repositories?${query}`, z.array(repositorySchema));
 }
 
 export function preloadExplore(

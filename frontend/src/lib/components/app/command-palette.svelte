@@ -27,6 +27,8 @@
   import {
     loadRepositoryIndex,
     peekRepositoryIndex,
+    searchRepositories,
+    serverSearchThreshold,
   } from "$lib/navigation-cache.js";
   import {
     cancelRepositoryPreload,
@@ -58,6 +60,13 @@
   let query = $state("");
   let selected = $state("");
   let loading = $state(false);
+  /**
+   * On a large instance the server narrows the candidates for the typed
+   * query; the ranking below then runs over what it returned instead of the
+   * whole index. `null` while no server search applies.
+   */
+  let serverMatches = $state.raw<Repository[] | null>(null);
+  const serverSearch = $derived(repositories.length > serverSearchThreshold);
 
   type IndexedRepository = {
     repository: Repository;
@@ -70,7 +79,7 @@
   };
 
   const indexedRepositories = $derived(
-    repositories.map((repository) => {
+    (serverMatches ?? repositories).map((repository) => {
       const path = `${repository.namespace}/${repository.name}`;
       return {
         repository,
@@ -122,6 +131,36 @@
   });
 
   const parsedQuery = $derived(parseSearchQuery(query));
+
+  // The server matches one substring, so it is sent the longest term, which
+  // narrows the most; every term still has to match in the ranking below.
+  $effect(() => {
+    const term =
+      serverSearch && shell.paletteOpen
+        ? parsedQuery.terms.reduce(
+            (longest, candidate) =>
+              candidate.length > longest.length ? candidate : longest,
+            "",
+          )
+        : "";
+    if (!term) {
+      serverMatches = null;
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      searchRepositories(term).then(
+        (found) => {
+          if (!cancelled) serverMatches = found;
+        },
+        () => undefined,
+      );
+    }, 150);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  });
 
   const results = $derived.by(() => {
     const { needle, topics } = parsedQuery;

@@ -32,7 +32,7 @@ use super::{
         BrowseQuery, count_reachable_commits, default_page, read_git, readable_repository,
         signature_response,
     },
-    resources::{self, accessible_repositories},
+    resources,
     signature::{SshCommitSignature, verify_ssh_commit_signature},
 };
 use crate::{
@@ -51,6 +51,7 @@ pub struct OverviewQuery {
     page: usize,
     #[serde(default = "default_overview_per_page")]
     per_page: usize,
+    q: Option<String>,
     namespace: Option<String>,
 }
 
@@ -330,19 +331,18 @@ pub async fn overview(
     jar: CookieJar,
     Query(query): Query<OverviewQuery>,
 ) -> Result<Json<RepositoryOverviewResponse>, ApiError> {
-    let accessible = accessible_repositories(&state, &headers, &jar).await?;
+    let filter = resources::RepositoryFilter {
+        q: query.q,
+        namespace: query.namespace,
+    };
+    let accessible =
+        resources::accessible_repositories_matching(&state, &headers, &jar, &filter).await?;
     let page = query.page.max(1);
     let per_page = query.per_page.clamp(1, MAX_OVERVIEW_PER_PAGE);
     let offset = (page - 1).saturating_mul(per_page);
     let mut page_repositories = accessible
         .repositories
         .into_iter()
-        .filter(|repository| {
-            query
-                .namespace
-                .as_deref()
-                .is_none_or(|namespace| repository.namespace == namespace)
-        })
         .skip(offset)
         .take(per_page + 1)
         .collect::<Vec<_>>();
