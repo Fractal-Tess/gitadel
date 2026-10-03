@@ -1045,4 +1045,281 @@ mod tests {
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].token_hash, hash_secret(&live));
     }
+
+    mod flow {
+        use axum::{
+            body::Body,
+            http::{Request, header},
+        };
+
+        use super::*;
+        use crate::identity::test_support::json_body;
+
+        const REDIRECT_URI: &str = "https://client.test/callback";
+
+        fn query(location: &str, name: &str) -> Option<String> {
+            let url = Url::parse(location)
+                .or_else(|_| Url::parse("https://gitadel.test").unwrap().join(location))
+                .unwrap();
+            url.query_pairs()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.into_owned())
+        }
+
+        fn location(response: &axum::response::Response) -> String {
+            assert!(
+                response.status().is_redirection(),
+                "expected a redirect, got {}",
+                response.status()
+            );
+            response
+                .headers()
+                .get(header::LOCATION)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned()
+        }
+
+        async fn form(
+            harness: &Harness,
+            uri: &str,
+            cookie: Option<&str>,
+            fields: &[(&str, &str)],
+        ) -> axum::response::Response {
+            let body = url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs(fields)
+                .finish();
+            let mut builder = Request::builder()
+                .method(Method::POST)
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+            if let Some(cookie) = cookie {
+                builder = builder.header(header::COOKIE, cookie);
+            }
+            harness.send(builder.body(Body::from(body)).unwrap()).await
+        }
+
+        /// Runs the browser half of the flow and returns the authorization
+        /// code the client receives.
+        async fn authorize(
+            harness: &Harness,
+            cookie: &str,
+            application: &oauth_application::Model,
+        ) -> String {
+            let uri = format!(
+                "/login/oauth/authorize?client_id={}&redirect_uri={}&response_type=code&scope=read:repository&state=xyz",
+                application.client_id,
+                urlencoding(REDIRECT_URI)
+            );
+            let response = harness
+                .send(
+                    Request::builder()
+                        .uri(&uri)
+                        .header(header::COOKIE, cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await;
+            let consent = location(&response);
+            assert!(consent.starts_with("/oauth/consent?"), "{consent}");
+            let consent_token = query(&consent, "consent_token").unwrap();
+            assert_eq!(query(&consent, "scope").as_deref(), Some("read:repository"));
+
+            let response = form(
+                harness,
+                "/login/oauth/authorize",
+                Some(cookie),
+                &[("consent_token", &consent_token), ("decision", "allow")],
+            )
+            .await;
+            let callback = location(&response);
+            assert!(callback.starts_with(REDIRECT_URI), "{callback}");
+            assert_eq!(query(&callback, "state").as_deref(), Some("xyz"));
+            query(&callback, "code").expect("the callback carries a code")
+        }
+
+        fn urlencoding(value: &str) -> String {
+            url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+        }
+
+        async fn exchange(
+            harness: &Harness,
+            application: &oauth_application::Model,
+            client_secret: &str,
+            code: &str,
+            redirect_uri: &str,
+        ) -> (StatusCode, Value) {
+            let response = form(
+                harness,
+                "/login/oauth/access_token",
+                None,
+                &[
+                    ("grant_type", "authorization_code"),
+                    ("client_id", &application.client_id),
+                    ("client_secret", client_secret),
+                    ("code", code),
+                    ("redirect_uri", redirect_uri),
+                ],
+            )
+            .await;
+            let status = response.status();
+            (status, json_body(response).await)
+        }
+
+        #[tokio::test]
+        async fn code_flow_issues_a_token_that_works_until_revoked() {
+            let harness = Harness::new().await;
+            let alice = harness.user("alice").await;
+            let cookie = harness.login(&alice).await;
+            let (application, client_secret) =
+                application(&harness, &alice, "Deploy", REDIRECT_URI).await;
+
+            // Signed-out browsers are sent to log in first.
+            let response = harness
+                .send(
+                    Request::builder()
+                        .uri(format!(
+                            "/login/oauth/authorize?client_id={}&redirect_uri={}&response_type=code",
+                            application.client_id,
+                            urlencoding(REDIRECT_URI)
+                        ))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await;
+            assert!(location(&response).starts_with("/login?returnTo="));
+
+            let code = authorize(&harness, &cookie, &application).await;
+            let (status, body) =
+                exchange(&harness, &application, &client_secret, &code, REDIRECT_URI).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["token_type"], "Bearer");
+            assert_eq!(body["scope"], "read:repository");
+            assert_eq!(body["expires_in"], ACCESS_TOKEN_LIFETIME.num_seconds());
+            let token = body["access_token"].as_str().unwrap().to_owned();
+            assert!(token.starts_with("gto_"));
+
+            let authenticated = harness
+                .state
+                .authenticate_token(&token, SCOPE_REPOSITORY_READ)
+                .await
+                .unwrap();
+            assert_eq!(authenticated.user.id, alice.id);
+            assert!(
+                harness
+                    .state
+                    .authenticate_token(&token, SCOPE_WRITE)
+                    .await
+                    .is_err(),
+                "the token carries only the granted scope"
+            );
+
+            // The code was consumed by the exchange.
+            let (status, body) =
+                exchange(&harness, &application, &client_secret, &code, REDIRECT_URI).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["error"], "invalid_grant");
+
+            // The authorization is listed and can be revoked.
+            let (_, body) = harness
+                .request(
+                    Method::GET,
+                    "/api/v1/me/authorizations",
+                    Some(&cookie),
+                    None,
+                )
+                .await;
+            assert_eq!(
+                body[0]["client_id"],
+                Value::String(application.client_id.clone())
+            );
+            let (status, _) = harness
+                .request(
+                    Method::DELETE,
+                    &format!("/api/v1/me/authorizations/{}", application.client_id),
+                    Some(&cookie),
+                    None,
+                )
+                .await;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            assert!(
+                harness
+                    .state
+                    .authenticate_token(&token, SCOPE_REPOSITORY_READ)
+                    .await
+                    .is_err()
+            );
+        }
+
+        #[tokio::test]
+        async fn a_code_is_bound_to_its_redirect_uri_and_client() {
+            let harness = Harness::new().await;
+            let alice = harness.user("alice").await;
+            let cookie = harness.login(&alice).await;
+            let (application, client_secret) =
+                application(&harness, &alice, "Deploy", REDIRECT_URI).await;
+
+            let code = authorize(&harness, &cookie, &application).await;
+            let (status, body) = exchange(
+                &harness,
+                &application,
+                &client_secret,
+                &code,
+                "https://client.test/other",
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(body["error"], "invalid_grant");
+            // A mismatch burns the code; the right URI no longer redeems it.
+            let (status, _) =
+                exchange(&harness, &application, &client_secret, &code, REDIRECT_URI).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+
+            let code = authorize(&harness, &cookie, &application).await;
+            let (status, body) =
+                exchange(&harness, &application, "gcs_wrong", &code, REDIRECT_URI).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+            assert_eq!(body["error"], "invalid_client");
+            let (other, other_secret) =
+                super::application(&harness, &alice, "Other", REDIRECT_URI).await;
+            let (status, body) =
+                exchange(&harness, &other, &other_secret, &code, REDIRECT_URI).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(body["error"], "invalid_grant");
+
+            // Authorization requests with an unregistered redirect URI stop
+            // before any redirect happens.
+            let response = harness
+                .send(
+                    Request::builder()
+                        .uri(format!(
+                            "/login/oauth/authorize?client_id={}&redirect_uri={}&response_type=code",
+                            application.client_id,
+                            urlencoding("https://evil.test/callback")
+                        ))
+                        .header(header::COOKIE, &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(json_body(response).await["error"], "invalid_request");
+
+            let response = form(
+                &harness,
+                "/login/oauth/access_token",
+                None,
+                &[
+                    ("grant_type", "refresh_token"),
+                    ("client_id", &application.client_id),
+                    ("client_secret", &client_secret),
+                    ("refresh_token", "none"),
+                ],
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(json_body(response).await["error"], "unsupported_grant_type");
+        }
+    }
 }

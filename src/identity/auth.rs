@@ -1300,4 +1300,262 @@ mod tests {
                 .is_err()
         );
     }
+
+    mod handlers {
+        use axum::http::{Method, StatusCode, header};
+        use sea_orm::{ActiveModelTrait, IntoActiveModel, Set};
+        use serde_json::{Value, json};
+
+        use super::super::*;
+        use crate::{
+            entity::api_token,
+            identity::{
+                SCOPE_READ, SCOPE_WRITE, SESSION_COOKIE,
+                test_support::{Harness, PASSWORD},
+            },
+        };
+
+        async fn login(harness: &Harness, username: &str, password: &str) -> (StatusCode, Value) {
+            harness
+                .request(
+                    Method::POST,
+                    "/api/v1/auth/login",
+                    None,
+                    Some(json!({ "username": username, "password": password })),
+                )
+                .await
+        }
+
+        #[tokio::test]
+        async fn login_accepts_the_password_and_refuses_everything_else() {
+            let harness = Harness::new().await;
+            let alice = harness.user("alice").await;
+
+            let request = axum::http::Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/auth/login")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "username": "Alice", "password": PASSWORD }).to_string(),
+                ))
+                .unwrap();
+            let response = harness.send(request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let cookie = response
+                .headers()
+                .get(header::SET_COOKIE)
+                .expect("a session cookie is set")
+                .to_str()
+                .unwrap()
+                .to_owned();
+            assert!(cookie.starts_with(&format!("{SESSION_COOKIE}=")));
+            assert!(cookie.contains("HttpOnly"));
+            let body = crate::identity::test_support::json_body(response).await;
+            assert_eq!(body["user"]["username"], "alice");
+
+            // The cookie signs the user in.
+            let session = cookie.split(';').next().unwrap().to_owned();
+            let (status, body) = harness
+                .request(
+                    Method::GET,
+                    "/api/v1/me/commit-identity",
+                    Some(&session),
+                    None,
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+
+            let (status, body) = login(&harness, "alice", "not the password").await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            assert_eq!(body["error"]["code"], "invalid_credentials");
+            let (status, body) = login(&harness, "nobody", PASSWORD).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "unknown users look the same"
+            );
+            assert_eq!(body["error"]["code"], "invalid_credentials");
+            let (status, _) = login(&harness, "not a slug!", PASSWORD).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+
+            let mut disabled = alice.into_active_model();
+            disabled.disabled_at = Set(Some(Utc::now()));
+            disabled.update(&harness.database).await.unwrap();
+            let (status, _) = login(&harness, "alice", PASSWORD).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "disabled accounts cannot sign in"
+            );
+        }
+
+        #[tokio::test]
+        async fn repeated_failures_lock_the_account_even_for_the_right_password() {
+            let harness = Harness::new().await;
+            harness.user("alice").await;
+            harness.user("bob").await;
+            for _ in 0..8 {
+                let (status, _) = login(&harness, "alice", "wrong password").await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED);
+            }
+            let (status, body) = login(&harness, "alice", PASSWORD).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+            assert_eq!(body["error"]["code"], "rate_limited");
+            // The lock is per account, not per instance.
+            let (status, _) = login(&harness, "bob", PASSWORD).await;
+            assert_eq!(status, StatusCode::OK);
+        }
+
+        #[tokio::test]
+        async fn changing_the_password_keeps_this_session_and_ends_the_others() {
+            let harness = Harness::new().await;
+            let alice = harness.user("alice").await;
+            let current = harness.login(&alice).await;
+            let other = harness.login(&alice).await;
+            let new_password = "a different long password";
+
+            let (status, body) = harness
+                .request(
+                    Method::PUT,
+                    "/api/v1/me/password",
+                    Some(&current),
+                    Some(json!({ "current_password": "wrong", "new_password": new_password })),
+                )
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            let (status, body) = harness
+                .request(
+                    Method::PUT,
+                    "/api/v1/me/password",
+                    Some(&current),
+                    Some(json!({ "current_password": PASSWORD, "new_password": "short" })),
+                )
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+            let (status, body) = harness
+                .request(
+                    Method::PUT,
+                    "/api/v1/me/password",
+                    Some(&current),
+                    Some(json!({ "current_password": PASSWORD, "new_password": new_password })),
+                )
+                .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+            let (status, _) = harness
+                .request(
+                    Method::GET,
+                    "/api/v1/me/commit-identity",
+                    Some(&current),
+                    None,
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "the session that changed it stays");
+            let (status, _) = harness
+                .request(
+                    Method::GET,
+                    "/api/v1/me/commit-identity",
+                    Some(&other),
+                    None,
+                )
+                .await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "other sessions are signed out"
+            );
+            let (status, _) = login(&harness, "alice", PASSWORD).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            let (status, _) = login(&harness, "alice", new_password).await;
+            assert_eq!(status, StatusCode::OK);
+
+            // API tokens cannot change credentials.
+            let raw = "gat_test_token";
+            api_token::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                user_id: Set(alice.id),
+                name: Set("script".to_owned()),
+                token_hash: Set(hash_secret(raw)),
+                scopes: Set(SCOPE_READ | SCOPE_WRITE),
+                expires_at: Set(None),
+                created_at: Set(Utc::now()),
+                last_used_at: Set(None),
+                revoked_at: Set(None),
+            }
+            .insert(&harness.database)
+            .await
+            .unwrap();
+            let request = axum::http::Request::builder()
+                .method(Method::PUT)
+                .uri("/api/v1/me/password")
+                .header(header::AUTHORIZATION, format!("Bearer {raw}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "current_password": new_password, "new_password": PASSWORD })
+                        .to_string(),
+                ))
+                .unwrap();
+            assert_eq!(harness.send(request).await.status(), StatusCode::FORBIDDEN);
+        }
+
+        #[tokio::test]
+        async fn renaming_moves_the_personal_namespace_and_refuses_taken_names() {
+            let harness = Harness::new().await;
+            let alice = harness.user("alice").await;
+            harness.user("taken").await;
+            let cookie = harness.login(&alice).await;
+
+            let (status, body) = harness
+                .request(
+                    Method::PUT,
+                    "/api/v1/me/username",
+                    Some(&cookie),
+                    Some(json!({ "username": "Alice-Two" })),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["user"]["username"], "alice-two");
+            let (status, body) = harness
+                .request(Method::GET, "/api/v1/namespaces/alice-two", None, None)
+                .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["kind"], "user");
+            let (status, _) = harness
+                .request(Method::GET, "/api/v1/namespaces/alice", None, None)
+                .await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            // The session survives the rename.
+            let (status, _) = harness
+                .request(
+                    Method::GET,
+                    "/api/v1/me/commit-identity",
+                    Some(&cookie),
+                    None,
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK);
+
+            let (status, body) = harness
+                .request(
+                    Method::PUT,
+                    "/api/v1/me/username",
+                    Some(&cookie),
+                    Some(json!({ "username": "taken" })),
+                )
+                .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            let (status, _) = harness
+                .request(
+                    Method::PUT,
+                    "/api/v1/me/username",
+                    Some(&cookie),
+                    Some(json!({ "username": "-bad-" })),
+                )
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let (status, body) = login(&harness, "alice-two", PASSWORD).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+    }
 }

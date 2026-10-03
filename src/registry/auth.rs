@@ -538,3 +538,408 @@ fn quote_header_value(value: &str) -> String {
     }
     quoted
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use chrono::Utc;
+    use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, IntoActiveModel, Set};
+    use tower::ServiceExt as _;
+
+    use super::*;
+    use crate::{
+        actions::test_support,
+        config::{AuthSettings, StorageSettings},
+        entity::{api_token, user},
+        identity::{IdentityState, SCOPE_READ, hash_secret},
+        registry::test_support::digest,
+    };
+
+    fn scopes(values: &[&str]) -> TokenQuery {
+        TokenQuery {
+            service: Some("gitadel".to_owned()),
+            scopes: values.iter().map(|value| (*value).to_owned()).collect(),
+            account: None,
+        }
+    }
+
+    #[test]
+    fn actions_parse_and_print_round_trip() {
+        assert_eq!(Actions::from_scope("pull"), Some(Actions::PULL));
+        assert_eq!(
+            Actions::from_scope("push,pull").map(Actions::as_scope),
+            Some("pull,push")
+        );
+        assert_eq!(
+            Actions::from_scope("pull,push,delete").map(Actions::as_scope),
+            Some("pull,push,delete")
+        );
+        for invalid in ["", "pull,", "admin", "pull push", "*"] {
+            assert_eq!(Actions::from_scope(invalid), None, "{invalid:?}");
+        }
+        assert!(
+            Actions::from_scope("push,delete")
+                .unwrap()
+                .contains(Actions::PUSH)
+        );
+        assert!(!Actions::from_scope("push").unwrap().contains(Actions::PULL));
+    }
+
+    #[test]
+    fn requested_scopes_are_parsed_split_and_bounded() {
+        assert!(matches!(
+            requested_scopes(&scopes(&[])).unwrap().as_slice(),
+            [RequestedScope::Root]
+        ));
+        let parsed = requested_scopes(&scopes(&[
+            "repository:alice/project:pull,push registry:catalog:*",
+            "repository:alice/tools/cli:pull",
+        ]))
+        .unwrap();
+        match parsed.as_slice() {
+            [
+                RequestedScope::Image(first, first_actions),
+                RequestedScope::Catalog,
+                RequestedScope::Image(second, second_actions),
+            ] => {
+                assert_eq!(first, "alice/project");
+                assert_eq!(first_actions.as_scope(), "pull,push");
+                assert_eq!(second, "alice/tools/cli");
+                assert_eq!(*second_actions, Actions::PULL);
+            }
+            other => panic!("unexpected scopes: {}", other.len()),
+        }
+        for invalid in [
+            "repository:alice/project",
+            "repository:alice/project:pull:extra",
+            "repository:alice/project:admin",
+            "repository:ALICE:pull",
+            "repository::pull",
+            "image:alice/project:pull",
+            "registry:catalog:pull",
+        ] {
+            assert!(requested_scopes(&scopes(&[invalid])).is_err(), "{invalid}");
+        }
+        let many = vec!["repository:alice/project:pull"; MAX_SCOPES + 1];
+        assert!(requested_scopes(&scopes(&many)).is_err());
+        let long = format!("repository:alice/{}:pull", "x".repeat(MAX_SCOPE_LENGTH));
+        assert!(requested_scopes(&scopes(&[&long])).is_err());
+    }
+
+    struct Environment {
+        root: std::path::PathBuf,
+        database: DatabaseConnection,
+        state: RepositoryState,
+    }
+
+    impl Drop for Environment {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    async fn environment() -> Environment {
+        let root = std::env::temp_dir().join(format!("gitadel-registry-auth-{}", Uuid::new_v4()));
+        let database = test_support::database().await;
+        let public_url = url::Url::parse("https://gitadel.test").unwrap();
+        let identity = IdentityState::new(
+            database.clone(),
+            AuthSettings {
+                session_lifetime_hours: 24,
+                invitation_lifetime_hours: 24,
+            },
+            public_url.clone(),
+        )
+        .unwrap();
+        let state = RepositoryState::new(
+            identity,
+            StorageSettings {
+                repository_root: root.join("repositories"),
+                lfs_root: root.join("lfs"),
+                registry_root: root.join("registry"),
+                actions_artifact_root: root.join("actions-artifacts"),
+            },
+            public_url,
+            22,
+        )
+        .await
+        .unwrap();
+        Environment {
+            root,
+            database,
+            state,
+        }
+    }
+
+    /// An API token with read and write scope; returns its id and raw value.
+    async fn api_token(database: &DatabaseConnection, account: &user::Model) -> (Uuid, String) {
+        let raw = format!("gat_{}", Uuid::new_v4().simple());
+        let token = api_token::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            user_id: Set(account.id),
+            name: Set("registry".to_owned()),
+            token_hash: Set(hash_secret(&raw)),
+            scopes: Set(SCOPE_READ | SCOPE_WRITE),
+            expires_at: Set(None),
+            created_at: Set(Utc::now()),
+            last_used_at: Set(None),
+            revoked_at: Set(None),
+        }
+        .insert(database)
+        .await
+        .unwrap();
+        (token.id, raw)
+    }
+
+    fn basic(username: &str, token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!(
+                "Basic {}",
+                STANDARD.encode(format!("{username}:{token}"))
+            ))
+            .unwrap(),
+        );
+        headers
+    }
+
+    async fn issued_token(response: Response) -> String {
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        body["token"].as_str().unwrap().to_owned()
+    }
+
+    #[tokio::test]
+    async fn registry_tokens_re_authorise_their_source_credential_on_use() {
+        let environment = environment().await;
+        let alice = test_support::owner(&environment.database, "alice").await;
+        test_support::repository(&environment.database, &alice, "project").await;
+        let (token_id, raw) = api_token(&environment.database, &alice).await;
+        let auth = RegistryAuth::new();
+
+        // The wrong username for the token is a failed login.
+        assert!(
+            auth.issue(
+                &environment.state,
+                &basic("bob", &raw),
+                &scopes(&["repository:alice/project:pull"])
+            )
+            .await
+            .is_err()
+        );
+        let response = auth
+            .issue(
+                &environment.state,
+                &basic("alice", &raw),
+                &scopes(&["repository:alice/project:pull,push"]),
+            )
+            .await
+            .unwrap();
+        let token = issued_token(response).await;
+
+        assert_eq!(
+            auth.verify(&environment.state, &token, "alice/project", Actions::PUSH)
+                .await
+                .unwrap(),
+            Some(alice.id)
+        );
+        assert!(
+            auth.verify(&environment.state, &token, "alice/project", Actions::DELETE)
+                .await
+                .is_err(),
+            "only granted actions pass"
+        );
+        assert!(
+            auth.verify(&environment.state, &token, "alice/other", Actions::PULL)
+                .await
+                .is_err(),
+            "only granted repositories pass"
+        );
+
+        // Revoking the API token behind the grant ends it before it expires.
+        let mut revoked = api_token::Entity::find_by_id(token_id)
+            .one(&environment.database)
+            .await
+            .unwrap()
+            .unwrap()
+            .into_active_model();
+        revoked.revoked_at = Set(Some(Utc::now()));
+        revoked.update(&environment.database).await.unwrap();
+        assert!(
+            auth.verify(&environment.state, &token, "alice/project", Actions::PULL)
+                .await
+                .is_err()
+        );
+        assert!(auth.verify_root(&environment.state, &token).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn anonymous_grants_cover_only_public_pulls() {
+        let environment = environment().await;
+        let alice = test_support::owner(&environment.database, "alice").await;
+        let mut public = test_support::repository(&environment.database, &alice, "public")
+            .await
+            .into_active_model();
+        public.visibility = Set("public".to_owned());
+        public.update(&environment.database).await.unwrap();
+        test_support::repository(&environment.database, &alice, "private").await;
+        let auth = RegistryAuth::new();
+
+        let response = auth
+            .issue(
+                &environment.state,
+                &HeaderMap::new(),
+                &scopes(&[
+                    "repository:alice/public:pull,push",
+                    "repository:alice/private:pull",
+                ]),
+            )
+            .await
+            .unwrap();
+        let token = issued_token(response).await;
+        assert_eq!(
+            auth.verify(&environment.state, &token, "alice/public", Actions::PULL)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(
+            auth.verify(&environment.state, &token, "alice/public", Actions::PUSH)
+                .await
+                .is_err()
+        );
+        assert!(
+            auth.verify(&environment.state, &token, "alice/private", Actions::PULL)
+                .await
+                .is_err()
+        );
+        // Nothing grantable at all is a challenge rather than an empty token.
+        assert!(
+            auth.issue(
+                &environment.state,
+                &HeaderMap::new(),
+                &scopes(&["repository:alice/private:pull"]),
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    /// Exchanges `scope` for a bearer token through the HTTP endpoint.
+    async fn bearer_for(router: &axum::Router, username: &str, raw: &str, scope: &str) -> String {
+        let uri = format!(
+            "/v2/token?service=gitadel&scope={}",
+            url::form_urlencoded::byte_serialize(scope.as_bytes()).collect::<String>()
+        );
+        let mut request = Request::builder().uri(uri);
+        request.headers_mut().unwrap().extend(basic(username, raw));
+        let response = router
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        issued_token(response).await
+    }
+
+    #[tokio::test]
+    async fn mounting_a_blob_across_repositories_needs_pull_on_the_source() {
+        let environment = environment().await;
+        let alice = test_support::owner(&environment.database, "alice").await;
+        test_support::repository(&environment.database, &alice, "source").await;
+        test_support::repository(&environment.database, &alice, "target").await;
+        let (_, raw) = api_token(&environment.database, &alice).await;
+        let router = crate::registry::router(environment.state.clone());
+        let layer = b"layer bytes";
+        let layer_digest = digest(layer);
+
+        // Put a blob into the source image.
+        let push_source =
+            bearer_for(&router, "alice", &raw, "repository:alice/source:pull,push").await;
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v2/alice/source/blobs/uploads/?digest={layer_digest}"
+                    ))
+                    .header(header::AUTHORIZATION, format!("Bearer {push_source}"))
+                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .body(Body::from(layer.as_slice()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let mount = |bearer: String| {
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/v2/alice/target/blobs/uploads/?mount={layer_digest}&from=alice/source"
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        // A token that may push to the target but was not granted pull on the
+        // source cannot mount: the registry starts an ordinary upload instead.
+        let target_only =
+            bearer_for(&router, "alice", &raw, "repository:alice/target:pull,push").await;
+        let response = router.clone().oneshot(mount(target_only)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert!(response.headers().get("docker-content-digest").is_none());
+
+        // With pull on the source the blob is mounted outright.
+        let both = bearer_for(
+            &router,
+            "alice",
+            &raw,
+            "repository:alice/target:pull,push repository:alice/source:pull",
+        )
+        .await;
+        let response = router.clone().oneshot(mount(both)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            response
+                .headers()
+                .get("docker-content-digest")
+                .and_then(|value| value.to_str().ok()),
+            Some(layer_digest.as_str())
+        );
+
+        // Another user cannot even obtain pull on the private source, so the
+        // mount degrades the same way.
+        let bob = test_support::owner(&environment.database, "bob").await;
+        test_support::repository(&environment.database, &bob, "target").await;
+        let (_, bob_raw) = api_token(&environment.database, &bob).await;
+        let bob_token = bearer_for(
+            &router,
+            "bob",
+            &bob_raw,
+            "repository:bob/target:pull,push repository:alice/source:pull",
+        )
+        .await;
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v2/bob/target/blobs/uploads/?mount={layer_digest}&from=alice/source"
+                    ))
+                    .header(header::AUTHORIZATION, format!("Bearer {bob_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+}
