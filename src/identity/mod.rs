@@ -394,13 +394,41 @@ impl IdentityState {
     ) -> Result<Self, anyhow::Error> {
         let auth = settings.auth.clone();
         let public_url = settings.server.public_url.clone();
-        Self::build(
+        let state = Self::build(
             database,
             auth,
             public_url,
             Some(Arc::new(settings)),
             Some(maintenance_sender),
-        )
+        )?;
+        state.seal_stored_secrets_in_background();
+        Ok(state)
+    }
+
+    /// Seals credentials that older versions stored as plain text. Readers
+    /// accept both forms, so this runs alongside startup rather than
+    /// delaying it; the pass is idempotent and logs what it changed.
+    fn seal_stored_secrets_in_background(&self) {
+        let database = self.database.clone();
+        let cipher = Arc::clone(&self.secret_cipher);
+        tokio::spawn(async move {
+            match crate::secrets::seal_stored_secrets(&database, &cipher).await {
+                Ok(report) if report.total() == 0 => {
+                    tracing::debug!("all stored secrets are sealed");
+                }
+                Ok(report) => tracing::info!(
+                    dokploy_api_keys = report.dokploy_api_keys,
+                    mirror_identity_secrets = report.mirror_identity_secrets,
+                    webhook_secrets = report.webhook_secrets,
+                    oidc_client_secrets = report.oidc_client_secrets,
+                    totp_secrets = report.totp_secrets,
+                    "sealed stored secrets that were kept as plain text"
+                ),
+                Err(error) => {
+                    tracing::error!(%error, "could not seal stored secrets; they stay readable as plain text until the next start");
+                }
+            }
+        });
     }
 
     fn build(

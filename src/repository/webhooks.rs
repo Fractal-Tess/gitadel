@@ -1470,7 +1470,7 @@ mod tests {
         let stored = seal_secret(&cipher, hook_id, Some("hunter2".to_owned()))
             .unwrap()
             .unwrap();
-        assert!(stored.starts_with("v1:"));
+        assert!(crate::secrets::is_sealed(&stored));
         assert_eq!(
             cipher
                 .open_text(SecretKind::WebhookSecret, &hook_id, &stored)
