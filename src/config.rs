@@ -1,4 +1,9 @@
-use std::{fmt, net::SocketAddr, path::PathBuf};
+use std::{
+    fmt,
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+    str::FromStr,
+};
 
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
@@ -28,6 +33,15 @@ pub struct Cli {
     /// Public browser origin used for cookies and passkey verification.
     #[arg(long, env = "GITADEL_PUBLIC_URL", value_name = "URL")]
     public_url: Option<Url>,
+
+    /// Reverse proxies whose X-Forwarded-For is trusted, as comma-separated CIDR networks.
+    #[arg(
+        long,
+        env = "GITADEL_TRUSTED_PROXIES",
+        value_name = "CIDR",
+        value_delimiter = ','
+    )]
+    trusted_proxies: Option<Vec<IpNetwork>>,
 
     /// PEM certificate chain for the embedded HTTPS listener.
     #[arg(
@@ -303,6 +317,89 @@ pub struct ServerSettings {
     pub public_url: Url,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<TlsSettings>,
+    /// Networks whose `X-Forwarded-For` header names the real client. A peer
+    /// outside these networks is the client itself and its header is ignored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_proxies: Vec<IpNetwork>,
+}
+
+/// An IP network in CIDR notation, such as `10.0.0.0/8` or `fd00::/8`. A
+/// bare address stands for itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct IpNetwork {
+    address: IpAddr,
+    prefix: u8,
+}
+
+impl IpNetwork {
+    /// Whether `candidate` lies inside this network. An IPv4-mapped IPv6
+    /// address, which a dual-stack listener reports for IPv4 peers, matches
+    /// IPv4 networks.
+    pub fn contains(&self, candidate: IpAddr) -> bool {
+        match (self.address, candidate) {
+            (IpAddr::V4(network), IpAddr::V4(candidate)) => {
+                let mask = u32::MAX
+                    .checked_shl(32 - u32::from(self.prefix))
+                    .unwrap_or(0);
+                (u32::from(network) & mask) == (u32::from(candidate) & mask)
+            }
+            (IpAddr::V6(network), IpAddr::V6(candidate)) => {
+                let mask = u128::MAX
+                    .checked_shl(128 - u32::from(self.prefix))
+                    .unwrap_or(0);
+                (u128::from(network) & mask) == (u128::from(candidate) & mask)
+            }
+            (IpAddr::V4(_), IpAddr::V6(candidate)) => candidate
+                .to_ipv4_mapped()
+                .is_some_and(|candidate| self.contains(IpAddr::V4(candidate))),
+            (IpAddr::V6(_), IpAddr::V4(_)) => false,
+        }
+    }
+}
+
+impl FromStr for IpNetwork {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        let (address, prefix) = match value.trim().split_once('/') {
+            Some((address, prefix)) => (address, Some(prefix)),
+            None => (value.trim(), None),
+        };
+        let address: IpAddr = address
+            .parse()
+            .with_context(|| format!("{value:?} is not an IP address or CIDR network"))?;
+        let bits = if address.is_ipv4() { 32 } else { 128 };
+        let prefix = match prefix {
+            Some(prefix) => prefix
+                .parse::<u8>()
+                .ok()
+                .filter(|prefix| *prefix <= bits)
+                .with_context(|| format!("{value:?} has an invalid prefix length"))?,
+            None => bits,
+        };
+        Ok(Self { address, prefix })
+    }
+}
+
+impl TryFrom<String> for IpNetwork {
+    type Error = anyhow::Error;
+
+    fn try_from(value: String) -> Result<Self> {
+        value.parse()
+    }
+}
+
+impl From<IpNetwork> for String {
+    fn from(network: IpNetwork) -> Self {
+        network.to_string()
+    }
+}
+
+impl fmt::Display for IpNetwork {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}/{}", self.address, self.prefix)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -449,6 +546,7 @@ impl Default for Settings {
                 public_url: Url::parse("http://localhost:3000")
                     .expect("default public URL is valid"),
                 tls: None,
+                trusted_proxies: Vec::new(),
             },
             database: DatabaseSettings {
                 url: "sqlite://gitadel.db?mode=rwc".to_owned(),
@@ -537,6 +635,9 @@ impl Settings {
         }
         if let Some(public_url) = &cli.public_url {
             settings.server.public_url.clone_from(public_url);
+        }
+        if let Some(trusted_proxies) = &cli.trusted_proxies {
+            settings.server.trusted_proxies.clone_from(trusted_proxies);
         }
         if let (Some(certificate), Some(private_key)) = (&cli.tls_certificate, &cli.tls_private_key)
         {
@@ -764,7 +865,57 @@ mod tests {
                 certificate: PathBuf::from("cert.pem"),
                 private_key: PathBuf::from("key.pem"),
             }),
+            trusted_proxies: Vec::new(),
         }
+    }
+
+    #[test]
+    fn ip_networks_parse_cidr_and_bare_addresses() {
+        let private: IpNetwork = "10.0.0.0/8".parse().unwrap();
+        assert!(private.contains("10.255.1.2".parse().unwrap()));
+        assert!(!private.contains("11.0.0.1".parse().unwrap()));
+        // A dual-stack listener reports IPv4 peers as mapped IPv6 addresses.
+        assert!(private.contains("::ffff:10.1.2.3".parse().unwrap()));
+        assert!(!private.contains("fd00::1".parse().unwrap()));
+
+        let loopback: IpNetwork = "127.0.0.1".parse().unwrap();
+        assert_eq!(loopback.to_string(), "127.0.0.1/32");
+        assert!(loopback.contains("127.0.0.1".parse().unwrap()));
+        assert!(!loopback.contains("127.0.0.2".parse().unwrap()));
+
+        let unique_local: IpNetwork = "fd00::/8".parse().unwrap();
+        assert!(unique_local.contains("fd12:3456::1".parse().unwrap()));
+        assert!(!unique_local.contains("2001:db8::1".parse().unwrap()));
+        let everything: IpNetwork = "0.0.0.0/0".parse().unwrap();
+        assert!(everything.contains("203.0.113.9".parse().unwrap()));
+
+        for invalid in ["10.0.0.0/33", "fd00::/129", "example.com", "10.0.0.0/"] {
+            assert!(invalid.parse::<IpNetwork>().is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn trusted_proxies_default_to_none_and_follow_the_command_line() {
+        let config =
+            std::env::temp_dir().join(format!("gitadel-missing-{}.toml", uuid::Uuid::new_v4()));
+        let config = config.to_str().expect("temporary path is UTF-8");
+        let defaults = Settings::load(&Cli::parse_from(["gitadel", "--config", config])).unwrap();
+        assert!(defaults.server.trusted_proxies.is_empty());
+        let configured = Settings::load(&Cli::parse_from([
+            "gitadel",
+            "--config",
+            config,
+            "--trusted-proxies",
+            "10.0.0.0/8,127.0.0.1",
+        ]))
+        .unwrap();
+        assert_eq!(
+            configured.server.trusted_proxies,
+            vec![
+                "10.0.0.0/8".parse().unwrap(),
+                "127.0.0.1/32".parse().unwrap()
+            ]
+        );
     }
 
     #[test]

@@ -1,7 +1,8 @@
 use std::{
     borrow::Cow,
     convert::Infallible,
-    net::{SocketAddr, TcpListener as StdTcpListener},
+    net::{IpAddr, SocketAddr, TcpListener as StdTcpListener},
+    sync::Arc,
 };
 
 use anyhow::{Context, Result};
@@ -38,7 +39,7 @@ use crate::{
     actions::{self, ActionsState},
     api,
     archive::{self, MaintenanceAction, MaintenanceProgress, MaintenanceProgressReporter},
-    config::Settings,
+    config::{IpNetwork, Settings},
     identity::{self, IdentityState},
     repository::{self, GitHttpState, RepositoryState},
 };
@@ -143,11 +144,71 @@ async fn dispatch_registry(
         next.run(request).await
     }
 }
-async fn request_context(request: Request, next: Next) -> Response {
-    let address = request
+/// The `server.trusted_proxies` networks, shared by every request.
+#[derive(Clone)]
+struct TrustedProxies(Arc<[IpNetwork]>);
+
+/// The address rate limits and audit events attribute a request to.
+///
+/// A peer inside a trusted network is a reverse proxy, so the client is the
+/// rightmost `X-Forwarded-For` entry that is not itself a trusted proxy: the
+/// proxy appends the address it saw, so anything the client wrote sits to
+/// the left and is never reached. Any other peer is the client itself and
+/// its header is ignored. An entry that is not an address stops the walk,
+/// falling back to the peer rather than guessing.
+fn client_address(
+    peer: Option<IpAddr>,
+    headers: &HeaderMap,
+    trusted: &[IpNetwork],
+) -> Option<IpAddr> {
+    let peer = peer?;
+    let is_trusted = |address: IpAddr| trusted.iter().any(|network| network.contains(address));
+    if !is_trusted(peer) {
+        return Some(peer);
+    }
+    let forwarded = headers
+        .get_all(header::HeaderName::from_static("x-forwarded-for"))
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    for entry in forwarded.into_iter().rev() {
+        let Some(address) = parse_forwarded_address(entry) else {
+            return Some(peer);
+        };
+        if !is_trusted(address) {
+            return Some(address);
+        }
+    }
+    Some(peer)
+}
+
+/// One `X-Forwarded-For` entry: an address, optionally with a port, with
+/// IPv6 optionally in brackets.
+fn parse_forwarded_address(entry: &str) -> Option<IpAddr> {
+    if let Ok(address) = entry.parse::<IpAddr>() {
+        return Some(address);
+    }
+    if let Ok(address) = entry.parse::<SocketAddr>() {
+        return Some(address.ip());
+    }
+    entry
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .and_then(|inner| inner.parse().ok())
+}
+
+async fn request_context(
+    State(TrustedProxies(trusted)): State<TrustedProxies>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let peer = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(peer)| peer.ip());
+    let address = client_address(peer, request.headers(), &trusted);
     let mut response = identity::with_remote_address(address, next.run(request)).await;
     let headers = response.headers_mut();
     headers
@@ -416,7 +477,10 @@ pub async fn serve(
             reject_cross_site_cookie_requests,
         ))
         .layer(TraceLayer::new_for_http())
-        .layer(middleware::from_fn(request_context));
+        .layer(middleware::from_fn_with_state(
+            TrustedProxies(Arc::from(settings.server.trusted_proxies.as_slice())),
+            request_context,
+        ));
 
     info!(
         address = %http_bind,
@@ -882,6 +946,81 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn forwarded(values: &[&str]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for value in values {
+            headers.append(
+                HeaderName::from_static("x-forwarded-for"),
+                HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        headers
+    }
+
+    fn ip(value: &str) -> IpAddr {
+        value.parse().unwrap()
+    }
+
+    fn networks(values: &[&str]) -> Vec<IpNetwork> {
+        values.iter().map(|value| value.parse().unwrap()).collect()
+    }
+
+    #[test]
+    fn untrusted_peers_are_the_client_whatever_they_forward() {
+        let headers = forwarded(&["203.0.113.9"]);
+        assert_eq!(
+            client_address(Some(ip("198.51.100.4")), &headers, &[]),
+            Some(ip("198.51.100.4"))
+        );
+        assert_eq!(
+            client_address(
+                Some(ip("198.51.100.4")),
+                &headers,
+                &networks(&["10.0.0.0/8"])
+            ),
+            Some(ip("198.51.100.4"))
+        );
+        assert_eq!(
+            client_address(None, &headers, &networks(&["10.0.0.0/8"])),
+            None
+        );
+    }
+
+    #[test]
+    fn trusted_peers_yield_the_rightmost_untrusted_forwarded_address() {
+        let trusted = networks(&["10.0.0.0/8", "127.0.0.1"]);
+        let peer = Some(ip("10.0.0.2"));
+        // The client's own header entry sits left of what the proxy appended.
+        assert_eq!(
+            client_address(peer, &forwarded(&["1.1.1.1, 203.0.113.9"]), &trusted),
+            Some(ip("203.0.113.9"))
+        );
+        // Two trusted hops, and the header split over two lines.
+        assert_eq!(
+            client_address(peer, &forwarded(&["203.0.113.9", "10.0.0.7"]), &trusted),
+            Some(ip("203.0.113.9"))
+        );
+        // Ports and bracketed IPv6 as some proxies write them.
+        assert_eq!(
+            client_address(peer, &forwarded(&["[2001:db8::5]:4433"]), &trusted),
+            Some(ip("2001:db8::5"))
+        );
+        assert_eq!(
+            client_address(peer, &forwarded(&["203.0.113.9:51234"]), &trusted),
+            Some(ip("203.0.113.9"))
+        );
+        // Nothing untrusted, no header, or garbage: the peer stands.
+        assert_eq!(
+            client_address(peer, &forwarded(&["10.0.0.7, 127.0.0.1"]), &trusted),
+            peer
+        );
+        assert_eq!(client_address(peer, &HeaderMap::new(), &trusted), peer);
+        assert_eq!(
+            client_address(peer, &forwarded(&["203.0.113.9, not-an-address"]), &trusted),
+            peer
+        );
+    }
 
     fn image_directive(policy: &str) -> &str {
         policy

@@ -78,6 +78,103 @@ const AUTH_CHALLENGE_CAPACITY: usize = 1_024;
 const AUTH_CHALLENGE_SOURCE_CAPACITY: usize = 16;
 const AUTH_RATE_LIMIT_CAPACITY: usize = 4_096;
 const AUTH_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+/// How many attempts an account tolerates per window across every source, as
+/// a multiple of its per-source limit. Distributed guessing is still slowed,
+/// while one source failing on purpose cannot lock the account's owner out.
+const ACCOUNT_RATE_LIMIT_GLOBAL_FACTOR: usize = 5;
+
+/// Sliding-window attempt counters keyed by source and account.
+#[derive(Default)]
+struct AuthRateLimiter {
+    buckets: HashMap<String, VecDeque<Instant>>,
+}
+
+impl AuthRateLimiter {
+    /// Records an attempt under `key` unless `limit` attempts already landed
+    /// inside the window. A full table evicts its quietest bucket instead of
+    /// refusing new keys, so a flood of fresh source addresses cannot lock
+    /// out everyone whose bucket does not exist yet.
+    fn try_acquire(&mut self, key: String, limit: usize, now: Instant) -> bool {
+        self.buckets.retain(|_, attempts| {
+            attempts.retain(|attempt| now.duration_since(*attempt) < AUTH_RATE_LIMIT_WINDOW);
+            !attempts.is_empty()
+        });
+        if !self.buckets.contains_key(&key) && self.buckets.len() >= AUTH_RATE_LIMIT_CAPACITY {
+            let quietest = self
+                .buckets
+                .iter()
+                .min_by_key(|(_, attempts)| attempts.back().copied())
+                .map(|(key, _)| key.clone());
+            if let Some(quietest) = quietest {
+                self.buckets.remove(&quietest);
+            }
+        }
+        let attempts = self.buckets.entry(key).or_default();
+        if attempts.len() >= limit {
+            return false;
+        }
+        attempts.push_back(now);
+        true
+    }
+}
+
+/// The rate-limit bucket of a source address. IPv6 is bucketed by /64: a
+/// single subscriber usually holds a whole /64 and can rotate through it.
+fn source_bucket(address: Option<IpAddr>) -> String {
+    match address {
+        Some(IpAddr::V4(address)) => address.to_string(),
+        Some(IpAddr::V6(address)) => {
+            let prefix = u128::from(address) & !((1u128 << 64) - 1);
+            format!("{}/64", std::net::Ipv6Addr::from(prefix))
+        }
+        None => "unknown".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_tests {
+    use super::*;
+
+    #[test]
+    fn a_full_limiter_evicts_its_quietest_bucket_instead_of_refusing() {
+        let mut limiter = AuthRateLimiter::default();
+        let start = Instant::now();
+        for index in 0..AUTH_RATE_LIMIT_CAPACITY {
+            let at = start + Duration::from_millis(index as u64);
+            assert!(limiter.try_acquire(format!("source:{index}"), 1, at));
+        }
+        let later = start + Duration::from_millis(AUTH_RATE_LIMIT_CAPACITY as u64);
+        assert!(
+            limiter.try_acquire("source:newcomer".to_owned(), 1, later),
+            "a new key is admitted when the table is full"
+        );
+        assert!(limiter.buckets.len() <= AUTH_RATE_LIMIT_CAPACITY);
+        assert!(
+            !limiter.buckets.contains_key("source:0"),
+            "the bucket with the oldest attempt made room"
+        );
+        assert!(limiter.buckets.contains_key("source:1"));
+    }
+
+    #[test]
+    fn attempts_outside_the_window_no_longer_count() {
+        let mut limiter = AuthRateLimiter::default();
+        let start = Instant::now();
+        assert!(limiter.try_acquire("k".to_owned(), 1, start));
+        assert!(!limiter.try_acquire("k".to_owned(), 1, start));
+        assert!(limiter.try_acquire("k".to_owned(), 1, start + AUTH_RATE_LIMIT_WINDOW));
+    }
+
+    #[test]
+    fn ipv6_sources_share_a_bucket_per_64() {
+        let same = |a: &str| source_bucket(Some(a.parse().unwrap()));
+        assert_eq!(same("2001:db8:1:2::1"), same("2001:db8:1:2:ffff::9"));
+        assert_ne!(same("2001:db8:1:2::1"), same("2001:db8:1:3::1"));
+        assert_eq!(same("2001:db8:1:2::1"), "2001:db8:1:2::/64");
+        assert_eq!(same("203.0.113.7"), "203.0.113.7");
+        assert_eq!(source_bucket(None), "unknown");
+    }
+}
 const PASSWORD_WORK_CONCURRENCY: usize = 4;
 static PASSWORD_WORK: LazyLock<Semaphore> =
     LazyLock::new(|| Semaphore::new(PASSWORD_WORK_CONCURRENCY));
@@ -100,7 +197,7 @@ pub struct IdentityState {
     authentication_challenges: Arc<Mutex<HashMap<String, AuthenticationChallenge>>>,
     authorization_requests: Arc<Mutex<HashMap<String, oauth::AuthorizationRequest>>>,
     oidc_authorizations: Arc<sso::OidcAuthorizations>,
-    auth_rate_limits: Arc<Mutex<HashMap<String, VecDeque<Instant>>>>,
+    auth_rate_limits: Arc<Mutex<AuthRateLimiter>>,
     pending_logins: Arc<Mutex<HashMap<String, two_factor::PendingLogin>>>,
     /// One-time first-run setup token, printed to the log while no account exists.
     setup_token: Arc<Mutex<Option<String>>>,
@@ -343,7 +440,7 @@ impl IdentityState {
             authentication_challenges: Arc::new(Mutex::new(HashMap::new())),
             authorization_requests: Arc::new(Mutex::new(HashMap::new())),
             oidc_authorizations: Arc::new(Mutex::new(HashMap::new())),
-            auth_rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            auth_rate_limits: Arc::new(Mutex::new(AuthRateLimiter::default())),
             pending_logins: Arc::new(Mutex::new(HashMap::new())),
             setup_token: Arc::new(Mutex::new(None)),
             runtime_settings,
@@ -606,42 +703,38 @@ impl IdentityState {
         bucket: &str,
         limit: usize,
     ) -> Result<(), ApiError> {
-        let source = remote_address()
-            .map(|address| address.to_string())
-            .unwrap_or_else(|| "unknown".to_owned());
+        let source = source_bucket(remote_address());
         self.enforce_rate_limit(format!("source:{source}:{bucket}"), limit)
             .await
     }
 
+    /// `limit` attempts per window for `account` from one source, and
+    /// [`ACCOUNT_RATE_LIMIT_GLOBAL_FACTOR`] times that across all sources,
+    /// so failing on purpose from elsewhere cannot lock the owner out.
     pub async fn enforce_account_auth_rate_limit(
         &self,
         account: &str,
         limit: usize,
     ) -> Result<(), ApiError> {
-        self.enforce_rate_limit(format!("account:{account}"), limit)
-            .await
+        let source = source_bucket(remote_address());
+        self.enforce_rate_limit(format!("account:{account}:{source}"), limit)
+            .await?;
+        self.enforce_rate_limit(
+            format!("account:{account}"),
+            limit.saturating_mul(ACCOUNT_RATE_LIMIT_GLOBAL_FACTOR),
+        )
+        .await
     }
 
     async fn enforce_rate_limit(&self, key: String, limit: usize) -> Result<(), ApiError> {
-        let mut limits = self.auth_rate_limits.lock().await;
-        let now = Instant::now();
-        limits.retain(|_, attempts| {
-            attempts.retain(|attempt| now.duration_since(*attempt) < AUTH_RATE_LIMIT_WINDOW);
-            !attempts.is_empty()
-        });
-        if !limits.contains_key(&key) && limits.len() >= AUTH_RATE_LIMIT_CAPACITY {
-            return Err(ApiError::too_many_requests(
+        let mut limiter = self.auth_rate_limits.lock().await;
+        if limiter.try_acquire(key, limit, Instant::now()) {
+            Ok(())
+        } else {
+            Err(ApiError::too_many_requests(
                 "Too many authentication attempts. Try again later.",
-            ));
+            ))
         }
-        let attempts = limits.entry(key).or_default();
-        if attempts.len() >= limit {
-            return Err(ApiError::too_many_requests(
-                "Too many authentication attempts. Try again later.",
-            ));
-        }
-        attempts.push_back(now);
-        Ok(())
     }
 
     pub async fn registration_challenges(

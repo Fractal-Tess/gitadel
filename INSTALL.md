@@ -412,6 +412,25 @@ GITADEL__SSH__BIND=0.0.0.0:2222
 
 Common command-line options also have aliases including `GITADEL_CONFIG`, `GITADEL_BIND`, `GITADEL_PUBLIC_URL`, and `GITADEL_DATABASE_URL`. Run `gitadel --help` for the complete list and defaults.
 
+### Reverse proxies
+
+Sign-in rate limits and audit events are attributed to the address a request
+arrives from. Behind a reverse proxy that is the proxy itself, so every
+visitor would share one rate-limit budget. List the proxy's networks and
+Gitadel reads the real client from `X-Forwarded-For` for peers inside them:
+
+```toml
+[server]
+trusted_proxies = ["10.0.0.0/8", "127.0.0.1"]
+```
+
+Equivalents are `--trusted-proxies 10.0.0.0/8,127.0.0.1` and
+`GITADEL_TRUSTED_PROXIES`. A bare address stands for itself. The rightmost
+forwarded address outside the trusted networks counts as the client, so a
+visitor cannot pick their own address by sending the header; a peer outside
+the list is taken as the client and its header is ignored. Keep the list to
+your own proxies: a network that covers visitors lets them spoof it.
+
 ### Audit retention
 
 Every sign-in, token use, and administrative change is recorded in the audit
