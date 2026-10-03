@@ -397,6 +397,7 @@ pub async fn serve(
         IdentityState::new_with_runtime(database, settings.clone(), maintenance_sender)
             .context("could not initialize authentication")?
             .with_read_database(read_database);
+    identity_state.seal_stored_secrets().await?;
     identity_state
         .initialize_lfs_storage(&settings.storage)
         .await

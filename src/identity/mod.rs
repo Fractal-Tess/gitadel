@@ -401,34 +401,29 @@ impl IdentityState {
             Some(Arc::new(settings)),
             Some(maintenance_sender),
         )?;
-        state.seal_stored_secrets_in_background();
         Ok(state)
     }
 
-    /// Seals credentials that older versions stored as plain text. Readers
-    /// accept both forms, so this runs alongside startup rather than
-    /// delaying it; the pass is idempotent and logs what it changed.
-    fn seal_stored_secrets_in_background(&self) {
-        let database = self.database.clone();
-        let cipher = Arc::clone(&self.secret_cipher);
-        tokio::spawn(async move {
-            match crate::secrets::seal_stored_secrets(&database, &cipher).await {
-                Ok(report) if report.total() == 0 => {
-                    tracing::debug!("all stored secrets are sealed");
-                }
-                Ok(report) => tracing::info!(
-                    dokploy_api_keys = report.dokploy_api_keys,
-                    mirror_identity_secrets = report.mirror_identity_secrets,
-                    webhook_secrets = report.webhook_secrets,
-                    oidc_client_secrets = report.oidc_client_secrets,
-                    totp_secrets = report.totp_secrets,
-                    "sealed stored secrets that were kept as plain text"
-                ),
-                Err(error) => {
-                    tracing::error!(%error, "could not seal stored secrets; they stay readable as plain text until the next start");
-                }
-            }
-        });
+    /// Seals credentials that older versions stored as plain text. The pass
+    /// is idempotent and logs what it changed; the server runs it before it
+    /// starts serving so no request ever reads a plain-text value.
+    pub(crate) async fn seal_stored_secrets(&self) -> Result<(), anyhow::Error> {
+        let report = crate::secrets::seal_stored_secrets(&self.database, &self.secret_cipher)
+            .await
+            .map_err(|error| error.context("could not seal stored secrets"))?;
+        if report.total() == 0 {
+            tracing::debug!("all stored secrets are sealed");
+        } else {
+            tracing::info!(
+                dokploy_api_keys = report.dokploy_api_keys,
+                mirror_identity_secrets = report.mirror_identity_secrets,
+                webhook_secrets = report.webhook_secrets,
+                oidc_client_secrets = report.oidc_client_secrets,
+                totp_secrets = report.totp_secrets,
+                "sealed stored secrets that were kept as plain text"
+            );
+        }
+        Ok(())
     }
 
     fn build(
