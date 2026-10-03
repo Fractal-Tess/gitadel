@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeSet, HashMap},
-    path::PathBuf,
+    path::{Path, PathBuf},
     pin::Pin,
 };
 
@@ -598,6 +598,31 @@ pub async fn upload_asset(
 
 type AssetStream<'a> = Pin<Box<dyn Stream<Item = Result<Bytes, ApiError>> + Send + 'a>>;
 
+/// Streams a request body into `temporary_path`, returning the byte count, and
+/// fails once the body exceeds `max_bytes`.
+async fn write_upload<S>(
+    temporary_path: &Path,
+    stream: &mut S,
+    max_bytes: u64,
+) -> Result<u64, ApiError>
+where
+    S: Stream<Item = Result<Bytes, ApiError>> + Unpin,
+{
+    let mut output = fs::File::create(temporary_path)
+        .await
+        .map_err(ApiError::internal)?;
+    let mut size = 0_u64;
+    while let Some(chunk) = stream.try_next().await? {
+        size = size.saturating_add(chunk.len() as u64);
+        if size > max_bytes {
+            return Err(ApiError::bad_request("Release assets cannot exceed 2 GiB."));
+        }
+        output.write_all(&chunk).await.map_err(ApiError::internal)?;
+    }
+    output.flush().await.map_err(ApiError::internal)?;
+    Ok(size)
+}
+
 /// `max_bytes` is [`MAX_RELEASE_ASSET_BYTES`] for every real upload; tests pass
 /// a small cap to exercise the limit without streaming gigabytes.
 #[allow(clippy::too_many_arguments)]
@@ -631,21 +656,15 @@ async fn store_release_asset(
         .map_err(ApiError::internal)?;
     let path = directory.join(asset_id.to_string());
     let temporary_path = directory.join(format!(".{asset_id}.upload"));
-    let mut output = fs::File::create(&temporary_path)
-        .await
-        .map_err(ApiError::internal)?;
-    let mut size = 0_u64;
-    while let Some(chunk) = stream.try_next().await? {
-        size = size.saturating_add(chunk.len() as u64);
-        if size > max_bytes {
-            drop(output);
+    let size = match write_upload(&temporary_path, &mut stream, max_bytes).await {
+        Ok(size) => size,
+        Err(error) => {
+            // Whatever interrupted the upload, the partial file must not stay
+            // behind in the release directory.
             let _ = fs::remove_file(&temporary_path).await;
-            return Err(ApiError::bad_request("Release assets cannot exceed 2 GiB."));
+            return Err(error);
         }
-        output.write_all(&chunk).await.map_err(ApiError::internal)?;
-    }
-    output.flush().await.map_err(ApiError::internal)?;
-    drop(output);
+    };
     fs::rename(&temporary_path, &path)
         .await
         .map_err(ApiError::internal)?;
@@ -1972,9 +1991,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "bug: store_release_asset returns through `?` when the body stream fails, \
-                leaving the `.{asset_id}.upload` temporary file in the release directory; \
-                the oversize path removes it, the stream-error path does not"]
     async fn an_upload_that_fails_midway_leaves_no_temporary_file() {
         let project = project().await;
         let (_, created) = project
