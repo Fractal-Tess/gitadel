@@ -5,6 +5,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -42,7 +43,7 @@ impl BridgeCancellation {
         self.notify.notify_waiters();
     }
 
-    fn is_cancelled(&self) -> bool {
+    pub(crate) fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
 }
@@ -89,6 +90,9 @@ pub(crate) struct BlockingWriter<W> {
     inner: W,
     handle: Handle,
     cancellation: BridgeCancellation,
+    /// How long one write may wait for the transport to accept bytes before
+    /// the bridge is cancelled. `None` waits for the service time limit.
+    idle_timeout: Option<Duration>,
 }
 
 impl<W> BlockingWriter<W> {
@@ -97,44 +101,77 @@ impl<W> BlockingWriter<W> {
             inner,
             handle,
             cancellation,
+            idle_timeout: None,
         }
     }
+
+    /// Fail the write, and cancel the bridge, when the client accepts no
+    /// bytes for `timeout`. A client that stops reading its response would
+    /// otherwise hold the service slot until the overall time limit.
+    pub(crate) fn with_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.idle_timeout = Some(timeout);
+        self
+    }
 }
+
+/// Drives one transport operation to completion on the runtime, giving up
+/// when the bridge is cancelled or `idle_timeout` passes first.
+fn bridge_write<T>(
+    handle: &Handle,
+    cancellation: &BridgeCancellation,
+    idle_timeout: Option<Duration>,
+    operation: impl Future<Output = io::Result<T>>,
+) -> io::Result<T> {
+    if cancellation.is_cancelled() {
+        return Err(sley_core::cancelled_io_error());
+    }
+    let notified = cancellation.notify.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    if cancellation.is_cancelled() {
+        return Err(sley_core::cancelled_io_error());
+    }
+    handle.block_on(async {
+        tokio::pin!(operation);
+        let idle = async move {
+            match idle_timeout {
+                Some(idle_timeout) => tokio::time::sleep(idle_timeout).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            result = &mut operation => result,
+            _ = &mut notified => Err(sley_core::cancelled_io_error()),
+            () = idle => {
+                cancellation.cancel();
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "client stopped accepting response bytes",
+                ))
+            }
+        }
+    })
+}
+
 impl<W: AsyncWrite + Unpin> Write for BlockingWriter<W> {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        if self.cancellation.is_cancelled() {
-            return Err(sley_core::cancelled_io_error());
-        }
-        let notified = self.cancellation.notify.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        if self.cancellation.is_cancelled() {
-            return Err(sley_core::cancelled_io_error());
-        }
-        self.handle.block_on(async {
-            tokio::select! {
-                result = self.inner.write(buffer) => result,
-                _ = &mut notified => Err(sley_core::cancelled_io_error()),
-            }
-        })
+        let Self {
+            inner,
+            handle,
+            cancellation,
+            idle_timeout,
+        } = self;
+        bridge_write(handle, cancellation, *idle_timeout, inner.write(buffer))
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        if self.cancellation.is_cancelled() {
-            return Err(sley_core::cancelled_io_error());
-        }
-        let notified = self.cancellation.notify.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        if self.cancellation.is_cancelled() {
-            return Err(sley_core::cancelled_io_error());
-        }
-        self.handle.block_on(async {
-            tokio::select! {
-                result = self.inner.flush() => result,
-                _ = &mut notified => Err(sley_core::cancelled_io_error()),
-            }
-        })
+        let Self {
+            inner,
+            handle,
+            cancellation,
+            idle_timeout,
+        } = self;
+        bridge_write(handle, cancellation, *idle_timeout, inner.flush())
     }
 }
 

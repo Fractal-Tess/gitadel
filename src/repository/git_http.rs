@@ -34,6 +34,10 @@ use crate::{
 /// A client that sends no request body bytes for this long is dropped, so a
 /// stalled connection cannot hold a blocking thread until the service cap.
 const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// A client that accepts no response bytes for this long is dropped too: a
+/// clone whose reader has gone away would otherwise block the pack writer,
+/// and its service slot, until the service cap.
+pub(super) const RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Upper bound for one upload-pack or receive-pack call.
 const SERVICE_TIME_LIMIT: Duration = Duration::from_secs(30 * 60);
 /// In-flight upload-pack and receive-pack calls. Each one occupies a blocking
@@ -228,7 +232,8 @@ async fn upload_pack(
     let mut worker = tokio::task::spawn_blocking(move || {
         let mut reader =
             BlockingReader::new(request_reader, handle.clone(), worker_cancellation.clone());
-        let mut writer = BlockingWriter::new(response_writer, handle, worker_cancellation);
+        let mut writer = BlockingWriter::new(response_writer, handle, worker_cancellation)
+            .with_idle_timeout(RESPONSE_IDLE_TIMEOUT);
         let _slot = slot;
         git_service::serve_upload_pack(&path, format, v2, true, &mut reader, &mut writer)
     });
@@ -309,7 +314,8 @@ async fn receive_pack(
     let mut worker = tokio::task::spawn_blocking(move || {
         let mut reader =
             BlockingReader::new(request_reader, handle.clone(), worker_cancellation.clone());
-        let mut writer = BlockingWriter::new(response_writer, handle, worker_cancellation);
+        let mut writer = BlockingWriter::new(response_writer, handle, worker_cancellation)
+            .with_idle_timeout(RESPONSE_IDLE_TIMEOUT);
         let _slot = slot;
         git_service::serve_receive_pack(&worker_path, format, &guard, &mut reader, &mut writer)
     });
@@ -593,8 +599,8 @@ mod tests {
     use tokio::{io::AsyncReadExt as _, sync::Semaphore};
 
     use super::{
-        BlockingReader, BridgeCancellation, acquire_service_slot, feed_request_body,
-        repository_name, service_busy, token_from_headers,
+        BlockingReader, BlockingWriter, BridgeCancellation, acquire_service_slot,
+        feed_request_body, repository_name, service_busy, token_from_headers,
     };
 
     fn authorization(value: &str) -> HeaderMap {
@@ -631,6 +637,30 @@ mod tests {
         .await
         .unwrap();
         assert!(read.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_client_that_stops_reading_the_response_is_dropped() {
+        // Nobody ever reads `client_end`, so the pipe fills and the writer
+        // can only wait for the client.
+        let (service_end, client_end) = tokio::io::duplex(16);
+        let cancellation = BridgeCancellation::default();
+        let handle = tokio::runtime::Handle::current();
+        let writer_cancellation = cancellation.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let mut writer = BlockingWriter::new(service_end, handle, writer_cancellation)
+                .with_idle_timeout(Duration::from_millis(50));
+            std::io::Write::write_all(&mut writer, &[0u8; 1024])
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            cancellation.is_cancelled(),
+            "the request side is cancelled with the response"
+        );
+        drop(client_end);
     }
 
     #[tokio::test]

@@ -389,8 +389,11 @@ impl russh::server::Handler for SshHandler {
                 handle.clone(),
                 worker_cancellation.clone(),
             );
+            // SSH flow control blocks the write once the client stops
+            // draining its window, so the same idle limit applies.
             let mut writer =
-                BlockingWriter::new(channel_writer.make_writer(), handle, worker_cancellation);
+                BlockingWriter::new(channel_writer.make_writer(), handle, worker_cancellation)
+                    .with_idle_timeout(super::git_http::RESPONSE_IDLE_TIMEOUT);
             if receive {
                 git_service::write_advertisement(&worker_path, format, true, false, &mut writer)?;
                 git_service::serve_receive_pack(
