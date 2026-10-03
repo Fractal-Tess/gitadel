@@ -12,7 +12,12 @@
     commitIdentitySchema,
     type CommitIdentity,
   } from "$lib/api/profile.js";
-  import { errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
+  import {
+    errorMessage,
+    jsonBody,
+    requestEmpty,
+    requestJson,
+  } from "$lib/api/transport.js";
   import { Badge } from "$lib/components/ui/badge/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Card from "$lib/components/ui/card/index.js";
@@ -29,12 +34,14 @@
   let primaryEmail = $state(DEFAULT_EMAIL);
   let working = $state(false);
 
-  /** Addresses browser commits can be authored with. */
+  /** Addresses browser commits can be authored with: verified ones only. */
   const choices = $derived(
     identity
       ? [
           ...(identity.account_email ? [identity.account_email] : []),
-          ...identity.emails,
+          ...identity.emails
+            .filter((entry) => entry.verification !== "pending")
+            .map((entry) => entry.email),
         ]
       : [],
   );
@@ -78,13 +85,32 @@
     event.preventDefault();
     const email = newEmail.trim();
     if (!email) return;
-    const added = await run(() =>
-      requestJson("/api/v1/me/commit-emails", commitIdentitySchema, {
-        method: "POST",
-        body: jsonBody({ email }),
-      }),
+    const added = await run(
+      () =>
+        requestJson("/api/v1/me/commit-emails", commitIdentitySchema, {
+          method: "POST",
+          body: jsonBody({ email }),
+        }),
+      identity?.verification_required
+        ? `Check ${email.toLowerCase()} for a verification link.`
+        : undefined,
     );
     if (added) newEmail = "";
+  }
+
+  async function resendVerification(email: string): Promise<void> {
+    working = true;
+    try {
+      await requestEmpty(
+        `/api/v1/me/commit-emails/${encodeURIComponent(email)}/verification`,
+        { method: "POST" },
+      );
+      toast.success(`Verification email sent to ${email}.`);
+    } catch (caught) {
+      toast.error(errorMessage(caught));
+    } finally {
+      working = false;
+    }
   }
 
   function removeEmail(email: string): void {
@@ -129,6 +155,17 @@
         Commits written with these addresses count on your profile's activity.
         Your account email and commits signed with your SSH keys count too.
       </Card.Description>
+      {#if identity}
+        <Card.Description class="mt-2 max-w-xs leading-5">
+          {#if identity.verification_required}
+            A new address counts only after you open the link sent to it, so
+            nobody can claim commits written with someone else's address.
+          {:else}
+            This instance does not send email, so addresses count as soon as
+            they are added.
+          {/if}
+        </Card.Description>
+      {/if}
     </div>
   </Card.Header>
 
@@ -148,17 +185,30 @@
               <Badge variant="outline">Account email</Badge>
             </li>
           {/if}
-          {#each identity.emails as email (email)}
+          {#each identity.emails as entry (entry.email)}
             <li class="flex items-center gap-3 py-1.5 pr-1.5 pl-4 text-sm">
               <span class="min-w-0 flex-1 truncate font-mono text-xs"
-                >{email}</span
+                >{entry.email}</span
               >
+              {#if entry.verification === "pending"}
+                <Badge variant="outline">Pending</Badge>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={working}
+                  onclick={() => void resendVerification(entry.email)}
+                >
+                  Resend
+                </Button>
+              {:else if entry.verification === "verified"}
+                <Badge variant="secondary">Verified</Badge>
+              {/if}
               <Button
                 variant="ghost"
                 size="icon-sm"
-                aria-label={`Remove ${email}`}
+                aria-label={`Remove ${entry.email}`}
                 disabled={working}
-                onclick={() => removeEmail(email)}
+                onclick={() => removeEmail(entry.email)}
               >
                 <X />
               </Button>

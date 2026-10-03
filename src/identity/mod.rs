@@ -10,6 +10,8 @@ mod notifications;
 mod oauth;
 mod resources;
 mod sso;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod two_factor;
 mod users;
 
@@ -1285,6 +1287,10 @@ pub fn router() -> Router<IdentityState> {
         .route(
             "/me/commit-emails/{email}",
             delete(commit_emails::remove_email),
+        )
+        .route(
+            "/me/commit-emails/{email}/verification",
+            post(commit_emails::resend_verification),
         )
         .route("/me/password", put(auth::update_password))
         .route("/me/two-factor", get(two_factor::status))

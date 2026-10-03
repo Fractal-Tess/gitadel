@@ -552,3 +552,67 @@ async fn cache_kind_migration_drops_borrowed_kinds_and_admits_the_new_ones() {
         .unwrap();
     assert!(index.is_some(), "the expiry index is recreated");
 }
+
+#[tokio::test]
+async fn commit_email_verification_migration_grandfathers_existing_addresses() {
+    use crate::entity::user_commit_email;
+
+    let mut options = ConnectOptions::new("sqlite::memory:");
+    options.max_connections(1);
+    let database = Database::connect(options).await.unwrap();
+    // Every migration before 000078, which rebuilds the table.
+    super::Migrator::up(&database, Some(75)).await.unwrap();
+    let owner = legacy_owner(&database).await;
+    database
+        .execute_unprepared(&format!(
+            "INSERT INTO user_commit_emails (user_id, email, created_at) \
+             VALUES (x'{}', 'old@example.com', '2026-09-30 10:00:00.000000 +00:00')",
+            owner.id.simple()
+        ))
+        .await
+        .unwrap();
+
+    super::Migrator::up(&database, None).await.unwrap();
+
+    let row = user_commit_email::Entity::find()
+        .filter(user_commit_email::Column::Email.eq("old@example.com"))
+        .one(&database)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.user_id, owner.id);
+    assert_eq!(
+        row.verified_at,
+        Some(row.created_at),
+        "pre-existing rows keep counting"
+    );
+
+    // Two accounts may hold an unverified claim; only verified ones are unique.
+    let other = Uuid::new_v4();
+    database
+        .execute_unprepared(&format!(
+            "INSERT INTO users (id, username, password_hash, is_admin, \
+             default_repository_visibility, theme_preference, motion_preference, \
+             created_at, updated_at) \
+             VALUES (x'{}', 'claimant', 'unused', 0, 'private', 'system', 'system', \
+             '2026-09-30 10:00:00.000000 +00:00', '2026-09-30 10:00:00.000000 +00:00')",
+            other.simple()
+        ))
+        .await
+        .unwrap();
+    let claim = |verified: &str| {
+        format!(
+            "INSERT INTO user_commit_emails (user_id, email, verified_at, created_at) \
+             VALUES (x'{}', 'old@example.com', {verified}, '2026-10-01 10:00:00.000000 +00:00')",
+            other.simple()
+        )
+    };
+    assert!(
+        database
+            .execute_unprepared(&claim("'2026-10-01 10:00:00.000000 +00:00'"))
+            .await
+            .is_err(),
+        "a second verified claim on one address is refused"
+    );
+    database.execute_unprepared(&claim("NULL")).await.unwrap();
+}

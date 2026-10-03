@@ -31,7 +31,9 @@ use crate::{
 
 const PURPOSE_VERIFY: &str = "verify";
 const PURPOSE_RESET: &str = "reset";
-const VERIFY_LIFETIME: Duration = Duration::hours(24);
+/// Verifies a commit address; see [`super::commit_emails`].
+pub(super) const PURPOSE_COMMIT_VERIFY: &str = "verify-commit";
+pub(super) const VERIFY_LIFETIME: Duration = Duration::hours(24);
 const RESET_LIFETIME: Duration = Duration::hours(1);
 const RESET_ACCEPTED: &str =
     "If that account has a verified email address, a reset link is on its way.";
@@ -346,8 +348,10 @@ pub async fn delete_email(
     user_email::Entity::delete_by_id(actor.user.id)
         .exec(&transaction)
         .await?;
+    // Commit-email links are unrelated to the account address and stay.
     email_token::Entity::delete_many()
         .filter(email_token::Column::UserId.eq(actor.user.id))
+        .filter(email_token::Column::Purpose.ne(PURPOSE_COMMIT_VERIFY))
         .exec(&transaction)
         .await?;
     state
@@ -368,6 +372,9 @@ pub struct TokenRequest {
 }
 
 /// Confirm an address from the emailed link. The token alone authorizes it.
+///
+/// Account addresses and commit addresses share the link format and this
+/// endpoint; the token's purpose tells them apart.
 pub async fn verify_email(
     State(state): State<IdentityState>,
     Json(request): Json<TokenRequest>,
@@ -377,9 +384,13 @@ pub async fn verify_email(
     let token_hash = hash_secret(request.token.trim());
     let now = Utc::now();
     let transaction = state.database().begin().await?;
-    let token = consume_token(&transaction, &token_hash, PURPOSE_VERIFY)
-        .await?
-        .ok_or_else(invalid)?;
+    let Some(token) = consume_token(&transaction, &token_hash, PURPOSE_VERIFY).await? else {
+        if super::commit_emails::verify_with_token(&state, &transaction, &token_hash).await? {
+            transaction.commit().await?;
+            return Ok(StatusCode::NO_CONTENT);
+        }
+        return Err(invalid());
+    };
     let row = user_email::Entity::find_by_id(token.user_id)
         .one(&transaction)
         .await?
@@ -599,7 +610,7 @@ async fn reset_recipient(
 // ---------------------------------------------------------------------------
 // Tokens
 
-async fn issue_token<C: ConnectionTrait>(
+pub(super) async fn issue_token<C: ConnectionTrait>(
     connection: &C,
     user_id: Uuid,
     purpose: &str,
@@ -629,7 +640,7 @@ async fn issue_token<C: ConnectionTrait>(
 }
 
 /// Atomically mark an unexpired, unused token as used and return it.
-async fn consume_token<C: ConnectionTrait>(
+pub(super) async fn consume_token<C: ConnectionTrait>(
     connection: &C,
     token_hash: &str,
     purpose: &str,
@@ -651,7 +662,7 @@ async fn consume_token<C: ConnectionTrait>(
         .await?)
 }
 
-fn link(state: &IdentityState, path: &str, token: &str) -> String {
+pub(super) fn link(state: &IdentityState, path: &str, token: &str) -> String {
     let mut url = state.public_url().clone();
     url.set_path(path);
     url.query_pairs_mut().clear().append_pair("token", token);

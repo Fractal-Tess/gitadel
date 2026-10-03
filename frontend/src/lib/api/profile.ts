@@ -15,16 +15,29 @@ export const namespaceActivitySchema = repositoryActivitySchema.extend({
   repository_count: z.number().int().nonnegative(),
 });
 
+/**
+ * One address a user writes commits under. `pending` addresses are waiting
+ * for their emailed link and count for nothing yet; `not_required` ones were
+ * accepted as entered because the instance cannot send mail.
+ */
+export const commitEmailSchema = z.object({
+  email: z.string(),
+  verified_at: z.string().nullable(),
+  verification: z.enum(["verified", "pending", "not_required"]),
+});
+
 /** How the signed-in user's commits are recognised and authored. */
 export const commitIdentitySchema = z.object({
   name: z.string().nullable(),
   primary_email: z.string().nullable(),
   author_name: z.string(),
   author_email: z.string(),
-  emails: z.array(z.string()),
+  emails: z.array(commitEmailSchema),
   account_email: z.string().nullable(),
+  verification_required: z.boolean(),
 });
 
+export type CommitEmail = z.infer<typeof commitEmailSchema>;
 export type CommitIdentity = z.infer<typeof commitIdentitySchema>;
 
 export const pinnedRepositoriesSchema = z.object({

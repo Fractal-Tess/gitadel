@@ -368,7 +368,8 @@ pub mod user_commit_email {
     use super::*;
 
     /// An address a user writes commits under. Commits authored with it count
-    /// as theirs on their profile. Each address belongs to one account.
+    /// as theirs on their profile once it is verified. Each verified address
+    /// belongs to one account.
     #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
     #[sea_orm(table_name = "user_commit_emails")]
     pub struct Model {
@@ -376,6 +377,10 @@ pub mod user_commit_email {
         pub user_id: Uuid,
         #[sea_orm(primary_key, auto_increment = false)]
         pub email: String,
+        /// Set once the user proved they receive mail at the address, or on
+        /// creation when the instance cannot send mail. Only verified
+        /// addresses attribute commits, and only they are unique.
+        pub verified_at: Option<DateTimeUtc>,
         pub created_at: DateTimeUtc,
     }
 
