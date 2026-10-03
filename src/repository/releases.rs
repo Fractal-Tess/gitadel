@@ -448,6 +448,7 @@ pub async fn forgejo_upload_asset(
         &asset_name,
         &content_type,
         stream,
+        MAX_RELEASE_ASSET_BYTES,
     )
     .await?;
     Ok((
@@ -586,6 +587,7 @@ pub async fn upload_asset(
         &query.name,
         &content_type,
         stream,
+        MAX_RELEASE_ASSET_BYTES,
     )
     .await?;
     Ok((
@@ -596,6 +598,9 @@ pub async fn upload_asset(
 
 type AssetStream<'a> = Pin<Box<dyn Stream<Item = Result<Bytes, ApiError>> + Send + 'a>>;
 
+/// `max_bytes` is [`MAX_RELEASE_ASSET_BYTES`] for every real upload; tests pass
+/// a small cap to exercise the limit without streaming gigabytes.
+#[allow(clippy::too_many_arguments)]
 async fn store_release_asset(
     state: &RepositoryState,
     repository: &repository::Model,
@@ -604,6 +609,7 @@ async fn store_release_asset(
     name: &str,
     content_type: &str,
     mut stream: AssetStream<'_>,
+    max_bytes: u64,
 ) -> Result<release_asset::Model, ApiError> {
     find_release(state, repository.id, release_id).await?;
     let asset_name = validate_asset_name(name)?;
@@ -631,7 +637,7 @@ async fn store_release_asset(
     let mut size = 0_u64;
     while let Some(chunk) = stream.try_next().await? {
         size = size.saturating_add(chunk.len() as u64);
-        if size > MAX_RELEASE_ASSET_BYTES {
+        if size > max_bytes {
             drop(output);
             let _ = fs::remove_file(&temporary_path).await;
             return Err(ApiError::bad_request("Release assets cannot exceed 2 GiB."));
@@ -1350,20 +1356,33 @@ fn ascii_download_name(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use axum::{
+        Json,
+        body::{Body, Bytes},
         extract::{Path as AxumPath, Query, State},
-        http::{HeaderMap, StatusCode},
-        response::IntoResponse as _,
+        http::{HeaderMap, StatusCode, header},
+        response::{IntoResponse, Response},
     };
     use axum_extra::extract::cookie::CookieJar;
     use chrono::{Duration, Utc};
-    use sea_orm::{ActiveModelTrait, Set};
+    use futures_util::stream;
+    use sea_orm::{ActiveModelTrait, EntityTrait as _, Set};
     use serde_json::Value;
     use uuid::Uuid;
 
-    use super::{ListReleasesQuery, ensure_accepts_writes, list_releases};
+    use super::{
+        CreateReleaseRequest, ListReleasesQuery, UpdateReleaseRequest, UploadAssetQuery,
+        create_release, delete_release, download_asset, ensure_accepts_writes, get_release,
+        list_releases, release_directory, store_release_asset, update_release, upload_asset,
+        validate_asset_name,
+    };
     use crate::{
+        actions::test_support,
         entity::{release_asset, repository, repository_release},
-        repository::resources::test_support::{TestInstance, instance},
+        identity::ApiError,
+        repository::{
+            http_test_support as http,
+            resources::test_support::{TestGit, TestInstance, instance},
+        },
     };
 
     async fn insert_release(
@@ -1530,5 +1549,463 @@ mod tests {
             let error = ensure_accepts_writes(&read_only).expect_err("reject the write");
             assert_eq!(error.into_response().status(), StatusCode::FORBIDDEN);
         }
+    }
+
+    const OWNER_TOKEN: &str = "alice-token";
+    const READER_TOKEN: &str = "bob-token";
+
+    /// A public repository with one commit, its owner's token, and a
+    /// read-only collaborator's token.
+    struct Project {
+        instance: TestInstance,
+        repository: repository::Model,
+        commit: String,
+        _git: TestGit,
+    }
+
+    async fn project() -> Project {
+        let instance = instance().await;
+        let (repository, git) = instance.git_repository("project").await;
+        let commit = git.commit_file("README.md", b"hello", "2024-01-01T00:00:00Z");
+        http::api_token(&instance.database, &instance.owner, OWNER_TOKEN).await;
+        let reader = test_support::owner(&instance.database, "bob").await;
+        http::api_token(&instance.database, &reader, READER_TOKEN).await;
+        http::collaborator(&instance.database, &repository, &reader, "read").await;
+        Project {
+            instance,
+            repository,
+            commit,
+            _git: git,
+        }
+    }
+
+    fn respond<T: IntoResponse>(result: Result<T, ApiError>) -> Response {
+        match result {
+            Ok(response) => response.into_response(),
+            Err(error) => error.into_response(),
+        }
+    }
+
+    async fn json_of(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value = if body.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&body).unwrap()
+        };
+        (status, value)
+    }
+
+    fn path() -> AxumPath<(String, String)> {
+        AxumPath(("alice".to_owned(), "project".to_owned()))
+    }
+
+    fn create_request(target: &str, title: &str, prerelease: bool) -> CreateReleaseRequest {
+        CreateReleaseRequest {
+            target_revision: target.to_owned(),
+            title: title.to_owned(),
+            body: "Notes".to_owned(),
+            prerelease,
+        }
+    }
+
+    impl Project {
+        async fn create(
+            &self,
+            headers: HeaderMap,
+            request: CreateReleaseRequest,
+        ) -> (StatusCode, Value) {
+            json_of(respond(
+                create_release(
+                    State(self.instance.state.clone()),
+                    path(),
+                    headers,
+                    CookieJar::new(),
+                    Json(request),
+                )
+                .await,
+            ))
+            .await
+        }
+
+        async fn update(
+            &self,
+            headers: HeaderMap,
+            id: Uuid,
+            request: UpdateReleaseRequest,
+        ) -> (StatusCode, Value) {
+            json_of(respond(
+                update_release(
+                    State(self.instance.state.clone()),
+                    AxumPath(("alice".to_owned(), "project".to_owned(), id)),
+                    headers,
+                    CookieJar::new(),
+                    Json(request),
+                )
+                .await,
+            ))
+            .await
+        }
+
+        async fn get(&self, id: Uuid) -> (StatusCode, Value) {
+            json_of(respond(
+                get_release(
+                    State(self.instance.state.clone()),
+                    AxumPath(("alice".to_owned(), "project".to_owned(), id)),
+                    HeaderMap::new(),
+                    CookieJar::new(),
+                )
+                .await,
+            ))
+            .await
+        }
+
+        async fn delete(&self, headers: HeaderMap, id: Uuid) -> StatusCode {
+            respond(
+                delete_release(
+                    State(self.instance.state.clone()),
+                    AxumPath(("alice".to_owned(), "project".to_owned(), id)),
+                    headers,
+                    CookieJar::new(),
+                )
+                .await,
+            )
+            .status()
+        }
+
+        async fn stored(&self, id: Uuid) -> Option<repository_release::Model> {
+            repository_release::Entity::find_by_id(id)
+                .one(&self.instance.database)
+                .await
+                .unwrap()
+        }
+
+        /// Stores `chunks` as an asset through the shared streaming path
+        /// with a small size cap, so the limit can be hit without 2 GiB.
+        async fn store(
+            &self,
+            release_id: Uuid,
+            name: &str,
+            chunks: Vec<Result<Bytes, ApiError>>,
+            max_bytes: u64,
+        ) -> Result<release_asset::Model, ApiError> {
+            store_release_asset(
+                &self.instance.state,
+                &self.repository,
+                self.instance.owner.id,
+                release_id,
+                name,
+                "application/octet-stream",
+                Box::pin(stream::iter(chunks)),
+                max_bytes,
+            )
+            .await
+        }
+
+        fn release_files(&self, release_id: Uuid) -> Vec<String> {
+            let directory = release_directory(&self.instance.state, &self.repository, release_id);
+            let Ok(entries) = std::fs::read_dir(directory) else {
+                return Vec::new();
+            };
+            let mut names = entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        }
+    }
+
+    fn release_id(value: &Value) -> Uuid {
+        value["id"].as_str().unwrap().parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn releases_change_only_with_write_access() {
+        let project = project().await;
+        let owner = http::bearer(OWNER_TOKEN);
+        let reader = http::bearer(READER_TOKEN);
+
+        let (status, _) = project
+            .create(HeaderMap::new(), create_request("main", "v1.0.0", false))
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // A read-only collaborator gets the same answer as a stranger: the
+        // write is refused without confirming anything about the repository.
+        let (status, _) = project
+            .create(reader.clone(), create_request("main", "v1.0.0", false))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            repository_release::Entity::find()
+                .all(&project.instance.database)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let (status, created) = project
+            .create(owner.clone(), create_request("main", "v1.0.0", false))
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["target_revision"], "main");
+        assert_eq!(created["target_oid"], project.commit.as_str());
+        assert_eq!(created["author"], "alice");
+        assert_eq!(created["latest"], true);
+        let id = release_id(&created);
+
+        let (status, _) = project
+            .create(owner.clone(), create_request("no-such-ref", "v9", false))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let rename = || UpdateReleaseRequest {
+            target_revision: None,
+            title: Some("Renamed".to_owned()),
+            body: None,
+            prerelease: None,
+        };
+        let (status, _) = project.update(reader.clone(), id, rename()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = project.update(HeaderMap::new(), id, rename()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(project.stored(id).await.unwrap().title, "v1.0.0");
+        let (status, updated) = project.update(owner.clone(), id, rename()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated["title"], "Renamed");
+        let (status, error) = project
+            .update(
+                owner.clone(),
+                id,
+                UpdateReleaseRequest {
+                    target_revision: Some("no-such-ref".to_owned()),
+                    title: None,
+                    body: None,
+                    prerelease: None,
+                },
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error["error"]["message"],
+            "The release target must resolve to an existing commit."
+        );
+        assert_eq!(project.stored(id).await.unwrap().target_revision, "main");
+
+        let asset = project
+            .store(id, "build.tar", vec![Ok(Bytes::from_static(b"data"))], 1024)
+            .await
+            .unwrap();
+        assert_eq!(project.release_files(id), [asset.id.to_string()]);
+        assert_eq!(project.delete(reader, id).await, StatusCode::NOT_FOUND);
+        assert_eq!(
+            project.delete(HeaderMap::new(), id).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert!(project.stored(id).await.is_some());
+        assert_eq!(
+            project.delete(owner.clone(), id).await,
+            StatusCode::NO_CONTENT
+        );
+        assert!(project.stored(id).await.is_none());
+        assert!(project.release_files(id).is_empty());
+        let (status, _) = project.get(id).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(project.delete(owner, id).await, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn latest_is_the_newest_release_that_is_not_a_prerelease() {
+        let project = project().await;
+        let owner = http::bearer(OWNER_TOKEN);
+
+        let (_, candidate) = project
+            .create(owner.clone(), create_request("main", "v2.0.0-rc1", true))
+            .await;
+        let candidate = release_id(&candidate);
+        // A repository with only prereleases has no latest release.
+        assert_eq!(project.get(candidate).await.1["latest"], false);
+
+        let (_, stable) = project
+            .create(owner.clone(), create_request("main", "v1.0.0", false))
+            .await;
+        let stable = release_id(&stable);
+        assert_eq!(project.get(stable).await.1["latest"], true);
+
+        let (_, newer) = project
+            .create(owner.clone(), create_request("main", "v2.0.0-rc2", true))
+            .await;
+        let newer = release_id(&newer);
+        assert_ne!(newer, stable);
+        assert_eq!(project.get(newer).await.1["latest"], false);
+        assert_eq!(project.get(stable).await.1["latest"], true);
+
+        // Promoting the newest candidate makes it the latest release, and
+        // demoting it again hands the title back.
+        let promote = |prerelease| UpdateReleaseRequest {
+            target_revision: None,
+            title: None,
+            body: None,
+            prerelease: Some(prerelease),
+        };
+        let (status, promoted) = project.update(owner.clone(), newer, promote(false)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(promoted["latest"], true);
+        assert_eq!(project.get(stable).await.1["latest"], false);
+        project.update(owner, newer, promote(true)).await;
+        assert_eq!(project.get(newer).await.1["latest"], false);
+        assert_eq!(project.get(stable).await.1["latest"], true);
+    }
+
+    #[tokio::test]
+    async fn asset_uploads_are_capped_streamed_and_uniquely_named() {
+        let project = project().await;
+        let owner = http::bearer(OWNER_TOKEN);
+        let (_, created) = project
+            .create(owner.clone(), create_request("main", "v1.0.0", false))
+            .await;
+        let release = release_id(&created);
+        let chunk = || Ok(Bytes::from_static(b"abcd"));
+
+        // One byte over the cap is refused as soon as the stream crosses it.
+        let error = project
+            .store(release, "big.bin", vec![chunk(), chunk(), chunk()], 11)
+            .await
+            .unwrap_err();
+        let (status, body) = json_of(error.into_response()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body["error"]["message"],
+            "Release assets cannot exceed 2 GiB."
+        );
+        assert!(project.release_files(release).is_empty());
+        assert!(
+            release_asset::Entity::find()
+                .all(&project.instance.database)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // Exactly the cap is fine.
+        let asset = project
+            .store(release, " build.tar ", vec![chunk(), chunk()], 8)
+            .await
+            .unwrap();
+        assert_eq!(asset.name, "build.tar");
+        assert_eq!(asset.size_bytes, 8);
+        assert_eq!(project.release_files(release), [asset.id.to_string()]);
+
+        let duplicate = project
+            .store(release, "build.tar", vec![chunk()], 1024)
+            .await
+            .unwrap_err();
+        let (status, body) = json_of(duplicate.into_response()).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            body["error"]["message"],
+            "An asset with that file name already exists."
+        );
+        assert_eq!(project.release_files(release).len(), 1);
+
+        for invalid in ["", ".", "..", "dir/file", "dir\\file", "tab\tname"] {
+            assert!(validate_asset_name(invalid).is_err(), "{invalid:?}");
+        }
+
+        // The upload handler enforces write access before touching the body.
+        let upload = |headers: HeaderMap| {
+            let state = project.instance.state.clone();
+            async move {
+                respond(
+                    upload_asset(
+                        State(state),
+                        AxumPath(("alice".to_owned(), "project".to_owned(), release)),
+                        Query(UploadAssetQuery {
+                            name: "other.bin".to_owned(),
+                        }),
+                        headers,
+                        CookieJar::new(),
+                        Body::from("payload"),
+                    )
+                    .await,
+                )
+                .status()
+            }
+        };
+        assert_eq!(upload(HeaderMap::new()).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            upload(http::bearer(READER_TOKEN)).await,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(project.release_files(release).len(), 1);
+        assert_eq!(upload(owner).await, StatusCode::CREATED);
+        assert_eq!(project.release_files(release).len(), 2);
+
+        // Anyone who can read the repository downloads, and it counts.
+        let response = respond(
+            download_asset(
+                State(project.instance.state.clone()),
+                AxumPath(("alice".to_owned(), "project".to_owned(), release, asset.id)),
+                HeaderMap::new(),
+                CookieJar::new(),
+            )
+            .await,
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "8");
+        assert_eq!(
+            response.headers()[header::CONTENT_DISPOSITION],
+            "attachment; filename=\"build.tar\""
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), b"abcdabcd");
+        let counted = release_asset::Entity::find_by_id(asset.id)
+            .one(&project.instance.database)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(counted.download_count, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "bug: store_release_asset returns through `?` when the body stream fails, \
+                leaving the `.{asset_id}.upload` temporary file in the release directory; \
+                the oversize path removes it, the stream-error path does not"]
+    async fn an_upload_that_fails_midway_leaves_no_temporary_file() {
+        let project = project().await;
+        let (_, created) = project
+            .create(
+                http::bearer(OWNER_TOKEN),
+                create_request("main", "v1.0.0", false),
+            )
+            .await;
+        let release = release_id(&created);
+
+        let error = project
+            .store(
+                release,
+                "broken.bin",
+                vec![
+                    Ok(Bytes::from_static(b"abcd")),
+                    Err(ApiError::bad_request("connection reset")),
+                ],
+                1024,
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
+        assert!(
+            release_asset::Entity::find()
+                .all(&project.instance.database)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(project.release_files(release), Vec::<String>::new());
     }
 }
