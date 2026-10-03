@@ -5,6 +5,8 @@ mod browser;
 mod deploy_keys;
 mod files;
 mod git_http;
+#[cfg(test)]
+mod git_http_tests;
 mod git_service;
 mod gitea;
 mod github_mirror;

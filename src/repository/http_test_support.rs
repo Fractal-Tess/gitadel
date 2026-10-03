@@ -100,6 +100,10 @@ impl HttpResponse {
         })
     }
 
+    pub(super) fn text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+
     /// The `error.message` of an [`ApiError`](crate::identity::ApiError) body.
     pub(super) fn error_message(&self) -> String {
         self.json()["error"]["message"]
