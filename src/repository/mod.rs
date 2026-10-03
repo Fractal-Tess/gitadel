@@ -8,6 +8,8 @@ mod git_http;
 mod git_service;
 mod gitea;
 mod github_mirror;
+#[cfg(test)]
+mod http_test_support;
 mod icon;
 pub(crate) mod image;
 mod import_metadata;
@@ -16,6 +18,8 @@ mod integrations;
 mod integrity;
 mod issues;
 mod lfs;
+#[cfg(test)]
+mod lfs_tests;
 mod maintenance;
 mod markdown;
 mod mirror_scheduler;
