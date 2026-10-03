@@ -229,10 +229,11 @@ impl russh::server::Handler for SshHandler {
             return reject(channel_id, session, "Authentication required.\n");
         };
         // The connection may have been open since before the account was
-        // disabled; authentication alone is checked only once per connection.
-        if let Some(user_id) = actor.user() {
-            match self.state.identity().user_is_enabled(user_id).await {
-                Ok(true) => {}
+        // disabled or the deploy key revoked; authentication alone is checked
+        // only once per connection.
+        let actor = match actor {
+            SshActor::User(user_id) => match self.state.identity().user_is_enabled(user_id).await {
+                Ok(true) => actor,
                 Ok(false) => {
                     self.actor = None;
                     return reject(channel_id, session, "This account is disabled.\n");
@@ -245,8 +246,29 @@ impl russh::server::Handler for SshHandler {
                         "Authentication could not be verified.\n",
                     );
                 }
+            },
+            SshActor::DeployKey(key) => {
+                match deploy_keys::reauthorize(self.state.identity().database(), key).await {
+                    Ok(Some(key)) => {
+                        let actor = SshActor::DeployKey(key);
+                        self.actor = Some(actor);
+                        actor
+                    }
+                    Ok(None) => {
+                        self.actor = None;
+                        return reject(channel_id, session, "This deploy key has been revoked.\n");
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "could not verify the SSH deploy key");
+                        return reject(
+                            channel_id,
+                            session,
+                            "Authentication could not be verified.\n",
+                        );
+                    }
+                }
             }
-        }
+        };
         let actor_user_id = actor.attributed_user();
         let Some(channel_state) = self.channels.remove(&channel_id) else {
             return reject(channel_id, session, "Invalid SSH channel.\n");

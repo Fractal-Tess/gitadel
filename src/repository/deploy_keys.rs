@@ -105,6 +105,35 @@ pub(crate) async fn authenticate<C: ConnectionTrait>(
     Ok(Some(access))
 }
 
+/// Re-reads a deploy key on a connection that authenticated earlier. The key
+/// may have been deleted, or its repository removed, since the login; the
+/// refreshed access also carries a changed read-only flag.
+pub(crate) async fn reauthorize<C: ConnectionTrait>(
+    database: &C,
+    access: DeployKeyAccess,
+) -> Result<Option<DeployKeyAccess>, ApiError> {
+    let Some(key) = repository_deploy_key::Entity::find_by_id(access.key_id)
+        .one(database)
+        .await?
+        .filter(|key| key.repository_id == access.repository_id)
+    else {
+        return Ok(None);
+    };
+    let Some(repository) = repository::Entity::find_by_id(key.repository_id)
+        .one(database)
+        .await?
+        .filter(|repository| repository.deleted_at.is_none())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(DeployKeyAccess {
+        key_id: key.id,
+        repository_id: key.repository_id,
+        read_only: key.read_only,
+        attributed_user: key.created_by.unwrap_or(repository.created_by),
+    }))
+}
+
 /// Returns true when a user SSH key or deploy key already uses `fingerprint`.
 pub(crate) async fn fingerprint_in_use<C: ConnectionTrait>(
     database: &C,
@@ -396,5 +425,61 @@ mod tests {
         writable.authorize(&bound, Permission::Write).unwrap();
         assert!(writable.authorize(&other, Permission::Write).is_err());
         assert!(writable.authorize(&bound, Permission::Manage).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_revoked_deploy_key_fails_its_next_command() {
+        let mut options = ConnectOptions::new("sqlite::memory:");
+        options.max_connections(1);
+        let database = Database::connect(options).await.unwrap();
+        crate::migration::Migrator::up(&database, None)
+            .await
+            .unwrap();
+        let owner = crate::identity::bootstrap_admin(
+            &database,
+            "deploy-owner",
+            "deploy-test-password".to_owned(),
+        )
+        .await
+        .unwrap();
+        let bound = insert_repository(&database, &owner, "bound").await;
+        let key = repository_deploy_key::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            repository_id: Set(bound.id),
+            title: Set("ci".to_owned()),
+            fingerprint: Set("SHA256:deploy".to_owned()),
+            public_key: Set("ssh-ed25519 AAAA".to_owned()),
+            read_only: Set(false),
+            created_by: Set(Some(owner.id)),
+            created_at: Set(Utc::now()),
+            last_used_at: Set(None),
+        }
+        .insert(&database)
+        .await
+        .unwrap();
+        // The connection authenticated while the key still allowed pushes.
+        let access = authenticate(&database, "SHA256:deploy")
+            .await
+            .unwrap()
+            .expect("deploy key authenticates");
+        assert!(!access.read_only);
+
+        // A downgrade shows up on the next command without a new login.
+        let mut downgraded: repository_deploy_key::ActiveModel = key.clone().into();
+        downgraded.read_only = Set(true);
+        downgraded.update(&database).await.unwrap();
+        let refreshed = reauthorize(&database, access)
+            .await
+            .unwrap()
+            .expect("the key still exists");
+        assert!(refreshed.read_only);
+        assert_eq!(refreshed.key_id, key.id);
+
+        // Deleting the key ends the open connection's access.
+        repository_deploy_key::Entity::delete_by_id(key.id)
+            .exec(&database)
+            .await
+            .unwrap();
+        assert!(reauthorize(&database, access).await.unwrap().is_none());
     }
 }
