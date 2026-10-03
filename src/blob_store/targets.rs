@@ -1,4 +1,7 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
@@ -258,6 +261,24 @@ pub async fn find(
     Ok((target, configuration))
 }
 
+/// Whether `path` is missing or an empty directory. The blob store's own
+/// listing only sees digest-named objects, so a directory holding unrelated
+/// files would otherwise be claimed and marked as Gitadel's.
+async fn directory_is_empty(path: &Path) -> Result<bool> {
+    let mut entries = match tokio::fs::read_dir(path).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not read {}", path.display()));
+        }
+    };
+    Ok(entries
+        .next_entry()
+        .await
+        .with_context(|| format!("could not read {}", path.display()))?
+        .is_none())
+}
+
 pub async fn create(
     database: &DatabaseConnection,
     name: String,
@@ -267,6 +288,11 @@ pub async fn create(
         bail!("storage target name cannot be empty");
     }
     let id = Uuid::new_v4();
+    if let StorageTargetConfiguration::Filesystem { path } = &configuration
+        && !directory_is_empty(path).await?
+    {
+        bail!("storage target must be empty before Gitadel claims it");
+    }
     let store = configuration.open().await?;
     if !store.list(&ObjectPrefix::new("")?).await?.is_empty() {
         bail!("storage target must be empty before Gitadel claims it");
@@ -934,9 +960,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "bug: create checks emptiness through BlobStore::list, which only sees \
-                digest-named files, so a destination holding arbitrary foreign files \
-                (here `stray.bin`) is claimed and marked as Gitadel's"]
     async fn create_refuses_a_destination_holding_foreign_files() {
         let scratch = Scratch::new();
         let database = test_support::database().await;
