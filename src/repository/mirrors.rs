@@ -552,13 +552,13 @@ impl MirrorBusySet {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn contains(&self, repository_id: Uuid) -> bool {
+    pub(super) fn contains(&self, repository_id: Uuid) -> bool {
         self.ids().contains(&repository_id)
     }
 
     /// Marks the repository busy until the returned claim is dropped, which
     /// also covers a handler future cancelled in the middle of the operation.
-    fn claim(&self, repository_id: Uuid) -> Option<MirrorBusy> {
+    pub(super) fn claim(&self, repository_id: Uuid) -> Option<MirrorBusy> {
         self.ids().insert(repository_id).then(|| MirrorBusy {
             set: self.clone(),
             repository_id,
@@ -566,7 +566,7 @@ impl MirrorBusySet {
     }
 }
 
-struct MirrorBusy {
+pub(super) struct MirrorBusy {
     set: MirrorBusySet,
     repository_id: Uuid,
 }
