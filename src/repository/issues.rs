@@ -216,14 +216,17 @@ pub async fn list_issues(
                 .or(repository_issue::Column::Body.contains(&query)),
         );
     }
-    let total = select.clone().count(state.identity().database()).await?;
+    let total = select
+        .clone()
+        .count(state.identity().read_database())
+        .await?;
     let issues = select
         .order_by_desc(repository_issue::Column::UpdatedAt)
         // Issues touched in the same instant keep one order across pages.
         .order_by_desc(repository_issue::Column::Number)
         .offset(window.offset)
         .limit(window.limit)
-        .all(state.identity().database())
+        .all(state.identity().read_database())
         .await?;
     Ok((
         total_count_header(total),
@@ -510,7 +513,7 @@ pub async fn list_comments(
     let comments = issue_comment::Entity::find()
         .filter(issue_comment::Column::IssueId.eq(issue.id))
         .order_by_asc(issue_comment::Column::CreatedAt)
-        .all(state.identity().database())
+        .all(state.identity().read_database())
         .await?;
     Ok(Json(
         comment_responses(&state, comments, viewer_id, can_write).await?,
@@ -692,7 +695,7 @@ pub async fn list_labels(
     let labels = issue_label::Entity::find()
         .filter(issue_label::Column::RepositoryId.eq(repository.id))
         .order_by_asc(issue_label::Column::Name)
-        .all(state.identity().database())
+        .all(state.identity().read_database())
         .await?;
     Ok(Json(labels.into_iter().map(label_response).collect()))
 }

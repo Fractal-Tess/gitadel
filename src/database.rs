@@ -14,6 +14,9 @@ use crate::{
 };
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Readers the read-only pool opens. WAL lets them run beside the single
+/// writer, so page loads no longer queue behind background writes.
+const READ_POOL_CONNECTIONS: u32 = 4;
 
 pub async fn connect_and_migrate(settings: &DatabaseSettings) -> Result<DatabaseConnection> {
     let database_path = sqlite_file_path(&settings.url);
@@ -29,7 +32,7 @@ pub async fn connect_and_migrate(settings: &DatabaseSettings) -> Result<Database
         );
     }
 
-    let connection = Database::connect(connect_options(&settings.url))
+    let connection = Database::connect(connect_options(&settings.url, PoolRole::Writer))
         .await
         .with_context(|| format!("could not connect to database {}", settings.url))?;
     if let Some(path) = database_path.as_deref() {
@@ -45,19 +48,51 @@ pub async fn connect_and_migrate(settings: &DatabaseSettings) -> Result<Database
     Ok(connection)
 }
 
-fn connect_options(url: &str) -> ConnectOptions {
+/// A read-only pool beside `writer` for hot read paths. Every connection is
+/// `query_only`, so a write routed here fails instead of racing the writer.
+///
+/// WAL guarantees a reader sees every transaction committed before its own
+/// statement starts, so a read here right after a write on `writer` observes
+/// that write. In-memory databases cannot be shared between pools and fall
+/// back to the writer itself.
+pub async fn connect_reader(
+    settings: &DatabaseSettings,
+    writer: &DatabaseConnection,
+) -> Result<DatabaseConnection> {
+    if sqlite_file_path(&settings.url).is_none() || is_memory_url(&settings.url) {
+        return Ok(writer.clone());
+    }
+    Database::connect(connect_options(&settings.url, PoolRole::Reader))
+        .await
+        .with_context(|| format!("could not open read-only pool for {}", settings.url))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PoolRole {
+    Writer,
+    Reader,
+}
+
+fn connect_options(url: &str, role: PoolRole) -> ConnectOptions {
     let mut options = ConnectOptions::new(url);
     options.sqlx_logging(false);
-    // A single SQLite writer connection makes transaction boundaries deterministic.
-    options.max_connections(1);
+    options.max_connections(match role {
+        // A single SQLite writer connection makes transaction boundaries deterministic.
+        PoolRole::Writer => 1,
+        PoolRole::Reader => READ_POOL_CONNECTIONS,
+    });
     // `foreign_keys` and `busy_timeout` are connection-local, so they are part
     // of the connect options: the pool replaces its connection when it ages
     // out, and a pragma issued once after startup would not follow it.
-    options.map_sqlx_sqlite_opts(|sqlite| {
-        sqlite
+    options.map_sqlx_sqlite_opts(move |sqlite| {
+        let sqlite = sqlite
             .foreign_keys(true)
             .pragma("journal_mode", "WAL")
-            .busy_timeout(BUSY_TIMEOUT)
+            .busy_timeout(BUSY_TIMEOUT);
+        match role {
+            PoolRole::Writer => sqlite,
+            PoolRole::Reader => sqlite.pragma("query_only", "1"),
+        }
     });
     options
 }
@@ -69,6 +104,10 @@ fn sqlite_file_path(url: &str) -> Option<PathBuf> {
         .split('?')
         .next()?;
     (!raw.is_empty() && raw != ":memory:").then(|| PathBuf::from(raw))
+}
+
+fn is_memory_url(url: &str) -> bool {
+    url.contains(":memory:") || url.contains("mode=memory")
 }
 
 #[cfg(test)]
@@ -99,7 +138,7 @@ mod tests {
         let url = format!("sqlite://{}?mode=rwc", root.join("gitadel.db").display());
         // The pool's connection is retired after every use, so each statement
         // below runs on a connection no earlier statement configured.
-        let mut options = connect_options(&url);
+        let mut options = connect_options(&url, PoolRole::Writer);
         options.map_sqlx_sqlite_pool_opts(|pool| pool.max_lifetime(Duration::ZERO));
         let connection = Database::connect(options).await?;
 
@@ -136,6 +175,81 @@ mod tests {
         std::fs::remove_dir_all(root)?;
 
         assert_eq!((directory_mode, database_mode), (0o700, 0o600));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_pool_sees_committed_writes_and_refuses_its_own() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("gitadel-database-reader-{}", Uuid::new_v4()));
+        let settings = DatabaseSettings {
+            url: format!("sqlite://{}?mode=rwc", root.join("gitadel.db").display()),
+        };
+        let writer = connect_and_migrate(&settings).await?;
+        let reader = connect_reader(&settings, &writer).await?;
+        let backend = writer.get_database_backend();
+        let statement = |sql: &str| Statement::from_string(backend, sql.to_owned());
+
+        writer
+            .execute_raw(statement("CREATE TABLE reader_probe (value TEXT NOT NULL)"))
+            .await?;
+        // Each pooled reader sees a write the moment the writer commits it.
+        for round in 0..(READ_POOL_CONNECTIONS + 1) {
+            writer
+                .execute_raw(statement(&format!(
+                    "INSERT INTO reader_probe (value) VALUES ('{round}')"
+                )))
+                .await?;
+            let count = reader
+                .query_one_raw(statement(
+                    "SELECT CAST(COUNT(*) AS TEXT) AS value FROM reader_probe",
+                ))
+                .await?
+                .unwrap()
+                .try_get::<String>("", "value")?;
+            assert_eq!(count, (round + 1).to_string());
+        }
+        assert_eq!(pragma(&reader, "query_only", "query_only").await, "1");
+        assert!(
+            reader
+                .execute_raw(statement("DELETE FROM reader_probe"))
+                .await
+                .is_err(),
+            "the read pool must not accept writes"
+        );
+
+        reader.close().await?;
+        writer.close().await?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn in_memory_databases_share_the_writer_as_their_reader() -> Result<()> {
+        assert!(is_memory_url("sqlite::memory:"));
+        assert!(is_memory_url("sqlite://probe.db?mode=memory&cache=shared"));
+        assert!(!is_memory_url("sqlite://probe.db?mode=rwc"));
+
+        let url = "sqlite::memory:";
+        let settings = DatabaseSettings {
+            url: url.to_owned(),
+        };
+        let writer = Database::connect(connect_options(url, PoolRole::Writer)).await?;
+        let reader = connect_reader(&settings, &writer).await?;
+        // A separate pool could not see this table; the shared writer can
+        // even write through the "reader".
+        writer
+            .execute_raw(Statement::from_string(
+                writer.get_database_backend(),
+                "CREATE TABLE memory_probe (value TEXT NOT NULL)",
+            ))
+            .await?;
+        reader
+            .execute_raw(Statement::from_string(
+                reader.get_database_backend(),
+                "INSERT INTO memory_probe (value) VALUES ('shared')",
+            ))
+            .await
+            .context("an in-memory URL should fall back to the writer")?;
         Ok(())
     }
 }

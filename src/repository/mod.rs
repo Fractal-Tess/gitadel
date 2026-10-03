@@ -444,7 +444,7 @@ impl RepositoryState {
     {
         let id = (repository_id, kind.to_owned(), cache_key.to_owned());
         let Some(entry) = repository_cache_entry::Entity::find_by_id(id.clone())
-            .one(self.identity.database())
+            .one(self.identity.read_database())
             .await?
         else {
             return Ok(None);

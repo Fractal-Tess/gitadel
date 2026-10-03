@@ -105,7 +105,7 @@ pub async fn list_repositories(
         .map(|repository| repository.id)
         .collect::<Vec<_>>();
     let mut topics =
-        repository_topics_by_repository(state.identity().database(), &repository_ids).await?;
+        repository_topics_by_repository(state.identity().read_database(), &repository_ids).await?;
     let response = accessible
         .repositories
         .into_iter()
@@ -173,7 +173,7 @@ pub(super) async fn accessible_repositories(
     } else {
         true
     };
-    let database = state.identity().database();
+    let database = state.identity().read_database();
 
     let Some(user_id) = user_id else {
         let repositories = repository::Entity::find()

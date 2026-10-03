@@ -1226,7 +1226,7 @@ async fn cached_commit_line_stats(
             .filter(repository_cache_entry::Column::Kind.eq(super::CACHE_KIND_COMMIT_STATS))
             .filter(repository_cache_entry::Column::CacheKey.is_in(keys.iter().cloned()))
             .filter(repository_cache_entry::Column::ExpiresAt.gt(now))
-            .all(state.identity().database())
+            .all(state.identity().read_database())
             .await?;
         for entry in entries {
             // An unreadable entry is recomputed and overwritten.
@@ -1436,12 +1436,12 @@ async fn attach_commit_verifications(
 
     let keys = ssh_key_entity::Entity::find()
         .filter(ssh_key_entity::Column::Fingerprint.is_in(fingerprints))
-        .all(state.identity().database())
+        .all(state.identity().read_database())
         .await?;
     let user_ids = keys.iter().map(|key| key.user_id).collect::<HashSet<_>>();
     let usernames = user::Entity::find()
         .filter(user::Column::Id.is_in(user_ids))
-        .all(state.identity().database())
+        .all(state.identity().read_database())
         .await?
         .into_iter()
         .map(|owner| (owner.id, owner.username))
@@ -1485,7 +1485,7 @@ async fn attach_release_refs(
     let releases = repository_release::Entity::find()
         .filter(repository_release::Column::RepositoryId.eq(repository.id))
         .order_by_desc(repository_release::Column::PublishedAt)
-        .all(state.identity().database())
+        .all(state.identity().read_database())
         .await?;
     let latest_id = releases
         .iter()

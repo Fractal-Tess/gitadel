@@ -89,6 +89,9 @@ tokio::task_local! {
 #[derive(Clone)]
 pub struct IdentityState {
     database: DatabaseConnection,
+    /// Read-only pool for hot read paths; the writer itself until
+    /// [`Self::with_read_database`] supplies one.
+    read_database: DatabaseConnection,
     settings: AuthSettings,
     public_url: Url,
     /// Absent when the public URL is an IP address, which WebAuthn rejects.
@@ -331,6 +334,7 @@ impl IdentityState {
             None => crate::mail::Mailer::disabled(),
         };
         Ok(Self {
+            read_database: database.clone(),
             database,
             settings,
             public_url,
@@ -358,6 +362,19 @@ impl IdentityState {
 
     pub fn database(&self) -> &DatabaseConnection {
         &self.database
+    }
+
+    /// The read-only pool. Reads that must observe an uncommitted write of
+    /// their own transaction stay on [`Self::database`].
+    pub fn read_database(&self) -> &DatabaseConnection {
+        &self.read_database
+    }
+
+    /// Route hot read paths through `read_database`, a pool opened by
+    /// [`crate::database::connect_reader`].
+    pub fn with_read_database(mut self, read_database: DatabaseConnection) -> Self {
+        self.read_database = read_database;
+        self
     }
 
     /// Outgoing mail; disabled unless `[smtp]` is configured.

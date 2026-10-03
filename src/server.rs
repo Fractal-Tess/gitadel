@@ -300,7 +300,11 @@ pub enum ServerExit {
     Maintenance(Box<MaintenanceAction>),
 }
 
-pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<ServerExit> {
+pub async fn serve(
+    settings: Settings,
+    database: DatabaseConnection,
+    read_database: DatabaseConnection,
+) -> Result<ServerExit> {
     let http_bind = settings.server.bind;
     let listener = StdTcpListener::bind(http_bind)
         .with_context(|| format!("could not bind web listener to {http_bind}"))?;
@@ -330,7 +334,8 @@ pub async fn serve(settings: Settings, database: DatabaseConnection) -> Result<S
     let (maintenance_sender, mut maintenance_receiver) = mpsc::channel(1);
     let identity_state =
         IdentityState::new_with_runtime(database, settings.clone(), maintenance_sender)
-            .context("could not initialize authentication")?;
+            .context("could not initialize authentication")?
+            .with_read_database(read_database);
     identity_state
         .initialize_lfs_storage(&settings.storage)
         .await

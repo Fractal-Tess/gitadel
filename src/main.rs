@@ -81,7 +81,12 @@ async fn run(cli: Cli) -> Result<()> {
 
     loop {
         let database = database::connect_and_migrate(&settings.database).await?;
-        let exit = server::serve(settings.clone(), database.clone()).await?;
+        let read_database = database::connect_reader(&settings.database, &database).await?;
+        let exit = server::serve(settings.clone(), database.clone(), read_database.clone()).await?;
+        read_database
+            .close()
+            .await
+            .context("could not close the read-only database pool for maintenance")?;
         database
             .close()
             .await

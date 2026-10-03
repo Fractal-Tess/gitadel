@@ -82,7 +82,7 @@ async fn ensure_namespace(state: &RepositoryState, slug: &str) -> Result<(), Api
 
 async fn load_namespace(state: &RepositoryState, slug: &str) -> Result<namespace::Model, ApiError> {
     namespace::Entity::find_by_id(slug)
-        .one(state.identity().database())
+        .one(state.identity().read_database())
         .await?
         .ok_or_else(ApiError::not_found)
 }
@@ -99,7 +99,7 @@ async fn profile_scope(
     state: &RepositoryState,
     namespace: &namespace::Model,
 ) -> Result<ProfileScope, ApiError> {
-    let database = state.identity().database();
+    let database = state.identity().read_database();
     if let Some(user_id) = namespace.user_id
         && let Some(account) = user::Entity::find_by_id(user_id).one(database).await?
     {
@@ -296,7 +296,7 @@ async fn pinned_repositories(
     let pins = namespace_pin::Entity::find()
         .filter(namespace_pin::Column::Namespace.eq(slug))
         .order_by_asc(namespace_pin::Column::Position)
-        .all(state.identity().database())
+        .all(state.identity().read_database())
         .await?;
     let mut readable = accessible
         .repositories
