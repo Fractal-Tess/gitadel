@@ -1493,6 +1493,10 @@ pub fn router() -> Router<IdentityState> {
                 .post(integrations::configure_integration_source)
                 .delete(integrations::disconnect_integration_source),
         )
+        .route(
+            "/namespaces/{slug}/integrations/{id}/source/verify",
+            post(integrations::verify_integration_source),
+        )
         .merge(mirror_identities::router())
 }
 

@@ -30,6 +30,7 @@ use crate::integrations::{
 };
 use crate::secrets::{SecretCipher, SecretKind};
 
+use super::oauth::{ACCESS_TOKEN_LIFETIME, TokenPair};
 use super::{ApiError, AuthenticatedUser, IdentityState, SCOPE_READ, SCOPE_WRITE};
 
 const MAX_API_KEY_LENGTH: usize = 512;
@@ -153,7 +154,31 @@ pub struct SourceConnectionResponse {
     required: bool,
     binding: Option<SourceBindingStatus>,
     sources: Vec<RemoteSourceResponse>,
+    /// Set when this response follows a reachability check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    check: Option<SourceCheckResponse>,
 }
+
+/// Whether Dokploy can list repositories through the bound provider.
+#[derive(Serialize)]
+pub struct SourceCheckResponse {
+    reachable: bool,
+    /// The Gitadel address Dokploy uses after the check.
+    internal_url: String,
+    repositories: Option<usize>,
+    /// Addresses that failed, in the order they were tried.
+    attempts: Vec<SourceAttempt>,
+}
+
+#[derive(Serialize)]
+pub struct SourceAttempt {
+    url: String,
+    error: String,
+}
+
+/// What a Gitadel-managed Dokploy provider may do: read repositories and the
+/// account they belong to.
+const DOKPLOY_SCOPE: &str = "read:repository read:user";
 
 #[derive(Serialize)]
 pub struct SourceBindingStatus {
@@ -563,6 +588,10 @@ pub async fn configure_integration_source(
             let client_id = format!("goc_{}", random_secret(24));
             let client_secret = format!("gcs_{}", random_secret(32));
             let application_id = Uuid::new_v4();
+            // Gitadel issues Dokploy's tokens itself, so the provider works
+            // without anyone completing an OAuth authorization in Dokploy.
+            let tokens = TokenPair::generate();
+            let expires_at = Utc::now() + ACCESS_TOKEN_LIFETIME;
             let internal_url = integration
                 .dokploy_internal_url
                 .as_deref()
@@ -578,6 +607,10 @@ pub async fn configure_integration_source(
                         redirect_uri: &redirect_uri,
                         public_url: state.public_url.as_str(),
                         internal_url,
+                        access_token: &tokens.access_token,
+                        refresh_token: &tokens.refresh_token,
+                        expires_at: expires_at.timestamp(),
+                        username: &actor.user.username,
                     },
                 )
                 .await
@@ -599,6 +632,9 @@ pub async fn configure_integration_source(
                 }
                 .insert(&transaction)
                 .await?;
+                tokens
+                    .store(&transaction, application.id, actor.user.id, DOKPLOY_SCOPE)
+                    .await?;
                 let binding = dokploy_source_binding::ActiveModel {
                     integration_id: Set(id),
                     gitea_id: Set(provisioned.id.clone()),
@@ -639,22 +675,160 @@ pub async fn configure_integration_source(
                 id: provisioned.id,
                 parent_id: provisioned.parent_id,
                 name,
-                ready: false,
+                ready: true,
                 authorization_url: provisioned.authorization_url,
                 url: Some(state.public_url.as_str().trim_end_matches('/').to_owned()),
             };
             (binding, vec![source])
         }
     };
-    Ok((
-        StatusCode::CREATED,
-        Json(source_connection_response(
-            provider,
-            Some(&binding),
-            &sources,
-            state.public_url.as_str(),
-        )),
+    let check = verify_source(&state, provider, &slug, &integration, &binding).await?;
+    let mut response = source_connection_response(
+        provider,
+        Some(&binding),
+        &sources,
+        state.public_url.as_str(),
+    );
+    response.check = Some(check);
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+/// Check that Dokploy reaches Gitadel through the bound provider. When it
+/// cannot and Gitadel manages the provider, try the other addresses this
+/// instance answers on and keep the first one that works.
+pub async fn verify_integration_source(
+    State(state): State<IdentityState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Path((slug, id)): Path<(String, Uuid)>,
+) -> Result<Json<SourceCheckResponse>, ApiError> {
+    let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
+    authorize_namespace(&state, &actor, &slug).await?;
+    let integration = owned_integration(state.secret_cipher(), state.database(), &slug, id).await?;
+    let provider = provider(&integration.provider).ok_or_else(ApiError::not_found)?;
+    let binding = source_binding(state.database(), id)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("Connect a Dokploy source first."))?;
+    Ok(Json(
+        verify_source(&state, provider, &slug, &integration, &binding).await?,
     ))
+}
+
+async fn verify_source(
+    state: &IdentityState,
+    provider: &'static Provider,
+    slug: &str,
+    integration: &namespace_integration::Model,
+    binding: &dokploy_source_binding::Model,
+) -> Result<SourceCheckResponse, ApiError> {
+    let credential = Credential {
+        url: &integration.url,
+        api_key: &integration.api_key,
+        source_id: Some(&binding.gitea_id),
+    };
+    let current = integration
+        .dokploy_internal_url
+        .clone()
+        .unwrap_or_else(|| state.public_url.as_str().trim_end_matches('/').to_owned());
+    let mut attempts = Vec::new();
+    match provider.integration.check_remote_source(credential).await {
+        Ok(repositories) => {
+            return Ok(SourceCheckResponse {
+                reachable: true,
+                internal_url: current,
+                repositories: Some(repositories),
+                attempts,
+            });
+        }
+        Err(error) => attempts.push(SourceAttempt {
+            url: current.clone(),
+            error,
+        }),
+    }
+    if !binding.managed {
+        return Ok(SourceCheckResponse {
+            reachable: false,
+            internal_url: current,
+            repositories: None,
+            attempts,
+        });
+    }
+    for candidate in candidate_internal_urls(state.public_url.as_str()).await {
+        if attempts.iter().any(|attempt| attempt.url == candidate) {
+            continue;
+        }
+        let result = match provider
+            .integration
+            .update_remote_source_internal_url(credential, &binding.gitea_id, &candidate)
+            .await
+        {
+            Ok(()) => provider.integration.check_remote_source(credential).await,
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(repositories) => {
+                let mut active = stored_integration(state.database(), slug, integration.id)
+                    .await?
+                    .into_active_model();
+                active.dokploy_internal_url = Set(Some(candidate.clone()));
+                active.updated_at = Set(Utc::now());
+                active.update(state.database()).await?;
+                return Ok(SourceCheckResponse {
+                    reachable: true,
+                    internal_url: candidate,
+                    repositories: Some(repositories),
+                    attempts,
+                });
+            }
+            Err(error) => attempts.push(SourceAttempt {
+                url: candidate,
+                error,
+            }),
+        }
+    }
+    // Nothing worked; leave the provider on the address the user chose.
+    if let Err(error) = provider
+        .integration
+        .update_remote_source_internal_url(credential, &binding.gitea_id, &current)
+        .await
+    {
+        tracing::warn!(%error, "could not restore the Dokploy provider's internal URL");
+    }
+    Ok(SourceCheckResponse {
+        reachable: false,
+        internal_url: current,
+        repositories: None,
+        attempts,
+    })
+}
+
+/// Addresses a remote service might reach this instance on: the public URL,
+/// then each address its host name resolves to here (a VPN or LAN address
+/// that the remote's containers can reach without resolving the name).
+async fn candidate_internal_urls(public_url: &str) -> Vec<String> {
+    let mut candidates = vec![public_url.trim_end_matches('/').to_owned()];
+    let Ok(parsed) = url::Url::parse(public_url) else {
+        return candidates;
+    };
+    let (Some(host), Some(port)) = (parsed.host_str(), parsed.port_or_known_default()) else {
+        return candidates;
+    };
+    if let Ok(addresses) = tokio::net::lookup_host((host, port)).await {
+        for address in addresses {
+            if address.ip().is_loopback() {
+                continue;
+            }
+            let mut candidate = parsed.clone();
+            if candidate.set_ip_host(address.ip()).is_err() {
+                continue;
+            }
+            let candidate = candidate.as_str().trim_end_matches('/').to_owned();
+            if !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        }
+    }
+    candidates
 }
 
 pub async fn disconnect_integration_source(
@@ -785,6 +959,7 @@ fn source_connection_response(
             .iter()
             .map(|source| RemoteSourceResponse::new(source, public_url))
             .collect(),
+        check: None,
     }
 }
 

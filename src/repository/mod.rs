@@ -2,6 +2,7 @@
 mod access_tests;
 mod analysis;
 mod browser;
+mod deploy_detect;
 mod deploy_keys;
 mod files;
 mod git_http;
@@ -1179,6 +1180,18 @@ pub fn router() -> Router<RepositoryState> {
         .route(
             "/repos/{namespace}/{name}/integrations/{id}/deploy",
             axum::routing::post(integrations::deploy_integration),
+        )
+        .route(
+            "/repos/{namespace}/{name}/integrations/{id}/suggestions",
+            get(integrations::deployment_suggestions),
+        )
+        .route(
+            "/repos/{namespace}/{name}/integrations/{id}/setup",
+            axum::routing::post(integrations::setup_deployment),
+        )
+        .route(
+            "/repos/{namespace}/{name}/integrations/{id}/deployment",
+            get(integrations::deployment_status),
         )
         .route(
             "/repos/{namespace}/{name}/hooks",

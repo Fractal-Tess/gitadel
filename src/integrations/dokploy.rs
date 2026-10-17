@@ -15,10 +15,10 @@ use transport::{
 };
 
 use super::{
-    CreateEnvironmentRequest, CreateProjectRequest, CreateRemoteRequest, Credential,
-    EnablementRequest, Event, EventContext, Integration, LinkRemoteRequest, ProvisionedSource,
-    PushEvent, RemoteResourcesRequest, RemoteSource, RepositoryIdentity, SourceApplication,
-    TestReport,
+    CreateEnvironmentRequest, CreateProjectRequest, CreateRemoteRequest, Credential, DomainRequest,
+    EnablementRequest, Event, EventContext, Integration, LinkRemoteRequest, ProjectChoice,
+    ProvisionedSource, PushEvent, RemoteResourcesRequest, RemoteSource, RepositoryIdentity,
+    SetupOutcome, SetupRemoteRequest, SourceApplication, TestReport,
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -521,6 +521,12 @@ fn source_from_value(base: &str, value: &Value, ready: bool) -> Result<RemoteSou
     })
 }
 
+/// Whether Dokploy holds an access token for this provider, which it only
+/// receives once someone completes the OAuth authorization.
+fn authorized(detail: &Value) -> bool {
+    value_string(detail, "accessToken").is_some()
+}
+
 async fn list_sources(credential: Credential<'_>) -> Result<Vec<RemoteSource>, String> {
     let client = client_for(credential.url).await?;
     let providers = get_json(
@@ -536,8 +542,9 @@ async fn list_sources(credential: Credential<'_>) -> Result<Vec<RemoteSource>, S
         .iter()
         .map(|provider| source_from_value(credential.url, provider, true))
         .collect::<Result<Vec<_>, _>>()?;
-    // The provider list omits each provider's forge URL. Fetch it for the
-    // bound provider only, or for every candidate while choosing one.
+    // Dokploy lists every provider that has OAuth client details, authorized
+    // or not, and omits its forge URL. The detail answers both; fetch it for
+    // the bound provider only, or for every candidate while choosing one.
     for source in &mut sources {
         if credential
             .source_id
@@ -553,7 +560,10 @@ async fn list_sources(credential: Credential<'_>) -> Result<Vec<RemoteSource>, S
         )
         .await
         {
-            Ok(detail) => source.url = value_string(&detail, "giteaUrl"),
+            Ok(detail) => {
+                source.url = value_string(&detail, "giteaUrl");
+                source.ready = authorized(&detail);
+            }
             Err(error) => {
                 tracing::debug!(%error, source = %source.id, "Dokploy provider detail unavailable")
             }
@@ -629,6 +639,12 @@ async fn create_source(
             "redirectUri": application.redirect_uri,
             "giteaUrl": application.public_url.trim_end_matches('/'),
             "giteaInternalUrl": application.internal_url.trim_end_matches('/'),
+            "accessToken": application.access_token,
+            "refreshToken": application.refresh_token,
+            "expiresAt": application.expires_at,
+            "giteaUsername": application.username,
+            "scopes": "repo,read:user",
+            "lastAuthenticatedAt": chrono::Utc::now().timestamp(),
         }),
     )
     .await?;
@@ -647,6 +663,21 @@ async fn create_source(
         parent_id: source.parent_id,
         authorization_url: source.authorization_url,
     })
+}
+
+async fn check_source(credential: Credential<'_>) -> Result<usize, String> {
+    let source_id = credential
+        .source_id
+        .ok_or("No Dokploy Gitea provider is bound to this connection.")?;
+    let client = client_for(credential.url).await?;
+    let repositories = get_json(
+        &client,
+        credential.url,
+        &source_query_path("/api/gitea.getGiteaRepositories", source_id),
+        credential.api_key,
+    )
+    .await?;
+    Ok(repositories.as_array().map_or(0, Vec::len))
 }
 
 async fn remove_source(credential: Credential<'_>, parent_id: &str) -> Result<(), String> {
@@ -1074,6 +1105,267 @@ async fn deploy_now(
     .await
 }
 
+/// Prefix a setup failure with the steps that had already succeeded, so the
+/// user knows how far it got before Gitadel rolled it back.
+fn failed_after(steps: &[String], error: String) -> String {
+    if steps.is_empty() {
+        error
+    } else {
+        format!(
+            "{error} Completed before this failed, then undone: {}.",
+            steps.join("; ")
+        )
+    }
+}
+
+async fn remove_project(client: &reqwest::Client, base: &str, api_key: &str, project_id: &str) {
+    if let Err(error) = post_for_status(
+        client,
+        base,
+        "/api/project.remove",
+        api_key,
+        &serde_json::json!({ "projectId": project_id }),
+    )
+    .await
+    {
+        tracing::warn!(%error, project = project_id, "could not remove a Dokploy project created by a failed setup");
+    }
+}
+
+async fn save_dockerfile_build(
+    client: &reqwest::Client,
+    base: &str,
+    api_key: &str,
+    application_id: &str,
+    dockerfile: &str,
+) -> Result<(), String> {
+    // Dokploy requires every field of this call; the empty context path and
+    // stage mean "the build path" and "the final stage".
+    post_for_status(
+        client,
+        base,
+        "/api/application.saveBuildType",
+        api_key,
+        &serde_json::json!({
+            "applicationId": application_id,
+            "buildType": "dockerfile",
+            "dockerfile": dockerfile,
+            "dockerContextPath": "",
+            "dockerBuildStage": "",
+            "herokuVersion": "24",
+            "railpackVersion": "0.15.4",
+        }),
+    )
+    .await
+}
+
+async fn create_domain(
+    client: &reqwest::Client,
+    base: &str,
+    api_key: &str,
+    kind: Kind,
+    id: &str,
+    domain: &DomainRequest,
+) -> Result<(), String> {
+    let mut body = serde_json::json!({
+        "host": domain.host.trim(),
+        "path": "/",
+        "port": domain.port,
+        "https": domain.https,
+        "certificateType": if domain.https { "letsencrypt" } else { "none" },
+        "customCertResolver": "",
+        "domainType": kind.route_segment(),
+    });
+    body[kind.id_key()] = Value::String(id.to_owned());
+    post_for_status(client, base, "/api/domain.create", api_key, &body).await
+}
+
+async fn setup(request: SetupRemoteRequest<'_>) -> Result<SetupOutcome, String> {
+    let kind = parse_kind(request.kind)?;
+    let base = request.credential.url;
+    let api_key = request.credential.api_key;
+    let source_id = request
+        .credential
+        .source_id
+        .ok_or("Connect this Dokploy connection to a repository source first.")?;
+    let environment = request.environment.trim();
+    if environment.is_empty() {
+        return Err("Choose an environment.".to_owned());
+    }
+    let client = client_for(base).await?;
+    let mut steps = Vec::new();
+
+    validate_gitea_provider(&client, request.repository, base, api_key, source_id).await?;
+    steps.push(format!(
+        "Dokploy can read {}/{}",
+        request.repository.namespace, request.repository.name
+    ));
+
+    let (project_id, created_project) = match request.project {
+        ProjectChoice::Existing(id) => (id, false),
+        ProjectChoice::New(name) => {
+            let created = create_project(
+                &client,
+                base,
+                api_key,
+                &CreateProjectRequest {
+                    credential: request.credential,
+                    name,
+                    description: Some(format!(
+                        "Deployments of {}/{} from Gitadel",
+                        request.repository.namespace, request.repository.name
+                    )),
+                },
+            )
+            .await?;
+            let id = value_string(&created, "id")
+                .ok_or("Dokploy did not return the new project's id.")?;
+            steps.push(format!(
+                "Created project {}",
+                value_string(&created, "name").unwrap_or_default()
+            ));
+            (id, true)
+        }
+    };
+    let undo_project = |error: String, steps: &[String]| {
+        let message = failed_after(steps, error);
+        let client = client.clone();
+        let project_id = project_id.clone();
+        async move {
+            if created_project {
+                remove_project(&client, base, api_key, &project_id).await;
+            }
+            message
+        }
+    };
+
+    let chosen = match create_environment(
+        &client,
+        base,
+        api_key,
+        &CreateEnvironmentRequest {
+            credential: request.credential,
+            project_id: project_id.clone(),
+            name: environment.to_owned(),
+            description: None,
+        },
+    )
+    .await
+    {
+        Ok(chosen) => chosen,
+        Err(error) => return Err(undo_project(error, &steps).await),
+    };
+    let Some(environment_id) = value_string(&chosen, "id") else {
+        return Err(undo_project(
+            "Dokploy did not return an environment id.".to_owned(),
+            &steps,
+        )
+        .await);
+    };
+    steps.push(format!(
+        "{} environment {} in {}",
+        if chosen["existing"] == true {
+            "Using"
+        } else {
+            "Created"
+        },
+        value_string(&chosen, "name").unwrap_or_default(),
+        value_string(&chosen, "project_name").unwrap_or_default(),
+    ));
+
+    let link = match create_resource(
+        &client,
+        request.repository,
+        base,
+        api_key,
+        source_id,
+        &CreateResourceRequest {
+            kind,
+            name: request.name,
+            environment_id,
+            branch: request.branch,
+            server_id: request.server_id,
+            repository_path: request.repository_path,
+            compose_path: request.compose_path,
+        },
+    )
+    .await
+    {
+        Ok(link) => link,
+        Err(error) => return Err(undo_project(error, &steps).await),
+    };
+    steps.push(format!(
+        "Created {} {} from {}/{} on branch {}",
+        match kind {
+            Kind::Application => "application",
+            Kind::Compose => "Compose service",
+        },
+        link.name,
+        request.repository.namespace,
+        request.repository.name,
+        link.branch
+    ));
+
+    let configured = async {
+        if kind == Kind::Application
+            && let Some(dockerfile) = request.dockerfile.as_deref()
+        {
+            save_dockerfile_build(&client, base, api_key, &link.id, dockerfile).await?;
+            steps.push(format!("Set the build to use {dockerfile}"));
+        }
+        if let Some(domain) = request.domain.as_ref() {
+            create_domain(&client, base, api_key, kind, &link.id, domain).await?;
+            steps.push(format!(
+                "Routed {}://{} to port {}",
+                if domain.https { "https" } else { "http" },
+                domain.host.trim(),
+                domain.port
+            ));
+        }
+        Ok::<(), String>(())
+    }
+    .await;
+    if let Err(error) = configured {
+        if let Err(cleanup) = remove_resource(&client, base, api_key, kind, &link.id).await {
+            tracing::warn!(%cleanup, resource = %link.id, "could not remove a Dokploy resource created by a failed setup");
+        }
+        return Err(undo_project(error, &steps).await);
+    }
+
+    Ok(SetupOutcome {
+        link: serde_json::to_value(link).map_err(|error| error.to_string())?,
+        steps,
+    })
+}
+
+async fn latest_deployment(credential: Credential<'_>, resource: &str) -> Result<Value, String> {
+    let link: Link = serde_json::from_str(resource)
+        .map_err(|error| format!("stored Dokploy resource is malformed: {error}"))?;
+    let client = client_for(credential.url).await?;
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair(link.kind.id_key(), &link.id)
+        .finish();
+    let path = match link.kind {
+        Kind::Application => format!("/api/deployment.all?{query}"),
+        Kind::Compose => format!("/api/deployment.allByCompose?{query}"),
+    };
+    let deployments = get_json(&client, credential.url, &path, credential.api_key).await?;
+    let latest = deployments.as_array().and_then(|deployments| {
+        deployments
+            .iter()
+            .max_by_key(|deployment| value_string(deployment, "createdAt").unwrap_or_default())
+    });
+    Ok(serde_json::json!({
+        "deployment": latest.map(|deployment| serde_json::json!({
+            "status": value_string(deployment, "status"),
+            "title": value_string(deployment, "title"),
+            "created_at": value_string(deployment, "createdAt"),
+            "error": value_string(deployment, "errorMessage"),
+        })),
+        "logs_url": format!("{}?tab=deployments", link.external_url),
+    }))
+}
+
 pub(crate) struct DokployIntegration;
 
 #[async_trait::async_trait]
@@ -1111,6 +1403,10 @@ impl Integration for DokployIntegration {
         parent_id: &str,
     ) -> Result<(), String> {
         remove_source(credential, parent_id).await
+    }
+
+    async fn check_remote_source(&self, credential: Credential<'_>) -> Result<usize, String> {
+        check_source(credential).await
     }
 
     fn validate_repository_settings(
@@ -1236,6 +1532,18 @@ impl Integration for DokployIntegration {
             request.enabled,
         )
         .await
+    }
+
+    async fn setup_remote(&self, request: SetupRemoteRequest<'_>) -> Result<SetupOutcome, String> {
+        setup(request).await
+    }
+
+    async fn deployment_status(
+        &self,
+        credential: Credential<'_>,
+        resource: &str,
+    ) -> Result<Value, String> {
+        latest_deployment(credential, resource).await
     }
 
     async fn handle_event(&self, context: EventContext<'_>) -> Result<String, String> {
@@ -1511,6 +1819,136 @@ mod tests {
         );
     }
 
+    /// A Dokploy stand-in that records every POST and can refuse one path.
+    async fn setup_server(
+        refuse: Option<&'static str>,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
+        let recorded = calls.clone();
+        let post = move |uri: axum::http::Uri, axum::Json(body): axum::Json<Value>| {
+            let recorded = recorded.clone();
+            async move {
+                let path = uri.path().to_owned();
+                recorded.lock().unwrap().push((path.clone(), body));
+                if Some(path.as_str()) == refuse {
+                    return Err((
+                        axum::http::StatusCode::BAD_REQUEST,
+                        axum::Json(json!({ "message": "Domain already exists" })),
+                    ));
+                }
+                Ok(axum::Json(match path.as_str() {
+                    "/api/project.create" => json!({
+                        "project": { "projectId": "project-1", "name": "home-therapy" },
+                        "environment": { "environmentId": "environment-1", "name": "production" }
+                    }),
+                    "/api/application.create" => json!({ "applicationId": "application-1" }),
+                    _ => json!(true),
+                }))
+            }
+        };
+        let app = axum::Router::new()
+            .route(
+                "/api/project.all",
+                axum::routing::get(|| async {
+                    axum::Json(json!([{
+                        "projectId": "project-1",
+                        "name": "home-therapy",
+                        "environments": [{ "environmentId": "environment-1", "name": "production" }]
+                    }]))
+                }),
+            )
+            .route(
+                "/api/gitea.getGiteaRepositories",
+                axum::routing::get(|| async {
+                    axum::Json(
+                        json!([{ "name": "gitadel", "owner": { "username": "fractal-tess" } }]),
+                    )
+                }),
+            )
+            .fallback(axum::routing::post(post));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{address}"), calls, server)
+    }
+
+    fn setup_request(base: &str) -> SetupRemoteRequest<'_> {
+        SetupRemoteRequest {
+            repository: repository(),
+            credential: Credential {
+                url: base,
+                api_key: "api-key",
+                source_id: Some("source-1"),
+            },
+            kind: "application".to_owned(),
+            name: "web".to_owned(),
+            branch: "main".to_owned(),
+            server_id: None,
+            repository_path: "/web".to_owned(),
+            compose_path: "./docker-compose.yml".to_owned(),
+            dockerfile: Some("Dockerfile".to_owned()),
+            project: ProjectChoice::New("home-therapy".to_owned()),
+            environment: "production".to_owned(),
+            domain: Some(DomainRequest {
+                host: "example.com".to_owned(),
+                port: 80,
+                https: true,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn setup_creates_configures_and_reports_each_step() {
+        let (base, calls, server) = setup_server(None).await;
+        let outcome = setup(setup_request(&base)).await;
+        server.abort();
+        let outcome = outcome.unwrap();
+
+        assert_eq!(outcome.link["id"], "application-1");
+        assert_eq!(outcome.link["environment_id"], "environment-1");
+        assert_eq!(outcome.steps.len(), 6, "{:?}", outcome.steps);
+        assert!(outcome.steps[2].starts_with("Using environment production"));
+        let calls = calls.lock().unwrap();
+        let paths: Vec<_> = calls.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "/api/project.create",
+                "/api/application.create",
+                "/api/application.saveGiteaProvider",
+                "/api/application.saveBuildType",
+                "/api/domain.create",
+            ]
+        );
+        assert_eq!(calls[2].1["giteaBuildPath"], "/web");
+        assert_eq!(calls[3].1["dockerfile"], "Dockerfile");
+        assert_eq!(calls[4].1["applicationId"], "application-1");
+        assert_eq!(calls[4].1["certificateType"], "letsencrypt");
+        assert_eq!(calls[4].1["domainType"], "application");
+    }
+
+    #[tokio::test]
+    async fn setup_failure_undoes_what_it_created() {
+        let (base, calls, server) = setup_server(Some("/api/domain.create")).await;
+        let error = setup(setup_request(&base)).await.err().unwrap();
+        server.abort();
+
+        assert!(error.contains("Domain already exists"), "{error}");
+        assert!(error.contains("Created project home-therapy"), "{error}");
+        let calls = calls.lock().unwrap();
+        let paths: Vec<_> = calls.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(
+            &paths[paths.len() - 2..],
+            ["/api/application.delete", "/api/project.remove"]
+        );
+    }
+
     #[test]
     fn source_provider_maps_stable_ids_and_authorization_url() {
         let source = source_from_value(
@@ -1577,7 +2015,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn source_provisioning_sends_gitadel_oauth_client_to_dokploy() {
+    async fn source_provisioning_sends_gitadel_oauth_client_and_tokens_to_dokploy() {
         async fn create(
             headers: axum::http::HeaderMap,
             axum::Json(body): axum::Json<Value>,
@@ -1595,6 +2033,10 @@ mod tests {
                     != Some("https://gitadel.example.com")
                 || body.get("giteaInternalUrl").and_then(Value::as_str)
                     != Some("http://100.64.0.5:3030")
+                || body.get("accessToken").and_then(Value::as_str) != Some("gto_access")
+                || body.get("refreshToken").and_then(Value::as_str) != Some("gtr_refresh")
+                || body.get("expiresAt").and_then(Value::as_i64) != Some(1_800_000_000)
+                || body.get("giteaUsername").and_then(Value::as_str) != Some("fractal-tess")
             {
                 return Err(axum::http::StatusCode::BAD_REQUEST);
             }
@@ -1641,6 +2083,10 @@ mod tests {
                 redirect_uri: "https://dokploy.example.com/api/providers/gitea/callback",
                 public_url: "https://gitadel.example.com/",
                 internal_url: "http://100.64.0.5:3030/",
+                access_token: "gto_access",
+                refresh_token: "gtr_refresh",
+                expires_at: 1_800_000_000,
+                username: "fractal-tess",
             },
         )
         .await;

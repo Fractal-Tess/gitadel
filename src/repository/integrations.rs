@@ -20,15 +20,15 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{Permission, RepositoryState};
+use super::{Permission, RepositoryState, browser::read_git};
 use crate::entity::{
     dokploy_source_binding, namespace_integration, repository, repository_integration,
 };
 use crate::identity::{ApiError, SCOPE_READ, SCOPE_WRITE};
 use crate::integrations::{
     self, CreateEnvironmentRequest, CreateProjectRequest, CreateRemoteRequest, Credential,
-    EnablementRequest, Event, EventContext, LinkRemoteRequest, PushEvent, RemoteResourcesRequest,
-    RepositoryIdentity,
+    DomainRequest, EnablementRequest, Event, EventContext, LinkRemoteRequest, ProjectChoice,
+    PushEvent, RemoteResourcesRequest, RepositoryIdentity, SetupRemoteRequest,
 };
 
 /// Distinguishes "field absent - leave stored value alone" from "field null -
@@ -926,6 +926,246 @@ pub async fn create_remote_resource(
         link,
     )
     .await
+}
+
+/// How this repository can deploy, read from its default branch.
+pub async fn deployment_suggestions(
+    State(state): State<RepositoryState>,
+    AxumPath((namespace, name, integration_id)): AxumPath<(String, String, uuid::Uuid)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Json<Value>, ApiError> {
+    let (_, repository_row) = state
+        .authenticated_repository(
+            &headers,
+            &jar,
+            &namespace,
+            &name,
+            Permission::Manage,
+            SCOPE_READ,
+        )
+        .await?;
+    integration_row(&state, repository_row.id, integration_id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let suggestions = match repository_row.default_branch.clone() {
+        Some(branch) => read_git(state.repository_path(&repository_row), move |git| {
+            super::deploy_detect::suggest(git, &branch)
+        })
+        .await
+        .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    Ok(Json(json!({
+        "branch": repository_row.default_branch,
+        "project_name": repository_row.name,
+        "suggestions": suggestions,
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DomainMutation {
+    host: String,
+    port: u16,
+    #[serde(default)]
+    https: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetupMutation {
+    kind: String,
+    name: String,
+    branch: String,
+    #[serde(default)]
+    server_id: Option<String>,
+    #[serde(default)]
+    repository_path: Option<String>,
+    #[serde(default)]
+    compose_path: Option<String>,
+    #[serde(default)]
+    dockerfile: Option<String>,
+    /// An existing remote project; otherwise `project_name` is created.
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    project_name: Option<String>,
+    environment: String,
+    #[serde(default)]
+    domain: Option<DomainMutation>,
+    #[serde(default)]
+    deploy: bool,
+    #[serde(default)]
+    deploy_on_push: bool,
+}
+
+/// Create, configure, link, and optionally deploy a resource in one request,
+/// reporting each completed step.
+pub async fn setup_deployment(
+    State(state): State<RepositoryState>,
+    AxumPath((namespace, name, integration_id)): AxumPath<(String, String, uuid::Uuid)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(request): Json<RemoteMutationRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let (actor, repository_row) = state
+        .authenticated_repository(
+            &headers,
+            &jar,
+            &namespace,
+            &name,
+            Permission::Manage,
+            SCOPE_WRITE,
+        )
+        .await?;
+    let (row, credential, source) =
+        require_instance(&state, &repository_row, integration_id, true).await?;
+    let provider = integrations::provider(&credential.provider).ok_or_else(ApiError::not_found)?;
+    if !provider.repository_setup {
+        return Err(ApiError::not_found());
+    }
+    let body: SetupMutation = serde_json::from_value(request.body)
+        .map_err(|error| ApiError::bad_request(format!("Invalid request: {error}")))?;
+    let project = match (body.project_id, body.project_name) {
+        (Some(id), _) if !id.trim().is_empty() => ProjectChoice::Existing(id),
+        (_, Some(name)) if !name.trim().is_empty() => ProjectChoice::New(name),
+        _ => return Err(ApiError::bad_request("Choose a project or name a new one.")),
+    };
+    if let Some(domain) = body.domain.as_ref()
+        && (domain.host.trim().is_empty() || domain.port == 0)
+    {
+        return Err(ApiError::bad_request(
+            "A domain needs a host name and a port.",
+        ));
+    }
+    let outcome = provider
+        .integration
+        .setup_remote(SetupRemoteRequest {
+            repository: RepositoryIdentity {
+                namespace: &repository_row.namespace,
+                name: &repository_row.name,
+            },
+            credential: provider_credential(&credential, source.as_ref()),
+            kind: body.kind,
+            name: body.name,
+            branch: body.branch,
+            server_id: body.server_id.filter(|id| !id.trim().is_empty()),
+            repository_path: repository_path(body.repository_path),
+            compose_path: compose_path(body.compose_path),
+            dockerfile: body.dockerfile.filter(|file| !file.trim().is_empty()),
+            project,
+            environment: body.environment,
+            domain: body.domain.map(|domain| DomainRequest {
+                host: domain.host,
+                port: domain.port,
+                https: domain.https,
+            }),
+        })
+        .await
+        .map_err(ApiError::bad_gateway)?;
+    let mut steps = outcome.steps;
+    let Json(mut linked) = store_remote_link(
+        &state,
+        actor.user.id,
+        &repository_row,
+        integration_id,
+        row,
+        &credential,
+        source.as_ref(),
+        provider,
+        outcome.link.clone(),
+    )
+    .await?;
+    steps.push("Linked it to this repository".to_owned());
+
+    // Later failures leave a working, linked resource; report them as the
+    // step that failed rather than discarding the setup.
+    let mut warning = None;
+    if body.deploy_on_push {
+        let request = enablement_request(
+            provider_credential(&credential, source.as_ref()),
+            &outcome.link,
+            true,
+        )?;
+        match provider.integration.set_remote_enabled(request).await {
+            Ok(()) => {
+                let stored = integration_row(&state, repository_row.id, integration_id)
+                    .await?
+                    .ok_or_else(ApiError::not_found)?;
+                let mut active = stored.into_active_model();
+                active.enabled = Set(true);
+                active.updated_at = Set(Utc::now());
+                let stored = active.update(state.identity().database()).await?;
+                linked = response(provider, &credential, stored);
+                steps.push("Turned on deploy on push".to_owned());
+            }
+            Err(error) => warning = Some(format!("Could not turn on deploy on push: {error}")),
+        }
+    }
+    if body.deploy && warning.is_none() {
+        let resource = outcome.link.to_string();
+        match provider
+            .integration
+            .handle_event(EventContext {
+                event: Event::Manual,
+                resource: Some(&resource),
+                credential: provider_credential(&credential, source.as_ref()),
+            })
+            .await
+        {
+            Ok(_) => steps.push("Started the first deployment".to_owned()),
+            Err(error) => warning = Some(format!("Could not start the first deployment: {error}")),
+        }
+    }
+    state
+        .identity()
+        .audit(
+            Some(actor.user.id),
+            "repository.integration.setup",
+            Some(format!(
+                "{}/{}/{}",
+                repository_row.namespace, repository_row.name, integration_id
+            )),
+        )
+        .await?;
+    Ok(Json(json!({
+        "integration": linked,
+        "steps": steps,
+        "warning": warning,
+    })))
+}
+
+/// The newest deployment of the linked resource.
+pub async fn deployment_status(
+    State(state): State<RepositoryState>,
+    AxumPath((namespace, name, integration_id)): AxumPath<(String, String, uuid::Uuid)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Json<Value>, ApiError> {
+    let (_, repository_row) = state
+        .authenticated_repository(
+            &headers,
+            &jar,
+            &namespace,
+            &name,
+            Permission::Manage,
+            SCOPE_READ,
+        )
+        .await?;
+    let (row, credential, source) =
+        require_instance(&state, &repository_row, integration_id, false).await?;
+    let provider = integrations::provider(&credential.provider).ok_or_else(ApiError::not_found)?;
+    let resource = row
+        .resource
+        .as_deref()
+        .ok_or_else(|| ApiError::bad_request("Set up a deployment first."))?;
+    let status = provider
+        .integration
+        .deployment_status(provider_credential(&credential, source.as_ref()), resource)
+        .await
+        .map_err(ApiError::bad_gateway)?;
+    Ok(Json(status))
 }
 
 /// Trigger a deployment right now without changing push delivery.

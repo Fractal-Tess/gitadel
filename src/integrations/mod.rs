@@ -119,6 +119,13 @@ pub struct SourceApplication<'a> {
     pub redirect_uri: &'a str,
     pub public_url: &'a str,
     pub internal_url: &'a str,
+    /// A token pair Gitadel issued for this application, so the remote
+    /// provider is usable without an interactive authorization.
+    pub access_token: &'a str,
+    pub refresh_token: &'a str,
+    /// Unix seconds at which `access_token` expires.
+    pub expires_at: i64,
+    pub username: &'a str,
 }
 
 /// The stable remote IDs returned after source provider creation.
@@ -205,6 +212,42 @@ pub struct CreateRemoteRequest<'a> {
     pub compose_path: String,
 }
 
+/// The remote project a new deployment goes into.
+pub enum ProjectChoice {
+    Existing(String),
+    New(String),
+}
+
+/// A public host name routed to a new deployment.
+pub struct DomainRequest {
+    pub host: String,
+    pub port: u16,
+    pub https: bool,
+}
+
+/// Request to create and fully configure a deployment in one call.
+pub struct SetupRemoteRequest<'a> {
+    pub repository: RepositoryIdentity<'a>,
+    pub credential: Credential<'a>,
+    pub kind: String,
+    pub name: String,
+    pub branch: String,
+    pub server_id: Option<String>,
+    pub repository_path: String,
+    pub compose_path: String,
+    /// Build with this Dockerfile; `None` leaves the build type to the remote.
+    pub dockerfile: Option<String>,
+    pub project: ProjectChoice,
+    pub environment: String,
+    pub domain: Option<DomainRequest>,
+}
+
+/// A completed setup: the stored resource link and what was done, in order.
+pub struct SetupOutcome {
+    pub link: Value,
+    pub steps: Vec<String>,
+}
+
 /// Request to change remote deployment enablement.
 pub struct EnablementRequest<'a> {
     pub credential: Credential<'a>,
@@ -246,6 +289,11 @@ pub trait Integration: Send + Sync {
         parent_id: &str,
     ) -> Result<(), String>;
 
+    /// Ask the remote service to list repositories through the bound source,
+    /// proving it can reach Gitadel and holds a working token. Returns how
+    /// many repositories it sees.
+    async fn check_remote_source(&self, credential: Credential<'_>) -> Result<usize, String>;
+
     /// Reject provider-owned repository settings before they reach storage.
     fn validate_repository_settings(
         &self,
@@ -270,6 +318,18 @@ pub trait Integration: Send + Sync {
     async fn create_remote(&self, request: CreateRemoteRequest<'_>) -> Result<Value, String>;
 
     async fn set_remote_enabled(&self, request: EnablementRequest<'_>) -> Result<(), String>;
+
+    /// Create the project, environment, and resource a repository deploys
+    /// to, configure its build and domain, and attach the repository. A
+    /// failure removes what this call created.
+    async fn setup_remote(&self, request: SetupRemoteRequest<'_>) -> Result<SetupOutcome, String>;
+
+    /// The newest deployment of a linked resource.
+    async fn deployment_status(
+        &self,
+        credential: Credential<'_>,
+        resource: &str,
+    ) -> Result<Value, String>;
 }
 
 #[cfg(test)]
