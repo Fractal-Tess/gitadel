@@ -87,9 +87,12 @@ pub(crate) enum DeployCommand {
         /// Do not redeploy on every push.
         #[arg(long)]
         no_push_deploy: bool,
-        /// Follow the first deployment until it finishes.
+        /// Follow the first deployment until it finishes and the site answers.
         #[arg(long)]
         wait: bool,
+        /// Use --domain even though something already answers on it.
+        #[arg(long)]
+        force: bool,
     },
     /// Show the latest deployment of each linked resource.
     Status {
@@ -168,6 +171,12 @@ async fn wait_for(
         }
         if fresh && matches!(state, "done" | "error" | "cancelled") {
             if state != "done" {
+                if let Some(log) = deployment["log"].as_str() {
+                    eprintln!(
+                        "--- last lines of the deployment log ---\n{}",
+                        log.trim_end()
+                    );
+                }
                 eprintln!("logs: {}", current["logs_url"].as_str().unwrap_or_default());
                 return Err(anyhow!(
                     "deployment {state}: {}",
@@ -214,6 +223,29 @@ async fn wait_for_site(url: &str) -> Value {
         tokio::time::sleep(POLL_INTERVAL).await;
     }
     json!({ "url": url, "error": last_error })
+}
+
+/// Refuse a host that already serves something. Dokploy accepts the same
+/// domain on two resources and its proxy then routes it unpredictably;
+/// for a host it does not know, the proxy answers a bare 404.
+async fn ensure_domain_unused(host: &str) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let Ok(response) = client.get(format!("http://{host}/")).send().await else {
+        // Nothing answers yet, so nothing is using it.
+        return Ok(());
+    };
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if status == reqwest::StatusCode::NOT_FOUND && body.trim() == "404 page not found" {
+        return Ok(());
+    }
+    bail!(
+        "{host} already answers ({status}); it is probably in use by another deployment. \
+         Choose another subdomain, or pass --force to use it anyway"
+    )
 }
 
 fn pick_connection(catalog: &Value, wanted: Option<&str>) -> Result<Value> {
@@ -318,7 +350,13 @@ pub(crate) async fn run(api: &ApiClient, command: DeployCommand) -> Result<Value
             no_deploy,
             no_push_deploy,
             wait,
+            force,
         } => {
+            if let Some(host) = domain.as_deref()
+                && !force
+            {
+                ensure_domain_unused(host).await?;
+            }
             let (_, repository_name) = crate::parse_repo(&repository)?;
             let repository_name = repository_name.to_owned();
             let base = integrations_path(&repository)?;
@@ -326,39 +364,12 @@ pub(crate) async fn run(api: &ApiClient, command: DeployCommand) -> Result<Value
             let chosen = pick_connection(&catalog, connection.as_deref())?;
             let connection_id = chosen["id"].as_str().unwrap_or_default().to_owned();
 
-            // Reuse an unlinked instance of this connection, else create one.
-            let existing = catalog["integrations"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|integration| {
-                    integration["connection_id"] == connection_id.as_str()
-                        && integration["resource"].is_null()
-                })
-                .cloned();
-            let instance = match existing {
-                Some(instance) => instance,
-                None => {
-                    api.request(
-                        Method::POST,
-                        &base,
-                        Some(json!({
-                            "integration_id": connection_id,
-                            "name": name.clone().unwrap_or_else(|| repository_name.clone()),
-                        })),
-                    )
-                    .await?
-                }
-            };
-            let id = instance["id"]
-                .as_str()
-                .context("Gitadel did not return the integration id")?
-                .to_owned();
-
+            // Detect and validate everything before creating anything, so a
+            // missing port or service leaves the repository untouched.
             let detected = api
                 .request(
                     Method::GET,
-                    &instance_path(&repository, &id, "/suggestions")?,
+                    &(route_repo("repos", &repository)? + "/deploy/suggestions"),
                     None,
                 )
                 .await?;
@@ -401,7 +412,7 @@ pub(crate) async fn run(api: &ApiClient, command: DeployCommand) -> Result<Value
 
             let mut body = json!({
                 "kind": kind,
-                "name": name.unwrap_or_else(|| repository_name.clone()),
+                "name": name.clone().unwrap_or_else(|| repository_name.clone()),
                 "branch": branch
                     .or_else(|| detected["branch"].as_str().map(str::to_owned))
                     .unwrap_or_else(|| "main".to_owned()),
@@ -428,26 +439,6 @@ pub(crate) async fn run(api: &ApiClient, command: DeployCommand) -> Result<Value
                 }
             }
 
-            // Reuse a Dokploy project with the requested name.
-            let project = project.unwrap_or_else(|| repository_name.clone());
-            let resources = api
-                .request(
-                    Method::GET,
-                    &instance_path(&repository, &id, "/resources")?,
-                    None,
-                )
-                .await?;
-            let existing_project = resources["projects"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|candidate| candidate["name"] == project.as_str())
-                .and_then(|candidate| candidate["id"].as_str());
-            match existing_project {
-                Some(project_id) => body["project_id"] = json!(project_id),
-                None => body["project_name"] = json!(project),
-            }
-
             let site_url = domain
                 .as_deref()
                 .map(|host| format!("{}://{host}/", if http { "http" } else { "https" }));
@@ -472,6 +463,55 @@ pub(crate) async fn run(api: &ApiClient, command: DeployCommand) -> Result<Value
                     );
                 }
                 body["domain"] = domain;
+            }
+
+            // Reuse an unlinked instance of this connection, else create one.
+            let existing = catalog["integrations"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|integration| {
+                    integration["connection_id"] == connection_id.as_str()
+                        && integration["resource"].is_null()
+                })
+                .cloned();
+            let instance = match existing {
+                Some(instance) => instance,
+                None => {
+                    api.request(
+                        Method::POST,
+                        &base,
+                        Some(json!({
+                            "integration_id": connection_id,
+                            "name": name.clone().unwrap_or_else(|| repository_name.clone()),
+                        })),
+                    )
+                    .await?
+                }
+            };
+            let id = instance["id"]
+                .as_str()
+                .context("Gitadel did not return the integration id")?
+                .to_owned();
+
+            // Reuse a Dokploy project with the requested name.
+            let project = project.unwrap_or_else(|| repository_name.clone());
+            let resources = api
+                .request(
+                    Method::GET,
+                    &instance_path(&repository, &id, "/resources")?,
+                    None,
+                )
+                .await?;
+            let existing_project = resources["projects"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|candidate| candidate["name"] == project.as_str())
+                .and_then(|candidate| candidate["id"].as_str());
+            match existing_project {
+                Some(project_id) => body["project_id"] = json!(project_id),
+                None => body["project_name"] = json!(project),
             }
 
             let mut result = api
