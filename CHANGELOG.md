@@ -8,10 +8,14 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 - OAuth clients can renew access tokens with the `refresh_token` grant. Token responses carry a `refresh_token` that is valid for a year and single use: each refresh returns a new pair. Revoking an application's authorization also invalidates its refresh tokens.
 - Dokploy setup is guided and checked step by step. Connecting Gitadel creates the Dokploy Gitea provider with tokens Gitadel issues itself, so there is no separate authorization in Dokploy, then confirms that Dokploy can list repositories through it. When Dokploy cannot reach the configured address, Gitadel tries its public URL and the addresses its host name resolves to, and keeps the first that works. `POST /api/v1/namespaces/{slug}/integrations/{id}/source/verify` repeats the check.
+- A **Deploy** tab on repositories you manage lists their Dokploy deployments with live status, deploy on push, and links into Dokploy, and starts a new setup from a configured connection.
+- `gtd deploy setup <repository> --domain <host> --wait` deploys a repository in one command and follows it until the site answers over HTTPS; `gtd deploy status`, `now`, and `suggest` cover the rest. `GET /api/v1/repos/{namespace}/{name}/deploy/suggestions` reports what a repository can deploy before any integration exists.
+- Deployment suggestions read Compose files: their services and ports, the service a domain should route to, and warnings about published host ports, `container_name`, bind mounts from the checkout, and Dockerfiles without `EXPOSE`. A Compose deployment's domain routes to the chosen service.
 - **Set up deployment** on a repository's Dokploy integration suggests a build from the Dockerfiles and Compose files on the default branch, then creates the project, environment, and resource, sets the Dockerfile build and an optional domain, links the repository, turns on deploy on push, and starts the first deployment in one step. It lists what it did and shows the deployment's progress. A failure undoes what the setup created. The endpoints are `GET …/integrations/{id}/suggestions`, `POST …/integrations/{id}/setup`, and `GET …/integrations/{id}/deployment`.
 
 ### Fixed
 
+- Deploy on push to Dokploy works again. Since 0.23.0 push delivery sent the encrypted API key, which Dokploy refused.
 - Dokploy setup works with Dokploy 0.30. Gitadel no longer sends `null` for optional fields, which Dokploy rejects, and asking for the `production` environment selects the one every project already has instead of failing.
 - Dokploy errors are shown with Dokploy's own message instead of "The request could not be completed".
 - A Dokploy Gitea provider configured for another forge can no longer be connected, and one already connected says so instead of failing with "fetch failed". A provider counts as ready only once Dokploy holds a token for it.
