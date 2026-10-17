@@ -9,8 +9,8 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
-    sea_query::Expr,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QueryOrder,
+    Set, TransactionTrait, sea_query::Expr,
 };
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -22,11 +22,15 @@ use super::{
 };
 use crate::entity::{
     dokploy_source_binding, oauth_access_token, oauth_application, oauth_authorization_code,
+    oauth_refresh_token,
 };
 
 const AUTHORIZATION_CODE_LIFETIME: chrono::Duration = chrono::Duration::minutes(10);
-/// Gitadel has no refresh grant, so a client re-authorises when this passes.
-const ACCESS_TOKEN_LIFETIME: chrono::Duration = chrono::Duration::days(30);
+/// Clients trade their refresh token for a new pair when this passes.
+pub(crate) const ACCESS_TOKEN_LIFETIME: chrono::Duration = chrono::Duration::days(30);
+/// Refresh tokens rotate on every use, so this only lapses for a client that
+/// has not refreshed for a year.
+const REFRESH_TOKEN_LIFETIME: chrono::Duration = chrono::Duration::days(365);
 const MAX_OAUTH_PARAMETER_LENGTH: usize = 2_048;
 
 pub(super) struct AuthorizationRequest {
@@ -376,6 +380,7 @@ pub struct TokenRequest {
     // answered with an OAuth error object instead of a form-decoding failure.
     code: Option<String>,
     redirect_uri: Option<String>,
+    refresh_token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -384,19 +389,77 @@ pub struct TokenResponse {
     token_type: &'static str,
     /// Seconds until the token expires (RFC 6749 section 5.1).
     expires_in: i64,
+    refresh_token: String,
     scope: String,
+}
+
+/// A freshly generated access and refresh token. Only their hashes are stored.
+pub(crate) struct TokenPair {
+    pub(crate) access_token: String,
+    pub(crate) refresh_token: String,
+}
+
+impl TokenPair {
+    pub(crate) fn generate() -> Self {
+        Self {
+            access_token: format!("gto_{}", random_secret(32)),
+            refresh_token: format!("gtr_{}", random_secret(32)),
+        }
+    }
+
+    /// Store the pair for `user_id` and return when the access token expires.
+    pub(crate) async fn store<C: ConnectionTrait>(
+        &self,
+        connection: &C,
+        application_id: Uuid,
+        user_id: Uuid,
+        scope: &str,
+    ) -> Result<chrono::DateTime<Utc>, DbErr> {
+        let now = Utc::now();
+        let expires_at = now + ACCESS_TOKEN_LIFETIME;
+        oauth_access_token::ActiveModel {
+            token_hash: Set(hash_secret(&self.access_token)),
+            application_id: Set(application_id),
+            user_id: Set(user_id),
+            scopes: Set(oauth_scope_bits(scope)),
+            scope: Set(scope.to_owned()),
+            created_at: Set(now),
+            expires_at: Set(expires_at),
+            last_used_at: Set(None),
+            revoked_at: Set(None),
+        }
+        .insert(connection)
+        .await?;
+        oauth_refresh_token::ActiveModel {
+            token_hash: Set(hash_secret(&self.refresh_token)),
+            application_id: Set(application_id),
+            user_id: Set(user_id),
+            scope: Set(scope.to_owned()),
+            created_at: Set(now),
+            expires_at: Set(now + REFRESH_TOKEN_LIFETIME),
+        }
+        .insert(connection)
+        .await?;
+        Ok(expires_at)
+    }
 }
 
 pub async fn access_token(
     State(state): State<IdentityState>,
     Form(request): Form<TokenRequest>,
 ) -> Response {
-    if request.grant_type != "authorization_code" {
+    if !matches!(
+        request.grant_type.as_str(),
+        "authorization_code" | "refresh_token"
+    ) {
         return oauth_error(
             StatusCode::BAD_REQUEST,
             "unsupported_grant_type",
-            "Gitadel supports only the authorization_code grant.",
+            "Gitadel supports the authorization_code and refresh_token grants.",
         );
+    }
+    if request.grant_type == "refresh_token" {
+        return refresh_access_token(&state, request).await;
     }
     let (Some(code), Some(redirect_uri)) = (request.code, request.redirect_uri) else {
         return oauth_error(
@@ -489,33 +552,109 @@ pub async fn access_token(
         );
     }
 
-    let raw_token = format!("gto_{}", random_secret(32));
-    let now = Utc::now();
-    let insert = oauth_access_token::ActiveModel {
-        token_hash: Set(hash_secret(&raw_token)),
-        application_id: Set(application.id),
-        user_id: Set(stored.user_id),
-        scopes: Set(oauth_scope_bits(&stored.scope)),
-        scope: Set(stored.scope.clone()),
-        created_at: Set(now),
-        expires_at: Set(now + ACCESS_TOKEN_LIFETIME),
-        last_used_at: Set(None),
-        revoked_at: Set(None),
-    }
-    .insert(&transaction)
-    .await;
-    if let Err(error) = insert {
+    let pair = TokenPair::generate();
+    if let Err(error) = pair
+        .store(&transaction, application.id, stored.user_id, &stored.scope)
+        .await
+    {
         return ApiError::from(error).into_response();
     }
     if let Err(error) = transaction.commit().await {
         return ApiError::from(error).into_response();
     }
+    token_response(pair, stored.scope)
+}
 
+/// Trade a refresh token for a new pair. The old refresh token is consumed,
+/// so a stolen copy stops working as soon as the client refreshes.
+async fn refresh_access_token(state: &IdentityState, request: TokenRequest) -> Response {
+    let Some(refresh_token) = request.refresh_token else {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "The token request is missing the refresh_token parameter.",
+        );
+    };
+    if [&request.client_id, &request.client_secret, &refresh_token]
+        .iter()
+        .any(|value| value.is_empty() || value.len() > MAX_OAUTH_PARAMETER_LENGTH)
+    {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "The token request contains an invalid parameter.",
+        );
+    }
+    let application = match oauth_application::Entity::find()
+        .filter(oauth_application::Column::ClientId.eq(&request.client_id))
+        .filter(oauth_application::Column::ClientSecretHash.eq(hash_secret(&request.client_secret)))
+        .one(state.database())
+        .await
+    {
+        Ok(Some(application)) => application,
+        Ok(None) => {
+            return oauth_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_client",
+                "The OAuth client credentials were not accepted.",
+            );
+        }
+        Err(error) => return ApiError::from(error).into_response(),
+    };
+    let transaction = match state.database().begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => return ApiError::from(error).into_response(),
+    };
+    let token_hash = hash_secret(&refresh_token);
+    let stored = match oauth_refresh_token::Entity::find_by_id(&token_hash)
+        .filter(oauth_refresh_token::Column::ApplicationId.eq(application.id))
+        .one(&transaction)
+        .await
+    {
+        Ok(Some(stored)) if stored.expires_at > Utc::now() => stored,
+        Ok(_) => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "The refresh token is invalid or expired.",
+            );
+        }
+        Err(error) => return ApiError::from(error).into_response(),
+    };
+    match oauth_refresh_token::Entity::delete_by_id(token_hash)
+        .exec(&transaction)
+        .await
+    {
+        Ok(deleted) if deleted.rows_affected == 1 => {}
+        Ok(_) => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "The refresh token is invalid or expired.",
+            );
+        }
+        Err(error) => return ApiError::from(error).into_response(),
+    }
+    let pair = TokenPair::generate();
+    if let Err(error) = pair
+        .store(&transaction, application.id, stored.user_id, &stored.scope)
+        .await
+    {
+        return ApiError::from(error).into_response();
+    }
+    if let Err(error) = transaction.commit().await {
+        return ApiError::from(error).into_response();
+    }
+    token_response(pair, stored.scope)
+}
+
+fn token_response(pair: TokenPair, scope: String) -> Response {
     let mut response = Json(TokenResponse {
-        access_token: raw_token,
+        access_token: pair.access_token,
         token_type: "Bearer",
         expires_in: ACCESS_TOKEN_LIFETIME.num_seconds(),
-        scope: stored.scope,
+        refresh_token: pair.refresh_token,
+        scope,
     })
     .into_response();
     response
@@ -625,7 +764,13 @@ pub async fn revoke_authorization(
         .filter(oauth_access_token::Column::RevokedAt.is_null())
         .exec(&transaction)
         .await?;
-    if revoked.rows_affected == 0 {
+    // Without this the client could mint a fresh access token right away.
+    let refreshes = oauth_refresh_token::Entity::delete_many()
+        .filter(oauth_refresh_token::Column::UserId.eq(actor.user.id))
+        .filter(oauth_refresh_token::Column::ApplicationId.eq(application.id))
+        .exec(&transaction)
+        .await?;
+    if revoked.rows_affected == 0 && refreshes.rows_affected == 0 {
         return Err(ApiError::not_found());
     }
     state
@@ -1252,6 +1397,81 @@ mod tests {
             );
         }
 
+        async fn refresh(
+            harness: &Harness,
+            application: &oauth_application::Model,
+            client_secret: &str,
+            refresh_token: &str,
+        ) -> (StatusCode, Value) {
+            let response = form(
+                harness,
+                "/login/oauth/access_token",
+                None,
+                &[
+                    ("grant_type", "refresh_token"),
+                    ("client_id", &application.client_id),
+                    ("client_secret", client_secret),
+                    ("refresh_token", refresh_token),
+                ],
+            )
+            .await;
+            let status = response.status();
+            (status, json_body(response).await)
+        }
+
+        #[tokio::test]
+        async fn refresh_tokens_rotate_and_die_with_the_authorization() {
+            let harness = Harness::new().await;
+            let alice = harness.user("alice").await;
+            let cookie = harness.login(&alice).await;
+            let (application, client_secret) =
+                application(&harness, &alice, "Deploy", REDIRECT_URI).await;
+            let code = authorize(&harness, &cookie, &application).await;
+            let (_, body) =
+                exchange(&harness, &application, &client_secret, &code, REDIRECT_URI).await;
+            let first = body["refresh_token"].as_str().unwrap().to_owned();
+            assert!(first.starts_with("gtr_"));
+
+            let (status, body) = refresh(&harness, &application, "wrong", &first).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+            let (status, body) = refresh(&harness, &application, &client_secret, &first).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["scope"], "read:repository");
+            let token = body["access_token"].as_str().unwrap().to_owned();
+            let second = body["refresh_token"].as_str().unwrap().to_owned();
+            assert_ne!(second, first);
+            assert_eq!(
+                harness
+                    .state
+                    .authenticate_token(&token, SCOPE_REPOSITORY_READ)
+                    .await
+                    .unwrap()
+                    .user
+                    .id,
+                alice.id
+            );
+
+            // A refresh token is single use.
+            let (status, body) = refresh(&harness, &application, &client_secret, &first).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["error"], "invalid_grant");
+
+            // Revoking the authorization also stops refreshing.
+            let (status, _) = harness
+                .request(
+                    Method::DELETE,
+                    &format!("/api/v1/me/authorizations/{}", application.client_id),
+                    Some(&cookie),
+                    None,
+                )
+                .await;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            let (status, body) = refresh(&harness, &application, &client_secret, &second).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(body["error"], "invalid_grant");
+        }
+
         #[tokio::test]
         async fn a_code_is_bound_to_its_redirect_uri_and_client() {
             let harness = Harness::new().await;
@@ -1315,6 +1535,20 @@ mod tests {
                     ("client_id", &application.client_id),
                     ("client_secret", &client_secret),
                     ("refresh_token", "none"),
+                ],
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(json_body(response).await["error"], "invalid_grant");
+
+            let response = form(
+                &harness,
+                "/login/oauth/access_token",
+                None,
+                &[
+                    ("grant_type", "client_credentials"),
+                    ("client_id", &application.client_id),
+                    ("client_secret", &client_secret),
                 ],
             )
             .await;

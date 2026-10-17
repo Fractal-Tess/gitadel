@@ -661,6 +661,40 @@ pub mod oauth_authorization_code {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod oauth_refresh_token {
+    use super::*;
+
+    /// A single-use credential an OAuth client trades for a new token pair.
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "oauth_refresh_tokens")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub token_hash: String,
+        pub application_id: Uuid,
+        pub user_id: Uuid,
+        pub scope: String,
+        pub created_at: DateTimeUtc,
+        pub expires_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+
+    /// Delete refresh tokens that expired before `now`.
+    pub async fn delete_expired<C: ConnectionTrait>(
+        connection: &C,
+        now: DateTimeUtc,
+    ) -> Result<u64, DbErr> {
+        Ok(Entity::delete_many()
+            .filter(Column::ExpiresAt.lt(now))
+            .exec(connection)
+            .await?
+            .rows_affected)
+    }
+}
+
 pub mod oauth_access_token {
     use super::*;
 
@@ -674,7 +708,7 @@ pub mod oauth_access_token {
         pub scopes: i32,
         pub scope: String,
         pub created_at: DateTimeUtc,
-        /// There is no refresh grant, so a client re-authorises after this.
+        /// Clients holding a refresh token trade it for a new pair after this.
         pub expires_at: DateTimeUtc,
         pub last_used_at: Option<DateTimeUtc>,
         pub revoked_at: Option<DateTimeUtc>,

@@ -35,8 +35,8 @@ use super::{Permission, RepositoryState, browser::read_git};
 use crate::{
     actions::ActionsState,
     entity::{
-        oauth_access_token, repository, repository_webhook, repository_webhook_delivery, session,
-        user,
+        oauth_access_token, oauth_refresh_token, repository, repository_webhook,
+        repository_webhook_delivery, session, user,
     },
     identity::{ApiError, SCOPE_READ, SCOPE_WRITE},
     network::pinned_public_http_client,
@@ -880,6 +880,11 @@ async fn sweep_expired_sessions(database: &DatabaseConnection) {
         Ok(0) => {}
         Ok(removed) => tracing::debug!(removed, "removed expired OAuth access tokens"),
         Err(error) => tracing::warn!(%error, "could not remove expired OAuth access tokens"),
+    }
+    match oauth_refresh_token::delete_expired(database, now).await {
+        Ok(0) => {}
+        Ok(removed) => tracing::debug!(removed, "removed expired OAuth refresh tokens"),
+        Err(error) => tracing::warn!(%error, "could not remove expired OAuth refresh tokens"),
     }
 }
 

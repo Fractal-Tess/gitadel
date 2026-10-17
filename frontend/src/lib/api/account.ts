@@ -38,8 +38,8 @@ export const createdOauthApplicationSchema = z.object({
 
 /**
  * An application holding live OAuth access tokens for the signed-in user.
- * Tokens expire and there is no refresh grant, so the application asks for
- * authorisation again after `expires_at`.
+ * Access tokens expire; applications holding a refresh token renew them,
+ * others ask for authorisation again after `expires_at`.
  */
 export const authorizedApplicationSchema = z.object({
   application_name: z.string(),
