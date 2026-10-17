@@ -948,8 +948,36 @@ pub async fn deployment_suggestions(
     integration_row(&state, repository_row.id, integration_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    suggestions_for(&state, &repository_row).await
+}
+
+/// The same suggestions before any integration exists, for clients that
+/// decide how to deploy before setting one up.
+pub async fn repository_deployment_suggestions(
+    State(state): State<RepositoryState>,
+    AxumPath((namespace, name)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Result<Json<Value>, ApiError> {
+    let (_, repository_row) = state
+        .authenticated_repository(
+            &headers,
+            &jar,
+            &namespace,
+            &name,
+            Permission::Manage,
+            SCOPE_READ,
+        )
+        .await?;
+    suggestions_for(&state, &repository_row).await
+}
+
+async fn suggestions_for(
+    state: &RepositoryState,
+    repository_row: &repository::Model,
+) -> Result<Json<Value>, ApiError> {
     let suggestions = match repository_row.default_branch.clone() {
-        Some(branch) => read_git(state.repository_path(&repository_row), move |git| {
+        Some(branch) => read_git(state.repository_path(repository_row), move |git| {
             super::deploy_detect::suggest(git, &branch)
         })
         .await
@@ -970,6 +998,8 @@ struct DomainMutation {
     port: u16,
     #[serde(default)]
     https: bool,
+    #[serde(default)]
+    service: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1060,6 +1090,7 @@ pub async fn setup_deployment(
                 host: domain.host,
                 port: domain.port,
                 https: domain.https,
+                service: domain.service,
             }),
         })
         .await

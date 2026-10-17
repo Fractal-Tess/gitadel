@@ -223,6 +223,8 @@ pub struct DomainRequest {
     pub host: String,
     pub port: u16,
     pub https: bool,
+    /// The Compose service the domain routes to; unused for applications.
+    pub service: Option<String>,
 }
 
 /// Request to create and fully configure a deployment in one call.

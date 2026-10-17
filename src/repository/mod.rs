@@ -1182,6 +1182,10 @@ pub fn router() -> Router<RepositoryState> {
             axum::routing::post(integrations::deploy_integration),
         )
         .route(
+            "/repos/{namespace}/{name}/deploy/suggestions",
+            get(integrations::repository_deployment_suggestions),
+        )
+        .route(
             "/repos/{namespace}/{name}/integrations/{id}/suggestions",
             get(integrations::deployment_suggestions),
         )

@@ -1167,6 +1167,17 @@ async fn create_domain(
     id: &str,
     domain: &DomainRequest,
 ) -> Result<(), String> {
+    let service = match kind {
+        Kind::Compose => Some(
+            domain
+                .service
+                .as_deref()
+                .map(str::trim)
+                .filter(|service| !service.is_empty())
+                .ok_or("Choose the Compose service the domain routes to.")?,
+        ),
+        Kind::Application => None,
+    };
     let mut body = serde_json::json!({
         "host": domain.host.trim(),
         "path": "/",
@@ -1177,6 +1188,9 @@ async fn create_domain(
         "domainType": kind.route_segment(),
     });
     body[kind.id_key()] = Value::String(id.to_owned());
+    if let Some(service) = service {
+        body["serviceName"] = Value::String(service.to_owned());
+    }
     post_for_status(client, base, "/api/domain.create", api_key, &body).await
 }
 
@@ -1316,9 +1330,13 @@ async fn setup(request: SetupRemoteRequest<'_>) -> Result<SetupOutcome, String> 
         if let Some(domain) = request.domain.as_ref() {
             create_domain(&client, base, api_key, kind, &link.id, domain).await?;
             steps.push(format!(
-                "Routed {}://{} to port {}",
+                "Routed {}://{} to {}port {}",
                 if domain.https { "https" } else { "http" },
                 domain.host.trim(),
+                match (kind, domain.service.as_deref()) {
+                    (Kind::Compose, Some(service)) => format!("service {service} on "),
+                    _ => String::new(),
+                },
                 domain.port
             ));
         }
@@ -1899,6 +1917,7 @@ mod tests {
                 host: "example.com".to_owned(),
                 port: 80,
                 https: true,
+                service: None,
             }),
         }
     }
