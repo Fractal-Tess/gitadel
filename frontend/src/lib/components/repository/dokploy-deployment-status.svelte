@@ -95,6 +95,15 @@
       {latest.error}
     </p>
   {/if}
+  {#if latest?.log}
+    <details class="mt-3" open={view.tone === "error"}>
+      <summary class="cursor-pointer text-xs font-medium text-muted-foreground">
+        End of the deployment log
+      </summary>
+      <pre
+        class="mt-2 max-h-80 overflow-auto rounded-md border bg-muted/30 px-3 py-2 font-mono text-[0.7rem] leading-5 whitespace-pre-wrap">{latest.log.trimEnd()}</pre>
+    </details>
+  {/if}
   {#if configure.deploymentError}
     <p class="mt-3 text-xs text-destructive">{configure.deploymentError}</p>
   {:else if configure.deploymentPollExpired}

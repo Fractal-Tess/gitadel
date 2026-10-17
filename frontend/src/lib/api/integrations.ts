@@ -228,6 +228,8 @@ export const deploymentStatusSchema = z.object({
       title: z.string().nullable(),
       created_at: z.string().nullable(),
       error: z.string().nullable(),
+      /** The end of the build log, sent only for failed deployments. */
+      log: z.string().nullable().optional(),
     })
     .nullable(),
   logs_url: z.string(),

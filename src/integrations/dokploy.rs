@@ -1356,6 +1356,9 @@ async fn setup(request: SetupRemoteRequest<'_>) -> Result<SetupOutcome, String> 
     })
 }
 
+/// How much of a failed deployment's log is returned with its status.
+const FAILED_LOG_LINES: usize = 40;
+
 async fn latest_deployment(credential: Credential<'_>, resource: &str) -> Result<Value, String> {
     let link: Link = serde_json::from_str(resource)
         .map_err(|error| format!("stored Dokploy resource is malformed: {error}"))?;
@@ -1373,12 +1376,37 @@ async fn latest_deployment(credential: Credential<'_>, resource: &str) -> Result
             .iter()
             .max_by_key(|deployment| value_string(deployment, "createdAt").unwrap_or_default())
     });
+    // A failed build's reason is in its log, which only Dokploy can read.
+    let log = match latest {
+        Some(deployment) if value_string(deployment, "status").as_deref() == Some("error") => {
+            match value_string(deployment, "deploymentId") {
+                Some(id) => {
+                    let query = url::form_urlencoded::Serializer::new(String::new())
+                        .append_pair("deploymentId", &id)
+                        .append_pair("tail", &FAILED_LOG_LINES.to_string())
+                        .finish();
+                    get_json(
+                        &client,
+                        credential.url,
+                        &format!("/api/deployment.readLogs?{query}"),
+                        credential.api_key,
+                    )
+                    .await
+                    .ok()
+                    .and_then(|log| log.as_str().map(str::to_owned))
+                }
+                None => None,
+            }
+        }
+        _ => None,
+    };
     Ok(serde_json::json!({
         "deployment": latest.map(|deployment| serde_json::json!({
             "status": value_string(deployment, "status"),
             "title": value_string(deployment, "title"),
             "created_at": value_string(deployment, "createdAt"),
             "error": value_string(deployment, "errorMessage"),
+            "log": log,
         })),
         "logs_url": format!("{}?tab=deployments", link.external_url),
     }))
