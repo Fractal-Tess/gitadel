@@ -12,6 +12,7 @@
   import Heart from "@lucide/svelte/icons/heart";
   import History from "@lucide/svelte/icons/history";
   import Package from "@lucide/svelte/icons/package";
+  import Rocket from "@lucide/svelte/icons/rocket";
   import PanelLeftClose from "@lucide/svelte/icons/panel-left-close";
   import PanelLeftOpen from "@lucide/svelte/icons/panel-left-open";
   import ScrollText from "@lucide/svelte/icons/scroll-text";
@@ -147,6 +148,12 @@
       },
       ...(current?.canManage
         ? [
+            {
+              label: "Deploy",
+              href: `${base}?view=deploy`,
+              icon: Rocket,
+              active: view === "deploy",
+            },
             {
               label: "Settings",
               href: `${base}?view=settings`,

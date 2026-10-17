@@ -4,6 +4,7 @@
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
 
   import NotFound7 from "$lib/components/blocks/not-found-7.svelte";
+  import RepositoryDeploy from "$lib/components/repository/repository-deploy.svelte";
   import RepositoryCommit from "$lib/components/repository/repository-commit.svelte";
   import RepositoryActions from "$lib/components/repository/repository-actions.svelte";
   import RepositoryHistory from "$lib/components/repository/repository-history.svelte";
@@ -34,7 +35,9 @@
     );
   });
   const inSettings = $derived(
-    state.view === "settings" || state.view === "integrations",
+    state.view === "settings" ||
+      state.view === "integrations" ||
+      state.view === "deploy",
   );
 
   $effect(() => {
@@ -124,14 +127,17 @@
     {/if}
 
     {#if inSettings}
-      <!-- Settings is a form, not a browsing surface: it drops the metadata
-           column and reads in the same narrow measure as account settings. -->
+      <!-- Settings and Deploy are forms, not browsing surfaces: they drop the
+           metadata column and read in the same narrow measure as account
+           settings. -->
       <div
         class="min-w-0 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:overscroll-contain"
       >
-        {#key `${state.view}:${state.settingsTab}`}
+        {#key `${state.view}:${state.settingsTab}:${state.integrationProvider ?? ""}`}
         <div class="motion-view mx-auto max-w-5xl px-5 py-8 lg:px-8">
-          {#if state.view === "integrations" && state.integrationProvider}
+          {#if state.view === "deploy"}
+            <RepositoryDeploy {state} />
+          {:else if state.view === "integrations" && state.integrationProvider}
             <RepositoryIntegrationConfigure {state} />
           {:else}
             <RepositorySettings {state} />

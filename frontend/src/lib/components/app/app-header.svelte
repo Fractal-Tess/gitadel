@@ -66,6 +66,7 @@
     issues: "Issues",
     releases: "Releases",
     tags: "Tags",
+    deploy: "Deploy",
     settings: "Settings",
     general: "General",
     location: "Location",

@@ -13,6 +13,7 @@ import {
   setupRequestBody,
   shouldPollDeployment,
   suggestedPort,
+  suggestedService,
   updateNamespaceInternalUrl,
   verifyIntegrationSource,
   catalogWithEnvironment,
@@ -326,9 +327,13 @@ export class DokployConfigureState {
   /** Bumped to restart deployment polling. */
   deploymentWatch = $state(0);
   #awaitingPrevious: string | null = null;
+  /** The integration this state manages, when it is not the one in the URL. */
+  readonly #integrationId: string | null;
 
   // Deferred so `page`, assigned in the constructor, is read lazily.
-  readonly id = $derived.by(() => this.page.integrationProvider ?? "");
+  readonly id = $derived.by(
+    () => this.#integrationId ?? this.page.integrationProvider ?? "",
+  );
   readonly link = $derived(parseDokployResourceLink(this.detail?.resource));
   readonly choices = $derived(
     buildChoices(this.suggestions?.suggestions ?? []),
@@ -352,8 +357,10 @@ export class DokployConfigureState {
     ) ?? null,
   );
 
-  constructor(page: RepositoryPageState) {
+  /** `integrationId` defaults to the integration selected in the URL. */
+  constructor(page: RepositoryPageState, integrationId: string | null = null) {
     this.page = page;
+    this.#integrationId = integrationId;
   }
 
   async load(): Promise<void> {
@@ -425,10 +432,19 @@ export class DokployConfigureState {
   }
 
   chooseBuild(id: string): void {
+    const choice = this.choices.find((candidate) => candidate.id === id);
     this.form.build = id;
+    this.form.domainService = suggestedService(choice);
     this.form.domainPort = suggestedPort(
-      this.choices.find((choice) => choice.id === id),
+      choice,
+      this.form.domainService || undefined,
     );
+  }
+
+  /** Route the domain to a Compose `service`, on that service's port. */
+  chooseService(service: string): void {
+    this.form.domainService = service;
+    this.form.domainPort = suggestedPort(this.selectedChoice, service);
   }
 
   /** Show the one-form setup, loading what it needs. */

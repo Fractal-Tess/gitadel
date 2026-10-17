@@ -45,6 +45,7 @@ export type RepositoryView =
   | "releases"
   | "issues"
   | "registry"
+  | "deploy"
   | "settings"
   | "integrations";
 export type CopyTarget = "http" | "ssh";
@@ -72,9 +73,20 @@ const views: readonly RepositoryView[] = [
   "releases",
   "issues",
   "registry",
+  "deploy",
   "settings",
   "integrations",
 ];
+/** Views only shown to people who can manage the repository. */
+const managedViews: readonly RepositoryView[] = [
+  "deploy",
+  "settings",
+  "integrations",
+];
+/** Views that open one integration, named by the `provider` parameter. */
+function opensIntegration(view: RepositoryView): boolean {
+  return view === "integrations" || view === "deploy";
+}
 function isRepositoryView(value: string | null): value is RepositoryView {
   return views.includes(value as RepositoryView);
 }
@@ -330,6 +342,7 @@ export class RepositoryPageState {
           await this.webhooks.loadWebhooks(init);
           break;
         case "tags":
+        case "deploy":
         case "integrations":
           if (this.view === "integrations" && !this.integrationProvider)
             this.view = "settings";
@@ -452,12 +465,12 @@ export class RepositoryPageState {
   ): void {
     if (!this.stopEditing()) return;
     this.view =
-      (nextView === "settings" || nextView === "integrations") &&
-      !this.repository?.can_manage
+      managedViews.includes(nextView) && !this.repository?.can_manage
         ? "overview"
         : nextView;
-    this.integrationProvider =
-      nextView === "integrations" ? (options.provider ?? null) : null;
+    this.integrationProvider = opensIntegration(this.view)
+      ? (options.provider ?? null)
+      : null;
     this.settingsTab =
       nextView === "settings"
         ? (options.settingsTab ?? "general")
@@ -595,7 +608,7 @@ export class RepositoryPageState {
     const requestedView = parameters.get("view");
     const view = isRepositoryView(requestedView) ? requestedView : "overview";
     this.view =
-      view === "settings" && !repository.can_manage ? "overview" : view;
+      managedViews.includes(view) && !repository.can_manage ? "overview" : view;
     this.settingsTab =
       this.view === "settings"
         ? parameters.get("tab") || "general"
@@ -617,8 +630,9 @@ export class RepositoryPageState {
     const issueNumber = Number(parameters.get("issue"));
     this.issueNumber =
       view === "issues" && issueNumber > 0 ? issueNumber : null;
-    this.integrationProvider =
-      view === "integrations" ? parameters.get("provider") : null;
+    this.integrationProvider = opensIntegration(this.view)
+      ? parameters.get("provider")
+      : null;
   }
   private writeLocation(): void {
     const parameters = new URLSearchParams();
@@ -633,7 +647,7 @@ export class RepositoryPageState {
       parameters.set("page", String(this.historyPage));
     if (this.view === "issues" && this.issueNumber)
       parameters.set("issue", String(this.issueNumber));
-    if (this.view === "integrations" && this.integrationProvider)
+    if (opensIntegration(this.view) && this.integrationProvider)
       parameters.set("provider", this.integrationProvider);
     if (this.view === "actions") {
       if (this.actionRunId) parameters.set("run", this.actionRunId);

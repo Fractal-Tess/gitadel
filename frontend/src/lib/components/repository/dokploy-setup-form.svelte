@@ -1,6 +1,7 @@
 <script lang="ts">
   import CircleAlert from "@lucide/svelte/icons/circle-alert";
   import Rocket from "@lucide/svelte/icons/rocket";
+  import TriangleAlert from "@lucide/svelte/icons/triangle-alert";
 
   import {
     DOKPLOY_SERVER,
@@ -18,12 +19,15 @@
   import type { DokployConfigureState } from "$lib/repository/state/integrations-state.svelte.js";
 
   let { configure }: { configure: DokployConfigureState } = $props();
+  // More than one setup form can be on a page.
+  const uid = $props.id();
 
   const form = $derived(configure.form);
   const catalog = $derived(configure.catalog);
-  const isCompose = $derived(
-    configure.selectedChoice?.suggestion?.kind === "compose",
-  );
+  const suggestion = $derived(configure.selectedChoice?.suggestion ?? null);
+  const isCompose = $derived(suggestion?.kind === "compose");
+  const services = $derived(isCompose ? (suggestion?.services ?? []) : []);
+  const warnings = $derived(suggestion?.warnings ?? []);
   const detected = $derived(configure.choices.length > 1);
   const branchLabel = $derived(form.branch.trim() || "the branch");
   const environmentNames = $derived(
@@ -34,14 +38,14 @@
 
 <form
   class="max-w-2xl space-y-6 rounded-xl border bg-card p-5 shadow-sm"
-  aria-labelledby="dokploy-setup-heading"
+  aria-labelledby="{uid}-heading"
   onsubmit={(event) => {
     event.preventDefault();
     void configure.submitSetup();
   }}
 >
   <div>
-    <h2 id="dokploy-setup-heading" class="text-base font-semibold">
+    <h2 id="{uid}-heading" class="text-base font-semibold">
       Set up deployment
     </h2>
     <p class="mt-1 text-sm leading-6 text-muted-foreground">
@@ -81,9 +85,9 @@
     {/each}
     {#if form.build === OTHER_BUILD}
       <Field.Field class="mt-2">
-        <Field.Label for="dokploy-setup-build-path">Build path</Field.Label>
+        <Field.Label for="{uid}-build-path">Build path</Field.Label>
         <Input
-          id="dokploy-setup-build-path"
+          id="{uid}-build-path"
           bind:value={configure.form.buildPath}
           placeholder="/"
         />
@@ -98,27 +102,27 @@
   <fieldset class="grid gap-4 sm:grid-cols-2" disabled={configure.setupWorking}>
     <legend class="sr-only">Resource</legend>
     <Field.Field>
-      <Field.Label for="dokploy-setup-name">Name</Field.Label>
+      <Field.Label for="{uid}-name">Name</Field.Label>
       <Input
-        id="dokploy-setup-name"
+        id="{uid}-name"
         bind:value={configure.form.name}
         maxlength={80}
         required
       />
     </Field.Field>
     <Field.Field>
-      <Field.Label for="dokploy-setup-branch">Branch</Field.Label>
-      <Input id="dokploy-setup-branch" bind:value={configure.form.branch} required />
+      <Field.Label for="{uid}-branch">Branch</Field.Label>
+      <Input id="{uid}-branch" bind:value={configure.form.branch} required />
     </Field.Field>
 
     <Field.Field>
-      <Field.Label for="dokploy-setup-project">Project</Field.Label>
+      <Field.Label for="{uid}-project">Project</Field.Label>
       <Select.Root
         type="single"
         bind:value={configure.form.project}
         disabled={configure.setupWorking}
       >
-        <Select.Trigger id="dokploy-setup-project" class="w-full">
+        <Select.Trigger id="{uid}-project" class="w-full">
           {form.project === NEW_DOKPLOY_PROJECT
             ? `New project: ${form.projectName.trim() || "unnamed"}`
             : (configure.formProject?.name ?? "Select a project")}
@@ -137,11 +141,11 @@
     </Field.Field>
     {#if form.project === NEW_DOKPLOY_PROJECT}
       <Field.Field>
-        <Field.Label for="dokploy-setup-project-name">
+        <Field.Label for="{uid}-project-name">
           New project name
         </Field.Label>
         <Input
-          id="dokploy-setup-project-name"
+          id="{uid}-project-name"
           bind:value={configure.form.projectName}
           maxlength={80}
           required
@@ -149,14 +153,14 @@
       </Field.Field>
     {/if}
     <Field.Field>
-      <Field.Label for="dokploy-setup-environment">Environment</Field.Label>
+      <Field.Label for="{uid}-environment">Environment</Field.Label>
       <Input
-        id="dokploy-setup-environment"
+        id="{uid}-environment"
         bind:value={configure.form.environment}
-        list="dokploy-setup-environments"
+        list="{uid}-environments"
         required
       />
-      <datalist id="dokploy-setup-environments">
+      <datalist id="{uid}-environments">
         {#each environmentNames as environmentName (environmentName)}
           <option value={environmentName}></option>
         {/each}
@@ -168,13 +172,13 @@
     </Field.Field>
     {#if catalog && catalog.servers.length > 0}
       <Field.Field>
-        <Field.Label for="dokploy-setup-server">Server</Field.Label>
+        <Field.Label for="{uid}-server">Server</Field.Label>
         <Select.Root
           type="single"
           bind:value={configure.form.server}
           disabled={configure.setupWorking}
         >
-          <Select.Trigger id="dokploy-setup-server" class="w-full">
+          <Select.Trigger id="{uid}-server" class="w-full">
             {form.server === DOKPLOY_SERVER
               ? "Dokploy server"
               : (catalog.servers.find((server) => server.id === form.server)
@@ -193,74 +197,124 @@
     {/if}
   </fieldset>
 
-  {#if !isCompose}
-    <fieldset class="grid gap-4 border-t pt-5" disabled={configure.setupWorking}>
-      <legend class="sr-only">Domain</legend>
-      <div>
-        <p class="text-sm font-medium">Domain (optional)</p>
-        <p class="mt-0.5 text-xs leading-5 text-muted-foreground">
-          Leave the host empty to add a domain later in Dokploy.
-        </p>
-      </div>
-      <div class="grid gap-4 sm:grid-cols-[minmax(0,1fr)_8rem]">
-        <Field.Field>
-          <Field.Label for="dokploy-setup-host">Host</Field.Label>
+  <fieldset class="grid gap-4 border-t pt-5" disabled={configure.setupWorking}>
+    <legend class="sr-only">Domain</legend>
+    <div>
+      <p class="text-sm font-medium">Domain (optional)</p>
+      <p class="mt-0.5 text-xs leading-5 text-muted-foreground">
+        Leave the host empty to add a domain later in Dokploy.
+      </p>
+    </div>
+    {#if isCompose}
+      <Field.Field>
+        <Field.Label for="{uid}-service">Service</Field.Label>
+        {#if services.length > 0}
+          <Select.Root
+            type="single"
+            value={form.domainService}
+            onValueChange={(service) => configure.chooseService(service)}
+            disabled={configure.setupWorking}
+          >
+            <Select.Trigger id="{uid}-service" class="w-full">
+              {form.domainService || "Select a service"}
+            </Select.Trigger>
+            <Select.Content>
+              <Select.Group>
+                {#each services as service (service.name)}
+                  <Select.Item value={service.name}>
+                    {service.name}{service.port
+                      ? ` · port ${service.port}`
+                      : ""}
+                  </Select.Item>
+                {/each}
+              </Select.Group>
+            </Select.Content>
+          </Select.Root>
+        {:else}
           <Input
-            id="dokploy-setup-host"
-            bind:value={configure.form.domainHost}
-            placeholder="app.example.com"
+            id="{uid}-service"
+            bind:value={configure.form.domainService}
+            placeholder="web"
             autocomplete="off"
           />
-        </Field.Field>
-        <Field.Field>
-          <Field.Label for="dokploy-setup-port">Port</Field.Label>
-          <Input
-            id="dokploy-setup-port"
-            type="number"
-            min={1}
-            max={65535}
-            bind:value={configure.form.domainPort}
-          />
-        </Field.Field>
-      </div>
-      <Field.Field orientation="horizontal">
-        <Switch
-          id="dokploy-setup-https"
-          bind:checked={configure.form.domainHttps}
-          disabled={configure.setupWorking}
-        />
-        <Field.Content>
-          <Field.Label for="dokploy-setup-https">HTTPS</Field.Label>
-          <Field.Description>
-            Dokploy requests a Let's Encrypt certificate. The host's DNS must
-            already point at your Dokploy server.
-          </Field.Description>
-        </Field.Content>
+        {/if}
+        <Field.Description>
+          The Compose service the domain routes to.
+        </Field.Description>
       </Field.Field>
-    </fieldset>
-  {/if}
+    {/if}
+    <div class="grid gap-4 sm:grid-cols-[minmax(0,1fr)_8rem]">
+      <Field.Field>
+        <Field.Label for="{uid}-host">Host</Field.Label>
+        <Input
+          id="{uid}-host"
+          bind:value={configure.form.domainHost}
+          placeholder="app.example.com"
+          autocomplete="off"
+        />
+      </Field.Field>
+      <Field.Field>
+        <Field.Label for="{uid}-port">Port</Field.Label>
+        <Input
+          id="{uid}-port"
+          type="number"
+          min={1}
+          max={65535}
+          bind:value={configure.form.domainPort}
+        />
+      </Field.Field>
+    </div>
+    <Field.Field orientation="horizontal">
+      <Switch
+        id="{uid}-https"
+        bind:checked={configure.form.domainHttps}
+        disabled={configure.setupWorking}
+      />
+      <Field.Content>
+        <Field.Label for="{uid}-https">HTTPS</Field.Label>
+        <Field.Description>
+          Dokploy requests a Let's Encrypt certificate. The host's DNS must
+          already point at your Dokploy server.
+        </Field.Description>
+      </Field.Content>
+    </Field.Field>
+  </fieldset>
 
   <fieldset class="grid gap-3 border-t pt-5" disabled={configure.setupWorking}>
     <legend class="sr-only">After setup</legend>
     <Field.Field orientation="horizontal">
       <Checkbox
-        id="dokploy-setup-deploy"
+        id="{uid}-deploy"
         bind:checked={configure.form.deploy}
         disabled={configure.setupWorking}
       />
-      <Field.Label for="dokploy-setup-deploy">Deploy now</Field.Label>
+      <Field.Label for="{uid}-deploy">Deploy now</Field.Label>
     </Field.Field>
     <Field.Field orientation="horizontal">
       <Checkbox
-        id="dokploy-setup-deploy-on-push"
+        id="{uid}-deploy-on-push"
         bind:checked={configure.form.deployOnPush}
         disabled={configure.setupWorking}
       />
-      <Field.Label for="dokploy-setup-deploy-on-push">
+      <Field.Label for="{uid}-deploy-on-push">
         Deploy on every push to {branchLabel}
       </Field.Label>
     </Field.Field>
   </fieldset>
+
+  {#if warnings.length > 0}
+    <Alert.Root class="border-amber-500/40 bg-amber-500/5">
+      <TriangleAlert class="size-4 shrink-0 text-amber-500" />
+      <Alert.Title>These often break a Dokploy deployment:</Alert.Title>
+      <Alert.Description>
+        <ul class="list-disc space-y-1 pl-4">
+          {#each warnings as warning, index (index)}
+            <li>{warning}</li>
+          {/each}
+        </ul>
+      </Alert.Description>
+    </Alert.Root>
+  {/if}
 
   {#if configure.setupError}
     <Alert.Root variant="destructive">

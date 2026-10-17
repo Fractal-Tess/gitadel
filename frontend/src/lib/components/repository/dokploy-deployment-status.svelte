@@ -11,6 +11,9 @@
   import type { DokployConfigureState } from "$lib/repository/state/integrations-state.svelte.js";
 
   let { configure }: { configure: DokployConfigureState } = $props();
+  // Several deployments can be listed on one page.
+  const uid = $props.id();
+  const headingId = `${uid}-deployment-heading`;
 
   const latest = $derived(configure.deployment?.deployment ?? null);
   const view = $derived(
@@ -27,11 +30,11 @@
 
 <section
   class="rounded-xl border bg-card p-5 shadow-sm"
-  aria-labelledby="dokploy-deployment-heading"
+  aria-labelledby={headingId}
 >
   <div class="flex flex-wrap items-start justify-between gap-3">
     <div class="min-w-0">
-      <h2 id="dokploy-deployment-heading" class="font-semibold">
+      <h2 id={headingId} class="font-semibold">
         Latest deployment
       </h2>
       <p class="mt-1 text-sm text-muted-foreground">

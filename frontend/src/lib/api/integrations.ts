@@ -181,7 +181,18 @@ export const buildSuggestionSchema = z.object({
   dockerfile: z.string().optional(),
   /** Compose file relative to the repository root. */
   compose_path: z.string().optional(),
+  /** The Dockerfile's exposed port, or the default Compose service's port. */
   port: z.number().int().optional(),
+  /** The Compose service a domain routes to by default. */
+  service: z.string().optional(),
+  /** Every service in a Compose file, with its port when known. */
+  services: z
+    .array(
+      z.object({ name: z.string(), port: z.number().int().optional() }),
+    )
+    .default([]),
+  /** Things in the build that commonly break a Dokploy deployment. */
+  warnings: z.array(z.string()).default([]),
 });
 export type BuildSuggestion = z.infer<typeof buildSuggestionSchema>;
 
@@ -203,7 +214,8 @@ export type DeploymentSetupRequest = {
   project_id?: string;
   project_name?: string;
   environment: string;
-  domain?: { host: string; port: number; https: boolean };
+  /** `service` is required for Compose and never sent for applications. */
+  domain?: { host: string; port: number; https: boolean; service?: string };
   deploy: boolean;
   deploy_on_push: boolean;
 };
@@ -427,6 +439,17 @@ export function loadDeploymentSuggestions(
 ): Promise<DeploymentSuggestions> {
   return requestJson(
     `${repositoryIntegrationPath(namespace, name, id)}/suggestions`,
+    deploymentSuggestionsSchema,
+  );
+}
+
+/** The same suggestions, before the repository has any integration. */
+export function loadRepositoryDeploymentSuggestions(
+  namespace: string,
+  name: string,
+): Promise<DeploymentSuggestions> {
+  return requestJson(
+    `/api/v1/repos/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/deploy/suggestions`,
     deploymentSuggestionsSchema,
   );
 }
@@ -866,15 +889,37 @@ export type SetupForm = {
   /** A server id, or `DOKPLOY_SERVER`. */
   server: string;
   domainHost: string;
+  /** The Compose service the domain routes to; empty for applications. */
+  domainService: string;
   domainPort: number | null;
   domainHttps: boolean;
   deploy: boolean;
   deployOnPush: boolean;
 };
 
-/** The port to expose for `choice`, falling back to 80. */
-export function suggestedPort(choice: BuildChoice | undefined): number {
-  return choice?.suggestion?.port ?? 80;
+/**
+ * The port to expose for `choice`, falling back to 80. For Compose, `service`
+ * picks that service's port instead of the default service's.
+ */
+export function suggestedPort(
+  choice: BuildChoice | undefined,
+  service?: string,
+): number {
+  const suggestion = choice?.suggestion;
+  if (suggestion?.kind === "compose" && service !== undefined) {
+    return (
+      suggestion.services.find((candidate) => candidate.name === service)
+        ?.port ?? 80
+    );
+  }
+  return suggestion?.port ?? 80;
+}
+
+/** The Compose service a domain routes to by default; empty otherwise. */
+export function suggestedService(choice: BuildChoice | undefined): string {
+  const suggestion = choice?.suggestion;
+  if (suggestion?.kind !== "compose") return "";
+  return suggestion.service ?? suggestion.services[0]?.name ?? "";
 }
 
 /** Form defaults from what Gitadel detected and what Dokploy already has. */
@@ -907,6 +952,7 @@ export function defaultSetupForm({
     environment: "production",
     server: DOKPLOY_SERVER,
     domainHost: "",
+    domainService: suggestedService(choices[0]),
     domainPort: suggestedPort(choices[0]),
     domainHttps: true,
     deploy: true,
@@ -926,7 +972,9 @@ export function setupFormProblem(
   if (form.project === NEW_DOKPLOY_PROJECT && !form.projectName.trim())
     return "Enter a name for the new project.";
   if (!form.environment.trim()) return "Enter an environment name.";
-  if (choice.suggestion?.kind !== "compose" && form.domainHost.trim()) {
+  if (form.domainHost.trim()) {
+    if (choice.suggestion?.kind === "compose" && !form.domainService.trim())
+      return "Choose the Compose service the domain routes to.";
     const port = form.domainPort;
     if (port === null || !Number.isInteger(port) || port < 1 || port > 65535)
       return "Enter the port your application listens on (1–65535).";
@@ -957,15 +1005,24 @@ export function setupRequestBody(
     body.project_id = form.project;
   }
   if (form.server !== DOKPLOY_SERVER) body.server_id = form.server;
+  const host = form.domainHost.trim();
   if (kind === "compose") {
     body.compose_path = suggestion?.compose_path ?? "./docker-compose.yml";
+    const service = form.domainService.trim();
+    if (host && service) {
+      body.domain = {
+        host,
+        port: form.domainPort ?? 80,
+        https: form.domainHttps,
+        service,
+      };
+    }
     return body;
   }
   body.repository_path = suggestion
     ? suggestion.build_path
     : form.buildPath.trim() || "/";
   if (suggestion?.dockerfile) body.dockerfile = suggestion.dockerfile;
-  const host = form.domainHost.trim();
   if (host) {
     body.domain = {
       host,

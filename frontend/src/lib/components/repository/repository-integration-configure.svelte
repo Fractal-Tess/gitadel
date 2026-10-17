@@ -1,13 +1,12 @@
 <script lang="ts">
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import CircleAlert from "@lucide/svelte/icons/circle-alert";
-  import CircleCheck from "@lucide/svelte/icons/circle-check";
   import Rocket from "@lucide/svelte/icons/rocket";
-  import TriangleAlert from "@lucide/svelte/icons/triangle-alert";
 
   import { resourceKindLabel } from "$lib/api/integrations.js";
   import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
   import DokployDeploymentStatus from "$lib/components/repository/dokploy-deployment-status.svelte";
+  import DokploySetupResult from "$lib/components/repository/dokploy-setup-result.svelte";
   import DokploySetupForm from "$lib/components/repository/dokploy-setup-form.svelte";
   import DokployConfigureStep from "$lib/components/repository/dokploy-configure-step.svelte";
   import DokployEnvironmentDialog from "$lib/components/repository/dokploy-environment-dialog.svelte";
@@ -22,12 +21,23 @@
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
   import { DokployConfigureState } from "$lib/repository/state/integrations-state.svelte.js";
 
-  let { state: repository }: { state: RepositoryPageState } = $props();
+  let {
+    state: repository,
+    configure: provided = null,
+    embedded = false,
+  }: {
+    state: RepositoryPageState;
+    /** A state the caller owns and loads; otherwise the URL's integration. */
+    configure?: DokployConfigureState | null;
+    /** Leave out the page heading when shown inside another view. */
+    embedded?: boolean;
+  } = $props();
 
-  const configure = $derived(new DokployConfigureState(repository));
+  const configure = $derived(provided ?? new DokployConfigureState(repository));
+  const fromDeploy = $derived(repository.view === "deploy");
 
   $effect(() => {
-    void configure.load();
+    if (!provided) void configure.load();
   });
 
   // Poll the latest deployment while a linked resource is shown; restarts
@@ -44,23 +54,27 @@
 </script>
 
 <div class="space-y-6">
-  <header class="flex items-center gap-4">
-    <Button
-      variant="ghost"
-      size="icon"
-      aria-label="Back to integrations"
-      onclick={() =>
-        repository.navigate("settings", { settingsTab: "integrations" })}
-    >
-      <ArrowLeft class="size-4" />
-    </Button>
-    <div class="min-w-0">
-      <h1 class="truncate text-lg font-semibold">Dokploy deployment</h1>
-      <p class="text-sm text-muted-foreground">
-        Deploy this repository with Dokploy and redeploy it on every push.
-      </p>
-    </div>
-  </header>
+  {#if !embedded}
+    <header class="flex items-center gap-4">
+      <Button
+        variant="ghost"
+        size="icon"
+        aria-label={fromDeploy ? "Back to deployments" : "Back to integrations"}
+        onclick={() =>
+          fromDeploy
+            ? repository.navigate("deploy")
+            : repository.navigate("settings", { settingsTab: "integrations" })}
+      >
+        <ArrowLeft class="size-4" />
+      </Button>
+      <div class="min-w-0">
+        <h1 class="truncate text-lg font-semibold">Dokploy deployment</h1>
+        <p class="text-sm text-muted-foreground">
+          Deploy this repository with Dokploy and redeploy it on every push.
+        </p>
+      </div>
+    </header>
+  {/if}
 
   {#if configure.loading}
     <div
@@ -77,33 +91,7 @@
     {@const detail = configure.detail}
     {@const link = configure.link}
     {#if configure.setupResult}
-      {@const result = configure.setupResult}
-      <section
-        class="rounded-xl border bg-card p-5 shadow-sm"
-        aria-labelledby="dokploy-setup-result-heading"
-      >
-        <h2 id="dokploy-setup-result-heading" class="font-semibold">
-          Deployment set up
-        </h2>
-        <ul class="mt-3 grid gap-1.5" aria-label="Completed steps">
-          {#each result.steps as step, index (index)}
-            <li class="flex items-start gap-2 text-sm">
-              <CircleCheck
-                class="mt-0.5 size-4 shrink-0 text-emerald-500"
-                aria-hidden="true"
-              />
-              <span><span class="sr-only">Done: </span>{step}</span>
-            </li>
-          {/each}
-        </ul>
-        {#if result.warning}
-          <Alert.Root class="mt-4 border-amber-500/40 bg-amber-500/5">
-            <TriangleAlert class="size-4 shrink-0 text-amber-500" />
-            <Alert.Title>One step did not finish</Alert.Title>
-            <Alert.Description>{result.warning}</Alert.Description>
-          </Alert.Root>
-        {/if}
-      </section>
+      <DokploySetupResult result={configure.setupResult} />
     {/if}
     <DokployDeploymentStatus {configure} />
     <div class="grid gap-4 xl:grid-cols-2">

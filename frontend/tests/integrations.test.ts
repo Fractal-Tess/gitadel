@@ -13,6 +13,7 @@ import {
   connectionFromCreated,
   defaultSetupForm,
   deploymentStatusView,
+  deploymentSuggestionsSchema,
   describeIntegration,
   dokployStatusLabel,
   findDefaultEnvironment,
@@ -29,6 +30,7 @@ import {
   shouldPollDeployment,
   sourceSetupStep,
   suggestedPort,
+  suggestedService,
   withSourceBinding,
   type DeploymentSuggestions,
   type DokployRemoteCatalog,
@@ -465,8 +467,18 @@ describe("deployment setup form", () => {
         build_path: "/web",
         dockerfile: "Dockerfile",
         port: 8080,
+        services: [],
+        warnings: ["The Dockerfile has no EXPOSE."],
       },
-      { kind: "compose", build_path: "/", compose_path: "./compose.yml" },
+      {
+        kind: "compose",
+        build_path: "/",
+        compose_path: "./compose.yml",
+        port: 3000,
+        service: "web",
+        services: [{ name: "db", port: 5432 }, { name: "web", port: 3000 }],
+        warnings: [],
+      },
     ],
   };
   const choices = buildChoices(detected.suggestions);
@@ -486,7 +498,23 @@ describe("deployment setup form", () => {
       [OTHER_BUILD],
     );
     assert.equal(suggestedPort(choices[0]), 8080);
-    assert.equal(suggestedPort(choices[1]), 80);
+    assert.equal(suggestedPort(choices[1]), 3000);
+    assert.equal(suggestedPort(choices[1], "db"), 5432);
+    assert.equal(suggestedPort(choices[1], "missing"), 80);
+    assert.equal(suggestedPort(choices[2]), 80);
+    assert.equal(suggestedService(choices[0]), "");
+    assert.equal(suggestedService(choices[1]), "web");
+  });
+
+  test("suggestions without the newer fields still parse", () => {
+    const parsed = deploymentSuggestionsSchema.parse({
+      branch: null,
+      project_name: "shop",
+      suggestions: [{ kind: "compose", build_path: "/" }],
+    });
+    assert.deepEqual(parsed.suggestions[0]?.services, []);
+    assert.deepEqual(parsed.suggestions[0]?.warnings, []);
+    assert.equal(parsed.suggestions[0]?.service, undefined);
   });
 
   test("defaults come from suggestions, then the repository", () => {
@@ -504,6 +532,7 @@ describe("deployment setup form", () => {
     assert.equal(form.environment, "production");
     assert.equal(form.server, DOKPLOY_SERVER);
     assert.equal(form.domainPort, 8080);
+    assert.equal(form.domainService, "");
     assert.equal(form.domainHttps, true);
     assert.equal(form.deploy, true);
     assert.equal(form.deployOnPush, true);
@@ -541,6 +570,8 @@ describe("deployment setup form", () => {
       }),
       name: "  web ",
       domainHost: " app.example.com ",
+      // A stale service from an earlier Compose choice is never sent.
+      domainService: "web",
       deployOnPush: false,
     };
     assert.deepEqual(setupRequestBody(form, choices), {
@@ -569,7 +600,6 @@ describe("deployment setup form", () => {
       project: "p1",
       server: "s1",
       environment: "staging",
-      domainHost: "ignored.example.com",
     };
     assert.deepEqual(setupRequestBody(form, choices), {
       kind: "compose",
@@ -582,6 +612,36 @@ describe("deployment setup form", () => {
       server_id: "s1",
       compose_path: "./compose.yml",
     });
+  });
+
+  test("a compose domain names the service it routes to", () => {
+    const form = {
+      ...defaultSetupForm({
+        repositoryName: "shop",
+        defaultBranch: "main",
+        suggestions: detected,
+        catalog: null,
+      }),
+      build: "suggestion-1",
+      domainHost: " shop.example.com ",
+      domainService: "web",
+      domainPort: 3000,
+      domainHttps: false,
+    };
+    assert.deepEqual(setupRequestBody(form, choices).domain, {
+      host: "shop.example.com",
+      port: 3000,
+      https: false,
+      service: "web",
+    });
+    assert.match(
+      setupFormProblem({ ...form, domainService: " " }, choices) ?? "",
+      /service/,
+    );
+    assert.equal(
+      setupRequestBody({ ...form, domainHost: "" }, choices).domain,
+      undefined,
+    );
   });
 
   test("the manual build sends a build path and no Dockerfile", () => {
@@ -626,10 +686,23 @@ describe("deployment setup form", () => {
     );
     assert.equal(
       setupFormProblem(
-        { ...form, build: "suggestion-1", domainHost: "a", domainPort: null },
+        { ...form, build: "suggestion-1", domainHost: "", domainPort: null },
         choices,
       ),
       null,
+    );
+    assert.match(
+      setupFormProblem(
+        {
+          ...form,
+          build: "suggestion-1",
+          domainHost: "a",
+          domainService: "web",
+          domainPort: null,
+        },
+        choices,
+      ) ?? "",
+      /port/,
     );
     assert.match(
       setupFormProblem({ ...form, build: "missing" }, choices) ?? "",
