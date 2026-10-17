@@ -14,6 +14,7 @@ use uuid::Uuid;
 mod accounts;
 mod actions;
 mod auth;
+mod deploy;
 mod deploy_keys;
 mod email;
 mod imports;
@@ -88,6 +89,11 @@ enum Command {
     Release {
         #[command(subcommand)]
         command: releases::ReleaseCommand,
+    },
+    /// Deploy a repository through a Dokploy connection and follow it.
+    Deploy {
+        #[command(subcommand)]
+        command: deploy::DeployCommand,
     },
     /// Manage repository webhooks and their deliveries.
     Webhook {
@@ -982,7 +988,7 @@ fn command_uses_stdin_body(command: &Command) -> bool {
         Command::Release { command } => releases::uses_stdin(command),
         Command::Webhook { command } => webhooks::uses_stdin(command),
         Command::Mirror { command } => mirrors::uses_stdin(command),
-        Command::Import { .. } => false,
+        Command::Import { .. } | Command::Deploy { .. } => false,
         Command::Actions { command } => actions::uses_stdin(command),
         Command::Auth { .. } | Command::Me { .. } | Command::Org { .. } => false,
     }
@@ -1060,6 +1066,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Issue { command } => issues::run(&api, command).await?,
         Command::Release { command } => releases::run(&api, command).await?,
         Command::Webhook { command } => webhooks::run(&api, command).await?,
+        Command::Deploy { command } => deploy::run(&api, command).await?,
         Command::Mirror { command } => mirrors::run(&api, command).await?,
         Command::Import { command } => imports::run(&api, command).await?,
         Command::Actions { command } => match actions::run(&api, command).await? {
