@@ -1,7 +1,20 @@
 import { toast } from "svelte-sonner";
 
 import {
+  DOKPLOY_SERVER,
+  NEW_DOKPLOY_PROJECT,
   bindIntegrationSource,
+  buildChoices,
+  defaultSetupForm,
+  loadDeploymentStatus,
+  loadDeploymentSuggestions,
+  setupDeployment,
+  setupFormProblem,
+  setupRequestBody,
+  shouldPollDeployment,
+  suggestedPort,
+  updateNamespaceInternalUrl,
+  verifyIntegrationSource,
   catalogWithEnvironment,
   catalogWithProject,
   createDokployEnvironment,
@@ -21,8 +34,12 @@ import {
   updateNamespaceConnection,
   updateRepositoryIntegration,
   withSourceBinding,
+  type DeploymentStatus,
+  type DeploymentSuggestions,
   type DokployProject,
   type DokployRemoteCatalog,
+  type SetupForm,
+  type SourceCheck,
   type IntegrationSourceBinding,
   type IntegrationSourceConnection,
   type IntegrationTestResult,
@@ -52,6 +69,9 @@ export type StagedConnectionCallbacks = {
 export class StagedConnectionState {
   connection = $state<NamespaceIntegration | null>(null);
   source = $state<IntegrationSourceConnection | null>(null);
+  /** The latest reachability check; null until one has run. */
+  check = $state.raw<SourceCheck | null>(null);
+  checking = $state(false);
   loading = $state(false);
   working = $state(false);
   error = $state<string | null>(null);
@@ -70,12 +90,14 @@ export class StagedConnectionState {
   reset(): void {
     this.connection = null;
     this.source = null;
+    this.check = null;
     this.error = null;
   }
 
   stage(connection: NamespaceIntegration): void {
     this.connection = connection;
     this.source = null;
+    this.check = null;
     this.error = null;
   }
 
@@ -89,6 +111,8 @@ export class StagedConnectionState {
 
   #update(response: IntegrationSourceConnection | null): void {
     this.source = response;
+    if (!response?.binding) this.check = null;
+    else if (response.check) this.check = response.check;
     if (!this.connection) return;
     const binding = response?.binding ?? null;
     this.connection = withSourceBinding(this.connection, binding);
@@ -121,9 +145,7 @@ export class StagedConnectionState {
         await bindIntegrationSource(namespace, connection.id, sourceId),
       );
     } catch (caught) {
-      toast.error(
-        errorMessage(caught, "Could not connect the Dokploy source."),
-      );
+      this.error = errorMessage(caught, "Could not use that Dokploy provider.");
     } finally {
       this.working = false;
     }
@@ -138,10 +160,55 @@ export class StagedConnectionState {
         await createIntegrationSource(namespace, connection.id, sourceName),
       );
     } catch (caught) {
-      toast.error(errorMessage(caught, "Could not create the Dokploy source."));
+      this.error = errorMessage(caught, "Could not connect Gitadel to Dokploy.");
     } finally {
       this.working = false;
     }
+  }
+
+  async verify(): Promise<void> {
+    this.checking = true;
+    this.error = null;
+    try {
+      const { namespace, connection } = this.#target();
+      this.check = await verifyIntegrationSource(namespace, connection.id);
+      if (this.connection && this.check.internal_url) {
+        this.connection = {
+          ...this.connection,
+          internal_url: this.check.internal_url,
+        };
+      }
+    } catch (caught) {
+      this.error = errorMessage(
+        caught,
+        "Could not check whether Dokploy reaches Gitadel.",
+      );
+    } finally {
+      this.checking = false;
+    }
+  }
+
+  /** Point Dokploy at `internalUrl`, then check again. */
+  async setInternalUrl(internalUrl: string): Promise<void> {
+    this.checking = true;
+    this.error = null;
+    try {
+      const { namespace, connection } = this.#target();
+      const updated = await updateNamespaceInternalUrl(
+        namespace,
+        connection.id,
+        internalUrl,
+      );
+      this.connection = {
+        ...updated,
+        source: updated.source ?? this.connection?.source,
+      };
+    } catch (caught) {
+      this.checking = false;
+      this.error = errorMessage(caught, "Could not save the address.");
+      return;
+    }
+    await this.verify();
   }
 
   async disconnect(): Promise<void> {
@@ -169,7 +236,12 @@ export class StagedConnectionState {
       internal_url: value.internalUrl,
       api_key: value.apiKey || null,
     });
-    this.connection = updated;
+    this.connection = {
+      ...updated,
+      source: updated.source ?? connection.source,
+    };
+    // The address may have changed; prove it again.
+    this.check = null;
     this.#callbacks.onsaved(updated);
   }
 
@@ -186,8 +258,10 @@ export class StagedConnectionState {
 
 export type ConfigureStep = "kind" | "create" | "link";
 export type SetupStep = "environments" | "resources" | ConfigureStep;
-export const DOKPLOY_SERVER = "__dokploy__";
-export const NEW_DOKPLOY_PROJECT = "__new_project__";
+export { DOKPLOY_SERVER, NEW_DOKPLOY_PROJECT };
+
+const DEPLOYMENT_POLL_INTERVAL_MS = 3_000;
+const DEPLOYMENT_POLL_LIMIT_MS = 10 * 60 * 1_000;
 
 /** The Dokploy setup wizard of one repository integration. */
 export class DokployConfigureState {
@@ -223,9 +297,50 @@ export class DokployConfigureState {
 
   unlinkDialogOpen = $state(false);
 
+  /** `setup` is the one-form flow; `link` is the step-by-step wizard. */
+  setupMode = $state<"setup" | "link">("setup");
+  suggestions = $state.raw<DeploymentSuggestions | null>(null);
+  suggestionsError = $state<string | null>(null);
+  form = $state<SetupForm>(
+    defaultSetupForm({
+      repositoryName: "",
+      defaultBranch: null,
+      suggestions: null,
+      catalog: null,
+    }),
+  );
+  setupLoading = $state(false);
+  setupWorking = $state(false);
+  setupError = $state<string | null>(null);
+  setupResult = $state.raw<{ steps: string[]; warning: string | null } | null>(
+    null,
+  );
+
+  deployment = $state.raw<DeploymentStatus | null>(null);
+  deploymentError = $state<string | null>(null);
+  deploymentLoading = $state(false);
+  /** True after starting a deployment until Dokploy lists it. */
+  awaitingDeployment = $state(false);
+  /** True when polling gave up after the time limit. */
+  deploymentPollExpired = $state(false);
+  /** Bumped to restart deployment polling. */
+  deploymentWatch = $state(0);
+  #awaitingPrevious: string | null = null;
+
   // Deferred so `page`, assigned in the constructor, is read lazily.
   readonly id = $derived.by(() => this.page.integrationProvider ?? "");
   readonly link = $derived(parseDokployResourceLink(this.detail?.resource));
+  readonly choices = $derived(
+    buildChoices(this.suggestions?.suggestions ?? []),
+  );
+  readonly selectedChoice = $derived(
+    this.choices.find((choice) => choice.id === this.form.build),
+  );
+  readonly formProblem = $derived(setupFormProblem(this.form, this.choices));
+  readonly formProject = $derived(
+    this.catalog?.projects.find((project) => project.id === this.form.project) ??
+      null,
+  );
   readonly selectedProject = $derived(
     this.catalog?.projects.find(
       (project) => project.id === this.selectedProjectId,
@@ -251,7 +366,12 @@ export class DokployConfigureState {
         this.id,
       );
       this.showSetup = !parseDokployResourceLink(this.detail.resource);
-      await this.loadCatalog();
+      if (this.showSetup) {
+        await Promise.all([this.loadCatalog(), this.loadSuggestions()]);
+        this.resetForm();
+      } else {
+        await this.loadCatalog();
+      }
     } catch (error) {
       this.loadError = errorMessage(error, "Could not reach Gitadel.");
     } finally {
@@ -275,6 +395,159 @@ export class DokployConfigureState {
     } finally {
       this.catalogLoading = false;
     }
+  }
+
+  async loadSuggestions(): Promise<void> {
+    this.suggestionsError = null;
+    try {
+      this.suggestions = await loadDeploymentSuggestions(
+        this.page.namespace,
+        this.page.name,
+        this.id,
+      );
+    } catch (error) {
+      this.suggestions = null;
+      this.suggestionsError = errorMessage(
+        error,
+        "Could not read the repository to suggest a build.",
+      );
+    }
+  }
+
+  /** Fill the setup form from the suggestions and the Dokploy catalog. */
+  resetForm(): void {
+    this.form = defaultSetupForm({
+      repositoryName: this.page.repository?.name ?? this.page.name,
+      defaultBranch: this.page.repository?.default_branch,
+      suggestions: this.suggestions,
+      catalog: this.catalog,
+    });
+  }
+
+  chooseBuild(id: string): void {
+    this.form.build = id;
+    this.form.domainPort = suggestedPort(
+      this.choices.find((choice) => choice.id === id),
+    );
+  }
+
+  /** Show the one-form setup, loading what it needs. */
+  async openSetup(): Promise<void> {
+    this.resetMessages();
+    this.setupError = null;
+    this.setupResult = null;
+    this.setupMode = "setup";
+    this.showSetup = true;
+    const pending: Promise<void>[] = [];
+    if (!this.suggestions) pending.push(this.loadSuggestions());
+    if (!this.catalog) pending.push(this.loadCatalog());
+    if (pending.length > 0) {
+      this.setupLoading = true;
+      try {
+        await Promise.all(pending);
+      } finally {
+        this.setupLoading = false;
+      }
+    }
+    this.resetForm();
+  }
+
+  /** Switch to linking an existing resource with the step-by-step wizard. */
+  openLinkWizard(): void {
+    this.resetMessages();
+    this.setupError = null;
+    this.setupMode = "link";
+    this.setupStep = "environments";
+  }
+
+  async submitSetup(): Promise<void> {
+    if (this.setupWorking || this.formProblem) return;
+    this.setupWorking = true;
+    this.setupError = null;
+    this.resetMessages();
+    const deploy = this.form.deploy;
+    try {
+      const result = await setupDeployment(
+        this.page.namespace,
+        this.page.name,
+        this.id,
+        setupRequestBody(this.form, this.choices),
+      );
+      this.detail = result.integration;
+      this.setupResult = { steps: result.steps, warning: result.warning };
+      this.showSetup = false;
+      this.deployment = null;
+      // The first deployment only starts when every earlier step worked.
+      this.#awaitDeployment(deploy && result.warning === null, null);
+      this.deploymentWatch += 1;
+      void this.loadCatalog();
+    } catch (error) {
+      this.setupError = errorMessage(error, "Dokploy setup failed.");
+    } finally {
+      this.setupWorking = false;
+    }
+  }
+
+  #awaitDeployment(awaiting: boolean, previous: string | null): void {
+    this.awaitingDeployment = awaiting;
+    this.#awaitingPrevious = previous;
+  }
+
+  async refreshDeployment(): Promise<void> {
+    this.deploymentLoading = true;
+    try {
+      const status = await loadDeploymentStatus(
+        this.page.namespace,
+        this.page.name,
+        this.id,
+      );
+      this.deployment = status;
+      this.deploymentError = null;
+      if (
+        this.awaitingDeployment &&
+        (status.deployment?.created_at ?? null) !== this.#awaitingPrevious
+      ) {
+        this.#awaitDeployment(false, null);
+      }
+    } catch (error) {
+      this.deploymentError = errorMessage(
+        error,
+        "Could not read the deployment status from Dokploy.",
+      );
+    } finally {
+      this.deploymentLoading = false;
+    }
+  }
+
+  /**
+   * Poll the newest deployment every few seconds while it builds, for at
+   * most ten minutes. Returns the function that stops polling.
+   */
+  watchDeployment(): () => void {
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const started = Date.now();
+    const tick = async () => {
+      if (stopped) return;
+      this.deploymentPollExpired = false;
+      await this.refreshDeployment();
+      if (stopped || this.deploymentError) return;
+      const awaiting = this.awaitingDeployment
+        ? { previous: this.#awaitingPrevious }
+        : null;
+      if (!shouldPollDeployment(this.deployment, awaiting)) return;
+      if (Date.now() - started >= DEPLOYMENT_POLL_LIMIT_MS) {
+        this.deploymentPollExpired = true;
+        return;
+      }
+      timer = setTimeout(() => void tick(), DEPLOYMENT_POLL_INTERVAL_MS);
+    };
+    // Deferred so the caller's effect does not track what `tick` reads.
+    timer = setTimeout(() => void tick(), 0);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
   }
 
   resetMessages(): void {
@@ -438,6 +711,7 @@ export class DokployConfigureState {
         },
       );
       this.showSetup = false;
+      this.setupResult = null;
       toast.success(`${this.selectedResource.name} is connected.`, {
         description:
           "Deploy on push is off. Check the build settings in Dokploy, then turn it on here.",
@@ -472,6 +746,7 @@ export class DokployConfigureState {
         },
       );
       this.showSetup = false;
+      this.setupResult = null;
       toast.success(`${this.resourceName} was created in Dokploy.`, {
         description:
           "Next, open it in Dokploy to choose a build type, domain, and variables. Then deploy it or turn on Deploy on push here.",
@@ -523,6 +798,11 @@ export class DokployConfigureState {
         this.id,
       );
       toast.success(result.summary);
+      this.#awaitDeployment(
+        true,
+        this.deployment?.deployment?.created_at ?? null,
+      );
+      this.deploymentWatch += 1;
     } catch (error) {
       toast.error(errorMessage(error, "Could not reach Gitadel."));
     } finally {
@@ -533,6 +813,7 @@ export class DokployConfigureState {
   changeResource(): void {
     this.resetMessages();
     this.showSetup = true;
+    this.setupMode = "link";
     this.setupStep = "environments";
     this.selectedProjectId = "";
     this.selectedEnvironmentId = "";
@@ -552,8 +833,10 @@ export class DokployConfigureState {
         { enabled: false, resource: null },
       );
       this.unlinkDialogOpen = false;
-      this.showSetup = true;
+      this.deployment = null;
+      this.#awaitDeployment(false, null);
       this.setupStep = "environments";
+      void this.openSetup();
       toast.success(
         "The Dokploy resource was unlinked. It was not deleted from Dokploy.",
       );

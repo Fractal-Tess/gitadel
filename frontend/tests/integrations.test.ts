@@ -2,11 +2,17 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import {
+  DOKPLOY_SERVER,
+  NEW_DOKPLOY_PROJECT,
+  OTHER_BUILD,
+  buildChoices,
   catalogWithEnvironment,
   catalogWithProject,
   connectionAfterBinding,
   connectionConfigured,
   connectionFromCreated,
+  defaultSetupForm,
+  deploymentStatusView,
   describeIntegration,
   dokployStatusLabel,
   findDefaultEnvironment,
@@ -18,7 +24,13 @@ import {
   repositoryIntegrationPath,
   repositoryIntegrationsPath,
   resourceKindLabel,
+  setupFormProblem,
+  setupRequestBody,
+  shouldPollDeployment,
+  sourceSetupStep,
+  suggestedPort,
   withSourceBinding,
+  type DeploymentSuggestions,
   type DokployRemoteCatalog,
   type DokployResourceLink,
   type NamespaceIntegration,
@@ -412,6 +424,276 @@ describe("Dokploy catalog updates", () => {
     assert.deepEqual(
       fresh.projects[0]!.environments.map((environment) => environment.id),
       ["e4", "e3"],
+    );
+  });
+});
+
+describe("connection setup steps", () => {
+  const ready = { ready: true, targets_instance: true };
+  test("advance only on what Dokploy confirmed", () => {
+    assert.equal(sourceSetupStep(null, null), "connect");
+    assert.equal(
+      sourceSetupStep({ ready: true, targets_instance: false }, null),
+      "connect",
+    );
+    assert.equal(
+      sourceSetupStep({ ready: false, targets_instance: true }, null),
+      "authorize",
+    );
+    assert.equal(sourceSetupStep(ready, null), "reach");
+    assert.equal(sourceSetupStep(ready, { reachable: false }), "reach");
+    assert.equal(sourceSetupStep(ready, { reachable: true }), "deploy");
+  });
+  test("a reachable check does not skip an unauthorized provider", () => {
+    assert.equal(
+      sourceSetupStep(
+        { ready: false, targets_instance: true },
+        { reachable: true },
+      ),
+      "authorize",
+    );
+  });
+});
+
+describe("deployment setup form", () => {
+  const detected: DeploymentSuggestions = {
+    branch: "trunk",
+    project_name: "home-therapy",
+    suggestions: [
+      {
+        kind: "application",
+        build_path: "/web",
+        dockerfile: "Dockerfile",
+        port: 8080,
+      },
+      { kind: "compose", build_path: "/", compose_path: "./compose.yml" },
+    ],
+  };
+  const choices = buildChoices(detected.suggestions);
+
+  test("labels every suggestion and always offers the manual build last", () => {
+    assert.deepEqual(
+      choices.map((choice) => choice.label),
+      [
+        "Dockerfile in /web · port 8080",
+        "Compose file ./compose.yml",
+        "Other — I'll configure the build in Dokploy",
+      ],
+    );
+    assert.equal(choices.at(-1)?.id, OTHER_BUILD);
+    assert.deepEqual(
+      buildChoices([]).map((choice) => choice.id),
+      [OTHER_BUILD],
+    );
+    assert.equal(suggestedPort(choices[0]), 8080);
+    assert.equal(suggestedPort(choices[1]), 80);
+  });
+
+  test("defaults come from suggestions, then the repository", () => {
+    const form = defaultSetupForm({
+      repositoryName: "home-therapy",
+      defaultBranch: "main",
+      suggestions: detected,
+      catalog: { projects: [] },
+    });
+    assert.equal(form.build, "suggestion-0");
+    assert.equal(form.branch, "trunk");
+    assert.equal(form.name, "home-therapy");
+    assert.equal(form.project, NEW_DOKPLOY_PROJECT);
+    assert.equal(form.projectName, "home-therapy");
+    assert.equal(form.environment, "production");
+    assert.equal(form.server, DOKPLOY_SERVER);
+    assert.equal(form.domainPort, 8080);
+    assert.equal(form.domainHttps, true);
+    assert.equal(form.deploy, true);
+    assert.equal(form.deployOnPush, true);
+
+    const fallback = defaultSetupForm({
+      repositoryName: "shop",
+      defaultBranch: null,
+      suggestions: null,
+      catalog: null,
+    });
+    assert.equal(fallback.build, OTHER_BUILD);
+    assert.equal(fallback.branch, "main");
+    assert.equal(fallback.domainPort, 80);
+  });
+
+  test("an existing project with the same name is chosen", () => {
+    const form = defaultSetupForm({
+      repositoryName: "home-therapy",
+      defaultBranch: "main",
+      suggestions: detected,
+      catalog: {
+        projects: [{ id: "p9", name: "Home-Therapy", environments: [] }],
+      },
+    });
+    assert.equal(form.project, "p9");
+  });
+
+  test("builds a Dockerfile application body with a domain", () => {
+    const form = {
+      ...defaultSetupForm({
+        repositoryName: "home-therapy",
+        defaultBranch: "main",
+        suggestions: detected,
+        catalog: null,
+      }),
+      name: "  web ",
+      domainHost: " app.example.com ",
+      deployOnPush: false,
+    };
+    assert.deepEqual(setupRequestBody(form, choices), {
+      kind: "application",
+      name: "web",
+      branch: "trunk",
+      environment: "production",
+      deploy: true,
+      deploy_on_push: false,
+      project_name: "home-therapy",
+      repository_path: "/web",
+      dockerfile: "Dockerfile",
+      domain: { host: "app.example.com", port: 8080, https: true },
+    });
+  });
+
+  test("builds a compose body for an existing project and server", () => {
+    const form = {
+      ...defaultSetupForm({
+        repositoryName: "shop",
+        defaultBranch: "main",
+        suggestions: detected,
+        catalog: null,
+      }),
+      build: "suggestion-1",
+      project: "p1",
+      server: "s1",
+      environment: "staging",
+      domainHost: "ignored.example.com",
+    };
+    assert.deepEqual(setupRequestBody(form, choices), {
+      kind: "compose",
+      name: "shop",
+      branch: "trunk",
+      environment: "staging",
+      deploy: true,
+      deploy_on_push: true,
+      project_id: "p1",
+      server_id: "s1",
+      compose_path: "./compose.yml",
+    });
+  });
+
+  test("the manual build sends a build path and no Dockerfile", () => {
+    const form = {
+      ...defaultSetupForm({
+        repositoryName: "shop",
+        defaultBranch: "main",
+        suggestions: null,
+        catalog: null,
+      }),
+      buildPath: " /api ",
+    };
+    const body = setupRequestBody(form, buildChoices([]));
+    assert.equal(body.kind, "application");
+    assert.equal(body.repository_path, "/api");
+    assert.equal(body.dockerfile, undefined);
+    assert.equal(body.domain, undefined);
+  });
+
+  test("explains what is missing before submitting", () => {
+    const form = defaultSetupForm({
+      repositoryName: "shop",
+      defaultBranch: "main",
+      suggestions: detected,
+      catalog: null,
+    });
+    assert.equal(setupFormProblem(form, choices), null);
+    assert.match(
+      setupFormProblem({ ...form, name: " " }, choices) ?? "",
+      /name/,
+    );
+    assert.match(
+      setupFormProblem({ ...form, projectName: "" }, choices) ?? "",
+      /project/,
+    );
+    assert.match(
+      setupFormProblem(
+        { ...form, domainHost: "a.example.com", domainPort: 70000 },
+        choices,
+      ) ?? "",
+      /port/,
+    );
+    assert.equal(
+      setupFormProblem(
+        { ...form, build: "suggestion-1", domainHost: "a", domainPort: null },
+        choices,
+      ),
+      null,
+    );
+    assert.match(
+      setupFormProblem({ ...form, build: "missing" }, choices) ?? "",
+      /build/,
+    );
+  });
+});
+
+describe("deployment status", () => {
+  const deployment = (
+    status: string | null,
+    created_at = "2026-10-17T10:00:00Z",
+  ) => ({
+    deployment: { status, title: "Deploy", created_at, error: null },
+    logs_url: "https://dokploy.example/app?tab=deployments",
+  });
+
+  test("reads Dokploy statuses in words", () => {
+    assert.deepEqual(deploymentStatusView(null), {
+      label: "No deployments yet",
+      tone: "idle",
+    });
+    assert.equal(
+      deploymentStatusView(deployment("running").deployment).label,
+      "Building",
+    );
+    assert.equal(
+      deploymentStatusView(deployment(null).deployment).label,
+      "Building",
+    );
+    assert.equal(
+      deploymentStatusView(deployment("done").deployment).label,
+      "Deployed",
+    );
+    assert.equal(
+      deploymentStatusView(deployment("error").deployment).label,
+      "Failed",
+    );
+    assert.equal(
+      deploymentStatusView(deployment("cancelled").deployment).label,
+      "Cancelled",
+    );
+  });
+
+  test("polls while building or until a started deployment appears", () => {
+    const none = { deployment: null, logs_url: "" };
+    assert.equal(shouldPollDeployment(null, null), true);
+    assert.equal(shouldPollDeployment(none, null), false);
+    assert.equal(shouldPollDeployment(none, { previous: null }), true);
+    assert.equal(shouldPollDeployment(deployment("running"), null), true);
+    assert.equal(shouldPollDeployment(deployment("done"), null), false);
+    assert.equal(shouldPollDeployment(deployment("error"), null), false);
+    // The previous deployment is still the newest: keep waiting.
+    assert.equal(
+      shouldPollDeployment(deployment("done"), {
+        previous: "2026-10-17T10:00:00Z",
+      }),
+      true,
+    );
+    assert.equal(
+      shouldPollDeployment(deployment("done", "2026-10-17T10:05:00Z"), {
+        previous: "2026-10-17T10:00:00Z",
+      }),
+      false,
     );
   });
 });

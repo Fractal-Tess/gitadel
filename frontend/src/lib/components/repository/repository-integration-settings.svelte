@@ -84,12 +84,6 @@
           ? connectionAfterBinding(candidate, connection, binding)
           : candidate,
       );
-      if (binding?.ready) {
-        const ready = connections.find(
-          (candidate) => candidate.id === connection.id,
-        );
-        if (ready) selectConnection(ready);
-      }
     },
     onsaved(updated) {
       connections = connections.map((connection) =>
@@ -210,6 +204,15 @@
     staged.save(value);
   const revealStagedCredential = () => staged.reveal();
   const testStagedConnection = () => staged.test();
+  const verifyStagedSource = () => staged.verify();
+  const setStagedInternalUrl = (internalUrl: string) =>
+    staged.setInternalUrl(internalUrl);
+  function continueWithStaged() {
+    const ready = connections.find(
+      (candidate) => candidate.id === staged.connection?.id,
+    );
+    if (ready) selectConnection(ready);
+  }
 
   async function createIntegration() {
     if (!namespace || !name || !formConnection) return;
@@ -555,6 +558,7 @@
           targets={namespace ? [{ slug: namespace, label: namespace }] : []}
           initialTarget={namespace ?? ""}
           integration={staged.connection}
+          mode="source"
           onsave={saveStagedConnection}
           oncancel={() => (createOpen = false)}
           onreveal={revealStagedCredential}
@@ -563,6 +567,12 @@
           sourceLoading={staged.loading}
           sourceWorking={staged.working}
           sourceError={staged.error}
+          sourceCheck={staged.check}
+          sourceChecking={staged.checking}
+          onverifysource={verifyStagedSource}
+          onsetinternalurl={setStagedInternalUrl}
+          oncontinue={continueWithStaged}
+          continueLabel="Add to this repository"
           onrefreshsource={loadStagedSource}
           onbindsource={bindStagedSource}
           oncreatesource={createStagedSource}

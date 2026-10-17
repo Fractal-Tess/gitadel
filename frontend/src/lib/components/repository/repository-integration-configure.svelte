@@ -1,10 +1,14 @@
 <script lang="ts">
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import CircleAlert from "@lucide/svelte/icons/circle-alert";
+  import CircleCheck from "@lucide/svelte/icons/circle-check";
   import Rocket from "@lucide/svelte/icons/rocket";
+  import TriangleAlert from "@lucide/svelte/icons/triangle-alert";
 
   import { resourceKindLabel } from "$lib/api/integrations.js";
   import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
+  import DokployDeploymentStatus from "$lib/components/repository/dokploy-deployment-status.svelte";
+  import DokploySetupForm from "$lib/components/repository/dokploy-setup-form.svelte";
   import DokployConfigureStep from "$lib/components/repository/dokploy-configure-step.svelte";
   import DokployEnvironmentDialog from "$lib/components/repository/dokploy-environment-dialog.svelte";
   import DokployEnvironmentStep from "$lib/components/repository/dokploy-environment-step.svelte";
@@ -26,6 +30,14 @@
     void configure.load();
   });
 
+  // Poll the latest deployment while a linked resource is shown; restarts
+  // when `deploymentWatch` is bumped and stops when the view goes away.
+  $effect(() => {
+    if (!configure.link || configure.showSetup) return;
+    void configure.deploymentWatch;
+    return configure.watchDeployment();
+  });
+
   function openExternal(url: string) {
     window.open(url, "_blank", "noopener,noreferrer");
   }
@@ -45,7 +57,7 @@
     <div class="min-w-0">
       <h1 class="truncate text-lg font-semibold">Dokploy deployment</h1>
       <p class="text-sm text-muted-foreground">
-        Connect this repository to one Application or Docker Compose resource.
+        Deploy this repository with Dokploy and redeploy it on every push.
       </p>
     </div>
   </header>
@@ -64,6 +76,36 @@
   {:else if configure.detail && configure.link && !configure.showSetup}
     {@const detail = configure.detail}
     {@const link = configure.link}
+    {#if configure.setupResult}
+      {@const result = configure.setupResult}
+      <section
+        class="rounded-xl border bg-card p-5 shadow-sm"
+        aria-labelledby="dokploy-setup-result-heading"
+      >
+        <h2 id="dokploy-setup-result-heading" class="font-semibold">
+          Deployment set up
+        </h2>
+        <ul class="mt-3 grid gap-1.5" aria-label="Completed steps">
+          {#each result.steps as step, index (index)}
+            <li class="flex items-start gap-2 text-sm">
+              <CircleCheck
+                class="mt-0.5 size-4 shrink-0 text-emerald-500"
+                aria-hidden="true"
+              />
+              <span><span class="sr-only">Done: </span>{step}</span>
+            </li>
+          {/each}
+        </ul>
+        {#if result.warning}
+          <Alert.Root class="mt-4 border-amber-500/40 bg-amber-500/5">
+            <TriangleAlert class="size-4 shrink-0 text-amber-500" />
+            <Alert.Title>One step did not finish</Alert.Title>
+            <Alert.Description>{result.warning}</Alert.Description>
+          </Alert.Root>
+        {/if}
+      </section>
+    {/if}
+    <DokployDeploymentStatus {configure} />
     <div class="grid gap-4 xl:grid-cols-2">
       <IntegrationConnectionCard
         name={link.name}
@@ -132,8 +174,35 @@
         </div>
       </article>
     </div>
+  {:else if configure.detail && configure.setupMode === "setup"}
+    {#if configure.setupLoading}
+      <div
+        class="flex min-h-48 items-center justify-center gap-2 rounded-xl border bg-card text-sm text-muted-foreground"
+      >
+        <Spinner class="size-5 animate-spin" />Reading the repository and
+        Dokploy…
+      </div>
+    {:else}
+      {#if configure.link}
+        <div class="flex justify-end">
+          <Button
+            variant="outline"
+            size="sm"
+            onclick={() => (configure.showSetup = false)}>Cancel</Button
+          >
+        </div>
+      {/if}
+      <DokploySetupForm {configure} />
+    {/if}
   {:else if configure.detail}
     <section id="dokploy-setup" class="space-y-5">
+      <Button
+        variant="link"
+        class="h-auto px-0"
+        onclick={() => void configure.openSetup()}
+      >
+        <ArrowLeft data-icon="inline-start" />Set up a new deployment instead
+      </Button>
       <DokploySetupBreadcrumb {configure} />
       <!-- Each setup step settles in under the fixed step bar. -->
       {#key configure.setupStep}

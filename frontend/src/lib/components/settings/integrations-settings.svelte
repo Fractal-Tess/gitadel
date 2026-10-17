@@ -14,9 +14,12 @@
     integrationSourceConnectionSchema,
     integrationTestResultSchema,
     namespaceIntegrationSchema,
+    updateNamespaceInternalUrl,
+    verifyIntegrationSource,
     type IntegrationProvider,
     type IntegrationSourceConnection,
     type NamespaceIntegration,
+    type SourceCheck,
   } from "$lib/api/integrations.js";
   import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
   import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
@@ -58,6 +61,8 @@
   let sourceLoading = $state(false);
   let sourceWorking = $state(false);
   let sourceError = $state<string | null>(null);
+  let sourceCheck = $state.raw<SourceCheck | null>(null);
+  let sourceChecking = $state(false);
 
   const cards = $derived<Card[]>(
     targets.flatMap((target) =>
@@ -70,6 +75,20 @@
   const editorTitle = $derived(
     editing ? `Configure ${editing.integration.name}` : "Add integration",
   );
+  const editorDescription = $derived(
+    editorMode === "source"
+      ? "Follow the steps in order. Each one is checked with Dokploy."
+      : editing
+        ? "Update this connection or reveal its stored credential."
+        : "Choose a provider, then sign in to it.",
+  );
+
+  function sourceRequiredFor(integration: Integration) {
+    return (
+      providerCatalog.find((provider) => provider.slug === integration.provider)
+        ?.source_required ?? false
+    );
+  }
 
   onMount(() => {
     void load();
@@ -111,6 +130,7 @@
     editing = null;
     sourceConnection = null;
     sourceError = null;
+    sourceCheck = null;
     editorMode = "connection";
     editorRevision += 1;
     modalOpen = true;
@@ -120,23 +140,14 @@
     editing = card;
     sourceConnection = null;
     sourceError = null;
+    sourceCheck = null;
     editorRevision += 1;
-    const sourceRequired =
-      providerCatalog.find(
-        (provider) => provider.slug === card.integration.provider,
-      )?.source_required ?? false;
-    editorMode =
-      sourceRequired && card.integration.source?.ready !== true
-        ? "source"
-        : "connection";
+    // Connections that need a source open at their setup steps, which also
+    // re-check that Dokploy still reaches Gitadel.
+    const sourceRequired = sourceRequiredFor(card.integration);
+    editorMode = sourceRequired ? "source" : "connection";
     modalOpen = true;
-    if (
-      providerCatalog.find(
-        (provider) => provider.slug === card.integration.provider,
-      )?.source_required
-    ) {
-      void loadSource(card);
-    }
+    if (sourceRequired) void loadSource(card);
   }
 
   function updateCard(slug: string, updated: Integration) {
@@ -150,6 +161,8 @@
     response: IntegrationSourceConnection | null,
   ) {
     const binding = response?.binding;
+    if (!binding) sourceCheck = null;
+    else if (response?.check) sourceCheck = response.check;
     const updated: Integration = {
       ...card.integration,
       source: binding
@@ -201,8 +214,9 @@
       );
       updateSourceSummary(card, sourceConnection);
     } catch (caught) {
-      toast.error(
-        errorMessage(caught, "Could not connect the Dokploy source."),
+      sourceError = errorMessage(
+        caught,
+        "Could not use that Dokploy provider.",
       );
     } finally {
       sourceWorking = false;
@@ -225,10 +239,64 @@
       );
       updateSourceSummary(card, sourceConnection);
     } catch (caught) {
-      toast.error(errorMessage(caught, "Could not create the Dokploy source."));
+      sourceError = errorMessage(
+        caught,
+        "Could not connect Gitadel to Dokploy.",
+      );
     } finally {
       sourceWorking = false;
     }
+  }
+
+  async function verifySource() {
+    const card = editing;
+    if (!card) return;
+    sourceChecking = true;
+    sourceError = null;
+    try {
+      sourceCheck = await verifyIntegrationSource(
+        card.target.slug,
+        card.integration.id,
+      );
+      const updated = {
+        ...card.integration,
+        internal_url: sourceCheck.internal_url,
+      };
+      updateCard(card.target.slug, updated);
+      editing = { target: card.target, integration: updated };
+    } catch (caught) {
+      sourceError = errorMessage(
+        caught,
+        "Could not check whether Dokploy reaches Gitadel.",
+      );
+    } finally {
+      sourceChecking = false;
+    }
+  }
+
+  async function setInternalUrl(internalUrl: string) {
+    const card = editing;
+    if (!card) return;
+    sourceChecking = true;
+    sourceError = null;
+    try {
+      const updated = await updateNamespaceInternalUrl(
+        card.target.slug,
+        card.integration.id,
+        internalUrl,
+      );
+      const merged = {
+        ...updated,
+        source: updated.source ?? card.integration.source,
+      };
+      updateCard(card.target.slug, merged);
+      editing = { target: card.target, integration: merged };
+    } catch (caught) {
+      sourceChecking = false;
+      sourceError = errorMessage(caught, "Could not save the address.");
+      return;
+    }
+    await verifySource();
   }
 
   async function disconnectSource() {
@@ -265,20 +333,27 @@
         },
       );
       const binding = sourceConnection?.binding;
-      updateCard(
-        value.target,
-        binding
-          ? {
-              ...updated,
-              source: {
-                id: binding.id,
-                name: binding.name,
-                managed: binding.managed,
-                ready: binding.ready,
-              },
-            }
-          : updated,
-      );
+      const saved: Integration = binding
+        ? {
+            ...updated,
+            source: {
+              id: binding.id,
+              name: binding.name,
+              managed: binding.managed,
+              ready: binding.ready,
+            },
+          }
+        : updated;
+      updateCard(value.target, saved);
+      if (sourceRequiredFor(saved)) {
+        // Back to the setup steps; the address may have changed, so the
+        // reachability check runs again.
+        editing = { target: editing.target, integration: saved };
+        sourceCheck = null;
+        editorMode = "source";
+        editorRevision += 1;
+        return;
+      }
     } else {
       const created = await requestJson(
         `/api/v1/namespaces/${encodeURIComponent(value.target)}/integrations`,
@@ -466,11 +541,7 @@
   <Dialog.Content class="ring-foreground/20 sm:max-w-lg">
     <Dialog.Header>
       <Dialog.Title>{editorTitle}</Dialog.Title>
-      <Dialog.Description>
-        {editing
-          ? "Update this connection or reveal its stored credential."
-          : "Choose a provider, then create a named connection."}
-      </Dialog.Description>
+      <Dialog.Description>{editorDescription}</Dialog.Description>
     </Dialog.Header>
     {#key editorRevision}
       <IntegrationConnectionEditor
@@ -486,6 +557,10 @@
         {sourceLoading}
         {sourceWorking}
         {sourceError}
+        {sourceCheck}
+        {sourceChecking}
+        onverifysource={editing ? verifySource : null}
+        onsetinternalurl={editing ? setInternalUrl : null}
         onrefreshsource={editing ? () => loadSource(editing) : null}
         onbindsource={editing ? bindSource : null}
         mode={editorMode}

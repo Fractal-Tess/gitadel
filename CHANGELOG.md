@@ -4,6 +4,20 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+### Added
+
+- OAuth clients can renew access tokens with the `refresh_token` grant. Token responses carry a `refresh_token` that is valid for a year and single use: each refresh returns a new pair. Revoking an application's authorization also invalidates its refresh tokens.
+- Dokploy setup is guided and checked step by step. Connecting Gitadel creates the Dokploy Gitea provider with tokens Gitadel issues itself, so there is no separate authorization in Dokploy, then confirms that Dokploy can list repositories through it. When Dokploy cannot reach the configured address, Gitadel tries its public URL and the addresses its host name resolves to, and keeps the first that works. `POST /api/v1/namespaces/{slug}/integrations/{id}/source/verify` repeats the check.
+- **Set up deployment** on a repository's Dokploy integration suggests a build from the Dockerfiles and Compose files on the default branch, then creates the project, environment, and resource, sets the Dockerfile build and an optional domain, links the repository, turns on deploy on push, and starts the first deployment in one step. It lists what it did and shows the deployment's progress. A failure undoes what the setup created. The endpoints are `GET …/integrations/{id}/suggestions`, `POST …/integrations/{id}/setup`, and `GET …/integrations/{id}/deployment`.
+
+### Fixed
+
+- Dokploy setup works with Dokploy 0.30. Gitadel no longer sends `null` for optional fields, which Dokploy rejects, and asking for the `production` environment selects the one every project already has instead of failing.
+- Dokploy errors are shown with Dokploy's own message instead of "The request could not be completed".
+- A Dokploy Gitea provider configured for another forge can no longer be connected, and one already connected says so instead of failing with "fetch failed". A provider counts as ready only once Dokploy holds a token for it.
+- Creating a Dokploy resource checks repository access first and removes the resource again if its source cannot be attached.
+- The repository logo picker suggests at most nine images, and only ones with a branding name, README reference, or root or web-asset location.
+
 ## [0.23.0] - 2026-10-04
 
 A hardening release from a full review of the server and the web interface: a protection bypass, several ways the server could stall or fall over, stored credentials, and a long list of smaller fixes in the API and the interface.

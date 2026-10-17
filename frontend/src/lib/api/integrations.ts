@@ -60,10 +60,23 @@ export const integrationSourceBindingSchema = z.object({
   problem: z.string().nullable().optional(),
 });
 
+/** Whether Dokploy reached Gitadel through the bound provider. */
+export const sourceCheckSchema = z.object({
+  reachable: z.boolean(),
+  /** The Gitadel address Dokploy uses after the check. */
+  internal_url: z.string(),
+  repositories: z.number().int().nullable(),
+  /** Addresses that failed, in the order they were tried. */
+  attempts: z.array(z.object({ url: z.string(), error: z.string() })),
+});
+export type SourceCheck = z.infer<typeof sourceCheckSchema>;
+
 export const integrationSourceConnectionSchema = z.object({
   required: z.boolean(),
   binding: integrationSourceBindingSchema.nullable(),
   sources: z.array(integrationRemoteSourceSchema),
+  /** Present when the response follows a reachability check. */
+  check: sourceCheckSchema.optional(),
 });
 export type IntegrationSourceConnection = z.infer<
   typeof integrationSourceConnectionSchema
@@ -160,10 +173,65 @@ export const integrationDeployResultSchema = z.object({
   summary: z.string(),
 });
 
+export const buildSuggestionSchema = z.object({
+  kind: dokployResourceKindSchema,
+  /** Directory Dokploy builds from, such as `/` or `/web`. */
+  build_path: z.string(),
+  /** Dockerfile name relative to `build_path`. */
+  dockerfile: z.string().optional(),
+  /** Compose file relative to the repository root. */
+  compose_path: z.string().optional(),
+  port: z.number().int().optional(),
+});
+export type BuildSuggestion = z.infer<typeof buildSuggestionSchema>;
+
+export const deploymentSuggestionsSchema = z.object({
+  branch: z.string().nullable(),
+  project_name: z.string(),
+  suggestions: z.array(buildSuggestionSchema),
+});
+export type DeploymentSuggestions = z.infer<typeof deploymentSuggestionsSchema>;
+
+export type DeploymentSetupRequest = {
+  kind: RemoteResource["kind"];
+  name: string;
+  branch: string;
+  server_id?: string;
+  repository_path?: string;
+  compose_path?: string;
+  dockerfile?: string;
+  project_id?: string;
+  project_name?: string;
+  environment: string;
+  domain?: { host: string; port: number; https: boolean };
+  deploy: boolean;
+  deploy_on_push: boolean;
+};
+
+export const deploymentStatusSchema = z.object({
+  deployment: z
+    .object({
+      /** `running`, `done`, or `error`; Dokploy may report others. */
+      status: z.string().nullable(),
+      title: z.string().nullable(),
+      created_at: z.string().nullable(),
+      error: z.string().nullable(),
+    })
+    .nullable(),
+  logs_url: z.string(),
+});
+export type DeploymentStatus = z.infer<typeof deploymentStatusSchema>;
+
 export type RepositoryIntegrationConnection = z.infer<
   typeof repositoryIntegrationConnectionSchema
 >;
 export type RepositoryIntegration = z.infer<typeof repositoryIntegrationSchema>;
+export const deploymentSetupResultSchema = z.object({
+  integration: repositoryIntegrationSchema,
+  steps: z.array(z.string()),
+  warning: z.string().nullable(),
+});
+export type DeploymentSetupResult = z.infer<typeof deploymentSetupResultSchema>;
 export type RepositoryIntegrations = z.infer<
   typeof repositoryIntegrationsSchema
 >;
@@ -352,6 +420,42 @@ export function createDokployResource(
   );
 }
 
+export function loadDeploymentSuggestions(
+  namespace: string,
+  name: string,
+  id: string,
+): Promise<DeploymentSuggestions> {
+  return requestJson(
+    `${repositoryIntegrationPath(namespace, name, id)}/suggestions`,
+    deploymentSuggestionsSchema,
+  );
+}
+
+/** Create, configure, link, and optionally deploy a resource in one step. */
+export function setupDeployment(
+  namespace: string,
+  name: string,
+  id: string,
+  body: DeploymentSetupRequest,
+): Promise<DeploymentSetupResult> {
+  return requestJson(
+    `${repositoryIntegrationPath(namespace, name, id)}/setup`,
+    deploymentSetupResultSchema,
+    { method: "POST", body: jsonBody(body) },
+  );
+}
+
+export function loadDeploymentStatus(
+  namespace: string,
+  name: string,
+  id: string,
+): Promise<DeploymentStatus> {
+  return requestJson(
+    `${repositoryIntegrationPath(namespace, name, id)}/deployment`,
+    deploymentStatusSchema,
+  );
+}
+
 // Namespace connections
 
 export function testNamespaceConnection(
@@ -396,6 +500,19 @@ export function updateNamespaceConnection(
     namespaceIntegrationPath(namespace, id),
     namespaceIntegrationSchema,
     { method: "PUT", body: jsonBody(body) },
+  );
+}
+
+/** Change only the address Dokploy uses to reach Gitadel. */
+export function updateNamespaceInternalUrl(
+  namespace: string,
+  id: string,
+  internalUrl: string,
+): Promise<NamespaceIntegration> {
+  return requestJson(
+    namespaceIntegrationPath(namespace, id),
+    namespaceIntegrationSchema,
+    { method: "PUT", body: jsonBody({ internal_url: internalUrl }) },
   );
 }
 
@@ -452,6 +569,18 @@ export function createIntegrationSource(
     `${namespaceIntegrationPath(namespace, id)}/source`,
     integrationSourceConnectionSchema,
     { method: "POST", body: jsonBody({ action: "create", name }) },
+  );
+}
+
+/** Check that Dokploy can reach Gitadel through the bound provider. */
+export function verifyIntegrationSource(
+  namespace: string,
+  id: string,
+): Promise<SourceCheck> {
+  return requestJson(
+    `${namespaceIntegrationPath(namespace, id)}/source/verify`,
+    sourceCheckSchema,
+    { method: "POST" },
   );
 }
 
@@ -658,4 +787,227 @@ export function catalogWithEnvironment(
           },
     ),
   };
+}
+
+// Guided Dokploy connection
+
+/**
+ * The step of the connection setup that needs attention: connect a provider,
+ * authorize a provider Gitadel did not create, prove Dokploy can reach
+ * Gitadel, or deploy a repository once everything is confirmed.
+ */
+export type SourceSetupStep = "connect" | "authorize" | "reach" | "deploy";
+
+export function sourceSetupStep(
+  binding: Pick<IntegrationSourceBinding, "ready" | "targets_instance"> | null,
+  check: Pick<SourceCheck, "reachable"> | null,
+): SourceSetupStep {
+  if (!binding || !binding.targets_instance) return "connect";
+  if (!binding.ready) return "authorize";
+  if (!check?.reachable) return "reach";
+  return "deploy";
+}
+
+// One-form deployment setup
+
+/** Select value for "deploy on the Dokploy server itself". */
+export const DOKPLOY_SERVER = "__dokploy__";
+/** Select value for "create a new project". */
+export const NEW_DOKPLOY_PROJECT = "__new_project__";
+/** Build choice for "I'll configure the build in Dokploy". */
+export const OTHER_BUILD = "other";
+
+export type BuildChoice = {
+  id: string;
+  suggestion: BuildSuggestion | null;
+  label: string;
+  detail: string;
+};
+
+/** Every detected build, then the manual fallback. */
+export function buildChoices(
+  suggestions: readonly BuildSuggestion[],
+): BuildChoice[] {
+  return [
+    ...suggestions.map((suggestion, index) => ({
+      id: `suggestion-${index}`,
+      suggestion,
+      label:
+        suggestion.kind === "compose"
+          ? `Compose file ${suggestion.compose_path ?? "./docker-compose.yml"}`
+          : `${suggestion.dockerfile ?? "Dockerfile"} in ${suggestion.build_path}${
+              suggestion.port ? ` · port ${suggestion.port}` : ""
+            }`,
+      detail:
+        suggestion.kind === "compose"
+          ? "Dokploy starts every service in this Compose file."
+          : "Dokploy builds this Dockerfile and runs it as one application.",
+    })),
+    {
+      id: OTHER_BUILD,
+      suggestion: null,
+      label: "Other — I'll configure the build in Dokploy",
+      detail:
+        "Gitadel creates an application. Choose its build type in Dokploy before the first deployment.",
+    },
+  ];
+}
+
+export type SetupForm = {
+  build: string;
+  /** Build path for the manual choice. */
+  buildPath: string;
+  name: string;
+  branch: string;
+  /** A project id, or `NEW_DOKPLOY_PROJECT`. */
+  project: string;
+  projectName: string;
+  environment: string;
+  /** A server id, or `DOKPLOY_SERVER`. */
+  server: string;
+  domainHost: string;
+  domainPort: number | null;
+  domainHttps: boolean;
+  deploy: boolean;
+  deployOnPush: boolean;
+};
+
+/** The port to expose for `choice`, falling back to 80. */
+export function suggestedPort(choice: BuildChoice | undefined): number {
+  return choice?.suggestion?.port ?? 80;
+}
+
+/** Form defaults from what Gitadel detected and what Dokploy already has. */
+export function defaultSetupForm({
+  repositoryName,
+  defaultBranch,
+  suggestions,
+  catalog,
+}: {
+  repositoryName: string;
+  defaultBranch: string | null | undefined;
+  suggestions: DeploymentSuggestions | null;
+  catalog: Pick<DokployRemoteCatalog, "projects"> | null;
+}): SetupForm {
+  const choices = buildChoices(suggestions?.suggestions ?? []);
+  const projectName = suggestions?.project_name || repositoryName;
+  const existing = catalog?.projects.find(
+    (project) =>
+      project.name.localeCompare(projectName, undefined, {
+        sensitivity: "accent",
+      }) === 0,
+  );
+  return {
+    build: choices[0]!.id,
+    buildPath: "/",
+    name: repositoryName,
+    branch: suggestions?.branch || defaultBranch || "main",
+    project: existing?.id ?? NEW_DOKPLOY_PROJECT,
+    projectName,
+    environment: "production",
+    server: DOKPLOY_SERVER,
+    domainHost: "",
+    domainPort: suggestedPort(choices[0]),
+    domainHttps: true,
+    deploy: true,
+    deployOnPush: true,
+  };
+}
+
+/** Why `form` cannot be submitted yet, or null when it can. */
+export function setupFormProblem(
+  form: SetupForm,
+  choices: readonly BuildChoice[],
+): string | null {
+  const choice = choices.find((candidate) => candidate.id === form.build);
+  if (!choice) return "Choose how Dokploy builds this repository.";
+  if (!form.name.trim()) return "Enter a name for the Dokploy resource.";
+  if (!form.branch.trim()) return "Enter the branch to deploy.";
+  if (form.project === NEW_DOKPLOY_PROJECT && !form.projectName.trim())
+    return "Enter a name for the new project.";
+  if (!form.environment.trim()) return "Enter an environment name.";
+  if (choice.suggestion?.kind !== "compose" && form.domainHost.trim()) {
+    const port = form.domainPort;
+    if (port === null || !Number.isInteger(port) || port < 1 || port > 65535)
+      return "Enter the port your application listens on (1–65535).";
+  }
+  return null;
+}
+
+/** The `POST …/setup` body for `form`. */
+export function setupRequestBody(
+  form: SetupForm,
+  choices: readonly BuildChoice[],
+): DeploymentSetupRequest {
+  const suggestion =
+    choices.find((candidate) => candidate.id === form.build)?.suggestion ??
+    null;
+  const kind = suggestion?.kind ?? "application";
+  const body: DeploymentSetupRequest = {
+    kind,
+    name: form.name.trim(),
+    branch: form.branch.trim(),
+    environment: form.environment.trim() || "production",
+    deploy: form.deploy,
+    deploy_on_push: form.deployOnPush,
+  };
+  if (form.project === NEW_DOKPLOY_PROJECT) {
+    body.project_name = form.projectName.trim();
+  } else {
+    body.project_id = form.project;
+  }
+  if (form.server !== DOKPLOY_SERVER) body.server_id = form.server;
+  if (kind === "compose") {
+    body.compose_path = suggestion?.compose_path ?? "./docker-compose.yml";
+    return body;
+  }
+  body.repository_path = suggestion
+    ? suggestion.build_path
+    : form.buildPath.trim() || "/";
+  if (suggestion?.dockerfile) body.dockerfile = suggestion.dockerfile;
+  const host = form.domainHost.trim();
+  if (host) {
+    body.domain = {
+      host,
+      port: form.domainPort ?? 80,
+      https: form.domainHttps,
+    };
+  }
+  return body;
+}
+
+export type DeploymentTone = "idle" | "running" | "done" | "error";
+
+/** How the newest deployment reads, in words and as a tone. */
+export function deploymentStatusView(
+  deployment: DeploymentStatus["deployment"],
+): { label: string; tone: DeploymentTone } {
+  if (!deployment) return { label: "No deployments yet", tone: "idle" };
+  switch (deployment.status) {
+    case null:
+    case "running":
+      return { label: "Building", tone: "running" };
+    case "done":
+      return { label: "Deployed", tone: "done" };
+    case "error":
+      return { label: "Failed", tone: "error" };
+    default:
+      return { label: dokployStatusLabel(deployment.status), tone: "idle" };
+  }
+}
+
+/**
+ * Whether to ask Dokploy again: while nothing is loaded, while a deployment
+ * is building, and, after starting one, until a deployment other than the
+ * newest one before it (`awaiting.previous`, by creation time) appears.
+ */
+export function shouldPollDeployment(
+  status: DeploymentStatus | null,
+  awaiting: { previous: string | null } | null,
+): boolean {
+  if (!status) return true;
+  if (awaiting && (status.deployment?.created_at ?? null) === awaiting.previous)
+    return true;
+  if (!status.deployment) return false;
+  return deploymentStatusView(status.deployment).tone === "running";
 }
