@@ -249,3 +249,107 @@ async fn git_and_lfs_answer_alike_for_private_and_missing_repositories() {
         .is_ok()
     );
 }
+
+#[tokio::test]
+async fn push_delivery_sends_the_opened_dokploy_api_key() {
+    use crate::entity::{dokploy_source_binding, namespace_integration, repository_integration};
+    use crate::secrets::SecretKind;
+
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let recorded = calls.clone();
+    let one = |headers: HeaderMap| async move {
+        if headers
+            .get("x-api-key")
+            .and_then(|value| value.to_str().ok())
+            == Some("plain-key")
+        {
+            Ok(axum::Json(serde_json::json!({ "refreshToken": "hook" })))
+        } else {
+            Err(StatusCode::UNAUTHORIZED)
+        }
+    };
+    let deploy = move || {
+        let recorded = recorded.clone();
+        async move {
+            recorded.lock().unwrap().push("deploy".to_owned());
+            StatusCode::OK
+        }
+    };
+    let app = axum::Router::new()
+        .route("/api/application.one", axum::routing::get(one))
+        .route("/api/deploy/hook", axum::routing::post(deploy));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let environment = environment().await;
+    let alice = test_support::owner(&environment.database, "alice").await;
+    let repository = test_support::repository(&environment.database, &alice, "project").await;
+    let now = Utc::now();
+    let connection_id = Uuid::new_v4();
+    // Keys are sealed at rest, exactly as the server stores them.
+    let sealed = environment
+        .state
+        .identity()
+        .secret_cipher()
+        .seal_text(SecretKind::DokployApiKey, &connection_id, "plain-key")
+        .unwrap();
+    namespace_integration::ActiveModel {
+        id: Set(connection_id),
+        namespace: Set("alice".to_owned()),
+        provider: Set("dokploy".to_owned()),
+        name: Set("Dokploy".to_owned()),
+        enabled: Set(true),
+        url: Set(base.clone()),
+        api_key: Set(sealed),
+        dokploy_internal_url: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+    }
+    .insert(&environment.database)
+    .await
+    .unwrap();
+    dokploy_source_binding::ActiveModel {
+        integration_id: Set(connection_id),
+        gitea_id: Set("source".to_owned()),
+        git_provider_id: Set("provider".to_owned()),
+        oauth_application_id: Set(None),
+        managed: Set(false),
+        created_at: Set(now),
+        updated_at: Set(now),
+    }
+    .insert(&environment.database)
+    .await
+    .unwrap();
+    let link = serde_json::json!({
+        "kind": "application", "id": "app", "name": "project", "branch": "main",
+        "project_id": "p", "project_name": "p", "environment_id": "e",
+        "environment_name": "production", "external_url": format!("{base}/app"),
+    });
+    repository_integration::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        repository_id: Set(repository.id),
+        integration_id: Set(connection_id),
+        name: Set("project".to_owned()),
+        enabled: Set(true),
+        resource: Set(Some(link.to_string())),
+        config: Set(None),
+        updated_at: Set(now),
+    }
+    .insert(&environment.database)
+    .await
+    .unwrap();
+
+    super::integrations::trigger_push(
+        &environment.state,
+        &repository,
+        "refs/heads/main",
+        false,
+        &serde_json::json!({ "ref": "refs/heads/main" }),
+    )
+    .await
+    .unwrap();
+    server.abort();
+
+    assert_eq!(*calls.lock().unwrap(), ["deploy"]);
+}

@@ -1294,7 +1294,7 @@ pub(super) async fn has_enabled(
         .is_some())
 }
 
-async fn trigger_push(
+pub(super) async fn trigger_push(
     state: &RepositoryState,
     repository: &repository::Model,
     reference: &str,
@@ -1302,11 +1302,18 @@ async fn trigger_push(
     payload: &Value,
 ) -> Result<(), String> {
     let database = state.identity().database();
+    // API keys are stored sealed; open them before they reach the provider.
     let connected = namespace_integration::Entity::find()
         .filter(namespace_integration::Column::Namespace.eq(repository.namespace.clone()))
         .filter(namespace_integration::Column::Enabled.eq(true))
         .all(database)
         .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|connection| {
+            crate::identity::open_integration_api_key(state.identity().secret_cipher(), connection)
+        })
+        .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     if connected.is_empty() {
         return Ok(());
