@@ -33,9 +33,12 @@ const MAX_SCAN_ENTRIES: usize = 20_000;
 const MAX_SCAN_DEPTH: usize = 64;
 const MAX_SCAN_READMES: usize = 32;
 const MAX_SCAN_README_BYTES: usize = 256 * 1024;
-const MAX_CANDIDATES: usize = 64;
+const MAX_CANDIDATES: usize = 9;
+/// Size and aspect alone add 30; a candidate also needs a branding name, README
+/// reference, or a root or web-asset location.
+const MIN_CANDIDATE_SCORE: i32 = 40;
 const MAX_SCAN_IMAGES: usize = 256;
-const DETECTOR_VERSION: i64 = 1;
+const DETECTOR_VERSION: i64 = 2;
 pub const SOURCE_AUTOMATIC: &str = "automatic";
 pub const SOURCE_SELECTED: &str = "selected";
 pub const SOURCE_UPLOADED: &str = "uploaded";
@@ -510,7 +513,8 @@ pub(super) async fn detect_icon(
     }
     discovery.candidates.retain(|candidate| {
         !candidate.bytes.is_empty()
-            && (candidate.score >= 0 || selected_path.as_deref() == Some(candidate.path.as_str()))
+            && (candidate.score >= MIN_CANDIDATE_SCORE
+                || selected_path.as_deref() == Some(candidate.path.as_str()))
     });
     discovery.candidates.sort_by(|left, right| {
         right
@@ -746,6 +750,25 @@ async fn load_candidates(
             .cmp(&left.recommended)
             .then_with(|| left.path.cmp(&right.path))
     });
+    // Scans stored before the cap was lowered can hold more rows than a fresh
+    // scan keeps; trim them without dropping the current selection.
+    if candidates.len() > MAX_CANDIDATES {
+        let selection = scan.as_ref().and_then(|scan| scan.selected_path.as_deref());
+        if let Some(index) = candidates
+            .iter()
+            .position(|candidate| selection == Some(candidate.path.as_str()))
+            .filter(|index| *index >= MAX_CANDIDATES)
+        {
+            let selected = candidates.remove(index);
+            candidates.truncate(MAX_CANDIDATES - 1);
+            candidates.push(selected);
+        } else {
+            candidates.truncate(MAX_CANDIDATES);
+        }
+    }
+    let outdated = scan
+        .as_ref()
+        .is_some_and(|scan| scan.detector_version != DETECTOR_VERSION);
     let (selected_path, selected_missing, mut scan_status, commit_oid) = scan.map_or_else(
         || {
             (
@@ -776,7 +799,10 @@ async fn load_candidates(
         })
         .await;
         match current_tip {
-            Ok(tip) if scan_status != "failed" && commit_oid.as_deref() != Some(tip.as_str()) => {
+            Ok(tip)
+                if scan_status != "failed"
+                    && (outdated || commit_oid.as_deref() != Some(tip.as_str())) =>
+            {
                 scan_status = "pending".to_owned();
                 state.queue_repository_analysis(repository.id).await;
             }
@@ -846,7 +872,7 @@ fn discover(
         };
         let readme = readme_refs.contains(&path);
         let (score, reasons) = score_path(&path, repository_name, 512, 512, readme);
-        if score < 0 && selected_path != Some(path.as_str()) {
+        if score < MIN_CANDIDATE_SCORE && selected_path != Some(path.as_str()) {
             continue;
         }
         candidates.push(DiscoveredCandidate {
