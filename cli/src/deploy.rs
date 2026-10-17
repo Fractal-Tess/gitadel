@@ -93,6 +93,9 @@ pub(crate) enum DeployCommand {
         /// Use --domain even though something already answers on it.
         #[arg(long)]
         force: bool,
+        /// Add a second deployment to a repository that already has one.
+        #[arg(long)]
+        additional: bool,
     },
     /// Show the latest deployment of each linked resource.
     Status {
@@ -351,6 +354,7 @@ pub(crate) async fn run(api: &ApiClient, command: DeployCommand) -> Result<Value
             no_push_deploy,
             wait,
             force,
+            additional,
         } => {
             if let Some(host) = domain.as_deref()
                 && !force
@@ -361,6 +365,19 @@ pub(crate) async fn run(api: &ApiClient, command: DeployCommand) -> Result<Value
             let repository_name = repository_name.to_owned();
             let base = integrations_path(&repository)?;
             let catalog = api.request(Method::GET, &base, None).await?;
+            let deployed: Vec<&str> = catalog["integrations"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|integration| integration["resource"]["name"].as_str())
+                .collect();
+            if !deployed.is_empty() && !additional {
+                bail!(
+                    "{repository} already deploys to {}; use `gtd deploy status` or \
+                     `gtd deploy now`, or pass --additional for a second deployment",
+                    deployed.join(", ")
+                );
+            }
             let chosen = pick_connection(&catalog, connection.as_deref())?;
             let connection_id = chosen["id"].as_str().unwrap_or_default().to_owned();
 
