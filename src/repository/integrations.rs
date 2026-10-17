@@ -155,6 +155,7 @@ fn provider_credential<'a>(
 }
 
 async fn ensure_source_ready(
+    public_url: &str,
     provider: &'static integrations::Provider,
     credential: &namespace_integration::Model,
     source: Option<&dokploy_source_binding::Model>,
@@ -177,16 +178,22 @@ async fn ensure_source_ready(
         })
         .await
         .map_err(ApiError::bad_request)?;
-    if sources
+    let remote = sources
         .iter()
-        .any(|remote| remote.id == source.gitea_id && remote.ready)
-    {
-        Ok(())
-    } else {
-        Err(ApiError::bad_request(format!(
-            "{} requires Dokploy source authorization before repositories can use it.",
+        .find(|remote| remote.id == source.gitea_id)
+        .ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "The Dokploy provider bound to {} no longer exists. Choose another in the \
+                 namespace's integration settings.",
+                credential.name
+            ))
+        })?;
+    match remote.problem(public_url) {
+        Some(problem) => Err(ApiError::bad_request(format!(
+            "{problem} Fix it in {}'s integration settings.",
             credential.name
-        )))
+        ))),
+        None => Ok(()),
     }
 }
 
@@ -324,7 +331,13 @@ pub async fn create_integration(
         .ok_or_else(ApiError::not_found)?;
     let provider = integrations::provider(&credential.provider).ok_or_else(ApiError::not_found)?;
     let source = load_source(&state, credential.id).await?;
-    ensure_source_ready(provider, &credential, source.as_ref()).await?;
+    ensure_source_ready(
+        state.public_url().as_str(),
+        provider,
+        &credential,
+        source.as_ref(),
+    )
+    .await?;
     let id = uuid::Uuid::new_v4();
     let row = repository_integration::Model {
         id,
@@ -449,7 +462,13 @@ pub async fn update_integration(
         .ok_or_else(ApiError::not_found)?;
     let provider = integrations::provider(&credential.provider).ok_or_else(ApiError::not_found)?;
     let source = load_source(&state, credential.id).await?;
-    ensure_source_ready(provider, &credential, source.as_ref()).await?;
+    ensure_source_ready(
+        state.public_url().as_str(),
+        provider,
+        &credential,
+        source.as_ref(),
+    )
+    .await?;
     provider
         .integration
         .validate_repository_settings(
@@ -470,7 +489,7 @@ pub async fn update_integration(
                 .integration
                 .set_remote_enabled(request)
                 .await
-                .map_err(ApiError::internal)?;
+                .map_err(ApiError::bad_gateway)?;
         } else if enabled {
             return Err(ApiError::bad_request("Choose a deployment resource first."));
         }
@@ -538,7 +557,7 @@ pub async fn list_remote_resources(
             credential: provider_credential(&credential, source.as_ref()),
         })
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(ApiError::bad_gateway)?;
     Ok(Json(resources))
 }
 
@@ -644,7 +663,7 @@ async fn store_remote_link(
         .integration
         .set_remote_enabled(request)
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(ApiError::bad_gateway)?;
     if row.enabled
         && let Some(stored) = row.resource.as_deref()
     {
@@ -657,7 +676,7 @@ async fn store_remote_link(
                 .integration
                 .set_remote_enabled(request)
                 .await
-                .map_err(ApiError::internal)?;
+                .map_err(ApiError::bad_gateway)?;
         }
     }
     let name = link
@@ -719,7 +738,7 @@ pub async fn create_remote_project(
         return Err(ApiError::not_found());
     }
     let body: ProjectMutation = serde_json::from_value(request.body)
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+        .map_err(|error| ApiError::bad_request(format!("Invalid request: {error}")))?;
     let project = provider
         .integration
         .create_remote_project(CreateProjectRequest {
@@ -728,7 +747,7 @@ pub async fn create_remote_project(
             description: body.description,
         })
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(ApiError::bad_gateway)?;
     state
         .identity()
         .audit(
@@ -768,7 +787,7 @@ pub async fn create_remote_environment(
         return Err(ApiError::not_found());
     }
     let body: EnvironmentMutation = serde_json::from_value(request.body)
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+        .map_err(|error| ApiError::bad_request(format!("Invalid request: {error}")))?;
     let environment = provider
         .integration
         .create_remote_environment(CreateEnvironmentRequest {
@@ -778,7 +797,7 @@ pub async fn create_remote_environment(
             description: body.description,
         })
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(ApiError::bad_gateway)?;
     state
         .identity()
         .audit(
@@ -819,7 +838,7 @@ pub async fn link_remote_resource(
         return Err(ApiError::not_found());
     }
     let body: LinkMutation = serde_json::from_value(request.body)
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+        .map_err(|error| ApiError::bad_request(format!("Invalid request: {error}")))?;
     let link = provider
         .integration
         .link_remote(LinkRemoteRequest {
@@ -835,7 +854,7 @@ pub async fn link_remote_resource(
             compose_path: compose_path(body.compose_path),
         })
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(ApiError::bad_gateway)?;
     store_remote_link(
         &state,
         actor.user.id,
@@ -876,7 +895,7 @@ pub async fn create_remote_resource(
         return Err(ApiError::not_found());
     }
     let body: CreateResourceMutation = serde_json::from_value(request.body)
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+        .map_err(|error| ApiError::bad_request(format!("Invalid request: {error}")))?;
     let link = provider
         .integration
         .create_remote(CreateRemoteRequest {
@@ -894,7 +913,7 @@ pub async fn create_remote_resource(
             compose_path: compose_path(body.compose_path),
         })
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(ApiError::bad_gateway)?;
     store_remote_link(
         &state,
         actor.user.id,
@@ -942,7 +961,7 @@ pub async fn deploy_integration(
     let summary = integration
         .handle_event(context)
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(ApiError::bad_gateway)?;
 
     state
         .identity()
@@ -985,7 +1004,13 @@ async fn require_instance(
     }
     let provider = integrations::provider(&credential.provider).ok_or_else(ApiError::not_found)?;
     let source = load_source(state, credential.id).await?;
-    ensure_source_ready(provider, &credential, source.as_ref()).await?;
+    ensure_source_ready(
+        state.public_url().as_str(),
+        provider,
+        &credential,
+        source.as_ref(),
+    )
+    .await?;
     Ok((row, credential, source))
 }
 

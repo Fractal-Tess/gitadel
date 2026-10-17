@@ -41,6 +41,12 @@ export const integrationRemoteSourceSchema = z.object({
   id: z.string(),
   name: z.string(),
   ready: z.boolean(),
+  /** The forge URL the provider was configured with, when Dokploy reports it. */
+  url: z.string().nullable().optional(),
+  /** False when the provider belongs to another forge. */
+  targets_instance: z.boolean().default(true),
+  /** Why this provider cannot serve this Gitadel, if it cannot. */
+  problem: z.string().nullable().optional(),
 });
 
 export const integrationSourceBindingSchema = z.object({
@@ -49,6 +55,9 @@ export const integrationSourceBindingSchema = z.object({
   managed: z.boolean(),
   ready: z.boolean(),
   authorization_url: z.url().optional(),
+  url: z.string().nullable().optional(),
+  targets_instance: z.boolean().default(true),
+  problem: z.string().nullable().optional(),
 });
 
 export const integrationSourceConnectionSchema = z.object({
@@ -130,6 +139,8 @@ export type DokployRemoteCatalog = z.infer<typeof dokployRemoteCatalogSchema>;
 export const dokployCreatedEnvironmentSchema = dokployEnvironmentSchema.extend({
   project_id: z.string(),
   project_name: z.string(),
+  /** True when an environment with that name already existed and was reused. */
+  existing: z.boolean().optional(),
 });
 
 export const dokployResourceLinkSchema = z.object({

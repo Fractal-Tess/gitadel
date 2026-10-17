@@ -67,6 +67,48 @@ pub struct RemoteSource {
     pub name: String,
     pub ready: bool,
     pub authorization_url: String,
+    /// The forge URL the remote provider was configured with, when known.
+    pub url: Option<String>,
+}
+
+impl RemoteSource {
+    /// Whether this provider was configured for the Gitadel at `public_url`.
+    /// A provider configured for another forge lists fine but cannot reach
+    /// this instance's repositories. An unknown URL is not held against it.
+    pub fn targets(&self, public_url: &str) -> bool {
+        self.url
+            .as_deref()
+            .is_none_or(|url| same_origin(url, public_url))
+    }
+
+    /// Explains why a listed provider cannot serve this Gitadel, if it cannot.
+    pub fn problem(&self, public_url: &str) -> Option<String> {
+        if !self.targets(public_url) {
+            return Some(format!(
+                "The Dokploy provider {} points at {}, not this Gitadel ({}). Choose or \
+                 create a provider for this Gitadel.",
+                self.name,
+                self.url.as_deref().unwrap_or_default(),
+                public_url.trim_end_matches('/'),
+            ));
+        }
+        (!self.ready).then(|| {
+            format!(
+                "The Dokploy provider {} has not been authorized yet. Authorize it in Dokploy.",
+                self.name
+            )
+        })
+    }
+}
+
+fn same_origin(left: &str, right: &str) -> bool {
+    match (url::Url::parse(left), url::Url::parse(right)) {
+        (Ok(left), Ok(right)) => {
+            left.origin() == right.origin()
+                && left.path().trim_end_matches('/') == right.path().trim_end_matches('/')
+        }
+        _ => left.trim_end_matches('/') == right.trim_end_matches('/'),
+    }
 }
 
 /// OAuth client details used to create a remote source provider.
@@ -228,4 +270,47 @@ pub trait Integration: Send + Sync {
     async fn create_remote(&self, request: CreateRemoteRequest<'_>) -> Result<Value, String>;
 
     async fn set_remote_enabled(&self, request: EnablementRequest<'_>) -> Result<(), String>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RemoteSource;
+
+    fn source(url: Option<&str>, ready: bool) -> RemoteSource {
+        RemoteSource {
+            id: "source-1".to_owned(),
+            parent_id: "provider-1".to_owned(),
+            name: "Gitadel".to_owned(),
+            ready,
+            authorization_url: String::new(),
+            url: url.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn sources_for_another_forge_explain_the_mismatch() {
+        let public_url = "http://neo.netbird.cloud:3030/";
+
+        assert!(source(Some("http://neo.netbird.cloud:3030"), true).targets(public_url));
+        assert!(source(None, true).targets(public_url));
+        assert_eq!(
+            source(Some("http://NEO.netbird.cloud:3030/"), true).problem(public_url),
+            None
+        );
+
+        let other = source(Some("http://kiwi.netbird.cloud:3030"), true);
+        assert!(!other.targets(public_url));
+        assert!(
+            other
+                .problem(public_url)
+                .unwrap()
+                .contains("points at http://kiwi.netbird.cloud:3030, not this Gitadel")
+        );
+        assert!(
+            source(Some("http://neo.netbird.cloud:3030"), false)
+                .problem(public_url)
+                .unwrap()
+                .contains("not been authorized")
+        );
+    }
 }

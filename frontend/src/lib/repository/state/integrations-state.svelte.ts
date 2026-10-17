@@ -200,6 +200,7 @@ export class DokployConfigureState {
   working = $state(false);
   loadError = $state<string | null>(null);
   operationError = $state<string | null>(null);
+  environmentError = $state<string | null>(null);
   showSetup = $state(false);
   setupStep = $state<SetupStep>("environments");
   retainedConfigureStep = $state<ConfigureStep | null>(null);
@@ -305,9 +306,12 @@ export class DokployConfigureState {
     this.resetMessages();
     this.environmentProjectId =
       this.catalog?.projects[0]?.id ?? NEW_DOKPLOY_PROJECT;
-    this.environmentProjectName = "";
-    this.environmentName = "";
+    this.environmentProjectName = this.page.repository?.name ?? "";
+    // Every Dokploy project has a production environment; choosing it selects
+    // the existing one instead of creating a duplicate.
+    this.environmentName = "production";
     this.environmentDescription = "";
+    this.environmentError = null;
     this.environmentDialogOpen = true;
   }
 
@@ -315,6 +319,7 @@ export class DokployConfigureState {
     if (this.working) return;
     this.working = true;
     this.operationError = null;
+    this.environmentError = null;
     let createdProject: DokployProject | null = null;
     try {
       let projectId = this.environmentProjectId;
@@ -364,13 +369,20 @@ export class DokployConfigureState {
       this.selectedResource = null;
       this.retainedConfigureStep = null;
       this.setupStep = "resources";
-      toast.success(`Created ${created.name}.`);
+      toast.success(
+        defaultEnvironment || ("existing" in created && created.existing)
+          ? `Selected ${created.name} in ${created.project_name}. Next, choose a resource.`
+          : `Created ${created.name} in ${created.project_name}. Next, choose a resource.`,
+      );
     } catch (error) {
       if (createdProject && this.catalog) {
         this.catalog = catalogWithProject(this.catalog, createdProject);
         this.environmentProjectId = createdProject.id;
       }
-      toast.error(errorMessage(error, "Could not reach Gitadel."));
+      this.environmentError = errorMessage(
+        error,
+        "Could not create the environment.",
+      );
     } finally {
       this.working = false;
     }
@@ -426,9 +438,15 @@ export class DokployConfigureState {
         },
       );
       this.showSetup = false;
-      toast.success(`${this.selectedResource.name} is connected.`);
+      toast.success(`${this.selectedResource.name} is connected.`, {
+        description:
+          "Deploy on push is off. Check the build settings in Dokploy, then turn it on here.",
+      });
     } catch (error) {
-      toast.error(errorMessage(error, "Could not reach Gitadel."));
+      this.operationError = errorMessage(
+        error,
+        "Could not connect the resource.",
+      );
     } finally {
       this.working = false;
     }
@@ -454,9 +472,15 @@ export class DokployConfigureState {
         },
       );
       this.showSetup = false;
-      toast.success(`${this.resourceName} was created and connected.`);
+      toast.success(`${this.resourceName} was created in Dokploy.`, {
+        description:
+          "Next, open it in Dokploy to choose a build type, domain, and variables. Then deploy it or turn on Deploy on push here.",
+      });
     } catch (error) {
-      toast.error(errorMessage(error, "Could not reach Gitadel."));
+      this.operationError = errorMessage(
+        error,
+        "Could not create the resource.",
+      );
     } finally {
       this.working = false;
     }

@@ -42,7 +42,8 @@
         Confirm the source path Gitadel should attach when this resource has no
         source yet.
       {:else}
-        The new resource stays disabled until you finish setup in Dokploy.
+        Gitadel creates the resource and points it at this repository. Deploy
+        on push stays off until you have checked its build settings in Dokploy.
       {/if}
     </p>
   </div>
@@ -119,7 +120,7 @@
       </label>
       {#if selectedResource.kind === "application"}
         <label class="grid gap-2 text-sm font-medium">
-          Repository path
+          Build path
           <Input bind:value={configure.repositoryPath} required />
         </label>
       {:else}
@@ -165,6 +166,15 @@
           Compose file
           <Input bind:value={configure.composePath} required />
         </label>
+      {:else}
+        <label class="grid gap-2 text-sm font-medium">
+          Build path
+          <Input bind:value={configure.repositoryPath} required />
+          <span class="text-xs font-normal text-muted-foreground">
+            The directory Dokploy builds from. Use a subdirectory such as
+            /web for a monorepo.
+          </span>
+        </label>
       {/if}
       {#if catalog.servers.length > 0}
         <Field.Field>
@@ -194,9 +204,12 @@
     <div
       class="rounded-lg border bg-muted/30 p-3 text-xs leading-5 text-muted-foreground"
     >
-      Gitadel creates the resource and connects its Gitea source. Build type,
-      variables, domains, ports, volumes, and deployment settings remain in
-      Dokploy.
+      <p class="font-medium text-foreground">After this step</p>
+      <ol class="mt-1 list-decimal space-y-0.5 pl-4">
+        <li>Open the resource in Dokploy and choose its build type, domain, and variables.</li>
+        <li>Deploy it once from here or from Dokploy.</li>
+        <li>Turn on Deploy on push so every push to {configure.branch || "the branch"} redeploys it.</li>
+      </ol>
     </div>
     <div class="flex justify-end">
       <Button type="submit" class="gap-2" disabled={configure.working}>

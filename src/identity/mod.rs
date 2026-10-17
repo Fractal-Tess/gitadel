@@ -321,6 +321,18 @@ impl ApiError {
         }
     }
 
+    /// A remote service refused or failed the request. The message is shown
+    /// to the person who asked, so it must not contain secrets.
+    pub fn bad_gateway(message: impl Into<String>) -> Self {
+        let message = message.into();
+        tracing::warn!(%message, "remote service request failed");
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code: "remote_failed",
+            message,
+        }
+    }
+
     pub fn internal(error: impl std::fmt::Display) -> Self {
         tracing::error!(%error, "request failed with an internal error");
         Self {

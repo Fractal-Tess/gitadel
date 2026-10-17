@@ -128,14 +128,22 @@ pub struct RemoteSourceResponse {
     id: String,
     name: String,
     ready: bool,
+    url: Option<String>,
+    /// False when the provider was configured for another forge.
+    targets_instance: bool,
+    /// Why this provider cannot be used by this Gitadel, if it cannot.
+    problem: Option<String>,
 }
 
-impl From<&RemoteSource> for RemoteSourceResponse {
-    fn from(source: &RemoteSource) -> Self {
+impl RemoteSourceResponse {
+    fn new(source: &RemoteSource, public_url: &str) -> Self {
         Self {
             id: source.id.clone(),
             name: source.name.clone(),
-            ready: source.ready,
+            ready: source.ready && source.targets(public_url),
+            url: source.url.clone(),
+            targets_instance: source.targets(public_url),
+            problem: source.problem(public_url),
         }
     }
 }
@@ -155,6 +163,9 @@ pub struct SourceBindingStatus {
     ready: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     authorization_url: Option<String>,
+    url: Option<String>,
+    targets_instance: bool,
+    problem: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -465,6 +476,7 @@ pub async fn get_integration_source(
         provider,
         binding.as_ref(),
         &sources,
+        state.public_url.as_str(),
     )))
 }
 
@@ -506,12 +518,13 @@ pub async fn configure_integration_source(
                 .map_err(ApiError::bad_request)?;
             let source = sources
                 .iter()
-                .find(|source| source.id == source_id && source.ready)
+                .find(|source| source.id == source_id)
                 .ok_or_else(|| {
-                    ApiError::bad_request(
-                        "That Dokploy Gitea provider is not connected or is no longer available.",
-                    )
+                    ApiError::bad_request("That Dokploy Gitea provider is no longer available.")
                 })?;
+            if let Some(problem) = source.problem(state.public_url.as_str()) {
+                return Err(ApiError::bad_request(problem));
+            }
             let now = Utc::now();
             let transaction = state.database().begin().await?;
             let binding = dokploy_source_binding::ActiveModel {
@@ -628,6 +641,7 @@ pub async fn configure_integration_source(
                 name,
                 ready: false,
                 authorization_url: provisioned.authorization_url,
+                url: Some(state.public_url.as_str().trim_end_matches('/').to_owned()),
             };
             (binding, vec![source])
         }
@@ -638,6 +652,7 @@ pub async fn configure_integration_source(
             provider,
             Some(&binding),
             &sources,
+            state.public_url.as_str(),
         )),
     ))
 }
@@ -740,6 +755,7 @@ fn source_connection_response(
     provider: &'static Provider,
     binding: Option<&dokploy_source_binding::Model>,
     sources: &[RemoteSource],
+    public_url: &str,
 ) -> SourceConnectionResponse {
     let binding = binding.map(|binding| {
         let remote = sources.iter().find(|source| source.id == binding.gitea_id);
@@ -749,14 +765,26 @@ fn source_connection_response(
                 .map(|source| source.name.clone())
                 .unwrap_or_else(|| "Gitea provider".to_owned()),
             managed: binding.managed,
-            ready: remote.is_some_and(|source| source.ready),
+            ready: remote.is_some_and(|source| source.ready && source.targets(public_url)),
             authorization_url: remote.map(|source| source.authorization_url.clone()),
+            url: remote.and_then(|source| source.url.clone()),
+            targets_instance: remote.is_none_or(|source| source.targets(public_url)),
+            problem: match remote {
+                Some(source) => source.problem(public_url),
+                None => Some(
+                    "The bound Dokploy provider no longer exists. Disconnect it and choose another."
+                        .to_owned(),
+                ),
+            },
         }
     });
     SourceConnectionResponse {
         required: provider.source_required,
         binding,
-        sources: sources.iter().map(RemoteSourceResponse::from).collect(),
+        sources: sources
+            .iter()
+            .map(|source| RemoteSourceResponse::new(source, public_url))
+            .collect(),
     }
 }
 

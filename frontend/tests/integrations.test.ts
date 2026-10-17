@@ -273,6 +273,7 @@ describe("staged connections", () => {
       name: "Source",
       managed: true,
       ready: false,
+      targets_instance: true,
       authorization_url: "https://dokploy.example/authorize",
     };
     const bound = withSourceBinding(staged, binding);

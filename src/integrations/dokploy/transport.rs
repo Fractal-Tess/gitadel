@@ -43,6 +43,46 @@ pub(super) fn account_label(response: &Value) -> Option<String> {
         })
 }
 
+const MAX_ERROR_MESSAGE: usize = 400;
+
+fn unreachable_error(base: &str, error: &reqwest::Error) -> String {
+    if error.is_timeout() {
+        format!("Dokploy at {base} did not answer in time.")
+    } else {
+        format!("Could not reach Dokploy at {base}: {error}")
+    }
+}
+
+/// Keep Dokploy's own explanation for a refused call. tRPC errors carry it in
+/// `message`; anything else falls back to the status line.
+async fn checked(path: &str, response: reqwest::Response) -> Result<reqwest::Response, String> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let body = response.text().await.unwrap_or_default();
+    Err(refusal(path, status, &body))
+}
+
+fn refusal(path: &str, status: reqwest::StatusCode, body: &str) -> String {
+    let endpoint = path.split('?').next().unwrap_or(path);
+    let message = serde_json::from_str::<Value>(body).ok().and_then(|body| {
+        body.get("message")
+            .or_else(|| body.pointer("/error/message"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+            .map(str::to_owned)
+    });
+    match message {
+        Some(message) => {
+            let message: String = message.chars().take(MAX_ERROR_MESSAGE).collect();
+            format!("Dokploy refused {endpoint} ({status}): {message}")
+        }
+        None => format!("Dokploy refused {endpoint} ({status})."),
+    }
+}
+
 fn headers(api_key: &str) -> Result<HeaderMap, String> {
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -64,14 +104,12 @@ pub(super) async fn get_json(
         .headers(headers(api_key)?)
         .send()
         .await
-        .map_err(|error| error.to_string())?;
-    let response = response
-        .error_for_status()
-        .map_err(|error| format!("{path} failed: {error}"))?;
+        .map_err(|error| unreachable_error(base, &error))?;
+    let response = checked(path, response).await?;
     response
         .json()
         .await
-        .map_err(|error| format!("{path} returned malformed JSON: {error}"))
+        .map_err(|error| format!("Dokploy returned malformed JSON for {path}: {error}"))
 }
 
 pub(super) async fn get_resource(
@@ -98,14 +136,12 @@ pub(super) async fn post_json(
         .json(body)
         .send()
         .await
-        .map_err(|error| error.to_string())?;
-    let response = response
-        .error_for_status()
-        .map_err(|error| format!("{path} failed: {error}"))?;
+        .map_err(|error| unreachable_error(base, &error))?;
+    let response = checked(path, response).await?;
     response
         .json()
         .await
-        .map_err(|error| format!("{path} returned malformed JSON: {error}"))
+        .map_err(|error| format!("Dokploy returned malformed JSON for {path}: {error}"))
 }
 
 pub(super) async fn post_for_status(
@@ -115,15 +151,14 @@ pub(super) async fn post_for_status(
     api_key: &str,
     body: &Value,
 ) -> Result<(), String> {
-    client
+    let response = client
         .post(format!("{base}{path}"))
         .headers(headers(api_key)?)
         .json(body)
         .send()
         .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| format!("{path} failed: {error}"))?;
+        .map_err(|error| unreachable_error(base, &error))?;
+    checked(path, response).await?;
     Ok(())
 }
 
@@ -167,4 +202,26 @@ pub(super) async fn client_for(base: &str) -> Result<reqwest::Client, String> {
         return crate::repository::outbound_http_client().map_err(|error| error.to_string());
     }
     crate::network::pinned_service_http_client(&endpoint, REQUEST_TIMEOUT).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::refusal;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn refusals_keep_dokploy_messages_and_drop_query_strings() {
+        assert_eq!(
+            refusal(
+                "/api/gitea.getGiteaRepositories?giteaId=abc",
+                StatusCode::BAD_REQUEST,
+                r#"{"message":"fetch failed","code":"BAD_REQUEST"}"#,
+            ),
+            "Dokploy refused /api/gitea.getGiteaRepositories (400 Bad Request): fetch failed"
+        );
+        assert_eq!(
+            refusal("/api/project.all", StatusCode::BAD_GATEWAY, "<html>"),
+            "Dokploy refused /api/project.all (502 Bad Gateway)."
+        );
+    }
 }

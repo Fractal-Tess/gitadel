@@ -153,7 +153,7 @@
   {#if configure.operationError}
     <Alert.Root variant="destructive">
       <CircleAlert class="mt-0.5 size-4 shrink-0" />
-      <Alert.Title>Deployment operation failed</Alert.Title>
+      <Alert.Title>Dokploy did not accept this</Alert.Title>
       <Alert.Description>{configure.operationError}</Alert.Description>
     </Alert.Root>
   {/if}

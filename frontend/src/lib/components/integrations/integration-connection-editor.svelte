@@ -112,8 +112,12 @@
     providers.find((candidate) => candidate.slug === provider) ?? null,
   );
   const instanceName = $derived(app.instance?.site_name.trim() ?? "");
-  const readySources = $derived(
-    sourceConnection?.sources.filter((source) => source.ready) ?? [],
+  // Ready providers first; the rest stay visible with the reason they cannot
+  // be used, so a provider for another forge is not silently missing.
+  const listedSources = $derived(
+    [...(sourceConnection?.sources ?? [])].sort(
+      (left, right) => Number(right.ready) - Number(left.ready),
+    ),
   );
   const testPassed = $derived(
     testResult !== null && testedCredentialRevision === credentialRevision,
@@ -127,6 +131,7 @@
   const shouldPollSource = $derived(
     mode === "source" &&
       sourceConnection?.binding?.ready === false &&
+      sourceConnection.binding.targets_instance &&
       onrefreshsource !== null,
   );
 
@@ -432,10 +437,14 @@
                 <p class="mt-0.5 text-xs text-muted-foreground">
                   {binding.ready
                     ? `Connected and ready to clone ${instanceName} repositories.`
-                    : binding.authorization_url
-                      ? "Created, but Dokploy still needs your authorization."
-                      : "The linked provider is unavailable in Dokploy."}
+                    : (binding.problem ??
+                      "The linked provider is unavailable in Dokploy.")}
                 </p>
+                {#if binding.url}
+                  <p class="mt-1 truncate font-mono text-[0.68rem] text-muted-foreground">
+                    {binding.url}
+                  </p>
+                {/if}
               </div>
               <span
                 class={`rounded-full border px-2 py-0.5 text-[0.68rem] font-medium ${
@@ -470,7 +479,7 @@
               </div>
             {/if}
             <div class="mt-3 flex flex-wrap gap-2">
-              {#if !binding.ready && binding.authorization_url}
+              {#if !binding.ready && binding.targets_instance && binding.authorization_url}
                 <Button
                   href={binding.authorization_url}
                   target="_blank"
@@ -490,7 +499,9 @@
                   disabled={sourceWorking}
                   onclick={() => void ondisconnectsource?.()}
                 >
-                  <Unplug class="size-3.5" />Disconnect
+                  <Unplug class="size-3.5" />{binding.targets_instance
+                    ? "Disconnect"
+                    : "Disconnect and choose another"}
                 </Button>
               {/if}
             </div>
@@ -545,19 +556,27 @@
                 if (!sourceWorking) creatingSource = true;
               }}
             />
-            {#each readySources as source (source.id)}
+            {#each listedSources as source (source.id)}
               <IntegrationConnectionCard
                 name={source.name}
                 provider="dokploy"
                 providerName="Dokploy"
-                subtitle="Gitea provider"
-                description={`Use this authorized provider to clone ${instanceName} repositories.`}
-                enabled
-                statusLabel="Ready"
+                subtitle={source.url ?? "Gitea provider"}
+                description={source.ready
+                  ? `Use this authorized provider to clone ${instanceName} repositories.`
+                  : (source.problem ?? "This provider cannot be used.")}
+                enabled={source.ready}
+                statusLabel={source.ready
+                  ? "Ready"
+                  : source.targets_instance
+                    ? "Not authorized"
+                    : "Other forge"}
                 compact
-                onselect={() => {
-                  if (!sourceWorking) void onbindsource?.(source.id);
-                }}
+                onselect={source.ready
+                  ? () => {
+                      if (!sourceWorking) void onbindsource?.(source.id);
+                    }
+                  : null}
               />
             {/each}
           </div>
@@ -574,7 +593,27 @@
     {/if}
 
 
+    {#if mode === "connection" && testPassed && testResult}
+      <Alert.Root>
+        <CircleCheck class="size-4 shrink-0 text-emerald-500" />
+        <Alert.Title>
+          Connection works{testResult.account
+            ? ` — signed in as ${testResult.account}`
+            : ""}
+        </Alert.Title>
+        {#if testResult.warnings.length > 0}
+          <Alert.Description>{testResult.warnings.join(" ")}</Alert.Description>
+        {/if}
+      </Alert.Root>
+    {/if}
+
     {#if mode === "connection"}
+      {#if requireSuccessfulTest && !testPassed}
+        <p class="text-xs text-muted-foreground">
+          Test the connection to continue. Changing the URL or API key requires
+          a new test.
+        </p>
+      {/if}
       <div
         class="flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-between"
       >

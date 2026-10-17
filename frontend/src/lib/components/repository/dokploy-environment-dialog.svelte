@@ -1,4 +1,6 @@
 <script lang="ts">
+  import CircleAlert from "@lucide/svelte/icons/circle-alert";
+  import * as Alert from "$lib/components/ui/alert/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Dialog from "$lib/components/ui/dialog/index.js";
   import * as Field from "$lib/components/ui/field/index.js";
@@ -22,25 +24,27 @@
       }}
     >
       <Dialog.Header>
-        <Dialog.Title>Create environment</Dialog.Title>
+        <Dialog.Title>Choose where to deploy</Dialog.Title>
         <Dialog.Description>
-          Name the environment, then choose an existing parent project or create
-          a new one.
+          Dokploy groups resources by project and environment. Every project
+          already has a production environment.
         </Dialog.Description>
       </Dialog.Header>
       <Field.Group class="py-5">
         <Field.Field>
           <Field.Label for="dokploy-environment-name">
-            New environment name
+            Environment
           </Field.Label>
           <Input
             id="dokploy-environment-name"
             bind:value={configure.environmentName}
-            placeholder="staging"
+            placeholder="production"
             required
           />
           <Field.Description>
-            This creates a new environment inside the selected project.
+            {configure.environmentName.trim().toLowerCase() === "production"
+              ? "Uses the project's existing production environment."
+              : "Gitadel creates this environment unless the project already has one with this name."}
           </Field.Description>
         </Field.Field>
         <Field.Field>
@@ -74,8 +78,8 @@
           </Select.Root>
           <Field.Description>
             {configure.environmentProjectId === NEW_DOKPLOY_PROJECT
-              ? "Dokploy automatically adds a production environment to every new project."
-              : "Dokploy requires every environment to belong to a project."}
+              ? "Gitadel creates the project in Dokploy first."
+              : "The environment goes inside this existing project."}
           </Field.Description>
         </Field.Field>
         {#if configure.environmentProjectId === NEW_DOKPLOY_PROJECT}
@@ -104,6 +108,13 @@
           />
         </Field.Field>
       </Field.Group>
+      {#if configure.environmentError}
+        <Alert.Root variant="destructive" class="mb-4">
+          <CircleAlert class="size-4 shrink-0" />
+          <Alert.Title>Dokploy did not accept this</Alert.Title>
+          <Alert.Description>{configure.environmentError}</Alert.Description>
+        </Alert.Root>
+      {/if}
       <Dialog.Footer>
         <Button
           type="button"
@@ -121,7 +132,7 @@
               !configure.environmentProjectName.trim())}
         >
           {#if configure.working}<Spinner class="size-4 animate-spin" />{/if}
-          Create environment
+          Continue
         </Button>
       </Dialog.Footer>
     </form>

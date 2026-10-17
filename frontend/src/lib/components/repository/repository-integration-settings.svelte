@@ -66,8 +66,11 @@
   let editorRevision = $state(0);
   let removeOpen = $state(false);
   let pendingRemove = $state<RepositoryIntegration | null>(null);
+  // Unfinished connections stay listed so they are not silently missing.
   const availableConnections = $derived(
-    connections.filter((connection) => connection.configured),
+    [...connections].sort(
+      (left, right) => Number(right.configured) - Number(left.configured),
+    ),
   );
   const selectedConnection = $derived(
     connections.find((connection) => connection.id === formConnection) ?? null,
@@ -460,7 +463,7 @@
               >
                 {createStep === "instance"
                   ? "Source ready"
-                  : "Next if required"}
+                  : "New connections only"}
               </span>
             </span>
           {/if}
@@ -512,11 +515,15 @@
             provider={connection.provider}
             providerName={connection.provider_name}
             subtitle={namespace ?? "Repository namespace"}
-            description="Use this configured connection for a new repository integration instance."
+            description={connection.configured
+              ? "Deploy this repository through this connection."
+              : `Its Dokploy source is not connected yet. Finish it in ${namespace ?? "the namespace"}'s integration settings.`}
             enabled={connection.configured}
-            statusLabel="Connected"
+            statusLabel={connection.configured ? "Connected" : "Source missing"}
             compact
-            onselect={() => selectConnection(connection)}
+            onselect={connection.configured
+              ? () => selectConnection(connection)
+              : null}
           />
         {/each}
       </div>
