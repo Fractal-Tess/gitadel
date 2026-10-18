@@ -16,6 +16,7 @@
   import PanelLeftClose from "@lucide/svelte/icons/panel-left-close";
   import PanelLeftOpen from "@lucide/svelte/icons/panel-left-open";
   import ScrollText from "@lucide/svelte/icons/scroll-text";
+  import FileCode from "@lucide/svelte/icons/file-code-2";
   import Settings2 from "@lucide/svelte/icons/settings-2";
   import ShieldCheck from "@lucide/svelte/icons/shield-check";
   import Tag from "@lucide/svelte/icons/tag";
@@ -225,6 +226,12 @@
           icon: ScrollText,
           active: page.url.pathname === "/changelog",
         },
+        {
+          label: "API",
+          href: resolve("/api-docs"),
+          icon: FileCode,
+          active: page.url.pathname === "/api-docs",
+        },
       ];
     }
     const links: RailLink[] = [
@@ -248,6 +255,12 @@
       href: resolve("/changelog"),
       icon: ScrollText,
       active: page.url.pathname === "/changelog",
+    });
+    links.push({
+      label: "API",
+      href: resolve("/api-docs"),
+      icon: FileCode,
+      active: page.url.pathname === "/api-docs",
     });
     return links;
   });

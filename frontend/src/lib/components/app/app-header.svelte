@@ -79,6 +79,7 @@
     const path = page.url.pathname;
     if (path === "/") return [{ label: "Explore" }];
     if (path === "/changelog") return [{ label: "Changelog" }];
+    if (path === "/api-docs") return [{ label: "API" }];
     if (path === "/settings") return [{ label: "Account settings" }];
     if (path === "/-/organizations") return [{ label: "Organizations" }];
     if (path.startsWith("/-/account/")) {
