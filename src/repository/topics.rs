@@ -11,6 +11,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{Permission, RepositoryState, resources::accessible_repositories};
@@ -24,12 +25,12 @@ const MAX_TOPIC_LENGTH: usize = 35;
 const MAX_TOPICS_PER_REPOSITORY: usize = 25;
 const MAX_SUGGESTIONS: usize = 20;
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct TopicsResponse {
     topics: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct ReplaceTopicsRequest {
     topics: Vec<String>,
 }

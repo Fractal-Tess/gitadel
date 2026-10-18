@@ -109,6 +109,7 @@ zstd = "0.14.0"
 axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls"] }
 rustls = { version = "0.23.45", default-features = false, features = ["aws-lc-rs"] }
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
+utoipa = { version = "6.0.0", features = ["chrono", "uuid"] }
 
 
 [build-dependencies]

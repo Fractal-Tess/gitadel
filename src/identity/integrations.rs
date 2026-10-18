@@ -18,6 +18,7 @@ use sea_orm::{
     QueryOrder, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::entity::{
@@ -36,7 +37,7 @@ use super::{ApiError, AuthenticatedUser, IdentityState, SCOPE_READ, SCOPE_WRITE}
 const MAX_API_KEY_LENGTH: usize = 512;
 const MAX_NAME_LENGTH: usize = 80;
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ProviderResponse {
     slug: &'static str,
     name: &'static str,
@@ -57,7 +58,7 @@ impl From<&'static Provider> for ProviderResponse {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct IntegrationResponse {
     id: Uuid,
     provider: &'static str,
@@ -71,7 +72,7 @@ pub struct IntegrationResponse {
     source: Option<SourceBindingSummary>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct SourceBindingSummary {
     id: String,
     name: String,
@@ -113,18 +114,18 @@ impl IntegrationResponse {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct NamespaceIntegrationsResponse {
     namespace: String,
     providers: Vec<ProviderResponse>,
     integrations: Vec<IntegrationResponse>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct IntegrationCredentialResponse {
     api_key: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct RemoteSourceResponse {
     id: String,
     name: String,
@@ -149,7 +150,7 @@ impl RemoteSourceResponse {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct SourceConnectionResponse {
     required: bool,
     binding: Option<SourceBindingStatus>,
@@ -160,7 +161,7 @@ pub struct SourceConnectionResponse {
 }
 
 /// Whether Dokploy can list repositories through the bound provider.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct SourceCheckResponse {
     reachable: bool,
     /// The Gitadel address Dokploy uses after the check.
@@ -170,7 +171,7 @@ pub struct SourceCheckResponse {
     attempts: Vec<SourceAttempt>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct SourceAttempt {
     url: String,
     error: String,
@@ -180,7 +181,7 @@ pub struct SourceAttempt {
 /// account they belong to.
 const DOKPLOY_SCOPE: &str = "read:repository read:user";
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct SourceBindingStatus {
     id: String,
     name: String,
@@ -193,14 +194,14 @@ pub struct SourceBindingStatus {
     problem: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ConfigureSourceRequest {
     Bind { source_id: String },
     Create { name: String },
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateIntegrationRequest {
     provider: String,
     name: String,
@@ -209,7 +210,7 @@ pub struct CreateIntegrationRequest {
     internal_url: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct UpdateIntegrationRequest {
     name: Option<String>,
     enabled: Option<bool>,
@@ -218,14 +219,14 @@ pub struct UpdateIntegrationRequest {
     internal_url: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct TestIntegrationRequest {
     provider: String,
     url: String,
     api_key: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct IntegrationTestResponse {
     account: Option<String>,
     warnings: Vec<String>,

@@ -16,6 +16,7 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use sley::{GitObjectType, Repository as GitRepository};
+use utoipa::ToSchema;
 
 use super::{
     Permission, RepositoryState,
@@ -44,7 +45,7 @@ pub const SOURCE_SELECTED: &str = "selected";
 pub const SOURCE_UPLOADED: &str = "uploaded";
 pub const SOURCE_NONE: &str = "none";
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct IconCandidateResponse {
     path: String,
     oid: String,
@@ -55,7 +56,7 @@ pub struct IconCandidateResponse {
     recommended: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct IconCandidatesResponse {
     mode: String,
     selected_path: Option<String>,
@@ -66,14 +67,14 @@ pub struct IconCandidatesResponse {
     icon_updated_at: Option<chrono::DateTime<Utc>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct IconSelectionRequest {
     mode: String,
     path: Option<String>,
     commit_oid: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct UpdateIconRequest {
     image_base64: String,
 }

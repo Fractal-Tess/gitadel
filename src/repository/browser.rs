@@ -33,6 +33,7 @@ use sley_diff_merge::{
     diff_name_status_trees_with_options,
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, SemaphorePermit};
+use utoipa::ToSchema;
 
 #[cfg(test)]
 pub(super) use super::analysis::AuthorActivity;
@@ -88,7 +89,7 @@ pub struct HistoryQuery {
     per_page: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct RefResponse {
     name: String,
     oid: String,
@@ -97,7 +98,7 @@ pub struct RefResponse {
     commit_oid: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct RefsResponse {
     branches: Vec<RefResponse>,
     tags: Vec<RefResponse>,
@@ -105,7 +106,7 @@ pub struct RefsResponse {
     lfs_size_bytes: Option<u64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct TreeResponse {
     revision: String,
     commit_oid: String,
@@ -115,14 +116,14 @@ pub struct TreeResponse {
     entries: Vec<TreeEntryResponse>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, ToSchema)]
 pub struct SubmoduleResponse {
     name: String,
     url: Option<String>,
     branch: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct TreeEntryResponse {
     name: String,
     path: String,
@@ -134,13 +135,13 @@ pub struct TreeEntryResponse {
     submodule: Option<SubmoduleResponse>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct LfsMetadata {
     oid: String,
     size: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct BlobResponse {
     revision: String,
     commit_oid: String,
@@ -156,7 +157,7 @@ pub struct BlobResponse {
     image_error: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct HistoryResponse {
     commits: Vec<CommitResponse>,
     page: usize,
@@ -165,7 +166,7 @@ pub struct HistoryResponse {
 }
 
 /// A tag or release pointing at a commit, for decorating history rows.
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, ToSchema)]
 pub struct CommitRefResponse {
     kind: &'static str,
     name: String,
@@ -177,7 +178,7 @@ pub struct CommitRefResponse {
     commits_since_previous: Option<usize>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct CommitResponse {
     oid: String,
     short_oid: String,
@@ -195,7 +196,7 @@ pub struct CommitResponse {
     signing_fingerprint: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct CommitVerificationResponse {
     verified: bool,
     reason: &'static str,
@@ -203,7 +204,7 @@ pub struct CommitVerificationResponse {
     fingerprint: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct SignatureResponse {
     pub(super) name: String,
     email: String,
@@ -211,7 +212,7 @@ pub struct SignatureResponse {
     timezone_offset_minutes: i16,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct DiffResponse {
     patch: String,
     truncated: bool,

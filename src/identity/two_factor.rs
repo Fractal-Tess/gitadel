@@ -21,6 +21,7 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use subtle::ConstantTimeEq as _;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{
@@ -212,7 +213,7 @@ pub async fn remove_on<C: ConnectionTrait>(
     Ok(removed.rows_affected == 1)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct TwoFactorStatusResponse {
     enabled: bool,
     confirmed_at: Option<chrono::DateTime<Utc>>,
@@ -241,7 +242,7 @@ pub async fn status(
     }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct EnrollmentResponse {
     secret: String,
     otpauth_uri: String,
@@ -299,12 +300,12 @@ pub async fn start_enrollment(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct ConfirmEnrollmentRequest {
     code: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct RecoveryCodesResponse {
     recovery_codes: Vec<String>,
 }
@@ -352,7 +353,7 @@ pub async fn confirm_enrollment(
 
 /// Either proof is enough to change an enabled second factor: the password
 /// covers a lost authenticator and the code covers a forgotten password.
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct ReauthenticationRequest {
     password: Option<String>,
     code: Option<String>,

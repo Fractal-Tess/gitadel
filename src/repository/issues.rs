@@ -20,6 +20,7 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use tokio::{fs, io::AsyncWriteExt as _};
 use tokio_util::io::ReaderStream;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{
@@ -58,14 +59,14 @@ struct AttachmentUsage {
     bytes: Option<i64>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, ToSchema)]
 pub struct IssueUserResponse {
     id: Uuid,
     username: String,
     avatar_updated_at: Option<chrono::DateTime<Utc>>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, ToSchema)]
 pub struct IssueLabelResponse {
     id: Uuid,
     name: String,
@@ -74,13 +75,13 @@ pub struct IssueLabelResponse {
     external_url: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ExternalIssueAuthorResponse {
     username: String,
     profile_url: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct IssueResponse {
     id: Uuid,
     number: i64,
@@ -101,7 +102,7 @@ pub struct IssueResponse {
     can_manage: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct IssueAttachmentResponse {
     id: Uuid,
     name: String,
@@ -111,12 +112,12 @@ pub struct IssueAttachmentResponse {
     url: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct RenderedMarkdownResponse {
     rendered_html: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct IssueCommentResponse {
     id: Uuid,
     body: String,
@@ -137,7 +138,7 @@ pub struct ListIssuesQuery {
     per_page: Option<u64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateIssueRequest {
     title: String,
     #[serde(default)]
@@ -149,7 +150,7 @@ pub struct CreateIssueRequest {
     assignee: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct UpdateIssueRequest {
     title: Option<String>,
     body: Option<String>,
@@ -159,7 +160,7 @@ pub struct UpdateIssueRequest {
     attachment_ids: Option<Vec<Uuid>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CommentRequest {
     body: String,
 }
@@ -169,12 +170,12 @@ pub struct UploadAttachmentQuery {
     name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct PreviewMarkdownRequest {
     markdown: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateLabelRequest {
     name: String,
     color: String,
@@ -182,7 +183,7 @@ pub struct CreateLabelRequest {
     description: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct UpdateLabelRequest {
     name: Option<String>,
     color: Option<String>,

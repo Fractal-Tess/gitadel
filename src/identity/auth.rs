@@ -14,6 +14,7 @@ use sea_orm::{
     PaginatorTrait, QueryFilter, QueryOrder, Set, TransactionTrait, sea_query::Expr,
 };
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 use webauthn_rs::prelude::{
     CreationChallengeResponse, DiscoverableKey, Passkey, PublicKeyCredential,
@@ -64,7 +65,7 @@ pub struct CredentialsRequest {
     password: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct AuthResponse {
     user: UserResponse,
 }
@@ -206,7 +207,7 @@ pub async fn logout(
     Ok((StatusCode::NO_CONTENT, jar.remove(removal)))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct UpdateUsernameRequest {
     username: String,
 }
@@ -235,7 +236,7 @@ pub async fn update_username(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct UpdateRepositoryPreferencesRequest {
     default_repository_visibility: String,
 }
@@ -279,7 +280,7 @@ pub async fn update_repository_preferences(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct UpdateThemePreferenceRequest {
     theme_preference: String,
 }
@@ -324,7 +325,7 @@ pub async fn update_theme_preference(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct UpdateMotionPreferenceRequest {
     motion_preference: String,
 }
@@ -368,7 +369,7 @@ pub async fn update_motion_preference(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct UpdatePasswordRequest {
     current_password: String,
     new_password: String,
@@ -655,12 +656,12 @@ pub async fn register(
     ))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateInvitationRequest {
     expires_in_hours: Option<i64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct InvitationResponse {
     token: String,
     expires_at: chrono::DateTime<Utc>,
@@ -713,7 +714,7 @@ pub async fn create_invitation(
     ))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct PasskeyResponse {
     id: Uuid,
     name: String,
@@ -746,14 +747,16 @@ pub async fn list_passkeys(
     ))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct StartPasskeyRegistrationRequest {
     name: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct PasskeyCreationResponse {
     challenge_id: String,
+    /// WebAuthn `PublicKeyCredentialCreationOptions`, wrapped in `publicKey`.
+    #[schema(value_type = Object)]
     options: CreationChallengeResponse,
 }
 
@@ -831,9 +834,11 @@ pub async fn start_passkey_registration(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct FinishPasskeyRegistrationRequest {
     challenge_id: String,
+    /// The WebAuthn `PublicKeyCredential` the browser produced.
+    #[schema(value_type = Object)]
     credential: RegisterPublicKeyCredential,
 }
 

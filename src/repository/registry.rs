@@ -5,6 +5,7 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use super::{RepositoryState, browser::readable_repository};
 use crate::{
@@ -12,14 +13,14 @@ use crate::{
     registry::store::{ImageMetadata, ImageReferenceMetadata, RegistryStore},
 };
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub(crate) struct RegistryResponse {
     pub registry_host: String,
     pub image_prefix: String,
     pub images: Vec<RegistryImageResponse>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub(crate) struct RegistryImageResponse {
     pub name: String,
     pub size_bytes: u64,
@@ -27,7 +28,7 @@ pub(crate) struct RegistryImageResponse {
     pub references: Vec<RegistryReferenceResponse>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub(crate) struct RegistryReferenceResponse {
     pub tag: Option<String>,
     pub digest: String,

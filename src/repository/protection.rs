@@ -20,6 +20,7 @@ use sea_orm::{
     TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{Permission, RepositoryState};
@@ -298,7 +299,7 @@ fn validate_pattern(value: &str) -> Result<String, ApiError> {
     Ok(value.to_owned())
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ProtectionRuleResponse {
     id: Uuid,
     kind: &'static str,
@@ -313,7 +314,7 @@ pub struct ProtectionRuleResponse {
     updated_at: DateTime<Utc>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateProtectionRuleRequest {
     kind: String,
     pattern: String,
@@ -326,7 +327,7 @@ pub struct CreateProtectionRuleRequest {
     allowed_users: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct UpdateProtectionRuleRequest {
     pattern: Option<String>,
     block_force_push: Option<bool>,

@@ -1,25 +1,25 @@
 #[cfg(test)]
 mod access_tests;
-mod analysis;
-mod browser;
-mod deploy_detect;
-mod deploy_keys;
-mod files;
+pub(crate) mod analysis;
+pub(crate) mod browser;
+pub(crate) mod deploy_detect;
+pub(crate) mod deploy_keys;
+pub(crate) mod files;
 mod git_http;
 #[cfg(test)]
 mod git_http_tests;
 mod git_service;
-mod gitea;
+pub(crate) mod gitea;
 mod github_mirror;
 #[cfg(test)]
 mod http_test_support;
-mod icon;
+pub(crate) mod icon;
 pub(crate) mod image;
 mod import_metadata;
 mod imports;
-mod integrations;
+pub(crate) mod integrations;
 mod integrity;
-mod issues;
+pub(crate) mod issues;
 mod lfs;
 #[cfg(test)]
 mod lfs_tests;
@@ -29,18 +29,18 @@ mod mirror_scheduler;
 mod mirrors;
 mod native_remote;
 pub(crate) mod notifications;
-mod profile;
-mod protection;
-mod registry;
-mod releases;
-mod resources;
+pub(crate) mod profile;
+pub(crate) mod protection;
+pub(crate) mod registry;
+pub(crate) mod releases;
+pub(crate) mod resources;
 mod signature;
 mod source_archive;
 mod ssh;
-mod statuses;
-mod topics;
+pub(crate) mod statuses;
+pub(crate) mod topics;
 pub(crate) mod webhook_events;
-mod webhooks;
+pub(crate) mod webhooks;
 pub(crate) use browser::{read_git, render_markdown};
 
 pub(crate) use git_http::GitHttpState;

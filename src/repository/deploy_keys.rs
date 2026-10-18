@@ -18,6 +18,7 @@ use sea_orm::{
     TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{Permission, RepositoryState};
@@ -154,7 +155,7 @@ pub(crate) async fn fingerprint_in_use<C: ConnectionTrait>(
         .is_some())
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct DeployKeyResponse {
     id: Uuid,
     title: String,
@@ -179,7 +180,7 @@ impl From<repository_deploy_key::Model> for DeployKeyResponse {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateDeployKeyRequest {
     title: String,
     key: String,

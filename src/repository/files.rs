@@ -12,6 +12,7 @@ use sley::{
     BString, CommitObject, FullName, GitObjectType, ObjectId, RefPrecondition, ReferenceTarget,
     Repository as GitRepository, TreeEditor,
 };
+use utoipa::ToSchema;
 
 use super::{
     Permission, RepositoryState,
@@ -24,7 +25,7 @@ pub(super) const MAX_FILE_REQUEST_BYTES: usize = MAX_FILE_BYTES * 6 + 16 * 1024;
 const MAX_PATH_BYTES: usize = 1024;
 const MAX_MESSAGE_BYTES: usize = 255;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateFileRequest {
     pub branch: String,
     pub expected_commit: Option<String>,
@@ -33,7 +34,7 @@ pub struct CreateFileRequest {
     pub message: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct CreateFileResponse {
     pub path: String,
     pub branch: String,

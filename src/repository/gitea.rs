@@ -7,6 +7,7 @@ use axum_extra::extract::cookie::CookieJar;
 use sea_orm::{EntityTrait, QueryOrder};
 use serde::{Deserialize, Serialize};
 use sley::ReferenceTarget;
+use utoipa::ToSchema;
 
 use super::{Permission, RepositoryState, browser};
 use crate::{
@@ -29,13 +30,13 @@ impl GiteaPagination {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct GiteaOwnerResponse {
     login: String,
     username: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct GiteaRepositoryResponse {
     id: String,
     owner: GiteaOwnerResponse,
@@ -85,14 +86,14 @@ pub async fn list_user_repositories(
     ))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct GiteaBranchResponse {
     name: String,
     commit: GiteaBranchCommitResponse,
     protected: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct GiteaBranchCommitResponse {
     id: String,
 }

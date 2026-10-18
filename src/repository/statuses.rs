@@ -20,6 +20,7 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use url::Url;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{
@@ -38,7 +39,7 @@ const MAX_DESCRIPTION_BYTES: usize = 1024;
 const MAX_TARGET_URL_BYTES: usize = 2048;
 const MAX_CONTEXTS_PER_COMMIT: u64 = 1000;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateStatusRequest {
     /// GitHub names the field `state`; Gitea also accepts it.
     state: String,
@@ -47,14 +48,14 @@ pub struct CreateStatusRequest {
     context: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct StatusCreator {
     id: Uuid,
     login: String,
     username: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct StatusResponse {
     id: i64,
     url: String,
@@ -70,7 +71,7 @@ pub struct StatusResponse {
     updated_at: DateTime<Utc>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct CombinedStatusResponse {
     state: &'static str,
     sha: String,

@@ -5,6 +5,7 @@ use axum_extra::extract::cookie::CookieJar;
 use chrono::Utc;
 use sea_orm::{ConnectionTrait, EntityTrait, Set, sea_query::OnConflict};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{ApiError, IdentityState, SCOPE_READ, SCOPE_WRITE};
@@ -18,7 +19,7 @@ pub(crate) enum NotificationKind {
     ActionFailures,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 pub struct NotificationPreferences {
     pub issues: bool,
     pub issue_comments: bool,
@@ -61,7 +62,7 @@ pub(crate) async fn preferences<C: ConnectionTrait>(
         }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct NotificationSettingsResponse {
     email_enabled: bool,
     #[serde(flatten)]

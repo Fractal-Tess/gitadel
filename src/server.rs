@@ -446,6 +446,7 @@ pub async fn serve(
         .route("/", get(api::version))
         .route("/version", get(api::forgejo_version))
         .route("/changelog", get(api::changelog))
+        .route("/openapi.json", get(crate::openapi::openapi_json))
         .merge(identity::router().with_state(identity_state.clone()))
         .merge(repository::router().with_state(repository_state.clone()))
         .merge(actions_state.api_router());

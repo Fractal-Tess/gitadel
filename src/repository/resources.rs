@@ -28,9 +28,10 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use sley::{FullName, ObjectFormat, Repository as SleyRepository};
 use tokio::fs;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct RepositoryResponse {
     id: Uuid,
     namespace: String,
@@ -353,7 +354,7 @@ pub(super) async fn accessible_repositories_matching(
     })
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateRepositoryRequest {
     namespace: String,
     name: String,
@@ -1001,7 +1002,7 @@ pub async fn get_repository(
     )))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct UpdateRepositoryControlRequest {
     description: Option<Option<String>>,
     visibility: Option<String>,
@@ -1513,7 +1514,7 @@ pub async fn unfavorite_repository(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct CollaboratorResponse {
     username: String,
     role: String,
@@ -1558,7 +1559,7 @@ pub async fn list_collaborators(
     Ok(Json(response))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct AddCollaboratorRequest {
     username: String,
     role: String,

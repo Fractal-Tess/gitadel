@@ -35,6 +35,7 @@ use sea_orm::{
     TransactionTrait, sea_query::Expr,
 };
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 const MAX_EMAIL_BYTES: usize = 254;
@@ -169,8 +170,9 @@ fn normalize_name(raw: &str) -> Result<Option<String>, ApiError> {
 }
 
 /// How an address came to count, or why it does not yet.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
+#[schema(as = CommitEmailVerification)]
 pub enum Verification {
     /// Proved by opening the emailed link.
     Verified,
@@ -180,7 +182,7 @@ pub enum Verification {
     NotRequired,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct CommitEmailResponse {
     email: String,
     verified_at: Option<chrono::DateTime<Utc>>,
@@ -202,7 +204,7 @@ impl CommitEmailResponse {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct CommitIdentityResponse {
     /// The chosen name, if any.
     name: Option<String>,
@@ -263,7 +265,8 @@ pub async fn get_identity(
     ))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
+#[schema(as = UpdateCommitIdentityRequest)]
 pub struct UpdateIdentityRequest {
     name: Option<String>,
     primary_email: Option<String>,
@@ -325,7 +328,7 @@ pub async fn update_identity(
     ))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct AddEmailRequest {
     email: String,
 }

@@ -18,6 +18,7 @@ use sea_orm::{
     TransactionTrait, sea_query::Expr,
 };
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{
@@ -178,7 +179,7 @@ pub(crate) async fn verified_mailbox<C: ConnectionTrait>(
     Ok(Some((account, mailbox)))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct EmailStatusResponse {
     /// Whether the instance can send mail at all.
     email_enabled: bool,
@@ -209,7 +210,7 @@ pub async fn get_email(
     Ok(Json(email_status(&state, actor.user.id).await?))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct SetEmailRequest {
     email: String,
     /// Required when the request uses an API token, because a verified

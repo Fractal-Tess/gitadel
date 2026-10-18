@@ -21,6 +21,7 @@ use sea_orm::{
     QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait, sea_query::Expr,
 };
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{ApiError, IdentityState, SCOPE_READ, SCOPE_WRITE, admin::require_admin};
@@ -442,7 +443,7 @@ pub async fn reset_two_factor(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct PendingInvitationResponse {
     /// The stored token hash. It identifies the invitation without revealing
     /// the token that redeems it.

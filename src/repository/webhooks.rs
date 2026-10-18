@@ -29,6 +29,7 @@ use sha2::Sha256;
 use sley::{DiffNameStatusOptions, ReferenceTarget};
 use tokio::sync::Semaphore;
 use url::Url;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{Permission, RepositoryState, browser::read_git};
@@ -76,21 +77,21 @@ const DEFAULT_WEBHOOK_EVENT: &str = "push";
 static WEBHOOK_DELIVERY_SLOTS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(WEBHOOK_DELIVERY_CONCURRENCY)));
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct WebhookConfigResponse {
     url: String,
     content_type: &'static str,
     insecure_ssl: &'static str,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct WebhookLastResponse {
     code: Option<i32>,
     status: &'static str,
     message: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct WebhookResponse {
     id: Uuid,
     #[serde(rename = "type")]
@@ -148,7 +149,7 @@ impl WebhookResponse {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct WebhookDeliveryResponse {
     id: Uuid,
     event: String,
@@ -192,14 +193,14 @@ impl WebhookDeliveryResponse {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct WebhookConfigRequest {
     url: String,
     content_type: Option<String>,
     secret: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateWebhookRequest {
     name: Option<String>,
     active: Option<bool>,
@@ -207,14 +208,14 @@ pub struct CreateWebhookRequest {
     config: WebhookConfigRequest,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, ToSchema)]
 pub struct UpdateWebhookConfigRequest {
     url: Option<String>,
     content_type: Option<String>,
     secret: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct UpdateWebhookRequest {
     active: Option<bool>,
     events: Option<Vec<String>>,

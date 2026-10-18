@@ -12,6 +12,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
 use serde::Deserialize;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::entity::{organization, organization_avatar, user, user_avatar};
@@ -67,7 +68,7 @@ fn avatar_response(content: Vec<u8>) -> Response {
     response
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct UpdateAvatarRequest {
     image_base64: String,
 }

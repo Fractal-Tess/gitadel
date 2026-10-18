@@ -6,6 +6,7 @@
 
 use serde::Serialize;
 use sley::{GitObjectType, Repository as GitRepository};
+use utoipa::ToSchema;
 
 /// Directories that hold dependencies or build output rather than a service.
 const SKIPPED_DIRECTORIES: &[&str] = &[
@@ -26,7 +27,7 @@ const MAX_COMPOSE_BYTES: u64 = 256 * 1024;
 /// Service names that usually carry the public web interface.
 const WEB_SERVICE_NAMES: &[&str] = &["web", "app", "frontend", "server", "nginx", "site", "api"];
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq, Eq, ToSchema)]
 pub(crate) struct BuildSuggestion {
     /// `application` for a Dockerfile, `compose` for a Compose file.
     pub kind: &'static str,
@@ -52,7 +53,7 @@ pub(crate) struct BuildSuggestion {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq, Eq, ToSchema)]
 pub(crate) struct ComposeService {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]

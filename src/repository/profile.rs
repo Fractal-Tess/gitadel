@@ -17,6 +17,7 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{
@@ -39,7 +40,7 @@ use crate::{
 /// Pins a namespace may feature, as on GitHub.
 const MAX_PINS: usize = 6;
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct NamespaceActivityResponse {
     /// `person` counts the commits the user wrote anywhere; `organization`
     /// counts every commit in its repositories.
@@ -50,20 +51,20 @@ pub struct NamespaceActivityResponse {
     activity: ActivityResponse,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct PinnedRepositoriesResponse {
     repositories: Vec<RepositoryOverviewItemResponse>,
     limit: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct RepositoryDayResponse {
     namespace: String,
     name: String,
     commits: Vec<DayCommitResponse>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct NamespaceDayResponse {
     date: NaiveDate,
     total_commits: usize,
@@ -71,7 +72,7 @@ pub struct NamespaceDayResponse {
     repositories: Vec<RepositoryDayResponse>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct SetPinsRequest {
     repository_ids: Vec<Uuid>,
 }

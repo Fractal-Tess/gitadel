@@ -21,6 +21,7 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use tokio::{fs, io::AsyncWriteExt as _};
 use tokio_util::io::ReaderStream;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{
@@ -40,7 +41,7 @@ const MAX_RELEASE_TITLE_LENGTH: usize = 255;
 const MAX_RELEASE_BODY_LENGTH: usize = 1_000_000;
 pub(super) const MAX_RELEASE_ASSET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ReleaseAssetResponse {
     id: Uuid,
     name: String,
@@ -52,13 +53,13 @@ pub struct ReleaseAssetResponse {
     external_url: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ExternalReleaseAuthorResponse {
     username: String,
     profile_url: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ReleaseResponse {
     id: Uuid,
     target_revision: String,
@@ -77,7 +78,7 @@ pub struct ReleaseResponse {
     external_author: Option<ExternalReleaseAuthorResponse>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateReleaseRequest {
     target_revision: String,
     title: String,
@@ -87,7 +88,7 @@ pub struct CreateReleaseRequest {
     prerelease: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct UpdateReleaseRequest {
     target_revision: Option<String>,
     title: Option<String>,
@@ -106,7 +107,7 @@ pub struct UploadAssetQuery {
     name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct ForgejoCreateReleaseRequest {
     tag_name: String,
     #[serde(default)]
@@ -117,7 +118,7 @@ pub struct ForgejoCreateReleaseRequest {
     prerelease: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct ForgejoUpdateReleaseRequest {
     #[serde(default)]
     draft: Option<bool>,
@@ -125,18 +126,18 @@ pub struct ForgejoUpdateReleaseRequest {
     hide_archive_links: Option<bool>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ForgejoTagResponse {
     name: String,
     commit: ForgejoCommitResponse,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct ForgejoCommitResponse {
     sha: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ForgejoReleaseResponse {
     id: i64,
     tag_name: String,
@@ -148,15 +149,15 @@ pub struct ForgejoReleaseResponse {
     assets: Vec<ForgejoReleaseAssetResponse>,
 }
 
-#[derive(Serialize)]
-struct ForgejoReleaseAssetResponse {
+#[derive(Serialize, ToSchema)]
+pub struct ForgejoReleaseAssetResponse {
     id: i64,
     name: String,
     size: i64,
     browser_download_url: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ForgejoUserResponse {
     id: i64,
     login: String,

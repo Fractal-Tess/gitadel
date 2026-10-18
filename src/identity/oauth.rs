@@ -14,6 +14,7 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use url::Url;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{
@@ -42,7 +43,7 @@ pub(super) struct AuthorizationRequest {
     pub(super) created_at: Instant,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct OauthApplicationResponse {
     id: Uuid,
     name: String,
@@ -63,13 +64,13 @@ impl From<oauth_application::Model> for OauthApplicationResponse {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateOauthApplicationRequest {
     name: String,
     redirect_uri: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct CreatedOauthApplicationResponse {
     client_secret: String,
     application: OauthApplicationResponse,
@@ -667,7 +668,7 @@ fn token_response(pair: TokenPair, scope: String) -> Response {
 }
 
 /// An application the user has live access tokens for.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct AuthorizationResponse {
     application_name: String,
     client_id: String,

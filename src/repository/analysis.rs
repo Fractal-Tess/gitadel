@@ -25,6 +25,7 @@ use tokio::{
     sync::{Mutex, OwnedMutexGuard},
     task::JoinSet,
 };
+use utoipa::ToSchema;
 
 use super::{
     RepositoryState,
@@ -61,7 +62,7 @@ pub struct ActivityQuery {
     days: u16,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct LanguageStatResponse {
     language: String,
     files: usize,
@@ -76,7 +77,7 @@ impl LanguageStatResponse {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct RepositoryOverviewResponse {
     repositories: Vec<RepositoryOverviewItemResponse>,
     page: usize,
@@ -84,7 +85,7 @@ pub struct RepositoryOverviewResponse {
     has_next: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub(super) struct RepositoryOverviewItemResponse {
     #[serde(flatten)]
     repository: resources::RepositoryResponse,
@@ -95,13 +96,13 @@ pub(super) struct RepositoryOverviewItemResponse {
     activity: ActivityResponse,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct OverviewLanguageResponse {
     language: String,
     lines: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ActivityResponse {
     start_date: NaiveDate,
     end_date: NaiveDate,
@@ -109,7 +110,7 @@ pub struct ActivityResponse {
     days: Vec<ActivityDayResponse>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct ActivityDayResponse {
     date: NaiveDate,
     count: usize,
@@ -689,7 +690,7 @@ fn authored_on(signature: &sley::Signature) -> Option<NaiveDate> {
 }
 
 /// A commit listed under one day of a namespace's activity graph.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct DayCommitResponse {
     oid: String,
     short_oid: String,

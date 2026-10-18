@@ -19,6 +19,7 @@ use image::{ImageDecoder, ImageFormat, ImageReader};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::{io::AsyncReadExt, sync::Semaphore};
+use utoipa::ToSchema;
 
 use super::{
     RepositoryState,
@@ -35,7 +36,7 @@ const RENDER_TIMEOUT: Duration = Duration::from_secs(8);
 static RENDER_ADMISSION: Semaphore = Semaphore::const_new(8);
 static RENDER_GATE: Semaphore = Semaphore::const_new(1);
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, ToSchema)]
 pub(super) struct ImageMetadata {
     pub width: u32,
     pub height: u32,

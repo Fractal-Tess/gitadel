@@ -18,7 +18,8 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
+use utoipa::ToSchema;
 
 use super::{Permission, RepositoryState, browser::read_git};
 use crate::entity::{
@@ -45,7 +46,7 @@ mod clearable {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct RepositoryIntegrationResponse {
     id: uuid::Uuid,
     connection_id: uuid::Uuid,
@@ -62,7 +63,7 @@ pub struct RepositoryIntegrationResponse {
     config: Option<Value>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct RepositoryIntegrationConnectionResponse {
     id: uuid::Uuid,
     provider: &'static str,
@@ -71,7 +72,7 @@ pub struct RepositoryIntegrationConnectionResponse {
     configured: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct RepositoryIntegrationProviderResponse {
     slug: &'static str,
     name: &'static str,
@@ -92,26 +93,29 @@ impl From<&'static integrations::Provider> for RepositoryIntegrationProviderResp
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct RepositoryIntegrationsResponse {
     integrations: Vec<RepositoryIntegrationResponse>,
     connections: Vec<RepositoryIntegrationConnectionResponse>,
     providers: Vec<RepositoryIntegrationProviderResponse>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateRepositoryIntegrationRequest {
     integration_id: uuid::Uuid,
     name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct UpdateRepositoryIntegrationRequest {
     name: Option<String>,
     enabled: Option<bool>,
+    /// Provider-owned resource link; `null` unlinks, absent leaves it.
     #[serde(default, deserialize_with = "clearable::deserialize")]
+    #[schema(value_type = Option<Object>, nullable)]
     resource: Option<Option<Value>>,
     #[serde(default, deserialize_with = "clearable::deserialize")]
+    #[schema(value_type = Option<Object>, nullable)]
     config: Option<Option<Value>>,
 }
 
@@ -561,26 +565,26 @@ pub async fn list_remote_resources(
     Ok(Json(resources))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-struct ProjectMutation {
+pub(crate) struct ProjectMutation {
     name: String,
     #[serde(default)]
     description: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-struct EnvironmentMutation {
+pub(crate) struct EnvironmentMutation {
     project_id: String,
     name: String,
     #[serde(default)]
     description: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-struct LinkMutation {
+pub(crate) struct LinkMutation {
     kind: String,
     id: String,
     branch: String,
@@ -590,9 +594,9 @@ struct LinkMutation {
     compose_path: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-struct CreateResourceMutation {
+pub(crate) struct CreateResourceMutation {
     kind: String,
     name: String,
     environment_id: String,
@@ -934,7 +938,7 @@ pub async fn deployment_suggestions(
     AxumPath((namespace, name, integration_id)): AxumPath<(String, String, uuid::Uuid)>,
     headers: HeaderMap,
     jar: CookieJar,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<DeploymentSuggestionsResponse>, ApiError> {
     let (_, repository_row) = state
         .authenticated_repository(
             &headers,
@@ -958,7 +962,7 @@ pub async fn repository_deployment_suggestions(
     AxumPath((namespace, name)): AxumPath<(String, String)>,
     headers: HeaderMap,
     jar: CookieJar,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<DeploymentSuggestionsResponse>, ApiError> {
     let (_, repository_row) = state
         .authenticated_repository(
             &headers,
@@ -972,10 +976,35 @@ pub async fn repository_deployment_suggestions(
     suggestions_for(&state, &repository_row).await
 }
 
+/// What a repository can deploy, read from its default branch.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct DeploymentSuggestionsResponse {
+    branch: Option<String>,
+    /// Default name for a new remote project.
+    project_name: String,
+    suggestions: Vec<super::deploy_detect::BuildSuggestion>,
+}
+
+/// The outcome of a one-step deployment setup.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct SetupDeploymentResponse {
+    integration: RepositoryIntegrationResponse,
+    /// What was done, in order.
+    steps: Vec<String>,
+    /// A later step that failed after the resource was linked.
+    warning: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct DeployResponse {
+    /// The provider's description of what it started.
+    summary: String,
+}
+
 async fn suggestions_for(
     state: &RepositoryState,
     repository_row: &repository::Model,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<DeploymentSuggestionsResponse>, ApiError> {
     let suggestions = match repository_row.default_branch.clone() {
         Some(branch) => read_git(state.repository_path(repository_row), move |git| {
             super::deploy_detect::suggest(git, &branch)
@@ -984,16 +1013,16 @@ async fn suggestions_for(
         .unwrap_or_default(),
         None => Vec::new(),
     };
-    Ok(Json(json!({
-        "branch": repository_row.default_branch,
-        "project_name": repository_row.name,
-        "suggestions": suggestions,
-    })))
+    Ok(Json(DeploymentSuggestionsResponse {
+        branch: repository_row.default_branch.clone(),
+        project_name: repository_row.name.clone(),
+        suggestions,
+    }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-struct DomainMutation {
+pub(crate) struct DomainMutation {
     host: String,
     port: u16,
     #[serde(default)]
@@ -1002,9 +1031,9 @@ struct DomainMutation {
     service: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-struct SetupMutation {
+pub(crate) struct SetupMutation {
     kind: String,
     name: String,
     branch: String,
@@ -1038,7 +1067,7 @@ pub async fn setup_deployment(
     headers: HeaderMap,
     jar: CookieJar,
     Json(request): Json<RemoteMutationRequest>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<SetupDeploymentResponse>, ApiError> {
     let (actor, repository_row) = state
         .authenticated_repository(
             &headers,
@@ -1160,11 +1189,11 @@ pub async fn setup_deployment(
             )),
         )
         .await?;
-    Ok(Json(json!({
-        "integration": linked,
-        "steps": steps,
-        "warning": warning,
-    })))
+    Ok(Json(SetupDeploymentResponse {
+        integration: linked,
+        steps,
+        warning,
+    }))
 }
 
 /// The newest deployment of the linked resource.
@@ -1205,7 +1234,7 @@ pub async fn deploy_integration(
     AxumPath((namespace, name, integration_id)): AxumPath<(String, String, uuid::Uuid)>,
     headers: HeaderMap,
     jar: CookieJar,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<DeployResponse>, ApiError> {
     let (actor, repository_row) = state
         .authenticated_repository(
             &headers,
@@ -1245,7 +1274,7 @@ pub async fn deploy_integration(
             )),
         )
         .await?;
-    Ok(Json(json!({ "summary": summary })))
+    Ok(Json(DeployResponse { summary }))
 }
 
 async fn require_instance(

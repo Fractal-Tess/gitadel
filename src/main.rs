@@ -14,6 +14,7 @@ mod integrations;
 mod mail;
 mod migration;
 mod network;
+mod openapi;
 mod registry;
 mod repository;
 mod schedule;

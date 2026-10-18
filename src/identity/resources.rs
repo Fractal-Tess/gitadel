@@ -12,6 +12,7 @@ use sea_orm::{
     PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait, sea_query::Expr,
 };
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{
@@ -23,7 +24,7 @@ use crate::entity::{
     ssh_key as ssh_key_entity, user,
 };
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct SshKeyResponse {
     id: Uuid,
     name: String,
@@ -47,7 +48,7 @@ pub async fn list_ssh_keys(
     Ok(Json(rows.into_iter().map(ssh_key_response).collect()))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateSshKeyRequest {
     name: String,
     public_key: String,
@@ -147,7 +148,8 @@ fn ssh_key_response(row: ssh_key_entity::Model) -> SshKeyResponse {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
+#[schema(as = ApiTokenResponse)]
 pub struct TokenResponse {
     id: Uuid,
     name: String,
@@ -177,14 +179,14 @@ pub async fn list_tokens(
     Ok(Json(rows.into_iter().map(token_response).collect()))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateTokenRequest {
     name: String,
     scopes: Vec<String>,
     expires_in_days: Option<i64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct CreatedTokenResponse {
     token: String,
     details: TokenResponse,
@@ -325,7 +327,7 @@ fn token_response(row: api_token::Model) -> TokenResponse {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct NamespaceResponse {
     slug: String,
     kind: String,
@@ -345,7 +347,7 @@ pub async fn get_namespace(
     }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct OrganizationResponse {
     id: Uuid,
     slug: String,
@@ -383,7 +385,7 @@ pub async fn list_organizations(
     Ok(Json(response))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateOrganizationRequest {
     slug: String,
     display_name: String,
@@ -457,7 +459,7 @@ pub async fn create_organization(
     ))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct UpdateOrganizationRequest {
     slug: String,
     display_name: String,
@@ -581,7 +583,7 @@ pub async fn delete_organization(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct MemberResponse {
     username: String,
     role: String,
@@ -623,7 +625,7 @@ pub struct MemberSuggestionsQuery {
     q: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct MemberSuggestionResponse {
     id: Uuid,
     username: String,
@@ -686,7 +688,7 @@ async fn member_suggestions(
         .collect())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct AddMemberRequest {
     username: String,
     role: String,
@@ -830,7 +832,7 @@ pub(super) async fn owned_organization(
     Ok(organization)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct AuditEventResponse {
     id: i64,
     actor_user_id: Option<Uuid>,

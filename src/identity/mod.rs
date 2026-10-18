@@ -1,19 +1,19 @@
 mod admin;
 mod admin_storage;
-mod auth;
-mod avatar;
+pub(crate) mod auth;
+pub(crate) mod avatar;
 pub mod commit_emails;
-mod email;
-mod integrations;
+pub(crate) mod email;
+pub(crate) mod integrations;
 mod mirror_identities;
-mod notifications;
-mod oauth;
-mod resources;
+pub(crate) mod notifications;
+pub(crate) mod oauth;
+pub(crate) mod resources;
 mod sso;
 #[cfg(test)]
 pub(crate) mod test_support;
-mod two_factor;
-mod users;
+pub(crate) mod two_factor;
+pub(crate) mod users;
 
 pub(crate) use admin::{require_admin, serve_audit_retention};
 pub(crate) use email::verified_mailbox;
@@ -57,6 +57,7 @@ use sha2::{Digest, Sha256};
 use time::Duration as TimeDuration;
 use tokio::sync::{Mutex, Semaphore, mpsc, watch};
 use url::Url;
+use utoipa::ToSchema;
 use uuid::Uuid;
 use webauthn_rs::{
     Webauthn, WebauthnBuilder,
@@ -1586,7 +1587,7 @@ pub fn validate_name(value: &str, label: &str) -> Result<String, ApiError> {
     Ok(value.to_owned())
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct UserResponse {
     pub id: Uuid,
     pub username: String,

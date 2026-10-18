@@ -33,7 +33,7 @@ const MAX_ERROR_LENGTH: usize = 2_048;
 const TEMPORARY_FILE_MAX_AGE: Duration = Duration::from_secs(12 * 60);
 const LFS_IMPORT_STAGING_PREFIX: &str = ".gitadel-import-";
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct CreateMirrorRequest {
     remote_url: String,
     identity_id: Option<Uuid>,
