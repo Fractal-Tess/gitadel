@@ -6,6 +6,7 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ### Added
 
+- `GET /api/v1/openapi.json` describes the whole `/api/v1` API as an OpenAPI 3.1 document: every operation with its parameters, authentication, and status codes, and typed request and response schemas for repositories, content, collaborators, branch protection, issues, releases, commit statuses, webhooks, accounts, organizations, namespaces, and deployments. The **API** page in the sidebar renders it, with request examples and a request runner that uses your session. A test fails when a route is added without a description.
 - OAuth clients can renew access tokens with the `refresh_token` grant. Token responses carry a `refresh_token` that is valid for a year and single use: each refresh returns a new pair. Revoking an application's authorization also invalidates its refresh tokens.
 - Dokploy setup is guided and checked step by step. Connecting Gitadel creates the Dokploy Gitea provider with tokens Gitadel issues itself, so there is no separate authorization in Dokploy, then confirms that Dokploy can list repositories through it. When Dokploy cannot reach the configured address, Gitadel tries its public URL and the addresses its host name resolves to, and keeps the first that works. `POST /api/v1/namespaces/{slug}/integrations/{id}/source/verify` repeats the check.
 - A **Deploy** tab on repositories you manage lists their Dokploy deployments with live status, deploy on push, and links into Dokploy, and starts a new setup from a configured connection.
