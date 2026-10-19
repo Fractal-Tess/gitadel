@@ -102,7 +102,14 @@
     <span class="min-w-0 flex-1">
       <span class="block truncate font-semibold">{name}</span>
       <span class="mt-0.5 block truncate text-xs text-muted-foreground">
-        {providerName} · {subtitle}
+        {providerName}
+      </span>
+      <!-- Paths and URLs are the detail people need to read in full, so they
+           wrap instead of being cut off. -->
+      <span
+        class="mt-0.5 block text-xs text-muted-foreground [overflow-wrap:anywhere]"
+      >
+        {subtitle}
       </span>
     </span>
     {#if onenabledchange}
