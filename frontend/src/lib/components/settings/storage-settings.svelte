@@ -1,5 +1,6 @@
 <script lang="ts">
   import Cloud from "@lucide/svelte/icons/cloud";
+  import Database from "@lucide/svelte/icons/database";
   import Gauge from "@lucide/svelte/icons/gauge";
   import HardDrive from "@lucide/svelte/icons/hard-drive";
   import { Spinner } from "$lib/components/ui/spinner/index.js";
@@ -30,6 +31,8 @@
   import * as Select from "$lib/components/ui/select/index.js";
   import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
   import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
+  import SettingsSectionHeader from "$lib/components/settings/settings-section-header.svelte";
+  import StorageOverview from "$lib/components/settings/storage-overview.svelte";
   import { formatBytes } from "$lib/format.js";
   import {
     invalidateAdminActivity,
@@ -291,7 +294,15 @@
     </Alert.Root>
   {/if}
 
-  <div class="flex flex-col gap-3">
+  <StorageOverview />
+
+  <section class="flex flex-col gap-4" aria-labelledby="storage-targets-title">
+    <SettingsSectionHeader
+      id="storage-targets-title"
+      icon={Database}
+      title="Storage targets"
+      description="Destinations Git LFS, the container registry, and backups can use. Choose which one each uses on the Git LFS and Container registry pages."
+    />
     {#if loading}
       <div
         class="flex items-center gap-2 rounded-xl border p-5 text-sm text-muted-foreground"
@@ -339,54 +350,52 @@
             {/snippet}
             {#snippet details()}
               {@const bar = usageBar(target)}
-              <div class="mt-4 flex flex-col gap-2">
-                {#if bar}
-                  <div
-                    class="flex h-1.5 overflow-hidden rounded-full bg-muted"
-                    role="img"
-                    aria-label={bar.label}
-                  >
-                    <div class="bg-primary" style="width: {bar.gitadel}%"></div>
-                    <div
-                      class="bg-foreground/25"
-                      style="width: {bar.other}%"
-                    ></div>
-                  </div>
-                  <div
-                    class="flex items-baseline justify-between gap-3 text-[11px] text-muted-foreground"
-                  >
-                    <span class="truncate">
-                      {formatBytes(storedBytes(target))} Gitadel
+              <dl class="mt-4 grid grid-cols-2 gap-3 text-xs">
+                <div>
+                  <dt class="text-muted-foreground">Git LFS</dt>
+                  <dd class="mt-0.5 font-medium tabular-nums">
+                    {formatBytes(target.usage.lfs_bytes)}
+                    <span class="font-normal text-muted-foreground">
+                      · {target.usage.lfs_object_count.toLocaleString()} objects
                     </span>
-                    <span class="shrink-0 tabular-nums">
-                      {formatBytes(target.capacity?.available_bytes ?? 0)} free of
-                      {formatBytes(target.capacity?.total_bytes ?? 0)}
+                  </dd>
+                </div>
+                <div>
+                  <dt class="text-muted-foreground">Container registry</dt>
+                  <dd class="mt-0.5 font-medium tabular-nums">
+                    {formatBytes(target.usage.registry_bytes)}
+                    <span class="font-normal text-muted-foreground">
+                      · {target.usage.registry_object_count.toLocaleString()} objects
                     </span>
-                  </div>
-                {:else}
-                  <div class="text-[11px] text-muted-foreground">
-                    {formatBytes(storedBytes(target))} stored · object storage reports
-                    no capacity
-                  </div>
-                {/if}
-                <div class="text-[11px] text-muted-foreground">
-                  {#if target.usage.measured}
-                    Scanned {formatMeasuredAt(
-                      target.usage.measured.measured_at,
-                    )}:
-                    {target.usage.measured.object_count.toLocaleString()} objects
-                    ({formatBytes(target.usage.measured.total_bytes)} total).
-                  {:else}
-                    {target.usage.lfs_object_count.toLocaleString()} LFS objects ·
-                    {target.usage.registry_object_count.toLocaleString()} registry
-                    objects tracked.
-                  {/if}
+                  </dd>
                 </div>
-                <div class="text-[11px] text-muted-foreground">
-                  Registry: {target.usage.registry_object_count.toLocaleString()}
-                  objects · {formatBytes(target.usage.registry_bytes)} stored.
+              </dl>
+              {#if bar}
+                <div
+                  class="mt-3 flex h-1.5 overflow-hidden rounded-full bg-muted"
+                  role="img"
+                  aria-label={bar.label}
+                >
+                  <div class="bg-primary" style="width: {bar.gitadel}%"></div>
+                  <div class="bg-foreground/25" style="width: {bar.other}%"></div>
                 </div>
-              </div>
+                <p class="mt-1.5 text-xs text-muted-foreground tabular-nums">
+                  Disk: {formatBytes(target.capacity?.available_bytes ?? 0)} free
+                  of {formatBytes(target.capacity?.total_bytes ?? 0)}
+                </p>
+              {:else}
+                <p class="mt-3 text-xs text-muted-foreground">
+                  Object storage reports no capacity.
+                </p>
+              {/if}
+              {#if target.usage.measured}
+                <p class="mt-1 text-xs text-muted-foreground">
+                  Scanned {formatMeasuredAt(target.usage.measured.measured_at)}:
+                  {formatBytes(target.usage.measured.total_bytes)} in
+                  {target.usage.measured.object_count.toLocaleString()} files,
+                  including anything Gitadel no longer tracks.
+                </p>
+              {/if}
             {/snippet}
             {#snippet actions()}
               <Button
@@ -432,7 +441,7 @@
         {/each}
       </div>
     {/if}
-  </div>
+  </section>
 </div>
 
 <Dialog.Root bind:open={adding}>

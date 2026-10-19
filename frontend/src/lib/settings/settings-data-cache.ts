@@ -20,8 +20,10 @@ import { auditEventSchema, type AuditEvent } from "$lib/api/instance.js";
 import {
   storageDomainPath,
   storageDomainStatusSchema,
+  storageOverviewSchema,
   storageTargetsSchema,
   type StorageDomainStatus,
+  type StorageOverview,
   type StorageTarget,
 } from "$lib/api/storage.js";
 import { requestJson } from "$lib/api/transport.js";
@@ -136,6 +138,7 @@ const apiTokens = new SettingsCache<ApiToken[]>();
 const oauthApplications = new SettingsCache<OauthApplication[]>();
 const storageTargets = new SettingsCache<StorageTarget[]>();
 const storageDomains = new SettingsCache<StorageDomainStatus>();
+const storageOverview = new SettingsCache<StorageOverview>();
 const adminActivity = new SettingsCache<AuditEvent[]>();
 const authenticationConfiguration =
   new SettingsCache<AuthenticationConfiguration>();
@@ -272,6 +275,27 @@ export function refreshStorageTargets(
   return loadStorageTargets(scope);
 }
 
+export function loadStorageOverview(
+  scope: AuthorizationCacheScope,
+): Promise<StorageOverview> {
+  return storageOverview.load(key(scope), () =>
+    requestJson("/api/v1/admin/storage/overview", storageOverviewSchema),
+  );
+}
+
+export function peekStorageOverview(
+  scope: AuthorizationCacheScope,
+): StorageOverview | null {
+  return storageOverview.peek(key(scope));
+}
+
+export function refreshStorageOverview(
+  scope: AuthorizationCacheScope,
+): Promise<StorageOverview> {
+  storageOverview.invalidate(key(scope));
+  return loadStorageOverview(scope);
+}
+
 function domainKey(scope: AuthorizationCacheScope, domain: string): string {
   return `${key(scope)}:${domain}`;
 }
@@ -381,7 +405,7 @@ export function preloadAdminSettingsView(
     view === "access"
       ? [loadAuthenticationConfiguration(scope), loadOidcProviders(scope)]
       : view === "storage"
-        ? [loadStorageTargets(scope)]
+        ? [loadStorageOverview(scope), loadStorageTargets(scope)]
         : view === "lfs"
           ? [loadStorageTargets(scope), loadStorageDomain(scope, "lfs")]
           : view === "registry"
@@ -401,6 +425,7 @@ export function clearSettingsDataCache(): void {
   oauthApplications.clear();
   storageTargets.clear();
   storageDomains.clear();
+  storageOverview.clear();
   adminActivity.clear();
   authenticationConfiguration.clear();
   oidcProviders.clear();

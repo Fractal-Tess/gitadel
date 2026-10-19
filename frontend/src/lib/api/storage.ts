@@ -66,6 +66,34 @@ export const storageTargetTestSchema = z.object({
   message: z.string(),
 });
 
+export const storageVolumeSchema = z.object({
+  id: z.string(),
+  mount_point: z.string().nullable(),
+  total_bytes: z.number().nonnegative(),
+  used_bytes: z.number().nonnegative(),
+  available_bytes: z.number().nonnegative(),
+  reserved_bytes: z.number().nonnegative(),
+  gitadel_bytes: z.number().nonnegative(),
+});
+export type StorageVolume = z.infer<typeof storageVolumeSchema>;
+
+export const storageCategorySchema = z.object({
+  key: z.string(),
+  label: z.string(),
+  location: z.string(),
+  bytes: z.number().nonnegative(),
+  volume_id: z.string().nullable(),
+});
+export type StorageCategory = z.infer<typeof storageCategorySchema>;
+
+/** Every volume Gitadel writes to, and what it keeps on each. */
+export const storageOverviewSchema = z.object({
+  volumes: z.array(storageVolumeSchema),
+  categories: z.array(storageCategorySchema),
+  measured_at: z.string(),
+});
+export type StorageOverview = z.infer<typeof storageOverviewSchema>;
+
 /** The nil target id, which selects a domain's local storage. */
 export const LOCAL_STORAGE_TARGET_ID = "00000000-0000-0000-0000-000000000000";
 

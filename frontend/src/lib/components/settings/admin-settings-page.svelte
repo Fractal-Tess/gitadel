@@ -75,7 +75,7 @@
           : view === "runners"
           ? "Provide runners that can execute workflows for every repository."
           : view === "storage"
-            ? "Define reusable filesystem and S3-compatible destinations."
+            ? "See how full each disk is, what Gitadel keeps where, and manage storage targets."
             : view === "lfs"
               ? "Inspect Git LFS usage and move objects between storage targets."
               : view === "registry"
