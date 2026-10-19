@@ -52,7 +52,7 @@
           : view === "runners"
           ? "Runners"
           : view === "storage"
-            ? "Storage"
+            ? "Storage overview"
             : view === "lfs"
               ? "Git LFS"
               : view === "registry"
