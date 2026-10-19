@@ -8,6 +8,8 @@ import KeySquare from "@lucide/svelte/icons/key-square";
 import LockKeyhole from "@lucide/svelte/icons/lock-keyhole";
 import Mail from "@lucide/svelte/icons/mail";
 import Palette from "@lucide/svelte/icons/palette";
+import Server from "@lucide/svelte/icons/server";
+import Settings2 from "@lucide/svelte/icons/settings-2";
 import ShieldCheck from "@lucide/svelte/icons/shield-check";
 import Terminal from "@lucide/svelte/icons/terminal";
 import UserPlus from "@lucide/svelte/icons/user-plus";
@@ -50,7 +52,40 @@ export const adminSettingsSections = [
   label: string;
   icon: ShellIcon;
 }[];
-export type AccountSettingsView =
-  (typeof accountSettingsSections)[number]["id"];
 
 export type AdminSettingsView = (typeof adminSettingsSections)[number]["id"];
+
+/**
+ * The administration tabs. Eleven pages do not fit one bar, so related pages
+ * share a tab and appear on the bar's second row.
+ */
+export const adminSettingsGroups = [
+  {
+    id: "general",
+    label: "General",
+    icon: Settings2,
+    views: ["appearance", "email"],
+  },
+  { id: "people", label: "People", icon: Users, views: ["users", "access"] },
+  {
+    id: "storage",
+    label: "Storage",
+    icon: Database,
+    views: ["storage", "lfs", "registry"],
+  },
+  {
+    id: "operations",
+    label: "Operations",
+    icon: Server,
+    views: ["runners", "backups", "maintenance"],
+  },
+  { id: "activity", label: "Activity", icon: Activity, views: ["activity"] },
+] as const satisfies readonly {
+  id: string;
+  label: string;
+  icon: ShellIcon;
+  views: readonly AdminSettingsView[];
+}[];
+
+export type AccountSettingsView =
+  (typeof accountSettingsSections)[number]["id"];

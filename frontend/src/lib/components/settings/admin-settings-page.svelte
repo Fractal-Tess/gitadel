@@ -15,6 +15,7 @@
   import { AccountSettingsState } from "$lib/settings/account-settings-state.svelte.js";
   import { systemRunnerScope } from "$lib/settings/account/actions-settings-state.svelte.js";
   import {
+    adminSettingsGroups,
     adminSettingsSections,
     type AdminSettingsView,
   } from "$lib/settings/navigation.js";
@@ -86,16 +87,31 @@
                     : "Review repository, authentication, and administration events.",
   );
 
-  const navigation = $derived.by<ContextNavItem[]>(() =>
-    adminSettingsSections.map((section) => ({
-      id: section.id,
-      label: section.label,
+  function viewItem(id: AdminSettingsView) {
+    const section = adminSettingsSections.find((entry) => entry.id === id)!;
+    return {
+      id,
+      // The Storage tab already names the area; its first page is the summary.
+      label: id === "storage" ? "Overview" : section.label,
       icon: section.icon,
-      href: resolve("/-/administration/[view]", { view: section.id }),
-      active: view === section.id,
-      preload: () =>
-        preloadAdminSettingsView(app.authorizationScope, section.id),
-    })),
+      href: resolve("/-/administration/[view]", { view: id }),
+      active: view === id,
+      preload: () => preloadAdminSettingsView(app.authorizationScope, id),
+    };
+  }
+
+  const navigation = $derived.by<ContextNavItem[]>(() =>
+    adminSettingsGroups.map((group) => {
+      const items = group.views.map(viewItem);
+      return {
+        ...items[0],
+        id: group.id,
+        label: group.label,
+        icon: group.icon,
+        active: items.some((item) => item.active),
+        items: items.length > 1 ? items : undefined,
+      };
+    }),
   );
 
   $effect(() => {
