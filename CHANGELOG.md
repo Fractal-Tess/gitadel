@@ -13,6 +13,13 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 - `gtd deploy setup <repository> --domain <host> --wait` deploys a repository in one command and follows it until the site answers over HTTPS; `gtd deploy status`, `now`, and `suggest` cover the rest. `GET /api/v1/repos/{namespace}/{name}/deploy/suggestions` reports what a repository can deploy before any integration exists.
 - Deployment suggestions read Compose files: their services and ports, the service a domain should route to, and warnings about published host ports, `container_name`, bind mounts from the checkout, and Dockerfiles without `EXPOSE`. A Compose deployment's domain routes to the chosen service.
 - **Set up deployment** on a repository's Dokploy integration suggests a build from the Dockerfiles and Compose files on the default branch, then creates the project, environment, and resource, sets the Dockerfile build and an optional domain, links the repository, turns on deploy on push, and starts the first deployment in one step. It lists what it did and shows the deployment's progress. A failure undoes what the setup created. The endpoints are `GET …/integrations/{id}/suggestions`, `POST …/integrations/{id}/setup`, and `GET …/integrations/{id}/deployment`.
+- **Administration → Storage → Overview** shows every disk Gitadel writes to: its size, what is free, what Gitadel uses and what other files use, with a breakdown into repositories, the database, Git LFS, the container registry, and workflow artifacts, and where each lives. Object storage and PostgreSQL are listed separately because they sit off the host. `GET /api/v1/admin/storage/overview` returns the same figures.
+
+### Changed
+
+- The administration tabs are grouped into General, People, Storage, Operations, and Activity, with the pages of the open group on a second row, so the bar fits on narrow screens. The open page is underlined on both rows.
+- Storage targets moved to their own **Storage targets** tab next to the storage overview.
+- The administration pages share one section layout: the same headers, card surfaces, and list frames throughout.
 
 ### Fixed
 
@@ -22,6 +29,7 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 - A Dokploy Gitea provider configured for another forge can no longer be connected, and one already connected says so instead of failing with "fetch failed". A provider counts as ready only once Dokploy holds a token for it.
 - Creating a Dokploy resource checks repository access first and removes the resource again if its source cannot be attached.
 - The repository logo picker suggests at most nine images, and only ones with a branding name, README reference, or root or web-asset location.
+- Connection cards show their full location, such as a storage target's path, instead of cutting it off.
 
 ## [0.23.0] - 2026-10-04
 
