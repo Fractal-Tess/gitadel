@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import Archive from "@lucide/svelte/icons/archive";
   import CalendarClock from "@lucide/svelte/icons/calendar-clock";
   import CloudUpload from "@lucide/svelte/icons/cloud-upload";
   import HardDrive from "@lucide/svelte/icons/hard-drive";
@@ -7,6 +8,7 @@
 
   import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
   import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
+  import SettingsSectionHeader from "$lib/components/settings/settings-section-header.svelte";
   import BackupCreateDialog from "$lib/components/settings/backup-create-dialog.svelte";
   import BackupProviderEditor from "$lib/components/settings/backup-provider-editor.svelte";
   import BackupRestorePanel from "$lib/components/settings/backup-restore-panel.svelte";
@@ -37,17 +39,25 @@
 </script>
 
 <section class="flex flex-col gap-6" aria-label="Backups">
-  {#if backup.providers.length > 0}
-    <div class="flex justify-end">
-      <Button
-        type="button"
-        onclick={backup.openCreateBackup}
-        disabled={backup.busy}
-      >
-        <CloudUpload data-icon="inline-start" /> Create backup
-      </Button>
-    </div>
-  {/if}
+  <SettingsSectionHeader
+    id="backup-providers-title"
+    icon={Archive}
+    title="Backup providers"
+    description="Destinations that hold instance snapshots. Select one to schedule, list, and restore its backups."
+  >
+    {#snippet actions()}
+      {#if backup.providers.length > 0}
+        <Button
+          type="button"
+          size="sm"
+          onclick={backup.openCreateBackup}
+          disabled={backup.busy}
+        >
+          <CloudUpload data-icon="inline-start" /> Create backup
+        </Button>
+      {/if}
+    {/snippet}
+  </SettingsSectionHeader>
 
   {#if backup.error}
     <Alert.Root variant="destructive">
@@ -108,7 +118,7 @@
   {#if backup.settings}
     {@const selected = backup.settings}
     <div
-      class="flex flex-wrap items-center justify-between gap-3 rounded-xl border bg-card/25 px-4 py-3"
+      class="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-card px-4 py-3 ring-1 ring-foreground/10"
     >
       <div class="min-w-0">
         <p class="truncate text-sm font-medium">

@@ -2,6 +2,8 @@
   import Cloud from "@lucide/svelte/icons/cloud";
   import Database from "@lucide/svelte/icons/database";
   import HardDrive from "@lucide/svelte/icons/hard-drive";
+  import FolderGit2 from "@lucide/svelte/icons/folder-git-2";
+  import Gauge from "@lucide/svelte/icons/gauge";
   import Search from "@lucide/svelte/icons/search";
   import { toast } from "svelte-sonner";
 
@@ -16,7 +18,7 @@
   import { Input } from "$lib/components/ui/input/index.js";
   import { Progress } from "$lib/components/ui/progress/index.js";
   import { Spinner } from "$lib/components/ui/spinner/index.js";
-  import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
+  import SettingsSectionHeader from "$lib/components/settings/settings-section-header.svelte";
   import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
   import { errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
   import {
@@ -382,15 +384,16 @@
     {/if}
   {:else}
     <section
-      aria-label="{label} storage target"
-      class="flex flex-col gap-3"
+      aria-labelledby="{domain}-target-title"
+      class="flex flex-col gap-4"
     >
+      <SettingsSectionHeader
+        id="{domain}-target-title"
+        icon={HardDrive}
+        title="Storage target"
+        description={`Where ${noun} data is stored. Change it to move every object to another destination while ${noun} stays online.`}
+      />
       <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-        <IntegrationAddCard
-          title="Change storage target"
-          description="Select another destination for {noun} data."
-          onclick={openTargetDialog}
-        />
         {#if activeTarget}
           <IntegrationConnectionCard
             name={activeTarget.name}
@@ -427,7 +430,7 @@
         {/if}
       </div>
       <p class="text-sm text-muted-foreground">
-        Storage destinations are created on the <a
+        New destinations are added on the <a
           class="text-primary underline-offset-4 hover:underline"
           href="/-/administration/storage">Storage page</a
         >.
@@ -435,52 +438,56 @@
     </section>
 
     <section
-      class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4"
-      aria-label="{label} usage"
+      class="flex flex-col gap-4"
+      aria-labelledby="{domain}-usage-title"
     >
-      {@render stat(
-        "Stored bytes",
-        formatBytes(status.usage.total_bytes),
-        "Persisted data only",
-      )}
-      {@render stat(objectsLabel, status.usage.object_count.toLocaleString())}
-      {@render stat(
-        "Repositories",
-        status.usage.repository_count.toLocaleString(),
-        "With stored data",
-      )}
-      {@render stat(
-        "Active target",
-        status.active_target_name ?? status.local_label,
-      )}
-    </section>
+      <SettingsSectionHeader
+        id="{domain}-usage-title"
+        icon={Gauge}
+        title="Usage"
+        description={`What ${noun} stores across all repositories.`}
+      />
+      <div class="grid gap-4 sm:grid-cols-3">
+        {@render stat(
+          "Stored bytes",
+          formatBytes(status.usage.total_bytes),
+          "Persisted data only",
+        )}
+        {@render stat(objectsLabel, status.usage.object_count.toLocaleString())}
+        {@render stat(
+          "Repositories",
+          status.usage.repository_count.toLocaleString(),
+          "With stored data",
+        )}
+      </div>
 
-    {#if detailFields.length > 0}
-      <dl
-        class="grid grid-cols-2 gap-x-6 gap-y-4 rounded-xl border bg-card/40 p-5 shadow-sm sm:grid-cols-3 lg:grid-cols-6"
-        aria-label="{label} details"
-      >
-        {#each detailFields as field (field.key)}
-          <div class="min-w-0">
-            <dt class="truncate text-xs text-muted-foreground">
-              {field.label}{field.per_repository ? "" : " *"}
-            </dt>
-            <dd class="mt-1 text-lg font-semibold tabular-nums">
-              {formatDetail(field, status.usage.details[field.key])}
-            </dd>
-          </div>
-        {/each}
-        {#if detailFields.some((field) => !field.per_repository)}
-          <p class="col-span-full text-xs text-muted-foreground">
-            * Temporary data, not included in stored bytes.
-          </p>
-        {/if}
-      </dl>
-    {/if}
+      {#if detailFields.length > 0}
+        <dl
+          class="grid grid-cols-2 gap-x-6 gap-y-4 rounded-xl bg-card p-5 ring-1 ring-foreground/10 sm:grid-cols-3 lg:grid-cols-6"
+          aria-label="{label} details"
+        >
+          {#each detailFields as field (field.key)}
+            <div class="min-w-0">
+              <dt class="truncate text-xs text-muted-foreground">
+                {field.label}{field.per_repository ? "" : " *"}
+              </dt>
+              <dd class="mt-1 text-lg font-semibold tabular-nums">
+                {formatDetail(field, status.usage.details[field.key])}
+              </dd>
+            </div>
+          {/each}
+          {#if detailFields.some((field) => !field.per_repository)}
+            <p class="col-span-full text-xs text-muted-foreground">
+              * Temporary data, not included in stored bytes.
+            </p>
+          {/if}
+        </dl>
+      {/if}
+    </section>
 
     {#if working && migration}
       <section
-        class="rounded-xl border bg-card/40 p-5 shadow-sm"
+        class="rounded-xl bg-card p-5 ring-1 ring-foreground/10"
         aria-live="polite"
       >
         <div class="flex items-start gap-3">
@@ -513,18 +520,15 @@
   {/if}
 
   <section
-    class="rounded-xl border bg-card/40 p-5 shadow-sm"
+    class="rounded-xl bg-card p-5 ring-1 ring-foreground/10"
     aria-labelledby="{domain}-repository-usage-title"
   >
-    <div class="flex flex-col gap-1">
-      <h2 id="{domain}-repository-usage-title" class="text-base font-semibold">
-        Repository usage
-      </h2>
-      <p class="text-sm leading-6 text-muted-foreground">
-        Find repositories that consume {noun} space. Usage is logical: an object
-        shared by repositories is counted once for each repository that owns it.
-      </p>
-    </div>
+    <SettingsSectionHeader
+      id="{domain}-repository-usage-title"
+      icon={FolderGit2}
+      title="Repository usage"
+      description={`Find repositories that consume ${noun} space. Usage is logical: an object shared by repositories is counted once for each repository that owns it.`}
+    />
 
     <Field.Group class="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
       <Field.Field>
@@ -702,12 +706,8 @@
 </div>
 
 {#snippet stat(title: string, value: string, note: string | null = null)}
-  <div class="rounded-xl border bg-card/40 p-5 shadow-sm">
-    <p
-      class="text-xs font-medium uppercase tracking-wide text-muted-foreground"
-    >
-      {title}
-    </p>
+  <div class="rounded-xl bg-card p-5 ring-1 ring-foreground/10">
+    <p class="text-xs text-muted-foreground">{title}</p>
     <p class="mt-2 truncate text-2xl font-semibold tabular-nums">{value}</p>
     {#if note}
       <p class="mt-1 text-xs text-muted-foreground">{note}</p>

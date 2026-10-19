@@ -122,19 +122,18 @@
           void saveSettings();
         }}
       >
-        <Card.Root
-          class="gap-5 [--card-spacing:--spacing(5)] md:grid md:grid-cols-[minmax(12rem,0.72fr)_minmax(0,1.5fr)] md:gap-10 md:[--card-spacing:--spacing(6)]"
-          aria-labelledby="branding-heading"
-        >
-          <Card.Header class="flex flex-row items-start gap-3">
-            <Palette class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-            <div>
-              <Card.Title id="branding-heading" role="heading" aria-level={2}>
-                Branding and defaults
-              </Card.Title>
-              <Card.Description class="mt-1 max-w-xs leading-5">
-                Browser identity and repository creation defaults.
-              </Card.Description>
+        <Card.Root aria-labelledby="branding-heading">
+          <Card.Header class="border-b">
+            <div class="flex items-center gap-3">
+              <Palette class="size-4 text-muted-foreground" />
+              <div>
+                <Card.Title id="branding-heading" role="heading" aria-level={2}>
+                  Branding and defaults
+                </Card.Title>
+                <Card.Description>
+                  Browser identity and repository creation defaults.
+                </Card.Description>
+              </div>
             </div>
           </Card.Header>
           <Card.Content class="grid max-w-2xl gap-5">

@@ -62,7 +62,7 @@
 </script>
 
 <section
-  class="overflow-hidden rounded-xl border bg-card/40 shadow-sm lg:col-span-2"
+  class="overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10 lg:col-span-2"
 >
   <header class="flex items-center gap-3 border-b px-5 py-4">
     <MailX class="size-4 text-muted-foreground" />

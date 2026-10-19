@@ -3,6 +3,7 @@
   import ChevronRight from "@lucide/svelte/icons/chevron-right";
   import Ellipsis from "@lucide/svelte/icons/ellipsis";
   import Search from "@lucide/svelte/icons/search";
+  import UsersIcon from "@lucide/svelte/icons/users";
   import { toast } from "svelte-sonner";
 
   import {
@@ -148,10 +149,25 @@
   }
 </script>
 
-<section class="overflow-hidden rounded-xl border bg-card/40 shadow-sm">
+<section class="overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10">
   <header
     class="flex flex-wrap items-center justify-between gap-3 border-b px-5 py-4"
   >
+    <div class="flex items-center gap-3">
+      <UsersIcon class="size-4 text-muted-foreground" />
+      <div>
+        <h2 class="text-sm font-semibold">Accounts</h2>
+        <p class="mt-0.5 text-xs text-muted-foreground" aria-live="polite">
+          {#if total > 0}
+            {offset + 1}–{pageEnd} of {total}
+          {:else if !loading}
+            No users
+          {:else}
+            Loading…
+          {/if}
+        </p>
+      </div>
+    </div>
     <form
       class="flex w-full max-w-sm items-center gap-2"
       role="search"
@@ -171,13 +187,6 @@
         <Search class="size-4" />
       </Button>
     </form>
-    <p class="text-xs text-muted-foreground" aria-live="polite">
-      {#if total > 0}
-        {offset + 1}–{pageEnd} of {total}
-      {:else if !loading}
-        No users
-      {/if}
-    </p>
   </header>
 
   {#if error}

@@ -27,7 +27,7 @@
 
 {#if backup.settings}
   {@const provider = backup.settings}
-  <section class="overflow-hidden rounded-xl border bg-card/40 shadow-sm">
+  <section class="overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10">
     <header
       class="flex flex-wrap items-center justify-between gap-3 border-b px-5 py-4"
     >

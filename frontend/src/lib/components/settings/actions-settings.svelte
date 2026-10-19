@@ -1,4 +1,5 @@
 <script lang="ts">
+  import SettingsSectionHeader from "$lib/components/settings/settings-section-header.svelte";
   import CircleAlert from "@lucide/svelte/icons/circle-alert";
   import CircleCheck from "@lucide/svelte/icons/circle-check";
   import { Spinner } from "$lib/components/ui/spinner/index.js";
@@ -162,18 +163,12 @@
 {/snippet}
 
 <section class="space-y-6" aria-labelledby="actions-settings-heading">
-  <header>
-    <h2
-      id="actions-settings-heading"
-      class="text-lg font-semibold tracking-tight"
-    >
-      Runners
-    </h2>
-    <p class="mt-1.5 max-w-2xl text-sm leading-6 text-muted-foreground">
-      Register runners for {scope.label}. Repositories in this scope can use
-      every runner listed here without per-repository setup.
-    </p>
-  </header>
+  <SettingsSectionHeader
+    id="actions-settings-heading"
+    icon={Server}
+    title="Registered runners"
+    description={`Runners for ${scope.label}. Every repository in this scope can use them without per-repository setup.`}
+  />
 
   {#if account.actionsLoading && Object.keys(account.actionRunners).length === 0}
     <p class="flex items-center gap-2 text-sm text-muted-foreground">

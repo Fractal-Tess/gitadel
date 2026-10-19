@@ -93,7 +93,7 @@
 
 <div class="grid gap-6 lg:grid-cols-2">
   {#if view === "access"}
-    <section class="overflow-hidden rounded-xl border bg-card/40 shadow-sm">
+    <section class="overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10">
       <header class="flex items-center gap-3 border-b px-5 py-4">
         <ShieldCheck class="size-4 text-muted-foreground" />
         <div>
@@ -176,7 +176,7 @@
 
   {#if view === "activity"}
     <section
-      class="overflow-hidden rounded-xl border bg-card/40 shadow-sm lg:col-span-2"
+      class="overflow-hidden rounded-xl bg-card ring-1 ring-foreground/10 lg:col-span-2"
     >
       <header
         class="flex items-center justify-between gap-3 border-b px-5 py-4"
