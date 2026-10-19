@@ -58,9 +58,9 @@
 
   // The active tab's underline is one element that slides between tabs
   // rather than one per tab, so switching reads as movement along the bar.
-  // The secondary row's highlighted pill slides the same way.
+  // The secondary row has a thinner underline that slides the same way.
   let indicator = $state<{ left: number; width: number } | null>(null);
-  let pill = $state<{ left: number; width: number } | null>(null);
+  let subIndicator = $state<{ left: number; width: number } | null>(null);
   let indicatorReady = $state(false);
 
   function measure(
@@ -78,7 +78,7 @@
 
   function placeIndicator(): void {
     indicator = measure(primaryList, 12);
-    pill = measure(secondaryList, 0);
+    subIndicator = measure(secondaryList, 12);
   }
 
   $effect(() => {
@@ -157,42 +157,47 @@
         </a>
       {/each}
     </div>
-
-    {#if activeItem?.items?.length}
-      <div
-        class="scrollbar-none relative flex overflow-x-auto border-t px-3 sm:px-5 lg:px-8"
-        bind:this={secondaryList}
-      >
-        {#if pill}
-          <span
-            class={[
-              "pointer-events-none absolute top-1/2 left-0 h-10 rounded-md bg-muted",
-              indicatorReady &&
-                "transition-[translate,width] duration-300 ease-[var(--ease-out-quint)]",
-            ]}
-            style:width={`${pill.width}px`}
-            style:translate={`${pill.left}px -50%`}
-            aria-hidden="true"
-          ></span>
-        {/if}
-        {#each activeItem.items as item (item.id)}
-          <a
-            href={item.href}
-            aria-current={item.active ? "page" : undefined}
-            class={[
-              "relative flex h-10 shrink-0 items-center gap-2 rounded-md px-3 text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground",
-              item.active && "text-foreground",
-            ]}
-            onclick={(event) => follow(event, item)}
-            onpointerenter={item.preload}
-            onpointerdown={item.preload}
-            onfocus={item.preload}
-          >
-            <item.icon class="size-3.5" />
-            <span>{item.label}</span>
-          </a>
-        {/each}
-      </div>
-    {/if}
   </div>
+
+  {#if activeItem?.items?.length}
+    <!-- The divider spans the whole bar, like the nav's own bottom border. -->
+    <div class="border-t">
+      <div class={wide ? "min-w-0" : "mx-auto max-w-5xl"}>
+        <div
+          class="scrollbar-none relative flex overflow-x-auto px-3 sm:px-5 lg:px-8"
+          bind:this={secondaryList}
+        >
+          {#if subIndicator}
+            <span
+              class={[
+                "pointer-events-none absolute bottom-0 left-0 h-0.5 bg-foreground",
+                indicatorReady &&
+                  "transition-[transform,width] duration-300 ease-[var(--ease-out-quint)]",
+              ]}
+              style:width={`${subIndicator.width}px`}
+              style:transform={`translateX(${subIndicator.left}px)`}
+              aria-hidden="true"
+            ></span>
+          {/if}
+          {#each activeItem.items as item (item.id)}
+            <a
+              href={item.href}
+              aria-current={item.active ? "page" : undefined}
+              class={[
+                "relative flex h-10 shrink-0 items-center gap-2 px-3 text-xs text-muted-foreground transition-colors hover:text-foreground",
+                item.active && "font-medium text-foreground",
+              ]}
+              onclick={(event) => follow(event, item)}
+              onpointerenter={item.preload}
+              onpointerdown={item.preload}
+              onfocus={item.preload}
+            >
+              <item.icon class="size-3.5" />
+              <span>{item.label}</span>
+            </a>
+          {/each}
+        </div>
+      </div>
+    </div>
+  {/if}
 </nav>
