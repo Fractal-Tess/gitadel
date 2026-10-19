@@ -32,7 +32,6 @@
   import IntegrationAddCard from "$lib/components/integrations/integration-add-card.svelte";
   import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
   import SettingsSectionHeader from "$lib/components/settings/settings-section-header.svelte";
-  import StorageOverview from "$lib/components/settings/storage-overview.svelte";
   import { formatBytes } from "$lib/format.js";
   import {
     invalidateAdminActivity,
@@ -294,14 +293,12 @@
     </Alert.Root>
   {/if}
 
-  <StorageOverview />
-
   <section class="flex flex-col gap-4" aria-labelledby="storage-targets-title">
     <SettingsSectionHeader
       id="storage-targets-title"
       icon={Database}
-      title="Storage targets"
-      description="Destinations Git LFS, the container registry, and backups can use. Choose which one each uses on the Git LFS and Container registry pages."
+      title="Destinations"
+      description="Where Git LFS, the container registry, and backups can keep data. Pick the one Git LFS and the registry use on their own tabs."
     />
     {#if loading}
       <div

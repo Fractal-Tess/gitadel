@@ -432,7 +432,7 @@
       <p class="text-sm text-muted-foreground">
         New destinations are added on the <a
           class="text-primary underline-offset-4 hover:underline"
-          href="/-/administration/storage">Storage page</a
+          href="/-/administration/targets">Storage targets page</a
         >.
       </p>
     </section>

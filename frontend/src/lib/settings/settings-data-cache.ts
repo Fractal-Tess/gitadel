@@ -126,6 +126,7 @@ export type AdminSettingsView =
   | "email"
   | "runners"
   | "storage"
+  | "targets"
   | "lfs"
   | "registry"
   | "backups"
@@ -405,8 +406,10 @@ export function preloadAdminSettingsView(
     view === "access"
       ? [loadAuthenticationConfiguration(scope), loadOidcProviders(scope)]
       : view === "storage"
-        ? [loadStorageOverview(scope), loadStorageTargets(scope)]
-        : view === "lfs"
+        ? [loadStorageOverview(scope)]
+        : view === "targets"
+          ? [loadStorageTargets(scope)]
+          : view === "lfs"
           ? [loadStorageTargets(scope), loadStorageDomain(scope, "lfs")]
           : view === "registry"
             ? [loadStorageTargets(scope), loadStorageDomain(scope, "registry")]

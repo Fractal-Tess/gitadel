@@ -11,6 +11,7 @@
   import EmailSettings from "$lib/components/settings/email-settings.svelte";
   import StorageDomainSettings from "$lib/components/settings/storage-domain-settings.svelte";
   import IntegritySettings from "$lib/components/settings/integrity-settings.svelte";
+  import StorageOverview from "$lib/components/settings/storage-overview.svelte";
   import StorageSettings from "$lib/components/settings/storage-settings.svelte";
   import { AccountSettingsState } from "$lib/settings/account-settings-state.svelte.js";
   import { systemRunnerScope } from "$lib/settings/account/actions-settings-state.svelte.js";
@@ -32,6 +33,7 @@
       requestedView === "email" ||
       requestedView === "runners" ||
       requestedView === "storage" ||
+      requestedView === "targets" ||
       requestedView === "lfs" ||
       requestedView === "registry" ||
       requestedView === "backups" ||
@@ -53,6 +55,8 @@
           ? "Runners"
           : view === "storage"
             ? "Storage overview"
+            : view === "targets"
+            ? "Storage targets"
             : view === "lfs"
               ? "Git LFS"
               : view === "registry"
@@ -75,7 +79,9 @@
           : view === "runners"
           ? "Provide runners that can execute workflows for every repository."
           : view === "storage"
-            ? "See how full each disk is, what Gitadel keeps where, and manage storage targets."
+            ? "See how full each disk is and what Gitadel keeps where."
+            : view === "targets"
+            ? "Add, check, and remove the destinations Git LFS and the container registry can use."
             : view === "lfs"
               ? "Inspect Git LFS usage and move objects between storage targets."
               : view === "registry"
@@ -146,6 +152,8 @@
   {:else if view === "runners"}
     <ActionsSettings state={actionsState} scope={systemRunnerScope} />
   {:else if view === "storage"}
+    <StorageOverview />
+  {:else if view === "targets"}
     <StorageSettings />
   {:else if view === "lfs"}
     <StorageDomainSettings

@@ -1,6 +1,7 @@
 import AppWindow from "@lucide/svelte/icons/app-window";
 import Activity from "@lucide/svelte/icons/activity";
 import ArchiveRestore from "@lucide/svelte/icons/archive-restore";
+import Boxes from "@lucide/svelte/icons/boxes";
 import Package from "@lucide/svelte/icons/package";
 import Database from "@lucide/svelte/icons/database";
 import HardDrive from "@lucide/svelte/icons/hard-drive";
@@ -42,6 +43,7 @@ export const adminSettingsSections = [
   { id: "email", label: "Email", icon: Mail },
   { id: "runners", label: "Runners", icon: Workflow },
   { id: "storage", label: "Storage", icon: Database },
+  { id: "targets", label: "Storage targets", icon: Boxes },
   { id: "lfs", label: "Git LFS", icon: HardDrive },
   { id: "registry", label: "Container registry", icon: Package },
   { id: "backups", label: "Backups", icon: ArchiveRestore },
@@ -56,7 +58,7 @@ export const adminSettingsSections = [
 export type AdminSettingsView = (typeof adminSettingsSections)[number]["id"];
 
 /**
- * The administration tabs. Eleven pages do not fit one bar, so related pages
+ * The administration tabs. Twelve pages do not fit one bar, so related pages
  * share a tab and appear on the bar's second row.
  */
 export const adminSettingsGroups = [
@@ -71,7 +73,7 @@ export const adminSettingsGroups = [
     id: "storage",
     label: "Storage",
     icon: Database,
-    views: ["storage", "lfs", "registry"],
+    views: ["storage", "targets", "lfs", "registry"],
   },
   {
     id: "operations",
