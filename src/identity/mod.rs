@@ -1257,6 +1257,10 @@ pub fn router() -> Router<IdentityState> {
             "/admin/storage/targets/test",
             post(admin::test_storage_target),
         )
+        .route(
+            "/admin/storage/overview",
+            get(admin_storage::overview::storage_overview),
+        )
         .route("/admin/storage/domains", get(admin_storage::list_domains))
         .route(
             "/admin/storage/domains/{domain}",

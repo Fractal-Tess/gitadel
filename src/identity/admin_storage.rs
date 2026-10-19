@@ -41,6 +41,7 @@ use crate::{
 };
 
 pub(super) mod legacy;
+pub(super) mod overview;
 #[cfg(test)]
 mod tests;
 

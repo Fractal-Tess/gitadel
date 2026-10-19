@@ -59,6 +59,12 @@ pub(super) const OPERATIONS: &[Operation] = &[
     )
     .response(Body::EventStream),
     Operation::new(
+        Method::Get,
+        "/admin/storage/overview",
+        TAG,
+        "Storage overview",
+    ),
+    Operation::new(
         Method::Post,
         "/admin/storage/registry/migrate",
         TAG,
