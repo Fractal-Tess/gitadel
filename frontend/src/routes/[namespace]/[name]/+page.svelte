@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { page } from "$app/state";
   import { resolve } from "$app/paths";
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
@@ -26,11 +27,15 @@
 
   const app = useAppState();
   const shell = useShellState();
+  // Query navigation replaces page.params too. Keep repository identity tied
+  // to primitive values so switching views does not recreate its state.
+  const namespace = $derived(page.params.namespace ?? "");
+  const name = $derived(page.params.name ?? "");
   const state = $derived.by(() => {
     app.authorizationScope;
     return new RepositoryPageState(
-      page.params.namespace ?? "",
-      page.params.name ?? "",
+      namespace,
+      name,
       app,
     );
   });
@@ -44,6 +49,13 @@
     const current = state;
     void current.initialize();
     return () => current.destroy();
+  });
+
+  // Router links change the query without changing repository identity.
+  // Initialize reads the initial location; subsequent links update its view.
+  $effect(() => {
+    page.url.search;
+    untrack(() => state.restoreLocation());
   });
 
   $effect(() => {

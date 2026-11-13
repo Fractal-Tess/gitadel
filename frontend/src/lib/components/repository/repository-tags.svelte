@@ -4,6 +4,7 @@
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
 
   let { state }: { state: RepositoryPageState } = $props();
+  const tags = $derived([...(state.browser.refs?.tags ?? [])].reverse());
 </script>
 
 <section class="overflow-hidden rounded-md border bg-card/25">
@@ -13,7 +14,7 @@
     <Tag class="size-4 text-muted-foreground" />Tags
   </header>
   <ul class="divide-y">
-    {#each state.browser.refs?.tags ?? [] as item, index (item.name)}
+    {#each tags as item, index (item.name)}
       <li
         class="motion-rise flex items-center justify-between gap-4 px-5 py-4"
         style:--stagger={index}
