@@ -6,6 +6,8 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ### Added
 
+- Contribution days show commit totals, repositories, contributors, and commit times in hover cards, with a link to the full day.
+
 - File viewers show line numbers and counts, selectable line ranges, commit-pinned sharing links, copying as code or Markdown, search, jump-to-line, per-file history, blame, a declaration outline, and issue creation from selected code. Markdown files offer Source and Preview views; reading preferences are remembered in the browser.
 - Repository sidebars support up to ten named website links. `GET` and `PUT /api/v1/repositories/{namespace}/{name}/websites` list and replace them; changes require repository management permission. `gtd repo websites list|set|clear` exposes the same controls, with `set OWNER/REPO 'Demo=https://example.com' 'Docs=https://docs.example.com'` preserving display order.
 - `GET …/snippet`, `…/blame`, and `…/symbols` accept `rev` and `path`; snippets and blame also accept inclusive `start` and `end` line numbers. The blob response includes `line_count`, and history accepts `path` to filter commits. `gtd repo file view|snippet|link|blame|symbols|history OWNER/REPO PATH` supports these features, with `--rev`, `--start`, `--end`, and history's `--page` where applicable. Text features support UTF-8 files up to 2 MiB; blame supports up to 20,000 lines. The outline recognizes common function and type declarations rather than providing language-server navigation.
@@ -21,6 +23,10 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ### Changed
 
+- Repository cards place Favorite beneath the icon and provide ZIP and TAR.GZ source downloads alongside clone URLs.
+
+- The left navigation collapse control sits at the top of its sidebar, matching the repository details panel.
+
 - The file viewer keeps its controls in the file's own header row: view mode, find, outline, display settings, and permanent link, with go to line, file history, copying, and the raw file in a menu. Find (Ctrl+F) and go to line (L) open as floating panels, display settings (wrap, font size, tab width) as a popover, and a selection shows its actions in a bar at the bottom of the code. Line ranges can be dragged down the gutter or extended with Shift and the arrow keys, Escape clears a selection, and search marks keep syntax colouring. Blame shows each commit once per run of lines with its age, and long files page inline. Markdown headings link to themselves, and a heading link opens the rendered view instead of the source.
 - Repository website links show their host, and an empty list offers **Add a website** to managers. Links can be reordered, addresses without a scheme get `https://`, and problems are explained beside the link before saving.
 - The Actions empty state lists the workflows found on the default branch, with any parse errors, when they have not run yet. Without workflows it offers a starter workflow to copy and names the folders it reads, in search order. Repository sidebar controls fit narrow columns, and long descriptions and website names wrap within the panel.
@@ -30,6 +36,8 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 - The administration pages share one section layout: the same headers, card surfaces, and list frames throughout.
 
 ### Fixed
+
+- Expanding or collapsing folders preserves the open file and its viewer state. JavaScript module files (`.mjs` and `.cjs`) receive JavaScript syntax highlighting.
 
 - Deploy on push to Dokploy works again. Since 0.23.0 push delivery sent the encrypted API key, which Dokploy refused.
 - Dokploy setup works with Dokploy 0.30. Gitadel no longer sends `null` for optional fields, which Dokploy rejects, and asking for the `production` environment selects the one every project already has instead of failing.

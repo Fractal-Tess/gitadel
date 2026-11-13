@@ -123,6 +123,14 @@
     year: "numeric",
   });
 
+  function sourceArchiveUrl(
+    repository: RepositoryOverviewItem,
+    format: "zip" | "tar.gz",
+  ): string {
+    const path = `/api/v1/repositories/${encodeURIComponent(repository.namespace)}/${encodeURIComponent(repository.name)}/source`;
+    return `${path}?${new URLSearchParams({ rev: repository.default_branch ?? "HEAD", format })}`;
+  }
+
   function updatedAt(value: string): string {
     return dateFormatter.format(new Date(value));
   }
@@ -468,6 +476,27 @@
         <ul class="divide-y">
           {#each visibleRepositories as repository, index (repository.id)}
             <li class="motion-rise relative" style:--stagger={index % 30}>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                class="absolute left-5 top-16 z-10 text-muted-foreground hover:text-amber-500"
+                onclick={() => void toggleFavorite(repository)}
+                disabled={favoritePending.includes(repository.id)}
+                aria-label={repository.favorited
+                  ? `Unfavorite ${repository.namespace}/${repository.name}`
+                  : `Favorite ${repository.namespace}/${repository.name}`}
+                title={repository.favorited
+                  ? "Remove from favorites"
+                  : "Add to favorites"}
+              >
+                <Heart
+                  class={[
+                    "size-4",
+                    repository.favorited && "fill-amber-400 text-amber-400",
+                    poppedFavorite === repository.id && "motion-pop",
+                  ]}
+                />
+              </Button>
               <a
                 class="group grid min-h-28 grid-cols-[minmax(0,1fr)] items-center gap-x-3 px-4 pr-20 hover:bg-accent/55 sm:grid-cols-[minmax(0,1fr)_11rem] lg:grid-cols-[minmax(0,1fr)_12rem]"
                 href={resolve("/[namespace]/[name]", {
@@ -596,9 +625,7 @@
                   </p>
                 </div>
               </a>
-              <!-- A flush rail rather than floating buttons: it fills
-                             the row edge to edge, so the three actions read as
-                             part of the card instead of hovering over it. -->
+              <!-- Clone URLs and source archives share the card's right rail. -->
               <div class="absolute inset-y-0 right-0 z-10 flex w-16 flex-col">
                 {#each ["ssh", "http"] as const as target, index (target)}
                   <Button
@@ -619,27 +646,19 @@
                     {/if}
                   </Button>
                 {/each}
-                <Button
-                  variant="ghost"
-                  size="xs"
-                  class="h-auto w-full flex-1 rounded-none border-t-border/60 border-l-border/60 text-muted-foreground hover:text-amber-500"
-                  onclick={() => void toggleFavorite(repository)}
-                  disabled={favoritePending.includes(repository.id)}
-                  aria-label={repository.favorited
-                    ? `Unfavorite ${repository.namespace}/${repository.name}`
-                    : `Favorite ${repository.namespace}/${repository.name}`}
-                  title={repository.favorited
-                    ? "Remove from favorites"
-                    : "Add to favorites"}
-                >
-                  <Heart
-                    class={[
-                      "size-4",
-                      repository.favorited && "fill-amber-400 text-amber-400",
-                      poppedFavorite === repository.id && "motion-pop",
-                    ]}
-                  />
-                </Button>
+                {#each ["zip", "tar.gz"] as const as format (format)}
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    class="h-auto w-full flex-1 rounded-none border-t-border/60 border-l-border/60 font-mono text-[10px] text-muted-foreground hover:text-foreground"
+                    href={sourceArchiveUrl(repository, format)}
+                    disabled={!repository.default_branch}
+                    data-sveltekit-reload
+                    aria-label={`Download ${format.toUpperCase()} source for ${repository.namespace}/${repository.name}`}
+                    title={`Download ${format.toUpperCase()} source`}
+                    >{format.toUpperCase()}</Button
+                  >
+                {/each}
               </div>
             </li>
           {:else}

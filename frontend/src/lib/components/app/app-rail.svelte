@@ -341,6 +341,30 @@
      instead of taking the whole viewport height the way shadcn's default
      dashboard layout does. -->
 <Sidebar.Root collapsible="icon" class="md:top-16 md:h-[calc(100svh-4rem)]">
+  <Sidebar.Header
+    class="hidden h-12 shrink-0 justify-center border-b px-2 py-1 md:flex"
+  >
+    <Sidebar.Menu>
+      <Sidebar.MenuItem
+        class="group-data-[collapsible=icon]:flex group-data-[collapsible=icon]:justify-center"
+      >
+        <Sidebar.MenuButton
+          class={menuRow}
+          aria-label={collapsed ? "Expand navigation" : "Collapse navigation"}
+          aria-expanded={!collapsed}
+          title={collapsed ? "Expand navigation" : undefined}
+          onclick={() => sidebar.toggle()}
+        >
+          {#if collapsed}
+            <PanelLeftOpen />
+          {:else}
+            <PanelLeftClose />
+            <span>Collapse sidebar</span>
+          {/if}
+        </Sidebar.MenuButton>
+      </Sidebar.MenuItem>
+    </Sidebar.Menu>
+  </Sidebar.Header>
   <!-- Inside a repository the rail is a repository menu and nothing else: the
        places groups would push the views most of the way down the column, and
        the header breadcrumb already leads back out to the namespace. -->
@@ -380,24 +404,6 @@
   </Sidebar.Content>
 
   <Sidebar.Footer class="mt-auto border-t">
-    <Sidebar.Menu>
-      <Sidebar.MenuItem class="hidden md:block">
-        <Sidebar.MenuButton
-          class={menuRow}
-          aria-label={collapsed ? "Expand navigation" : "Collapse navigation"}
-          aria-expanded={!collapsed}
-          title={collapsed ? "Expand navigation" : undefined}
-          onclick={() => sidebar.toggle()}
-        >
-          {#if collapsed}
-            <PanelLeftOpen />
-          {:else}
-            <PanelLeftClose />
-            <span>Collapse sidebar</span>
-          {/if}
-        </Sidebar.MenuButton>
-      </Sidebar.MenuItem>
-    </Sidebar.Menu>
     {@render linkMenu(manageLinks, "Manage", "manage")}
   </Sidebar.Footer>
 

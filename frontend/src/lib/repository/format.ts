@@ -29,6 +29,8 @@ const LANGUAGES: Record<string, string> = {
   html: "xml",
   java: "java",
   js: "javascript",
+  mjs: "javascript",
+  cjs: "javascript",
   jsx: "javascript",
   json: "json",
   json5: "json",

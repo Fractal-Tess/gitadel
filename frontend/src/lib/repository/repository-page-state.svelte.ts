@@ -505,11 +505,11 @@ export class RepositoryPageState {
   selectEntry(entry: Tree["entries"][number]): void {
     if (entry.kind !== "tree" && !this.stopEditing()) return;
     this.error = null;
-    this.browser.selectedPath = entry.path;
     if (entry.kind === "tree") {
       void this.browser.toggleDirectory(entry.path, this.revision);
       return;
     }
+    this.browser.selectedPath = entry.path;
     this.view = "overview";
     this.repositoryPath = entry.path;
     this.commitOid = "";

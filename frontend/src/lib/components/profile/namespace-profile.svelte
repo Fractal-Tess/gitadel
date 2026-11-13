@@ -92,8 +92,7 @@
       style:--stagger={2}
     >
       {#if activity}
-        {@const noun =
-          activity.scope === "person" ? "contribution" : "commit"}
+        {@const noun = activity.scope === "person" ? "contribution" : "commit"}
         <h2 class="mb-4 text-sm font-semibold">
           {#if activity.total_commits === 0}
             No {noun}s in the last year
@@ -102,7 +101,9 @@
             {noun}{activity.total_commits === 1 ? "" : "s"} in the last year
           {/if}
           <span class="font-normal text-muted-foreground">
-            · {activity.scope === "person" ? "in " : ""}{activity.repository_count}
+            · {activity.scope === "person"
+              ? "in "
+              : ""}{activity.repository_count}
             repositor{activity.repository_count === 1 ? "y" : "ies"}
           </span>
         </h2>
@@ -117,7 +118,12 @@
             or are signed with your SSH key.
           </p>
         {/if}
-        <ContributionGraph {activity} selected={date} href={dayHref} />
+        <ContributionGraph
+          {activity}
+          {namespace}
+          selected={date}
+          href={dayHref}
+        />
       {:else}
         <Skeleton class="mb-4 h-4 w-56" />
         <Skeleton class="h-28 w-full" />
