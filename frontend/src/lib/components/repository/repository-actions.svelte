@@ -1,13 +1,16 @@
 <script lang="ts">
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import Download from "@lucide/svelte/icons/download";
-  import Folder from "@lucide/svelte/icons/folder";
+  import Copy from "@lucide/svelte/icons/copy";
+  import FileCode from "@lucide/svelte/icons/file-code";
   import GitCommit from "@lucide/svelte/icons/git-commit";
   import PackageOpen from "@lucide/svelte/icons/package-open";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
   import RotateCcw from "@lucide/svelte/icons/rotate-ccw";
   import Workflow from "@lucide/svelte/icons/workflow";
   import { tick } from "svelte";
+  import { toast } from "svelte-sonner";
+  import { copyText } from "$lib/clipboard.js";
 
   import { actionEventLabel } from "$lib/api/actions.js";
   import ActionStatusBadge from "$lib/components/actions/action-status-badge.svelte";
@@ -19,6 +22,30 @@
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
 
   let { state: repository }: { state: RepositoryPageState } = $props();
+
+  // The runner Gitadel ships takes `docker` jobs and only remote actions
+  // pinned to a full commit; see INSTALL.md.
+  const starterPath = ".forgejo/workflows/ci.yml";
+  const starterWorkflow = `name: CI
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: docker
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: echo "Replace with your build and test commands"
+`;
+
+  async function copyStarter() {
+    try {
+      await copyText(starterWorkflow);
+      toast.success(`Starter workflow copied. Save it as ${starterPath}.`);
+    } catch {
+      toast.error("Could not copy to the clipboard.");
+    }
+  }
 
   let logElement: HTMLPreElement | null = $state(null);
   let followLog = $state(true);
@@ -304,37 +331,91 @@
   </div>
   {/key}
 {:else if !repository.actions.actionRuns || repository.actions.actionRuns.runs.length === 0}
+  {@const found = repository.actions.workflows?.workflows ?? []}
+  {@const branch = (repository.actions.workflows?.reference ?? "").replace(/^refs\/heads\//, "")}
   <Empty.Root class="mx-auto max-w-xl border border-dashed">
     <Empty.Header>
       <Empty.Media variant="icon">
         <Workflow />
       </Empty.Media>
-      <Empty.Title>No workflow runs</Empty.Title>
-      <Empty.Description>
-        Push a supported workflow to one of these folders to get started.
-      </Empty.Description>
+      {#if found.length}
+        <Empty.Title>No workflow runs yet</Empty.Title>
+        <Empty.Description>
+          {found.length === 1 ? "One workflow is" : `${found.length} workflows are`}
+          set up{branch ? ` on ${branch}` : ""}. Runs appear here after the next
+          push, on a schedule, or when started by hand.
+        </Empty.Description>
+      {:else}
+        <Empty.Title>Set up a workflow</Empty.Title>
+        <Empty.Description>
+          Commit a workflow file and push it. Jobs run with
+          <code>runs-on: docker</code> on push, on a schedule, or by hand.
+        </Empty.Description>
+      {/if}
     </Empty.Header>
-    <Empty.Content>
-      <ol
-        aria-label="Workflow folders in search order"
-        class="w-full divide-y overflow-hidden rounded-md border bg-muted/20 text-left"
-      >
-        {#each [".forgejo/workflows", ".gitea/workflows", ".github/workflows"] as folder, index (folder)}
-          <li class="flex items-center gap-3 px-3 py-2.5">
-            <span
-              aria-hidden="true"
-              class="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-medium tabular-nums text-muted-foreground"
-              >{index + 1}</span
+    <Empty.Content class="max-w-lg gap-3">
+      {#if found.length}
+        <ul
+          aria-label="Workflows found"
+          class="w-full divide-y overflow-hidden rounded-md border bg-muted/20 text-left"
+        >
+          {#each found as workflow (workflow.path)}
+            <li class="flex min-w-0 flex-col gap-0.5 px-3 py-2">
+              <span class="flex min-w-0 items-center gap-2 text-sm font-medium">
+                <FileCode aria-hidden="true" class="size-3.5 shrink-0 text-muted-foreground" />
+                <span class="truncate">{workflow.name}</span>
+                {#if workflow.dispatchable}
+                  <span class="ml-auto shrink-0 text-[11px] font-normal text-muted-foreground"
+                    >Can run by hand</span
+                  >
+                {/if}
+              </span>
+              <code class="min-w-0 break-all text-xs text-muted-foreground"
+                >{workflow.path}</code
+              >
+              {#if workflow.error}
+                <p class="text-xs text-destructive">{workflow.error}</p>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      {:else}
+        <div class="w-full overflow-hidden rounded-md border bg-background/55 text-left">
+          <div class="flex items-center justify-between gap-2 border-b px-3 py-1.5">
+            <code class="min-w-0 truncate text-xs text-muted-foreground"
+              >{starterPath}</code
             >
-            <Folder aria-hidden="true" class="size-4 shrink-0 text-muted-foreground" />
-            <code class="min-w-0 break-all text-xs sm:text-sm">{folder}</code>
-          </li>
-        {/each}
-      </ol>
-      <p class="text-xs leading-relaxed text-muted-foreground">
-        Checked from top to bottom. The first folder that exists is used.
-      </p>
-      {#if repository.actions.workflows?.can_dispatch && repository.actions.workflows.workflows.some((workflow) => workflow.dispatchable)}
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-label="Copy starter workflow"
+              title="Copy starter workflow"
+              onclick={() => void copyStarter()}><Copy /></Button
+            >
+          </div>
+          <pre class="overflow-x-auto p-3 text-xs leading-5"><code>{starterWorkflow}</code></pre>
+        </div>
+        {#if repository.actions.workflowsError}
+          <p class="text-xs text-destructive">{repository.actions.workflowsError}</p>
+        {/if}
+      {/if}
+      <div class="flex w-full flex-col items-start gap-2 text-xs text-muted-foreground">
+        <span>Read from the first folder that exists:</span>
+        <ol
+          aria-label="Workflow folders in search order"
+          class="flex w-full flex-col gap-1.5"
+        >
+          {#each [".forgejo/workflows", ".gitea/workflows", ".github/workflows"] as folder, index (folder)}
+            <li class="flex items-center gap-2">
+              <span aria-hidden="true" class="w-3 text-right tabular-nums">{index + 1}</span>
+              <code class="rounded bg-muted px-1 py-0.5 text-[11px] text-foreground/80"
+                >{folder}</code
+              >
+            </li>
+          {/each}
+        </ol>
+      </div>
+      {#if repository.actions.workflows?.can_dispatch && found.some((workflow) => workflow.dispatchable)}
         <RunWorkflowDialog actions={repository.actions} />
       {/if}
     </Empty.Content>

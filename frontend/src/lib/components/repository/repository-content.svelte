@@ -12,6 +12,7 @@
 
   import { Button } from "$lib/components/ui/button/index.js";
   import { repositoryImageUrl } from "$lib/api/repositories.js";
+  import { formatBytes } from "$lib/format.js";
   import { trustedHtml } from "$lib/repository/format.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
 
@@ -33,6 +34,14 @@
       : (pageState.browser.blob?.image ?? null),
   );
   const blob = $derived(pageState.browser.blob);
+  /** Text the code viewer reads, as opposed to images and unreadable blobs. */
+  const isTextBlob = $derived(
+    !!blob &&
+      !image &&
+      !blob.image_error &&
+      !blob.binary &&
+      !blob.too_large,
+  );
   const imageUrl = $derived(
     blob && image
       ? repositoryImageUrl(
@@ -127,6 +136,28 @@
   }
 </script>
 
+{#snippet fileTitle()}
+  {#if pageState.browser.blob}
+    {@const path = pageState.browser.blob.path}
+    {@const slash = path.lastIndexOf("/") + 1}
+    <MaterialFileIcon name={path} class="size-4 shrink-0" />
+    <!-- The directory gives way first, from its start, so the file name and
+         its nearest folders stay readable. -->
+    <span class="flex min-w-0 items-baseline font-semibold" title={path}>
+      {#if slash}<span
+          dir="rtl"
+          class="min-w-0 truncate font-normal text-muted-foreground"
+          ><bdi dir="ltr">{path.slice(0, slash)}</bdi></span
+        >{/if}<span class="max-w-full shrink-0 truncate">{path.slice(slash)}</span>
+    </span>
+    <span
+      class="hidden shrink-0 rounded border bg-muted/45 px-1.5 py-0.5 font-mono text-[10px] font-normal text-muted-foreground sm:inline"
+    >
+      {image ? image.mime_type : pageState.browser.selectedLanguage}
+    </span>
+  {/if}
+{/snippet}
+
 <!-- The metadata rail draws the divider on this column's right, so it only owns
      its own stacking border on narrow screens. -->
 <!-- Opening another file fades it in over the last one. -->
@@ -142,31 +173,22 @@
     {/key}
   {:else if pageState.browser.blob && pageState.editing?.path === pageState.browser.blob.path}
     <RepositoryFileEditor state={pageState} />
+  {:else if pageState.browser.blob && isTextBlob}
+    {#key `${pageState.browser.blob.commit_oid}:${pageState.browser.blob.path}`}
+      <RepositoryCodeViewer
+        state={pageState}
+        blob={pageState.browser.blob}
+        title={fileTitle}
+      />
+    {/key}
   {:else if pageState.browser.blob}
     <header
       class="flex min-h-12 shrink-0 flex-wrap items-center justify-between gap-3 border-b px-5 py-2 text-sm font-semibold"
     >
       <span class="flex min-w-0 items-center gap-2">
-        <MaterialFileIcon
-          name={pageState.browser.blob.path}
-          class="size-4 shrink-0"
-        />
-        <span class="truncate">{pageState.browser.blob.path}</span>
-        {#if image}
-          <span
-            class="shrink-0 rounded border bg-muted/45 px-1.5 py-0.5 font-mono text-[10px] font-normal text-muted-foreground"
-          >
-            {image.mime_type}
-          </span>
-        {:else}
-          <span
-            class="shrink-0 rounded border bg-muted/45 px-1.5 py-0.5 font-mono text-[10px] font-normal text-muted-foreground"
-          >
-            {pageState.browser.selectedLanguage}
-          </span>
-        {/if}
+        {@render fileTitle()}
         <span class="shrink-0 text-xs font-normal text-muted-foreground">
-          {pageState.browser.blob.size.toLocaleString()} B
+          {formatBytes(pageState.browser.blob.size)}
         </span>
       </span>
       <div class="flex items-center gap-1">
@@ -366,10 +388,6 @@
             >
           </div>
         </div>
-      {:else}
-        {#key `${pageState.browser.blob.commit_oid}:${pageState.browser.blob.path}`}
-          <RepositoryCodeViewer state={pageState} blob={pageState.browser.blob} />
-        {/key}
       {/if}
     </div>
   {:else if pageState.browser.readme?.rendered_html}
@@ -388,7 +406,7 @@
           revision: pageState.browser.readme.revision,
           commit_oid: pageState.browser.readme.commit_oid,
           path: pageState.browser.readme.path,
-        })}
+        }, { headingAnchors: true })}
       ></div>
     </div>
   {:else}

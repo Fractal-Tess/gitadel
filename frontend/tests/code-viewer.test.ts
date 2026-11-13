@@ -18,7 +18,12 @@ function expect(actual: unknown) {
   };
 }
 import {
+  blameHunkStarts,
   codePermalink,
+  compactAge,
+  headingSlugger,
+  isLineHash,
+  markMatches,
   highlightedLines,
   markdownSnippet,
   parseLineRange,
@@ -26,6 +31,11 @@ import {
   searchMarkup,
   sourceLines,
 } from "../src/lib/repository/code-viewer";
+import {
+  websiteHost,
+  websiteProblem,
+  withWebsiteScheme,
+} from "../src/lib/repository/websites";
 
 describe("source line sharing", () => {
   test("counts logical lines without creating a phantom trailing line", () => {
@@ -84,5 +94,104 @@ describe("source line sharing", () => {
     expect(readPreferences('{"wrap":true,"fontSize":100,"tabSize":1}')).toEqual(
       { wrap: true, fontSize: 24, tabSize: 2 },
     );
+  });
+  test("rendered links can drop plain and carry a heading hash", () => {
+    const url = new URL(
+      codePermalink("https://g.test", "o", "r", "abc", "README.md", null, {
+        plain: false,
+        hash: "#user-content-install",
+      }),
+    );
+    expect(url.searchParams.has("plain")).toBe(false);
+    expect(url.hash).toBe("#user-content-install");
+  });
+  test("only line hashes switch a rendered document to its source", () => {
+    expect(isLineHash("#L4")).toBe(true);
+    expect(isLineHash("#L4-L9")).toBe(true);
+    expect(isLineHash("#L4-9")).toBe(true);
+    expect(isLineHash("#user-content-install")).toBe(false);
+    expect(isLineHash("#Licence")).toBe(false);
+    expect(isLineHash("")).toBe(false);
+  });
+});
+
+describe("search marks inside highlighted markup", () => {
+  test("keeps syntax spans and marks case-insensitively", () => {
+    expect(
+      markMatches('<span class="k">return</span> Value', "value"),
+    ).toBe('<span class="k">return</span> <mark>Value</mark>');
+  });
+  test("splits a match that crosses a span boundary", () => {
+    expect(markMatches('<span class="s">&quot;hi</span>&quot;', 'hi"')).toBe(
+      '<span class="s">&quot;<mark>hi</mark></span><mark>&quot;</mark>',
+    );
+  });
+  test("matches decoded entities without breaking them", () => {
+    expect(markMatches("a &lt;b&gt; &amp; c", "<b>")).toBe(
+      "a <mark>&lt;b&gt;</mark> &amp; c",
+    );
+    expect(markMatches("x &amp;&amp; y", "&")).toBe(
+      "x <mark>&amp;&amp;</mark> y",
+    );
+  });
+  test("treats the query literally and leaves unmatched markup alone", () => {
+    expect(markMatches("a.*b", ".*")).toBe("a<mark>.*</mark>b");
+    expect(markMatches('<span class="c">x</span>', "zzz")).toBe(
+      '<span class="c">x</span>',
+    );
+    expect(markMatches("😀 ok", "ok")).toBe("😀 <mark>ok</mark>");
+  });
+});
+
+describe("blame and document helpers", () => {
+  test("starts a blame hunk where the commit changes", () => {
+    expect([
+      ...blameHunkStarts([
+        { line: 3, commit_oid: "b" },
+        { line: 1, commit_oid: "a" },
+        { line: 2, commit_oid: "a" },
+        { line: 4, commit_oid: "a" },
+      ]),
+    ]).toEqual([1, 3, 4]);
+  });
+  test("formats compact ages", () => {
+    expect(compactAge(1000, 1030)).toBe("now");
+    expect(compactAge(0, 3 * 86_400)).toBe("3d");
+    expect(compactAge(0, 400 * 86_400)).toBe("1y");
+  });
+  test("heading anchors remain unique when a title already includes a suffix", () => {
+    const slug = headingSlugger();
+    expect([slug("Intro"), slug("Intro-1"), slug("Intro")]).toEqual(["intro", "intro-1", "intro-2"]);
+  });
+  test("slugs headings like GitHub and numbers repeats", () => {
+    const slug = headingSlugger();
+    expect(slug("Getting Started!")).toBe("getting-started");
+    expect(slug("Getting started")).toBe("getting-started-1");
+    expect(slug("API: v2.0 & más")).toBe("api-v20--más");
+  });
+});
+
+describe("website links", () => {
+  test("adds https to bare hosts and reports the host", () => {
+    expect(withWebsiteScheme(" docs.example.com/x ")).toBe(
+      "https://docs.example.com/x",
+    );
+    expect(withWebsiteScheme("http://a.test")).toBe("http://a.test");
+    expect(withWebsiteScheme("localhost:3030/demo")).toBe("https://localhost:3030/demo");
+    expect(withWebsiteScheme("example.com:8443/docs")).toBe("https://example.com:8443/docs");
+    expect(websiteHost("example.com/demo")).toBe("example.com");
+    expect(websiteHost("javascript:alert(1)")).toBe("");
+  });
+  test("explains links the server would reject", () => {
+    expect(websiteProblem("", "", [])).toBe("");
+    expect(websiteProblem("", "Docs", [])).toContain("Add a URL");
+    expect(websiteProblem("ftp://a.test", "", [])).toContain("http");
+    expect(websiteProblem("https://u:p@a.test", "", [])).toContain(
+      "username",
+    );
+    expect(websiteProblem("a.test", "", ["https://a.test/"])).toContain(
+      "already",
+    );
+    expect(websiteProblem("https://a.test/docs", "", [])).toBe("");
   });
 });

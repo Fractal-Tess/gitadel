@@ -21,7 +21,9 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ### Changed
 
-- Workflow empty states list each supported folder on its own numbered row, in search order. Repository sidebar controls fit narrow columns, and long descriptions and website names wrap within the panel.
+- The file viewer keeps its controls in the file's own header row: view mode, find, outline, display settings, and permanent link, with go to line, file history, copying, and the raw file in a menu. Find (Ctrl+F) and go to line (L) open as floating panels, display settings (wrap, font size, tab width) as a popover, and a selection shows its actions in a bar at the bottom of the code. Line ranges can be dragged down the gutter or extended with Shift and the arrow keys, Escape clears a selection, and search marks keep syntax colouring. Blame shows each commit once per run of lines with its age, and long files page inline. Markdown headings link to themselves, and a heading link opens the rendered view instead of the source.
+- Repository website links show their host, and an empty list offers **Add a website** to managers. Links can be reordered, addresses without a scheme get `https://`, and problems are explained beside the link before saving.
+- The Actions empty state lists the workflows found on the default branch, with any parse errors, when they have not run yet. Without workflows it offers a starter workflow to copy and names the folders it reads, in search order. Repository sidebar controls fit narrow columns, and long descriptions and website names wrap within the panel.
 
 - The administration tabs are grouped into General, People, Storage, Operations, and Activity, with the pages of the open group on a second row, so the bar fits on narrow screens. The open page is underlined on both rows.
 - Storage targets moved to their own **Storage targets** tab next to the storage overview.
@@ -35,6 +37,7 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 - A Dokploy Gitea provider configured for another forge can no longer be connected, and one already connected says so instead of failing with "fetch failed". A provider counts as ready only once Dokploy holds a token for it.
 - Creating a Dokploy resource checks repository access first and removes the resource again if its source cannot be attached.
 - The repository logo picker suggests at most nine images, and only ones with a branding name, README reference, or root or web-asset location.
+- Relative links between Markdown files open the linked file again instead of the repository root.
 - Connection cards show their full location, such as a storage target's path, instead of cutting it off.
 
 ## [0.23.0] - 2026-10-04

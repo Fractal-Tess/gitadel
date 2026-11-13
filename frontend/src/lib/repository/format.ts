@@ -2,6 +2,7 @@ import { buttonVariants } from "$lib/components/ui/button/index.js";
 import { copyText } from "$lib/clipboard.js";
 import { formatBytes, formatDateTime } from "$lib/format.js";
 import { cn } from "$lib/utils.js";
+import { headingSlugger } from "$lib/repository/code-viewer.js";
 
 const MAX_MARKDOWN_HIGHLIGHT_CHARACTERS = 50_000;
 const DAY_FORMATTER = new Intl.DateTimeFormat(undefined, {
@@ -253,6 +254,7 @@ function rewriteMarkdownReferences(node: HTMLElement, source: MarkdownSource) {
     if (!resolved) continue;
     const parameters = new URLSearchParams({
       rev: source.commit_oid ?? source.revision,
+      path: resolved.path,
     });
     anchor.href = `${repository}?${parameters}${resolved.hash}`;
   }
@@ -344,14 +346,76 @@ function addCodeCopyButton(code: HTMLElement, source: string): () => void {
   };
 }
 
+/**
+ * Gives each rendered heading a GitHub-style `user-content-` id and turns its
+ * text into a link to itself, so a section can be shared by its hash. The
+ * heading keeps its own accessible name; the `#` marker is decoration.
+ */
+function addHeadingAnchors(node: HTMLElement) {
+  const slug = headingSlugger();
+  for (const heading of node.querySelectorAll<HTMLElement>(
+    "h1, h2, h3, h4, h5, h6",
+  )) {
+    const generated = slug(heading.textContent?.trim() ?? "");
+    if (!heading.id && generated) heading.id = `user-content-${generated}`;
+    // A heading that already links elsewhere keeps that link.
+    if (!heading.id || heading.querySelector("a")) continue;
+    heading.classList.add("scroll-mt-4");
+    const anchor = document.createElement("a");
+    anchor.href = `#${heading.id}`;
+    anchor.className =
+      "group/heading font-[inherit] text-inherit no-underline hover:underline hover:decoration-muted-foreground/50 hover:underline-offset-4";
+    anchor.append(...heading.childNodes);
+    const marker = document.createElement("span");
+    marker.setAttribute("aria-hidden", "true");
+    marker.textContent = "#";
+    marker.className =
+      "ml-2 inline-block font-normal text-muted-foreground opacity-0 transition-opacity group-hover/heading:opacity-100 group-focus-visible/heading:opacity-100";
+    anchor.append(marker);
+    heading.append(anchor);
+  }
+}
+
+/**
+ * The rendered element a location hash points at. Links written as `#install`
+ * reach the `user-content-install` id rendered Markdown actually carries.
+ */
+export function markdownHashTarget(
+  node: ParentNode,
+  hash: string,
+): HTMLElement | null {
+  if (!hash || hash === "#") return null;
+  let id: string;
+  try {
+    id = decodeURIComponent(hash.slice(1));
+  } catch {
+    return null;
+  }
+  const escape = (value: string) =>
+    typeof CSS !== "undefined" && CSS.escape
+      ? CSS.escape(value)
+      : value.replace(/["\\]/g, "\\$&");
+  return (
+    node.querySelector<HTMLElement>(`[id="${escape(id)}"]`) ??
+    node.querySelector<HTMLElement>(`[id="${escape(`user-content-${id}`)}"]`)
+  );
+}
+
 export function trustedHtml(
   html: string,
   markdownSource?: MarkdownSource,
+  options: { headingAnchors?: boolean } = {},
 ): (node: HTMLElement) => void {
   return (node) => {
     let cancelled = false;
     node.innerHTML = html;
     if (markdownSource) rewriteMarkdownReferences(node, markdownSource);
+    if (options.headingAnchors) {
+      addHeadingAnchors(node);
+      markdownHashTarget(node, window.location.hash)?.scrollIntoView({
+        block: "start",
+      });
+    }
     const blocks = Array.from(
       node.querySelectorAll<HTMLElement>("pre code"),
     ).map((code) => ({
