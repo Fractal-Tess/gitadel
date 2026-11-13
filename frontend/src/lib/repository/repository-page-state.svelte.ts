@@ -303,7 +303,7 @@ export class RepositoryPageState {
           );
           break;
         case "history":
-          await this.browser.loadHistory(this.revision, this.historyPage, init);
+          await this.browser.loadHistory(this.revision, this.historyPage, init, this.repositoryPath);
           break;
         case "commit":
           if (!this.commitOid) throw new Error("No commit was selected.");

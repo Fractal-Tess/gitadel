@@ -4,6 +4,7 @@
   import Minus from "@lucide/svelte/icons/minus";
   import Pencil from "@lucide/svelte/icons/pencil";
   import Plus from "@lucide/svelte/icons/plus";
+  import RepositoryCodeViewer from "$lib/components/repository/repository-code-viewer.svelte";
   import RepositorySubmodule from "$lib/components/repository/repository-submodule.svelte";
   import RepositoryFileEditor from "$lib/components/repository/repository-file-editor.svelte";
   import RepositoryLfs from "$lib/components/repository/repository-lfs.svelte";
@@ -188,17 +189,6 @@
               onclick={() => void showSource()}>Source</Button
             >
           {/if}
-        {:else if !pageState.browser.blob.binary && !pageState.browser.blob.too_large}
-          <Button
-            variant="ghost"
-            size="sm"
-            class={pageState.browser.wrapLines
-              ? "gap-1.5 bg-accent text-foreground"
-              : "gap-1.5 text-muted-foreground"}
-            onclick={() =>
-              (pageState.browser.wrapLines = !pageState.browser.wrapLines)}
-            >Wrap</Button
-          >
         {/if}
         <Button
           variant="ghost"
@@ -222,7 +212,7 @@
     </header>
 
     <div
-      class="min-h-0 flex-1 overflow-x-auto xl:overflow-auto xl:overscroll-contain"
+      class="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto xl:overscroll-contain"
     >
       {#if image}
         <div class="grid min-h-full content-start gap-3 p-4">
@@ -376,23 +366,10 @@
             >
           </div>
         </div>
-      {:else if pageState.browser.blob.rendered_html}
-        <div
-          class="prose max-w-none p-6 prose-img:my-0 prose-img:inline-block prose-code:before:content-none prose-code:after:content-none dark:prose-invert lg:p-8"
-          {@attach trustedHtml(pageState.browser.blob.rendered_html, {
-            namespace: pageState.namespace,
-            name: pageState.name,
-            revision: pageState.browser.blob.revision,
-            commit_oid: pageState.browser.blob.commit_oid,
-            path: pageState.browser.blob.path,
-          })}
-        ></div>
       {:else}
-        <pre
-          class={pageState.browser.wrapLines
-            ? "whitespace-pre-wrap break-words bg-background/35 p-5 font-mono text-xs leading-5"
-            : "w-max min-w-full whitespace-pre bg-background/35 p-5 font-mono text-xs leading-5"}><code
-            {@attach trustedHtml(pageState.browser.highlighted)}></code></pre>
+        {#key `${pageState.browser.blob.commit_oid}:${pageState.browser.blob.path}`}
+          <RepositoryCodeViewer state={pageState} blob={pageState.browser.blob} />
+        {/key}
       {/if}
     </div>
   {:else if pageState.browser.readme?.rendered_html}

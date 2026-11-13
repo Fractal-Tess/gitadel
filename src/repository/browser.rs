@@ -81,6 +81,8 @@ pub struct BrowseQuery {
 
 #[derive(Deserialize)]
 pub struct HistoryQuery {
+    #[serde(default)]
+    path: String,
     #[serde(default, deserialize_with = "blank_as_none")]
     rev: Option<String>,
     #[serde(default = "default_page")]
@@ -155,6 +157,7 @@ pub struct BlobResponse {
     rendered_html: Option<String>,
     image: Option<super::image::ImageMetadata>,
     image_error: Option<String>,
+    line_count: Option<usize>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -622,6 +625,7 @@ pub async fn blob(
             lfs,
             binary,
             too_large,
+            line_count: text.as_deref().map(|text| text.lines().count()),
             content: text,
             rendered_html,
             image: None,
@@ -864,6 +868,7 @@ pub async fn history(
         .rev
         .or_else(|| repository.default_branch.clone())
         .ok_or_else(ApiError::not_found)?;
+    let file_path = normalize_browse_path(&query.path)?;
     let page = query.page.max(1);
     let per_page = query.per_page.clamp(1, 100);
     let path = state.repository_path(&repository);
@@ -880,6 +885,11 @@ pub async fn history(
             [tip],
             ReachableCommitOptions::new(),
             |metadata| {
+                if !file_path.is_empty()
+                    && !super::code::touches_path(git, metadata.oid, &file_path)?
+                {
+                    return Ok(StreamControl::Continue);
+                }
                 if seen >= start && seen < end {
                     selected.push(metadata.oid);
                 }
@@ -988,7 +998,7 @@ const HISTORY_CONCURRENCY: usize = 4;
 /// else. Requests beyond the bound wait their turn.
 static HISTORY_SLOTS: Semaphore = Semaphore::const_new(HISTORY_CONCURRENCY);
 
-async fn history_slot() -> Result<SemaphorePermit<'static>, ApiError> {
+pub(super) async fn history_slot() -> Result<SemaphorePermit<'static>, ApiError> {
     HISTORY_SLOTS.acquire().await.map_err(ApiError::internal)
 }
 
@@ -2021,6 +2031,7 @@ mod tests {
                 HeaderMap::new(),
                 CookieJar::new(),
                 Query(HistoryQuery {
+                    path: String::new(),
                     rev: None,
                     page: 1,
                     per_page: 30,

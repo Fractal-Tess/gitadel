@@ -6,6 +6,10 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ### Added
 
+- File viewers show line numbers and counts, selectable line ranges, commit-pinned sharing links, copying as code or Markdown, search, jump-to-line, per-file history, blame, a declaration outline, and issue creation from selected code. Markdown files offer Source and Preview views; reading preferences are remembered in the browser.
+- Repository sidebars support up to ten named website links. `GET` and `PUT /api/v1/repositories/{namespace}/{name}/websites` list and replace them; changes require repository management permission. `gtd repo websites list|set|clear` exposes the same controls, with `set OWNER/REPO 'Demo=https://example.com' 'Docs=https://docs.example.com'` preserving display order.
+- `GET …/snippet`, `…/blame`, and `…/symbols` accept `rev` and `path`; snippets and blame also accept inclusive `start` and `end` line numbers. The blob response includes `line_count`, and history accepts `path` to filter commits. `gtd repo file view|snippet|link|blame|symbols|history OWNER/REPO PATH` supports these features, with `--rev`, `--start`, `--end`, and history's `--page` where applicable. Text features support UTF-8 files up to 2 MiB; blame supports up to 20,000 lines. The outline recognizes common function and type declarations rather than providing language-server navigation.
+
 - `GET /api/v1/openapi.json` describes the whole `/api/v1` API as an OpenAPI 3.1 document: every operation with its parameters, authentication, and status codes, and typed request and response schemas for repositories, content, collaborators, branch protection, issues, releases, commit statuses, webhooks, accounts, organizations, namespaces, and deployments. The **API** page in the sidebar renders it, with request examples and a request runner that uses your session. A test fails when a route is added without a description.
 - OAuth clients can renew access tokens with the `refresh_token` grant. Token responses carry a `refresh_token` that is valid for a year and single use: each refresh returns a new pair. Revoking an application's authorization also invalidates its refresh tokens.
 - Dokploy setup is guided and checked step by step. Connecting Gitadel creates the Dokploy Gitea provider with tokens Gitadel issues itself, so there is no separate authorization in Dokploy, then confirms that Dokploy can list repositories through it. When Dokploy cannot reach the configured address, Gitadel tries its public URL and the addresses its host name resolves to, and keeps the first that works. `POST /api/v1/namespaces/{slug}/integrations/{id}/source/verify` repeats the check.
@@ -16,6 +20,8 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 - **Administration → Storage → Overview** shows every disk Gitadel writes to: its size, what is free, what Gitadel uses and what other files use, with a breakdown into repositories, the database, Git LFS, the container registry, and workflow artifacts, and where each lives. Object storage and PostgreSQL are listed separately because they sit off the host. `GET /api/v1/admin/storage/overview` returns the same figures.
 
 ### Changed
+
+- Workflow empty states list each supported folder on its own numbered row, in search order. Repository sidebar controls fit narrow columns, and long descriptions and website names wrap within the panel.
 
 - The administration tabs are grouped into General, People, Storage, Operations, and Activity, with the pages of the open group on a second row, so the bar fits on narrow screens. The open page is underlined on both rows.
 - Storage targets moved to their own **Storage targets** tab next to the storage overview.

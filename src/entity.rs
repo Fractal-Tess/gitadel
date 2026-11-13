@@ -2037,3 +2037,18 @@ pub mod registry_tag {
 
     impl ActiveModelBehavior for ActiveModel {}
 }
+
+/// Ordered hosted links stored separately from imported source metadata.
+pub mod repository_website {
+    use super::*;
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+    #[sea_orm(table_name = "repository_websites")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub repository_id: Uuid,
+        pub links: String,
+    }
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+    impl ActiveModelBehavior for ActiveModel {}
+}

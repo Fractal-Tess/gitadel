@@ -7,6 +7,7 @@ use crate::repository::{
     registry::RegistryResponse,
     resources::{CreateRepositoryRequest, RepositoryResponse, UpdateRepositoryControlRequest},
     topics::{ReplaceTopicsRequest, TopicsResponse},
+    websites::{UpdateWebsites, Website},
 };
 
 const TAG: &str = "Repositories";
@@ -20,6 +21,10 @@ const FILTER: &[(&str, &str)] = &[
 ];
 
 pub(super) const OPERATIONS: &[Operation] = &[
+    Operation::new(Method::Get, "/repositories/{namespace}/{name}/websites", TAG, "List hosted website links")
+        .auth(Auth::Optional).response(json_list::<Website>()),
+    Operation::new(Method::Put, "/repositories/{namespace}/{name}/websites", TAG, "Replace hosted websites in display order; requires repository management")
+        .request(json::<UpdateWebsites>()).response(json_list::<Website>()),
     Operation::new(Method::Get, "/repositories", TAG, "List the repositories the caller can read")
         .auth(Auth::Optional)
         .response(json_list::<RepositoryResponse>())

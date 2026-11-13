@@ -20,7 +20,7 @@
 <!-- Matches the height of the tree and content headers so the three columns
      share one unbroken divider under the app header. -->
 <section
-  class="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-b px-4 py-2"
+  class="flex min-h-12 min-w-0 shrink-0 flex-wrap items-center gap-1.5 border-b px-3 py-2"
 >
   <!-- The code view heads its own file tree with the branch picker, so the
        toolbar only carries it for the views that have no tree column. -->
@@ -33,18 +33,21 @@
       }}
     >
       <Select.Trigger
-        class="min-w-0 flex-1 shadow-none"
-        aria-label="Switch branch"
+        class="w-8 min-w-0 shrink-0 justify-center px-0 shadow-none [&>svg]:hidden"
+        aria-label={`Switch branch (current: ${pageState.revision})`}
+        title={pageState.revision}
       >
         <span class="flex min-w-0 items-center gap-2">
           <GitBranch class="size-3.5 shrink-0 text-muted-foreground" />
-          <span class="truncate">{pageState.revision}</span>
+          <span class="sr-only">{pageState.revision}</span>
         </span>
       </Select.Trigger>
       <Select.Content align="end">
-        {#each pageState.browser.refs?.branches ?? [] as branch (branch.name)}
-          <Select.Item value={branch.name}>{branch.name}</Select.Item>
-        {/each}
+        <Select.Group>
+          {#each pageState.browser.refs?.branches ?? [] as branch (branch.name)}
+            <Select.Item value={branch.name}>{branch.name}</Select.Item>
+          {/each}
+        </Select.Group>
       </Select.Content>
     </Select.Root>
   {/if}
@@ -58,7 +61,7 @@
   {/if}
   {#if pageState.repository?.visibility === "private"}
     <span
-      class="inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs font-medium text-muted-foreground"
+      class="inline-flex shrink-0 items-center gap-1.5 rounded border px-2 py-1 text-xs font-medium text-muted-foreground"
     >
       <LockKeyhole class="size-3" />Private
     </span>
@@ -76,7 +79,7 @@
   <Button
     size="sm"
     variant={pageState.repository?.favorited ? "secondary" : "outline"}
-    class="ml-auto gap-2 max-sm:h-11"
+    class="ml-auto shrink-0 gap-1.5"
     aria-pressed={pageState.repository?.favorited ?? false}
     disabled={pageState.settings.favoritePending}
     onclick={() => {

@@ -258,6 +258,21 @@ describe("settings data cache", () => {
 });
 
 describe("repository data cache", () => {
+  test("keeps whole-repository and individual file histories separate", async () => {
+    const paths: string[] = [];
+    globalThis.fetch = ((input: string | URL | Request) => {
+      paths.push(String(input));
+      return Promise.resolve(Response.json(historyResponse));
+    }) as typeof fetch;
+    await loadRepositoryHistory("acme", "widgets", "main", scope, 1);
+    await loadRepositoryHistory("acme", "widgets", "main", scope, 1, false, "src/a.ts");
+    await loadRepositoryHistory("acme", "widgets", "main", scope, 1, false, "src/b.ts");
+    await loadRepositoryHistory("acme", "widgets", "main", scope, 1, false, "src/a.ts");
+    assert.equal(paths.length, 3);
+    assert.equal(new URL(paths[1], "https://gitadel.test").searchParams.get("path"), "src/a.ts");
+    assert.equal(new URL(paths[2], "https://gitadel.test").searchParams.get("path"), "src/b.ts");
+  });
+
   test("deduplicates revision-keyed history within one scope", async () => {
     const paths: string[] = [];
     globalThis.fetch = ((input: string | URL | Request) => {

@@ -196,6 +196,7 @@ export class RepositoryBrowserState {
     revision: string,
     page: number,
     init: RequestInit,
+    path = "",
   ): Promise<void> {
     const history = await loadRepositoryHistory(
       this.namespace,
@@ -203,6 +204,8 @@ export class RepositoryBrowserState {
       revision,
       this.scope,
       page,
+      false,
+      path,
     );
     if (init.signal?.aborted || this.#destroyed || !this.isScopeCurrent())
       return;

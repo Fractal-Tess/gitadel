@@ -16,11 +16,15 @@
     open = $bindable(false),
     state: repository,
     issue = null,
+    initialTitle = "",
+    initialBody = "",
   }: {
     open?: boolean;
     state: RepositoryPageState;
     /** When set, the dialog edits this issue instead of composing a new one. */
     issue?: Issue | null;
+    initialTitle?: string;
+    initialBody?: string;
   } = $props();
 
   let title = $state("");
@@ -37,8 +41,8 @@
   // Prefill the draft each time the dialog opens.
   $effect(() => {
     if (!open) return;
-    title = issue?.title ?? "";
-    body = issue?.body ?? "";
+    title = issue?.title ?? initialTitle;
+    body = issue?.body ?? initialBody;
     assignee = issue?.assignee?.username ?? "";
     selectedLabelIds = issue ? issue.labels.map((label) => label.id) : [];
     pendingAttachmentIds = [];

@@ -37,9 +37,10 @@ function loadCached<T>(key: string, loader: () => Promise<T>, refresh = false): 
   return entry.promise;
 }
 
-export function loadRepositoryHistory(namespace: string, name: string, revision: string, scope: AuthorizationCacheScope, page: number, refresh = false): Promise<History> {
+export function loadRepositoryHistory(namespace: string, name: string, revision: string, scope: AuthorizationCacheScope, page: number, refresh = false, path = ""): Promise<History> {
   const query = new URLSearchParams({ rev: revision, page: String(page), per_page: "30" });
-  return loadCached(scopedDatasetKey(scope, namespace, name, `history:${revision}:${page}`), () => requestJson(`${repositoryApi(namespace, name, "/history")}?${query}`, historySchema), refresh);
+  if (path) query.set("path", path);
+  return loadCached(scopedDatasetKey(scope, namespace, name, `history:${revision}:${page}:${path}`), () => requestJson(`${repositoryApi(namespace, name, "/history")}?${query}`, historySchema), refresh);
 }
 export function loadRepositoryActionRuns(namespace: string, name: string, _scope: AuthorizationCacheScope, page: number, commit = "", _refresh = false): Promise<ActionRuns> {
   const query = new URLSearchParams({ page: String(page), per_page: "25" });

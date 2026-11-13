@@ -51,6 +51,7 @@ mod m20260904_000050_integrity_settings;
 mod m20260915_000051_repository_icons;
 mod m20260918_000052_default_branch_selection;
 mod m20260918_000053_repository_icon_discovery;
+mod m20261113_000083_repository_websites;
 
 mod m20260918_000054_registry_storage;
 mod m20260921_000055_attachment_quota_indexes;
@@ -169,6 +170,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261003_000079_oauth_access_token_expiry::Migration),
             Box::new(m20261003_000081_repository_cache_kinds::Migration),
             Box::new(m20261017_000082_oauth_refresh_tokens::Migration),
+            Box::new(m20261113_000083_repository_websites::Migration),
         ]
     }
 }

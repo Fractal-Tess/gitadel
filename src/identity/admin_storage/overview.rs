@@ -171,10 +171,7 @@ fn path_category(key: &'static str, label: &'static str, path: &Path, bytes: u64
 
 /// SQLite is a file on one of the volumes; PostgreSQL reports its own size
 /// but lives wherever its server does.
-async fn database_category(
-    state: &IdentityState,
-    url: &str,
-) -> Result<Option<Category>, ApiError> {
+async fn database_category(state: &IdentityState, url: &str) -> Result<Option<Category>, ApiError> {
     let database = state.database();
     match database.get_database_backend() {
         DatabaseBackend::Sqlite => {

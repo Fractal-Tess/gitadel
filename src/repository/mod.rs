@@ -2,6 +2,9 @@
 mod access_tests;
 pub(crate) mod analysis;
 pub(crate) mod browser;
+pub(crate) mod code;
+#[cfg(test)]
+mod code_tests;
 pub(crate) mod deploy_detect;
 pub(crate) mod deploy_keys;
 pub(crate) mod files;
@@ -41,6 +44,7 @@ pub(crate) mod statuses;
 pub(crate) mod topics;
 pub(crate) mod webhook_events;
 pub(crate) mod webhooks;
+pub(crate) mod websites;
 pub(crate) use browser::{read_git, render_markdown};
 
 pub(crate) use git_http::GitHttpState;
@@ -1093,8 +1097,21 @@ pub fn router() -> Router<RepositoryState> {
             get(profile::list_pins).put(profile::set_pins),
         )
         .route("/repositories/{namespace}/{name}/tree", get(browser::tree))
+        .route(
+            "/repositories/{namespace}/{name}/websites",
+            get(websites::list).put(websites::update),
+        )
         .route("/repositories/{namespace}/{name}/blob", get(browser::blob))
         .route("/repositories/{namespace}/{name}/raw", get(browser::raw))
+        .route(
+            "/repositories/{namespace}/{name}/snippet",
+            get(code::snippet),
+        )
+        .route(
+            "/repositories/{namespace}/{name}/symbols",
+            get(code::symbols),
+        )
+        .route("/repositories/{namespace}/{name}/blame", get(code::blame))
         .route(
             "/repositories/{namespace}/{name}/image",
             get(image::preview),

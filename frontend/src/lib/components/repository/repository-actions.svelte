@@ -1,6 +1,7 @@
 <script lang="ts">
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import Download from "@lucide/svelte/icons/download";
+  import Folder from "@lucide/svelte/icons/folder";
   import GitCommit from "@lucide/svelte/icons/git-commit";
   import PackageOpen from "@lucide/svelte/icons/package-open";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
@@ -310,16 +311,33 @@
       </Empty.Media>
       <Empty.Title>No workflow runs</Empty.Title>
       <Empty.Description>
-        Push a supported workflow in <code>.forgejo/workflows</code>,
-        <code>.gitea/workflows</code>, or <code>.github/workflows</code>. The
-        first directory that exists takes precedence.
+        Push a supported workflow to one of these folders to get started.
       </Empty.Description>
     </Empty.Header>
-    {#if repository.actions.workflows?.can_dispatch && repository.actions.workflows.workflows.some((workflow) => workflow.dispatchable)}
-      <Empty.Content>
+    <Empty.Content>
+      <ol
+        aria-label="Workflow folders in search order"
+        class="w-full divide-y overflow-hidden rounded-md border bg-muted/20 text-left"
+      >
+        {#each [".forgejo/workflows", ".gitea/workflows", ".github/workflows"] as folder, index (folder)}
+          <li class="flex items-center gap-3 px-3 py-2.5">
+            <span
+              aria-hidden="true"
+              class="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-medium tabular-nums text-muted-foreground"
+              >{index + 1}</span
+            >
+            <Folder aria-hidden="true" class="size-4 shrink-0 text-muted-foreground" />
+            <code class="min-w-0 break-all text-xs sm:text-sm">{folder}</code>
+          </li>
+        {/each}
+      </ol>
+      <p class="text-xs leading-relaxed text-muted-foreground">
+        Checked from top to bottom. The first folder that exists is used.
+      </p>
+      {#if repository.actions.workflows?.can_dispatch && repository.actions.workflows.workflows.some((workflow) => workflow.dispatchable)}
         <RunWorkflowDialog actions={repository.actions} />
-      </Empty.Content>
-    {/if}
+      {/if}
+    </Empty.Content>
   </Empty.Root>
 {:else}
   <div class="motion-view mx-auto max-w-5xl">

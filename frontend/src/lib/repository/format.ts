@@ -143,12 +143,7 @@ export function languageLabel(path: string): string {
   return language ? (LANGUAGE_LABELS[language] ?? language) : "Plain text";
 }
 
-export function escapeHtml(source: string): string {
-  return source
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
-}
+export { escapeHtml } from "./escape-html.js";
 
 export function labelForeground(color: string): string {
   const channels = [0, 2, 4].map((offset) => {

@@ -108,6 +108,7 @@ export const imageMetadataSchema = z.object({
 });
 
 export const blobSchema = z.object({
+  line_count: z.number().int().nonnegative().nullable().optional(),
   revision: z.string(),
   commit_oid: z.string(),
   path: z.string(),
@@ -256,3 +257,13 @@ export type CommitRef = z.infer<typeof commitRefSchema>;
 export type History = z.infer<typeof historySchema>;
 export type Diff = z.infer<typeof diffSchema>;
 export type LanguageStat = z.infer<typeof languageStatSchema>;
+
+export const blameSchema = z.object({
+  commit_oid: z.string(), path: z.string(),
+  lines: z.array(z.object({ line: z.number().int().positive(), commit_oid: z.string(), original_path: z.string(), original_line: z.number().int().positive() })),
+  commits: z.record(z.string(), z.object({ author: z.string(), timestamp: z.number(), title: z.string() })),
+});
+export const codeSymbolsSchema = z.object({
+  commit_oid: z.string(), path: z.string(),
+  symbols: z.array(z.object({ name: z.string(), kind: z.string(), line: z.number().int().positive() })),
+});

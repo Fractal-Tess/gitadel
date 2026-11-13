@@ -57,15 +57,16 @@
 <section>
   <button
     class="mb-7 inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
-    onclick={() => repository.navigate("overview")}
+    onclick={() => repository.navigate("overview", { path: repository.repositoryPath })}
   >
     <ArrowLeft class="size-4" />Back to repository
   </button>
-  <header class="mb-6 flex items-center gap-2">
+  <header class="mb-6 flex min-w-0 flex-wrap items-center gap-2">
     <History class="size-4 text-muted-foreground" />
     <h2 class="text-sm font-semibold">Commit history</h2>
-    <span class="text-xs text-muted-foreground">
+    <span class="min-w-0 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
       Page {repository.browser.history?.page ?? repository.historyPage} on {repository.revision}
+      {#if repository.repositoryPath} · {repository.repositoryPath}{/if}
     </span>
   </header>
   <ol>
@@ -213,7 +214,7 @@
         size="sm"
         disabled={repository.browser.history.page <= 1}
         onclick={() =>
-          repository.navigate("history", { page: repository.browser.history!.page - 1 })}
+          repository.navigate("history", { path: repository.repositoryPath, page: repository.browser.history!.page - 1 })}
       >
         Previous
       </Button>
@@ -222,7 +223,7 @@
         size="sm"
         disabled={!repository.browser.history.has_next}
         onclick={() =>
-          repository.navigate("history", { page: repository.browser.history!.page + 1 })}
+          repository.navigate("history", { path: repository.repositoryPath, page: repository.browser.history!.page + 1 })}
       >
         Next
       </Button>

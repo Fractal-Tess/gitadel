@@ -14,6 +14,7 @@ use uuid::Uuid;
 mod accounts;
 mod actions;
 mod auth;
+mod code;
 mod deploy;
 mod deploy_keys;
 mod email;
@@ -126,6 +127,16 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum RepoCommand {
+    /// Read files, history, blame, declarations, and permanent code links.
+    File {
+        #[command(subcommand)]
+        command: code::FileCommand,
+    },
+    /// Manage hosted website links.
+    Websites {
+        #[command(subcommand)]
+        command: code::WebsiteCommand,
+    },
     /// List repositories visible to the authenticated user.
     List,
     /// View a repository (public repositories may be viewed without a token).
@@ -1127,6 +1138,8 @@ async fn run(cli: Cli) -> Result<()> {
 
 async fn run_repo(api: &ApiClient, command: RepoCommand) -> Result<Value> {
     match command {
+        RepoCommand::File { command } => code::run(api, command).await,
+        RepoCommand::Websites { command } => code::websites(api, command).await,
         RepoCommand::List => api.request(Method::GET, "repositories", None).await,
         RepoCommand::View { repository } => {
             api.request(Method::GET, &route_repo("repositories", &repository)?, None)

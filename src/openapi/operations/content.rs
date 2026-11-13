@@ -6,6 +6,7 @@ use crate::repository::{
     browser::{
         BlobResponse, CommitResponse, DiffResponse, HistoryResponse, RefsResponse, TreeResponse,
     },
+    code::{BlameResponse, SnippetResponse, SymbolsResponse},
     files::{CreateFileRequest, CreateFileResponse},
     issues::{PreviewMarkdownRequest, RenderedMarkdownResponse},
 };
@@ -19,6 +20,43 @@ const REV: (&str, &str) = (
 const PATH: (&str, &str) = ("path", "Path within the repository");
 
 pub(super) const OPERATIONS: &[Operation] = &[
+    Operation::new(
+        Method::Get,
+        "/repositories/{namespace}/{name}/snippet",
+        TAG,
+        "Read a commit-pinned line range and its permanent link",
+    )
+    .auth(Auth::Optional)
+    .response(json::<SnippetResponse>())
+    .query(&[
+        REV,
+        PATH,
+        ("start", "First line (1-based)"),
+        ("end", "Last line, inclusive"),
+    ]),
+    Operation::new(
+        Method::Get,
+        "/repositories/{namespace}/{name}/symbols",
+        TAG,
+        "List declarations in a text file",
+    )
+    .auth(Auth::Optional)
+    .response(json::<SymbolsResponse>())
+    .query(&[REV, PATH]),
+    Operation::new(
+        Method::Get,
+        "/repositories/{namespace}/{name}/blame",
+        TAG,
+        "Attribute file lines to commits, following renames",
+    )
+    .auth(Auth::Optional)
+    .response(json::<BlameResponse>())
+    .query(&[
+        REV,
+        PATH,
+        ("start", "First line (1-based)"),
+        ("end", "Last line, inclusive"),
+    ]),
     Operation::new(
         Method::Get,
         "/repositories/{namespace}/{name}/activity",
@@ -82,6 +120,7 @@ pub(super) const OPERATIONS: &[Operation] = &[
     .response(json::<HistoryResponse>())
     .query(&[
         REV,
+        PATH,
         ("page", "Page number, starting at 1"),
         ("per_page", "Commits per page, 1 to 100 (default 30)"),
     ]),

@@ -6,6 +6,7 @@
   import Package from "@lucide/svelte/icons/package";
   import Pencil from "@lucide/svelte/icons/pencil";
 
+  import RepositoryWebsites from "$lib/components/repository/repository-websites.svelte";
   import RepositoryToolbar from "$lib/components/repository/repository-toolbar.svelte";
   import RepositoryTopics from "$lib/components/repository/repository-topics.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -131,13 +132,14 @@
 </script>
 
 <aside
+  aria-label="Repository details"
   class="flex h-fit min-w-0 flex-col border-t bg-card/20 xl:h-full xl:min-h-0 xl:border-l xl:border-t-0"
 >
   <RepositoryToolbar state={repository} />
 
   <!-- The toolbar is pinned so it keeps forming the divider under the app
        header; only the metadata below it scrolls. -->
-  <div class="min-h-0 flex-1 divide-y xl:overflow-y-auto xl:overscroll-contain">
+  <div class="min-h-0 min-w-0 flex-1 divide-y xl:overflow-y-auto xl:overscroll-contain">
     <section class="p-4">
       <div class="flex items-center justify-between gap-2">
         <h2
@@ -268,7 +270,7 @@
           </div>
         </form>
       {:else if repository.repository?.description}
-        <p class="mt-3 text-sm leading-6">
+        <p class="mt-3 break-words text-sm leading-6 [overflow-wrap:anywhere]">
           {repository.repository.description}
         </p>
       {:else}
@@ -408,6 +410,8 @@
         {/if}
       </section>
     {/if}
+
+    <RepositoryWebsites state={repository} />
 
     <section class="p-4">
       <div class="flex items-center justify-between gap-3">
