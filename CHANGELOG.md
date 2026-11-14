@@ -37,6 +37,8 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ### Fixed
 
+- File editing shows live syntax highlighting, synchronized horizontal scrolling, and a visible caret while preserving native selection and undo.
+
 - Expanding or collapsing folders preserves the open file and its viewer state. JavaScript module files (`.mjs` and `.cjs`) receive JavaScript syntax highlighting.
 
 - Deploy on push to Dokploy works again. Since 0.23.0 push delivery sent the encrypted API key, which Dokploy refused.

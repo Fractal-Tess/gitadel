@@ -15,6 +15,7 @@
   import * as Field from "$lib/components/ui/field/index.js";
   import { Input } from "$lib/components/ui/input/index.js";
   import type { RepositoryPageState } from "$lib/repository/repository-page-state.svelte.js";
+  import { highlight } from "$lib/repository/syntax-highlight.js";
 
   let { state: pageState }: { state: RepositoryPageState } = $props();
 
@@ -25,11 +26,27 @@
   // Tab indents the way the file already does: tabs if any line starts with
   // one, otherwise two spaces.
   const indent = $derived(/^\t/m.test(edit.original) ? "\t" : "  ");
+  // Match the viewer's size limit so highlighting cannot block large edits.
+  const highlighted = $derived.by(() => {
+    if (pageState.draft.length > 200_000) return null;
+    try {
+      return highlight(edit.path, pageState.draft);
+    } catch {
+      return null;
+    }
+  });
 
   let commitOpen = $state(false);
   let message = $state("");
   let committing = $state(false);
   let textarea = $state<HTMLTextAreaElement | null>(null);
+  let highlightLayer: HTMLPreElement;
+
+  function syncScroll(event: Event): void {
+    const target = event.currentTarget as HTMLTextAreaElement;
+    highlightLayer.scrollLeft = target.scrollLeft;
+    highlightLayer.scrollTop = target.scrollTop;
+  }
 
   $effect(() => {
     textarea?.focus({ preventScroll: true });
@@ -130,18 +147,28 @@
       <div>{index + 1}</div>
     {/each}
   </div>
-  <textarea
-    bind:this={textarea}
-    bind:value={pageState.draft}
-    class="min-h-80 min-w-0 flex-1 resize-none overflow-x-auto overflow-y-hidden bg-transparent p-5 font-mono text-xs leading-5 whitespace-pre outline-none"
-    rows={lineCount}
-    wrap="off"
-    spellcheck="false"
-    autocapitalize="off"
-    autocomplete="off"
-    aria-label={`Contents of ${edit.path}`}
-    onkeydown={onKeydown}
-  ></textarea>
+  <div class="relative min-w-0 flex-1 self-start">
+    <!-- The textarea owns editing, selection, IME and accessibility. This
+         noninteractive copy supplies only the syntax colours underneath it. -->
+    <pre
+      bind:this={highlightLayer}
+      class="editor-text pointer-events-none absolute inset-0 m-0 overflow-hidden p-5 text-foreground"
+      aria-hidden="true"
+      data-editor-highlight>{@html (highlighted ?? "") + "\n"}</pre>
+    <textarea
+      bind:this={textarea}
+      bind:value={pageState.draft}
+      class="editor-text relative block min-h-80 w-full resize-none overflow-x-auto overflow-y-hidden bg-transparent p-5 caret-foreground outline-none"
+      class:highlighted={highlighted !== null}
+      rows={lineCount}
+      wrap="off"
+      spellcheck="false"
+      autocapitalize="off"
+      autocomplete="off"
+      aria-label={`Contents of ${edit.path}`}
+      onkeydown={onKeydown}
+      onscroll={syncScroll}></textarea>
+  </div>
 </div>
 
 <Dialog.Root bind:open={commitOpen}>
@@ -149,7 +176,8 @@
     <Dialog.Header>
       <Dialog.Title>Commit changes</Dialog.Title>
       <Dialog.Description>
-        Adds a commit to <span class="font-mono">{edit.branch}</span> that updates
+        Adds a commit to <span class="font-mono">{edit.branch}</span> that
+        updates
         <span class="font-mono">{edit.path}</span>.
       </Dialog.Description>
     </Dialog.Header>
@@ -170,8 +198,8 @@
           disabled={committing}
         />
         <Field.Description>
-          If someone else pushed to {edit.branch} since you opened the file, the
-          commit is refused so their work is not overwritten.
+          If someone else pushed to {edit.branch} since you opened the file, the commit
+          is refused so their work is not overwritten.
         </Field.Description>
       </Field.Field>
       <Dialog.Footer>
@@ -187,3 +215,38 @@
     </form>
   </Dialog.Content>
 </Dialog.Root>
+
+<style>
+  .editor-text {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 400;
+    line-height: 1.25rem;
+    letter-spacing: normal;
+    white-space: pre;
+    tab-size: 4;
+    font-variant-ligatures: none;
+  }
+
+  textarea.highlighted {
+    color: transparent;
+  }
+
+  textarea.highlighted::selection {
+    background: color-mix(in srgb, var(--primary) 25%, transparent);
+    color: transparent;
+  }
+
+  @media (forced-colors: active) {
+    textarea.highlighted {
+      color: CanvasText;
+    }
+    textarea.highlighted::selection {
+      color: HighlightText;
+      background: Highlight;
+    }
+    pre {
+      visibility: hidden;
+    }
+  }
+</style>
