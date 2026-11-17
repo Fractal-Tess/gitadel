@@ -35,11 +35,11 @@ use std::{
     future::Future,
     net::IpAddr,
     path::PathBuf,
-    sync::{Arc, LazyLock},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+use argon2::{Argon2, PasswordHasher};
 use axum::{
     Json, Router,
     extract::DefaultBodyLimit,
@@ -48,17 +48,13 @@ use axum::{
     routing::{get, post},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration as ChronoDuration, Utc};
-use rand::RngExt as _;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
-    PaginatorTrait, QueryFilter, Set, TransactionTrait,
+    ActiveModelTrait, ConnectionTrait, DatabaseConnection, EntityTrait, PaginatorTrait, Set,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use time::Duration as TimeDuration;
-use tokio::sync::{Mutex, Semaphore, mpsc, watch};
+use tokio::sync::{Mutex, mpsc, watch};
 use url::Url;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -72,15 +68,15 @@ use crate::{
     backup_provider::{BackupProvider, BackupProviderConfig},
     blob_store::{DomainStorage, targets::MeasuredUsage},
     config::{AuthSettings, Settings},
-    entity::{api_token, audit_event, namespace, oauth_access_token, session, ssh_key, user},
+    entity::{audit_event, user},
     secrets::SecretCipher,
 };
 
 pub(crate) const SESSION_COOKIE: &str = "gitadel_session";
-pub const SCOPE_READ: i32 = 1;
-pub const SCOPE_WRITE: i32 = 1 << 1;
-pub const SCOPE_SSH_KEYS: i32 = 1 << 2;
-pub const SCOPE_REPOSITORY_READ: i32 = 1 << 3;
+pub use gitadel_identity::{
+    AuthenticatedUser, SCOPE_READ, SCOPE_REPOSITORY_READ, SCOPE_SSH_KEYS, SCOPE_WRITE, hash_secret,
+    random_secret,
+};
 const VALIDATED_BACKUP_LIFETIME: Duration = Duration::from_secs(30 * 60);
 const TESTED_BACKUP_PROVIDER_LIFETIME: Duration = Duration::from_secs(10 * 60);
 const CHALLENGE_LIFETIME: Duration = Duration::from_secs(5 * 60);
@@ -185,10 +181,6 @@ mod rate_limit_tests {
         assert_eq!(source_bucket(None), "unknown");
     }
 }
-const PASSWORD_WORK_CONCURRENCY: usize = 4;
-static PASSWORD_WORK: LazyLock<Semaphore> =
-    LazyLock::new(|| Semaphore::new(PASSWORD_WORK_CONCURRENCY));
-
 tokio::task_local! {
     static REMOTE_ADDRESS: Option<IpAddr>;
 }
@@ -250,12 +242,6 @@ pub struct AuthenticationChallenge {
     pub state: DiscoverableAuthentication,
     pub created_at: Instant,
     pub remote_address: Option<IpAddr>,
-}
-
-#[derive(Clone)]
-pub struct AuthenticatedUser {
-    pub user: user::Model,
-    pub via_api_token: bool,
 }
 
 #[derive(Debug)]
@@ -343,6 +329,21 @@ impl ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "internal_error",
             message: "The request could not be completed.".to_owned(),
+        }
+    }
+}
+
+impl From<gitadel_identity::IdentityError> for ApiError {
+    fn from(error: gitadel_identity::IdentityError) -> Self {
+        use gitadel_identity::IdentityError;
+        match error {
+            IdentityError::BadRequest(message) => Self::bad_request(message),
+            IdentityError::Unauthorized => Self::unauthorized(),
+            IdentityError::NotFound => Self::not_found(),
+            IdentityError::Forbidden(message) => Self::forbidden(message),
+            IdentityError::Conflict(message) => Self::conflict(message),
+            IdentityError::Internal(message) => Self::internal(message),
+            IdentityError::SecretOpen(error) => Self::from(error),
         }
     }
 }
@@ -883,28 +884,9 @@ impl IdentityState {
             .get(SESSION_COOKIE)
             .map(Cookie::value)
             .ok_or_else(ApiError::unauthorized)?;
-        let token_hash = hash_secret(raw_token);
-        let now = Utc::now();
-        let stored = session::Entity::find_by_id(token_hash)
-            .one(&self.database)
-            .await?
-            .filter(|session| session.expires_at > now)
-            .ok_or_else(ApiError::unauthorized)?;
-        let account = self
-            .enabled_user(stored.user_id)
-            .await?
-            .ok_or_else(ApiError::unauthorized)?;
-
-        if now - stored.last_seen_at > ChronoDuration::minutes(5) {
-            let mut active: session::ActiveModel = stored.into();
-            active.last_seen_at = Set(now);
-            active.update(&self.database).await?;
-        }
-
-        Ok(AuthenticatedUser {
-            user: account,
-            via_api_token: false,
-        })
+        Ok(gitadel_identity::IdentityService::new(&self.database)
+            .authenticate_session(raw_token)
+            .await?)
     }
 
     pub async fn authenticate_token(
@@ -912,112 +894,27 @@ impl IdentityState {
         token: &str,
         required_scope: i32,
     ) -> Result<AuthenticatedUser, ApiError> {
-        let token_hash = hash_secret(token);
-        let now = Utc::now();
-        if let Some(stored) = api_token::Entity::find()
-            .filter(api_token::Column::TokenHash.eq(&token_hash))
-            .filter(api_token::Column::RevokedAt.is_null())
-            .one(&self.database)
-            .await?
-            .filter(|token| token.expires_at.is_none_or(|expires_at| expires_at > now))
-        {
-            let required_api_scope = if required_scope & SCOPE_REPOSITORY_READ != 0 {
-                (required_scope & !SCOPE_REPOSITORY_READ) | SCOPE_READ
-            } else {
-                required_scope
-            };
-            if stored.scopes & required_api_scope != required_api_scope {
-                return Err(ApiError::forbidden(
-                    "The API token does not have the required scope.",
-                ));
-            }
-            let account = self
-                .enabled_user(stored.user_id)
-                .await?
-                .ok_or_else(ApiError::unauthorized)?;
-            if stored
-                .last_used_at
-                .is_none_or(|last_used_at| now - last_used_at > ChronoDuration::minutes(5))
-            {
-                let mut active: api_token::ActiveModel = stored.into();
-                active.last_used_at = Set(Some(now));
-                active.update(&self.database).await?;
-            }
-            return Ok(AuthenticatedUser {
-                user: account,
-                via_api_token: true,
-            });
-        }
-
-        let stored = oauth_access_token::Entity::find_by_id(token_hash)
-            .filter(oauth_access_token::Column::RevokedAt.is_null())
-            .one(&self.database)
-            .await?
-            .filter(|token| token.expires_at > now)
-            .ok_or_else(ApiError::unauthorized)?;
-        if stored.scopes & required_scope != required_scope {
-            return Err(ApiError::forbidden(
-                "The OAuth token does not have the required scope.",
-            ));
-        }
-        let account = self
-            .enabled_user(stored.user_id)
-            .await?
-            .ok_or_else(ApiError::unauthorized)?;
-        if stored
-            .last_used_at
-            .is_none_or(|last_used_at| now - last_used_at > ChronoDuration::minutes(5))
-        {
-            let mut active: oauth_access_token::ActiveModel = stored.into();
-            active.last_used_at = Set(Some(now));
-            active.update(&self.database).await?;
-        }
-        Ok(AuthenticatedUser {
-            user: account,
-            via_api_token: true,
-        })
+        Ok(gitadel_identity::IdentityService::new(&self.database)
+            .authenticate_token(token, required_scope)
+            .await?)
     }
 
     pub async fn authenticate_ssh_key(
         &self,
         fingerprint: &str,
     ) -> Result<Option<user::Model>, ApiError> {
-        let Some(stored) = ssh_key::Entity::find()
-            .filter(ssh_key::Column::Fingerprint.eq(fingerprint))
-            .one(&self.database)
-            .await?
-        else {
-            return Ok(None);
-        };
-        let Some(account) = self.enabled_user(stored.user_id).await? else {
-            return Ok(None);
-        };
-        let now = Utc::now();
-        if stored
-            .last_used_at
-            .is_none_or(|last_used_at| now - last_used_at > ChronoDuration::minutes(5))
-        {
-            let mut active: ssh_key::ActiveModel = stored.into();
-            active.last_used_at = Set(Some(now));
-            active.update(&self.database).await?;
-        }
-        Ok(Some(account))
+        Ok(gitadel_identity::IdentityService::new(&self.database)
+            .authenticate_ssh_key(fingerprint)
+            .await?)
     }
 
     pub async fn session_user(&self, jar: &CookieJar) -> Result<Option<user::Model>, ApiError> {
         let Some(raw_token) = jar.get(SESSION_COOKIE).map(Cookie::value) else {
             return Ok(None);
         };
-        let token_hash = hash_secret(raw_token);
-        let now = Utc::now();
-        let Some(stored) = session::Entity::find_by_id(token_hash)
-            .one(&self.database)
-            .await?
-            .filter(|session| session.expires_at > now)
-        else {
-            return Ok(None);
-        };
-        self.enabled_user(stored.user_id).await
+        Ok(gitadel_identity::IdentityService::new(&self.database)
+            .session_user(raw_token)
+            .await?)
     }
 
     pub async fn optional_user(
@@ -1043,9 +940,8 @@ impl IdentityState {
     }
 
     async fn enabled_user(&self, id: Uuid) -> Result<Option<user::Model>, ApiError> {
-        Ok(user::Entity::find_by_id(id)
-            .filter(user::Column::DisabledAt.is_null())
-            .one(&self.database)
+        Ok(gitadel_identity::IdentityService::new(&self.database)
+            .enabled_user(id)
             .await?)
     }
 
@@ -1054,19 +950,9 @@ impl IdentityState {
         connection: &C,
         user_id: Uuid,
     ) -> Result<(String, Cookie<'static>), ApiError> {
-        let raw_token = random_secret(32);
-        let token_hash = hash_secret(&raw_token);
-        let now = Utc::now();
-        let expires_at = now + self.session_lifetime();
-        session::ActiveModel {
-            token_hash: Set(token_hash),
-            user_id: Set(user_id),
-            expires_at: Set(expires_at),
-            created_at: Set(now),
-            last_seen_at: Set(now),
-        }
-        .insert(connection)
-        .await?;
+        let raw_token =
+            gitadel_identity::create_session_on(connection, user_id, self.session_lifetime())
+                .await?;
 
         let cookie = Cookie::build((SESSION_COOKIE, raw_token.clone()))
             .path("/")
@@ -1080,9 +966,7 @@ impl IdentityState {
 
     pub async fn delete_session(&self, jar: &CookieJar) -> Result<Cookie<'static>, ApiError> {
         if let Some(raw_token) = jar.get(SESSION_COOKIE).map(Cookie::value) {
-            session::Entity::delete_by_id(hash_secret(raw_token))
-                .exec(&self.database)
-                .await?;
+            gitadel_identity::delete_session(&self.database, raw_token).await?;
         }
         Ok(Cookie::build(SESSION_COOKIE).path("/").build())
     }
@@ -1123,56 +1007,7 @@ pub async fn bootstrap_admin(
     username: &str,
     password: String,
 ) -> Result<user::Model, ApiError> {
-    let username = validate_slug(username, "Username")?;
-    if user::Entity::find().count(database).await? != 0 {
-        return Err(ApiError::conflict(
-            "The first administrator already exists.",
-        ));
-    }
-    let password_hash = hash_password(password).await?;
-    let transaction = database.begin().await?;
-    if user::Entity::find().count(&transaction).await? != 0 {
-        return Err(ApiError::conflict(
-            "The first administrator already exists.",
-        ));
-    }
-    let now = Utc::now();
-    let account = user::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        username: Set(username.clone()),
-        password_hash: Set(password_hash),
-        is_admin: Set(true),
-        default_repository_visibility: Set("private".to_owned()),
-        theme_preference: Set("system".to_owned()),
-        motion_preference: Set("system".to_owned()),
-        disabled_at: Set(None),
-        avatar_updated_at: Set(None),
-        created_at: Set(now),
-        updated_at: Set(now),
-    }
-    .insert(&transaction)
-    .await?;
-    namespace::ActiveModel {
-        slug: Set(username.clone()),
-        kind: Set("user".to_owned()),
-        user_id: Set(Some(account.id)),
-        organization_id: Set(None),
-        created_at: Set(now),
-    }
-    .insert(&transaction)
-    .await?;
-    audit_event::ActiveModel {
-        id: sea_orm::ActiveValue::NotSet,
-        actor_user_id: Set(Some(account.id)),
-        action: Set("admin.bootstrap".to_owned()),
-        target: Set(Some(username)),
-        remote_address: Set(None),
-        created_at: Set(now),
-    }
-    .insert(&transaction)
-    .await?;
-    transaction.commit().await?;
-    Ok(account)
+    Ok(gitadel_identity::bootstrap_admin(database, username, password).await?)
 }
 
 pub fn router() -> Router<IdentityState> {
@@ -1528,77 +1363,20 @@ pub fn oauth_router() -> Router<IdentityState> {
         .route("/login/oauth/access_token", post(oauth::access_token))
 }
 
-pub fn random_secret(bytes: usize) -> String {
-    let mut data = vec![0_u8; bytes];
-    rand::rng().fill(&mut data);
-    URL_SAFE_NO_PAD.encode(data)
-}
-
-pub fn hash_secret(secret: &str) -> String {
-    let digest = Sha256::digest(secret.as_bytes());
-    URL_SAFE_NO_PAD.encode(digest)
-}
-
 pub async fn hash_password(password: String) -> Result<String, ApiError> {
-    let _permit = PASSWORD_WORK.acquire().await.map_err(ApiError::internal)?;
-    validate_password(&password)?;
-    tokio::task::spawn_blocking(move || {
-        Argon2::default()
-            .hash_password(password.as_bytes())
-            .map(|hash| hash.to_string())
-            .map_err(ApiError::internal)
-    })
-    .await
-    .map_err(ApiError::internal)?
+    Ok(gitadel_identity::hash_password(password).await?)
 }
-
 pub async fn verify_password(password: String, encoded: String) -> Result<bool, ApiError> {
-    let _permit = PASSWORD_WORK.acquire().await.map_err(ApiError::internal)?;
-    tokio::task::spawn_blocking(move || {
-        let hash = PasswordHash::new(&encoded).map_err(ApiError::internal)?;
-        Ok(Argon2::default()
-            .verify_password(password.as_bytes(), &hash)
-            .is_ok())
-    })
-    .await
-    .map_err(ApiError::internal)?
+    Ok(gitadel_identity::verify_password(password, encoded).await?)
 }
-
 pub fn validate_password(password: &str) -> Result<(), ApiError> {
-    if password.len() < 12 {
-        return Err(ApiError::bad_request(
-            "Use at least 12 characters for the password.",
-        ));
-    }
-    if password.len() > 1024 {
-        return Err(ApiError::bad_request("The password is too long."));
-    }
-    Ok(())
+    Ok(gitadel_identity::validate_password(password)?)
 }
-
 pub fn validate_slug(value: &str, label: &str) -> Result<String, ApiError> {
-    let normalized = value.trim().to_ascii_lowercase();
-    let valid_length = (1..=39).contains(&normalized.len());
-    let valid_edges = !normalized.starts_with('-') && !normalized.ends_with('-');
-    let valid_chars = normalized
-        .bytes()
-        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
-    if !valid_length || !valid_edges || !valid_chars {
-        return Err(ApiError::bad_request(format!(
-            "{label} must use 1 to 39 lowercase letters, numbers, or single hyphens."
-        )));
-    }
-    Ok(normalized)
+    Ok(gitadel_identity::validate_slug(value, label)?)
 }
-
 pub fn validate_name(value: &str, label: &str) -> Result<String, ApiError> {
-    let value = value.trim();
-    if value.is_empty() || value.len() > 128 {
-        return Err(ApiError::bad_request(format!(
-            "{label} must contain 1 to 128 characters."
-        )));
-    }
-    Ok(value.to_owned())
+    Ok(gitadel_identity::validate_name(value, label)?)
 }
 
 #[derive(Serialize, ToSchema)]

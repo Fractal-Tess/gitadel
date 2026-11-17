@@ -1003,16 +1003,10 @@ async fn accessible_organization(
     slug: &str,
     user_id: Uuid,
 ) -> Result<organization::Model, ApiError> {
-    let organization = organization::Entity::find()
-        .filter(organization::Column::Slug.eq(slug))
-        .one(state.database())
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    organization_member::Entity::find_by_id((organization.id, user_id))
-        .one(state.database())
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    Ok(organization)
+    Ok(
+        gitadel_identity::permissions::accessible_organization(state.database(), slug, user_id)
+            .await?,
+    )
 }
 
 pub(super) async fn owned_organization(
@@ -1020,17 +1014,7 @@ pub(super) async fn owned_organization(
     slug: &str,
     user_id: Uuid,
 ) -> Result<organization::Model, ApiError> {
-    let organization = accessible_organization(state, slug, user_id).await?;
-    let membership = organization_member::Entity::find_by_id((organization.id, user_id))
-        .one(state.database())
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    if membership.role != "owner" {
-        return Err(ApiError::forbidden(
-            "Only an organization owner can manage this organization.",
-        ));
-    }
-    Ok(organization)
+    Ok(gitadel_identity::permissions::owned_organization(state.database(), slug, user_id).await?)
 }
 
 #[derive(Serialize, ToSchema)]

@@ -21,10 +21,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::entity::{
-    dokploy_source_binding, namespace, namespace_integration, oauth_application,
-    organization_member,
-};
+use crate::entity::{dokploy_source_binding, namespace_integration, oauth_application};
 use crate::identity::{hash_secret, random_secret};
 use crate::integrations::{
     Credential, PROVIDERS, Provider, RemoteSource, SourceApplication, TestReport, provider,
@@ -1230,29 +1227,7 @@ pub(crate) async fn authorize_namespace(
     actor: &AuthenticatedUser,
     slug: &str,
 ) -> Result<(), ApiError> {
-    let owner = namespace::Entity::find_by_id(slug)
-        .one(state.database())
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    let permitted = match owner.kind.as_str() {
-        "user" => owner.user_id == Some(actor.user.id),
-        "organization" => match owner.organization_id {
-            Some(organization_id) => {
-                organization_member::Entity::find_by_id((organization_id, actor.user.id))
-                    .filter(organization_member::Column::Role.eq("owner"))
-                    .one(state.database())
-                    .await?
-                    .is_some()
-            }
-            None => false,
-        },
-        _ => false,
-    };
-    if permitted {
-        Ok(())
-    } else {
-        Err(ApiError::not_found())
-    }
+    Ok(gitadel_identity::permissions::authorize_namespace(state.database(), actor, slug).await?)
 }
 
 pub(crate) fn validate_name(value: &str) -> Result<String, ApiError> {

@@ -28,7 +28,7 @@ use super::{
 use crate::entity::{
     action_runner, action_runner_registration_token, action_secret, action_variable, invitation,
     namespace, namespace_integration, namespace_mirror_identity, namespace_pin, passkey,
-    repository, repository_alias, repository_import, repository_import_item, session, user,
+    repository, repository_alias, repository_import, repository_import_item, user,
 };
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -520,15 +520,13 @@ pub async fn update_password(
         .map(|cookie| super::hash_secret(cookie.value()))
         .ok_or_else(ApiError::unauthorized)?;
     let transaction = state.database().begin().await?;
-    let mut account: user::ActiveModel = actor.user.clone().into();
-    account.password_hash = Set(password_hash);
-    account.updated_at = Set(Utc::now());
-    account.update(&transaction).await?;
-    session::Entity::delete_many()
-        .filter(session::Column::UserId.eq(actor.user.id))
-        .filter(session::Column::TokenHash.ne(current_session_hash))
-        .exec(&transaction)
-        .await?;
+    gitadel_identity::replace_password_on(
+        &transaction,
+        &actor.user,
+        password_hash,
+        &current_session_hash,
+    )
+    .await?;
     state
         .audit_on(
             &transaction,
@@ -545,10 +543,7 @@ async fn verify_current_password(
     account: &user::Model,
     current_password: String,
 ) -> Result<(), ApiError> {
-    if !verify_password(current_password, account.password_hash.clone()).await? {
-        return Err(ApiError::bad_request("The current password is incorrect."));
-    }
-    Ok(())
+    Ok(gitadel_identity::verify_current_password(account, current_password).await?)
 }
 
 pub(super) fn require_browser_session(via_api_token: bool) -> Result<(), ApiError> {
@@ -1313,6 +1308,7 @@ fn invalid_credentials() -> ApiError {
 
 #[cfg(test)]
 mod tests {
+    use crate::entity::session;
     use sea_orm::{ConnectOptions, Database, DatabaseConnection, NotSet};
     use sea_orm_migration::MigratorTrait;
 

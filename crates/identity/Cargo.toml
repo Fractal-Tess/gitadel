@@ -1,0 +1,30 @@
+[package]
+name = "gitadel-identity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gitadel account and credential services"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+gitadel-db.workspace = true
+gitadel-secrets.workspace = true
+hmac.workspace = true
+sha1.workspace = true
+subtle.workspace = true
+argon2.workspace = true
+base64.workspace = true
+chrono.workspace = true
+rand.workspace = true
+sea-orm.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+uuid.workspace = true
+
+[dev-dependencies]
+gitadel-db = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+

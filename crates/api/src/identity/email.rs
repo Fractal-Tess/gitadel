@@ -14,16 +14,15 @@ use axum_extra::extract::cookie::CookieJar;
 use chrono::{Duration, Utc};
 use lettre::message::Mailbox;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set,
-    TransactionTrait, sea_query::Expr,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{
-    ApiError, IdentityState, SCOPE_READ, SCOPE_WRITE, hash_password, hash_secret, random_secret,
-    require_admin, validate_password, validate_slug, verify_password,
+    ApiError, IdentityState, SCOPE_READ, SCOPE_WRITE, hash_password, hash_secret, require_admin,
+    validate_password, validate_slug, verify_password,
 };
 use crate::{
     entity::{email_token, session, user, user_email},
@@ -190,11 +189,7 @@ pub(crate) async fn verified_email<C: ConnectionTrait>(
     connection: &C,
     user_id: Uuid,
 ) -> Result<Option<String>, ApiError> {
-    Ok(user_email::Entity::find_by_id(user_id)
-        .filter(user_email::Column::VerifiedAt.is_not_null())
-        .one(connection)
-        .await?
-        .map(|row| row.email))
+    Ok(gitadel_identity::email::verified_email(connection, user_id).await?)
 }
 
 /// Mailbox for an enabled user with a verified address, for notifications.
@@ -742,26 +737,7 @@ pub(super) async fn issue_token<C: ConnectionTrait>(
     email: Option<&str>,
     lifetime: Duration,
 ) -> Result<String, ApiError> {
-    let now = Utc::now();
-    email_token::Entity::delete_many()
-        .filter(email_token::Column::UserId.eq(user_id))
-        .filter(email_token::Column::Purpose.eq(purpose))
-        .filter(email_token::Column::ExpiresAt.lte(now))
-        .exec(connection)
-        .await?;
-    let token = random_secret(32);
-    email_token::ActiveModel {
-        token_hash: Set(hash_secret(&token)),
-        user_id: Set(user_id),
-        purpose: Set(purpose.to_owned()),
-        email: Set(email.map(str::to_owned)),
-        expires_at: Set(now + lifetime),
-        used_at: Set(None),
-        created_at: Set(now),
-    }
-    .insert(connection)
-    .await?;
-    Ok(token)
+    Ok(gitadel_identity::email::issue_token(connection, user_id, purpose, email, lifetime).await?)
 }
 
 /// Atomically mark an unexpired, unused token as used and return it.
@@ -770,21 +746,7 @@ pub(super) async fn consume_token<C: ConnectionTrait>(
     token_hash: &str,
     purpose: &str,
 ) -> Result<Option<email_token::Model>, ApiError> {
-    let now = Utc::now();
-    let consumed = email_token::Entity::update_many()
-        .col_expr(email_token::Column::UsedAt, Expr::value(Some(now)))
-        .filter(email_token::Column::TokenHash.eq(token_hash))
-        .filter(email_token::Column::Purpose.eq(purpose))
-        .filter(email_token::Column::UsedAt.is_null())
-        .filter(email_token::Column::ExpiresAt.gt(now))
-        .exec(connection)
-        .await?;
-    if consumed.rows_affected != 1 {
-        return Ok(None);
-    }
-    Ok(email_token::Entity::find_by_id(token_hash)
-        .one(connection)
-        .await?)
+    Ok(gitadel_identity::email::consume_token(connection, token_hash, purpose).await?)
 }
 
 pub(super) fn link(state: &IdentityState, path: &str, token: &str) -> String {
