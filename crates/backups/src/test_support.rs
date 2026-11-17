@@ -3,7 +3,7 @@ use crate::{
     blob_store::{BlobDigest, BlobStore, ObjectKey},
     config::DatabaseSettings,
     database,
-    entity::{repository, user},
+    entity::{namespace, repository, user},
 };
 use chrono::Utc;
 use sea_orm::{ActiveModelTrait as _, DatabaseConnection, Set};
@@ -30,6 +30,16 @@ pub(crate) async fn database(root: &Path) -> (DatabaseConnection, Uuid) {
         avatar_updated_at: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
+    }
+    .insert(&database)
+    .await
+    .unwrap();
+    namespace::ActiveModel {
+        slug: Set(user.username.clone()),
+        kind: Set("user".to_owned()),
+        user_id: Set(Some(user.id)),
+        organization_id: Set(None),
+        created_at: Set(now),
     }
     .insert(&database)
     .await
