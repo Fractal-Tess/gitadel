@@ -57,9 +57,10 @@ async fn frontend_asset(name: &str) -> Option<Cow<'static, [u8]>> {
 
     #[cfg(debug_assertions)]
     {
-        let root = tokio::fs::canonicalize(concat!(env!("CARGO_MANIFEST_DIR"), "/frontend/build"))
-            .await
-            .ok()?;
+        let root =
+            tokio::fs::canonicalize(concat!(env!("CARGO_MANIFEST_DIR"), "/../../frontend/build"))
+                .await
+                .ok()?;
         let path = tokio::fs::canonicalize(root.join(name)).await.ok()?;
         if !path.starts_with(&root) {
             return None;

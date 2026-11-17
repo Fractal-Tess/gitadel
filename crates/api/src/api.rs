@@ -7,7 +7,7 @@ use crate::repository::render_markdown;
 
 /// Embedded at build time so a running instance can always document itself,
 /// without depending on the source tree being present on the host.
-const CHANGELOG: &str = include_str!("../CHANGELOG.md");
+const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
 
 /// Rendering is identical for every caller, so it happens once per process.
 static CHANGELOG_HTML: LazyLock<String> = LazyLock::new(|| render_markdown(CHANGELOG));

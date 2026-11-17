@@ -6,6 +6,9 @@ use std::{
 };
 
 fn main() {
+    // Build scripts start in their package. Assets, protobufs and fingerprint
+    // inputs remain shared workspace files after the crate split.
+    env::set_current_dir(workspace_path("")).expect("workspace root is available");
     build_actions_protocol();
 
     if env::var_os("CARGO_FEATURE_API_CONTRACT_EXPORT").is_some() {
@@ -17,7 +20,10 @@ fn main() {
     }
 
     let frontend_build = Path::new("frontend/build");
-    println!("cargo:rerun-if-changed={}", frontend_build.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_path("frontend/build").display()
+    );
 
     if env::var("PROFILE").is_ok_and(|profile| profile == "release")
         && !frontend_build.join("index.html").is_file()
@@ -39,8 +45,14 @@ fn main() {
     build_frontend_assets(frontend_build).expect("could not generate frontend asset lookup");
 }
 
+fn workspace_path(path: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(path)
+}
+
 fn contract_fingerprint() -> String {
-    use sha2::{Digest, Sha256};
+    use sha2_build::{Digest, Sha256};
     fn collect(path: &Path, files: &mut Vec<std::path::PathBuf>) {
         if path.is_dir() {
             for entry in fs::read_dir(path).expect("contract input directory is readable") {
@@ -56,7 +68,7 @@ fn contract_fingerprint() -> String {
     let inputs = fs::read_to_string("api/inputs.txt").expect("contract input list exists");
     let mut files = Vec::new();
     for input in inputs.lines().filter(|s| !s.is_empty()) {
-        println!("cargo:rerun-if-changed={input}");
+        println!("cargo:rerun-if-changed={}", workspace_path(input).display());
         collect(Path::new(input), &mut files);
     }
     // Match JavaScript's full relative-path ordering, rather than Path's
@@ -125,7 +137,10 @@ fn build_actions_protocol() {
         "proto/forgejo-actions/proto/artifact/v4/artifact.proto",
     ];
 
-    println!("cargo:rerun-if-changed=proto/forgejo-actions");
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_path("proto/forgejo-actions").display()
+    );
     let protoc = protoc_bin_vendored::protoc_bin_path()
         .expect("vendored protoc must be available for Actions protocol generation");
     let descriptor =

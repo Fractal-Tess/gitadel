@@ -2,36 +2,17 @@
 
 use std::io::Read;
 
-mod actions;
-mod api;
-mod archive;
-mod backup_provider;
-mod blob_store;
-mod config;
-mod database;
-mod entity;
-mod filesystem;
-mod identity;
-mod integrations;
-mod mail;
-mod migration;
-mod network;
-mod openapi;
-mod registry;
-mod repository;
-mod schedule;
-mod secrets;
-mod server;
-mod storage;
+use gitadel_config as config;
+use gitadel_db as database;
+use gitadel_storage::lfs as storage;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use config::{Cli, Settings};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[cfg(feature = "api-contract-export")]
 fn main() -> Result<()> {
-    print!("{}", openapi::json()?);
+    print!("{}", gitadel_api::export_openapi()?);
     Ok(())
 }
 
@@ -39,11 +20,11 @@ fn main() -> Result<()> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     if matches!(cli.command(), Some(config::GitadelCommand::Openapi)) {
-        print!("{}", openapi::json()?);
+        print!("{}", gitadel_api::export_openapi()?);
         return Ok(());
     }
     if let Some(config::GitadelCommand::ImageRender { path, thumbnail }) = cli.command() {
-        return repository::image::worker(path, *thumbnail);
+        return gitadel_api::image_worker(path, *thumbnail);
     }
     run(cli)
 }
@@ -51,13 +32,7 @@ fn main() -> Result<()> {
 #[tokio::main]
 #[cfg(not(feature = "api-contract-export"))]
 async fn run(cli: Cli) -> Result<()> {
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "gitadel=info,tower_http=info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    gitadel_api::init_tracing();
 
     if let Some(command) = cli.command() {
         return match command {
@@ -67,17 +42,17 @@ async fn run(cli: Cli) -> Result<()> {
             }
             config::GitadelCommand::Backup { command } => {
                 let settings = Settings::load(&cli)?;
-                archive::run(command, &settings, cli.config_path()).await
+                gitadel_api::run_backup(command, &settings, cli.config_path()).await
             }
             config::GitadelCommand::Lfs { command } => {
                 let settings = Settings::load(&cli)?;
-                let _storage_lock = archive::acquire_storage_lock(&settings.database)?;
+                let _storage_lock = gitadel_api::acquire_storage_lock(&settings.database)?;
                 storage::run(command, &settings).await
             }
         };
     }
     let settings = Settings::load(&cli)?;
-    let _storage_lock = archive::acquire_storage_lock(&settings.database)?;
+    let _storage_lock = gitadel_api::acquire_storage_lock(&settings.database)?;
     if let Some(username) = cli.bootstrap_admin() {
         if !cli.password_stdin() {
             bail!("--bootstrap-admin requires --password-stdin");
@@ -88,7 +63,7 @@ async fn run(cli: Cli) -> Result<()> {
             .context("could not read the administrator password from standard input")?;
         let password = password.trim_end_matches(['\r', '\n']).to_owned();
         let database = database::connect_and_migrate(&settings.database).await?;
-        let account = identity::bootstrap_admin(&database, username, password)
+        let account = gitadel_api::bootstrap_admin(&database, username, password)
             .await
             .context("could not create the first administrator")?;
         database.close().await?;
@@ -99,7 +74,8 @@ async fn run(cli: Cli) -> Result<()> {
     loop {
         let database = database::connect_and_migrate(&settings.database).await?;
         let read_database = database::connect_reader(&settings.database, &database).await?;
-        let exit = server::serve(settings.clone(), database.clone(), read_database.clone()).await?;
+        let exit =
+            gitadel_api::serve(settings.clone(), database.clone(), read_database.clone()).await?;
         read_database
             .close()
             .await
@@ -109,9 +85,9 @@ async fn run(cli: Cli) -> Result<()> {
             .await
             .context("could not close database for maintenance")?;
         match exit {
-            server::ServerExit::Shutdown => return Ok(()),
-            server::ServerExit::Maintenance(action) => {
-                if let Err(error) = server::perform_maintenance(&settings, *action).await {
+            gitadel_api::ServerExit::Shutdown => return Ok(()),
+            gitadel_api::ServerExit::Maintenance(action) => {
+                if let Err(error) = gitadel_api::perform_maintenance(&settings, *action).await {
                     tracing::error!(%error, "maintenance operation failed");
                 }
             }

@@ -113,6 +113,10 @@
             commonRustAttrs // {
               pname = "gitadel-contract-exporter";
               src = contractSource;
+              # This build-time tool prints metadata only. Optimizing/linking
+              # it with the server's fat LTO profile doubles release build time.
+              buildType = "debug";
+              CARGO_PROFILE_DEV_DEBUG = "0";
               nativeBuildInputs = buildDeps pkgs;
               buildInputs = [ pkgs.openssl pkgs.dav1d ];
               cargoBuildFlags = [ "--package" "gitadel" "--bin" "gitadel" "--features" "api-contract-export" ];

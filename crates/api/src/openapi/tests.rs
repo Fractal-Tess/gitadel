@@ -66,7 +66,7 @@ fn compatibility_aliases_and_native_transfers_are_described() {
 fn export_is_deterministic_and_matches_the_committed_contract() {
     let first = super::json().unwrap();
     assert_eq!(first, super::json().unwrap());
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("api/openapi.json");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../api/openapi.json");
     assert_eq!(
         first,
         std::fs::read_to_string(path).expect("run just api-generate")

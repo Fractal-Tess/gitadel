@@ -37,8 +37,9 @@ pub const MAX_FAVICON_BYTES: usize = 512 * 1024;
 const MIN_FAVICON_EDGE: u32 = 16;
 const MAX_FAVICON_EDGE: u32 = 1024;
 const PNG_SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
-const DEFAULT_LIGHT_FAVICON: &[u8] = include_bytes!("../../frontend/static/favicon-light.png");
-const DEFAULT_DARK_FAVICON: &[u8] = include_bytes!("../../frontend/static/favicon-dark.png");
+const DEFAULT_LIGHT_FAVICON: &[u8] =
+    include_bytes!("../../../../frontend/static/favicon-light.png");
+const DEFAULT_DARK_FAVICON: &[u8] = include_bytes!("../../../../frontend/static/favicon-dark.png");
 
 use super::{ApiError, IdentityState, SCOPE_READ, SCOPE_WRITE};
 
