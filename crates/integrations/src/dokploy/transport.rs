@@ -197,11 +197,7 @@ pub(super) async fn client_for(base: &str) -> Result<reqwest::Client, String> {
     if endpoint.query().is_some() || endpoint.fragment().is_some() {
         return Err("the stored Dokploy URL must not contain a query or fragment".to_owned());
     }
-    if cfg!(test) {
-        // Unit tests talk to servers bound on loopback.
-        return crate::repository::outbound_http_client().map_err(|error| error.to_string());
-    }
-    crate::network::pinned_service_http_client(&endpoint, REQUEST_TIMEOUT).await
+    gitadel_core::network::pinned_service_http_client(&endpoint, REQUEST_TIMEOUT).await
 }
 
 #[cfg(test)]

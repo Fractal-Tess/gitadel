@@ -1,0 +1,25 @@
+[package]
+name = "gitadel-integrations"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "External deployment providers and transport for Gitadel"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+gitadel-core.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+url.workspace = true
+utoipa.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }

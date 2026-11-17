@@ -98,7 +98,7 @@ pub(crate) struct Link {
 
 #[derive(Serialize, utoipa::ToSchema)]
 #[schema(as = IntegrationRemoteCatalog)]
-pub(crate) struct Catalog {
+pub struct Catalog {
     external_url: String,
     projects: Vec<ProjectSummary>,
     servers: Vec<ServerSummary>,
@@ -106,7 +106,7 @@ pub(crate) struct Catalog {
 
 #[derive(Serialize, utoipa::ToSchema)]
 #[schema(as = IntegrationProject)]
-pub(crate) struct ProjectSummary {
+pub struct ProjectSummary {
     id: String,
     name: String,
     environments: Vec<EnvironmentSummary>,
@@ -137,7 +137,7 @@ struct ServerSummary {
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
-pub(crate) struct CreatedEnvironment {
+pub struct CreatedEnvironment {
     id: String,
     name: String,
     description: Option<String>,
@@ -148,7 +148,7 @@ pub(crate) struct CreatedEnvironment {
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
-pub(crate) struct DeploymentStatus {
+pub struct DeploymentStatus {
     deployment: Option<DeploymentSummary>,
     logs_url: String,
 }
@@ -170,8 +170,12 @@ struct Location {
     environment_name: String,
 }
 
-async fn test(base: &str, api_key: &str) -> Result<TestReport, String> {
-    let client = client_for(base).await?;
+async fn test(
+    integration: &DokployIntegration,
+    base: &str,
+    api_key: &str,
+) -> Result<TestReport, String> {
+    let client = integration.client_for(base).await?;
     let user = get_json(&client, base, "/api/user.get", api_key)
         .await
         .map_err(|error| format!("Dokploy rejected the credential: {error}"))?;
@@ -556,8 +560,11 @@ fn authorized(detail: &Value) -> bool {
     value_string(detail, "accessToken").is_some()
 }
 
-async fn list_sources(credential: Credential<'_>) -> Result<Vec<RemoteSource>, String> {
-    let client = client_for(credential.url).await?;
+async fn list_sources(
+    integration: &DokployIntegration,
+    credential: Credential<'_>,
+) -> Result<Vec<RemoteSource>, String> {
+    let client = integration.client_for(credential.url).await?;
     let providers = get_json(
         &client,
         credential.url,
@@ -613,11 +620,12 @@ async fn list_sources(credential: Credential<'_>) -> Result<Vec<RemoteSource>, S
     Ok(sources)
 }
 async fn update_source_internal_url(
+    integration: &DokployIntegration,
     credential: Credential<'_>,
     source_id: &str,
     internal_url: &str,
 ) -> Result<(), String> {
-    let client = client_for(credential.url).await?;
+    let client = integration.client_for(credential.url).await?;
     let source = get_json(
         &client,
         credential.url,
@@ -652,10 +660,11 @@ async fn update_source_internal_url(
 }
 
 async fn create_source(
+    integration: &DokployIntegration,
     credential: Credential<'_>,
     application: SourceApplication<'_>,
 ) -> Result<ProvisionedSource, String> {
-    let client = client_for(credential.url).await?;
+    let client = integration.client_for(credential.url).await?;
     let created = post_json(
         &client,
         credential.url,
@@ -694,11 +703,14 @@ async fn create_source(
     })
 }
 
-async fn check_source(credential: Credential<'_>) -> Result<usize, String> {
+async fn check_source(
+    integration: &DokployIntegration,
+    credential: Credential<'_>,
+) -> Result<usize, String> {
     let source_id = credential
         .source_id
         .ok_or("No Dokploy Gitea provider is bound to this connection.")?;
-    let client = client_for(credential.url).await?;
+    let client = integration.client_for(credential.url).await?;
     let repositories = get_json(
         &client,
         credential.url,
@@ -709,8 +721,12 @@ async fn check_source(credential: Credential<'_>) -> Result<usize, String> {
     Ok(repositories.as_array().map_or(0, Vec::len))
 }
 
-async fn remove_source(credential: Credential<'_>, parent_id: &str) -> Result<(), String> {
-    let client = client_for(credential.url).await?;
+async fn remove_source(
+    integration: &DokployIntegration,
+    credential: Credential<'_>,
+    parent_id: &str,
+) -> Result<(), String> {
+    let client = integration.client_for(credential.url).await?;
     post_for_status(
         &client,
         credential.url,
@@ -1223,7 +1239,10 @@ async fn create_domain(
     post_for_status(client, base, "/api/domain.create", api_key, &body).await
 }
 
-async fn setup(request: SetupRemoteRequest<'_>) -> Result<SetupOutcome, String> {
+async fn setup(
+    integration: &DokployIntegration,
+    request: SetupRemoteRequest<'_>,
+) -> Result<SetupOutcome, String> {
     let kind = parse_kind(request.kind)?;
     let base = request.credential.url;
     let api_key = request.credential.api_key;
@@ -1235,7 +1254,7 @@ async fn setup(request: SetupRemoteRequest<'_>) -> Result<SetupOutcome, String> 
     if environment.is_empty() {
         return Err("Choose an environment.".to_owned());
     }
-    let client = client_for(base).await?;
+    let client = integration.client_for(base).await?;
     let mut steps = Vec::new();
 
     validate_gitea_provider(&client, request.repository, base, api_key, source_id).await?;
@@ -1374,12 +1393,13 @@ async fn setup(request: SetupRemoteRequest<'_>) -> Result<SetupOutcome, String> 
 const FAILED_LOG_LINES: usize = 40;
 
 async fn latest_deployment(
+    integration: &DokployIntegration,
     credential: Credential<'_>,
     resource: &str,
 ) -> Result<DeploymentStatus, String> {
     let link: Link = serde_json::from_str(resource)
         .map_err(|error| format!("stored Dokploy resource is malformed: {error}"))?;
-    let client = client_for(credential.url).await?;
+    let client = integration.client_for(credential.url).await?;
     let query = url::form_urlencoded::Serializer::new(String::new())
         .append_pair(link.kind.id_key(), &link.id)
         .finish();
@@ -1429,19 +1449,43 @@ async fn latest_deployment(
     })
 }
 
-pub(crate) struct DokployIntegration;
+type ClientFactory = fn(&str) -> Result<reqwest::Client, String>;
+
+/// Dokploy operations using the pinned service transport by default.
+pub struct DokployIntegration {
+    client_factory: Option<ClientFactory>,
+}
+
+impl DokployIntegration {
+    /// Use an explicitly supplied transport, for example an isolated mock server.
+    ///
+    /// The caller owns address validation and redirect policy for this instance.
+    /// This does not change the production provider registry's pinned transport.
+    pub const fn with_client_factory(factory: fn(&str) -> Result<reqwest::Client, String>) -> Self {
+        Self {
+            client_factory: Some(factory),
+        }
+    }
+
+    async fn client_for(&self, base: &str) -> Result<reqwest::Client, String> {
+        match self.client_factory {
+            Some(factory) => factory(base),
+            None => client_for(base).await,
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl Integration for DokployIntegration {
     async fn test(&self, credential: Credential<'_>) -> Result<TestReport, String> {
-        test(credential.url, credential.api_key).await
+        test(self, credential.url, credential.api_key).await
     }
 
     async fn remote_sources(
         &self,
         credential: Credential<'_>,
     ) -> Result<Vec<RemoteSource>, String> {
-        list_sources(credential).await
+        list_sources(self, credential).await
     }
 
     async fn provision_remote_source(
@@ -1449,7 +1493,7 @@ impl Integration for DokployIntegration {
         credential: Credential<'_>,
         application: SourceApplication<'_>,
     ) -> Result<ProvisionedSource, String> {
-        create_source(credential, application).await
+        create_source(self, credential, application).await
     }
     async fn update_remote_source_internal_url(
         &self,
@@ -1457,7 +1501,7 @@ impl Integration for DokployIntegration {
         source_id: &str,
         internal_url: &str,
     ) -> Result<(), String> {
-        update_source_internal_url(credential, source_id, internal_url).await
+        update_source_internal_url(self, credential, source_id, internal_url).await
     }
 
     async fn remove_remote_source(
@@ -1465,11 +1509,11 @@ impl Integration for DokployIntegration {
         credential: Credential<'_>,
         parent_id: &str,
     ) -> Result<(), String> {
-        remove_source(credential, parent_id).await
+        remove_source(self, credential, parent_id).await
     }
 
     async fn check_remote_source(&self, credential: Credential<'_>) -> Result<usize, String> {
-        check_source(credential).await
+        check_source(self, credential).await
     }
 
     fn validate_repository_settings(
@@ -1504,7 +1548,7 @@ impl Integration for DokployIntegration {
         &self,
         request: RemoteResourcesRequest<'_>,
     ) -> Result<Catalog, String> {
-        let client = client_for(request.credential.url).await?;
+        let client = self.client_for(request.credential.url).await?;
         list_resources(&client, request.credential.url, request.credential.api_key).await
     }
 
@@ -1512,7 +1556,7 @@ impl Integration for DokployIntegration {
         &self,
         request: CreateProjectRequest<'_>,
     ) -> Result<ProjectSummary, String> {
-        let client = client_for(request.credential.url).await?;
+        let client = self.client_for(request.credential.url).await?;
         create_project(
             &client,
             request.credential.url,
@@ -1526,7 +1570,7 @@ impl Integration for DokployIntegration {
         &self,
         request: CreateEnvironmentRequest<'_>,
     ) -> Result<CreatedEnvironment, String> {
-        let client = client_for(request.credential.url).await?;
+        let client = self.client_for(request.credential.url).await?;
         create_environment(
             &client,
             request.credential.url,
@@ -1537,7 +1581,7 @@ impl Integration for DokployIntegration {
     }
 
     async fn link_remote(&self, request: LinkRemoteRequest<'_>) -> Result<Value, String> {
-        let client = client_for(request.credential.url).await?;
+        let client = self.client_for(request.credential.url).await?;
         let body = LinkResourceRequest {
             kind: parse_kind(request.kind)?,
             id: request.id,
@@ -1561,7 +1605,7 @@ impl Integration for DokployIntegration {
     }
 
     async fn create_remote(&self, request: CreateRemoteRequest<'_>) -> Result<Value, String> {
-        let client = client_for(request.credential.url).await?;
+        let client = self.client_for(request.credential.url).await?;
         let body = CreateResourceRequest {
             kind: parse_kind(request.kind)?,
             name: request.name,
@@ -1587,7 +1631,7 @@ impl Integration for DokployIntegration {
     }
 
     async fn set_remote_enabled(&self, request: EnablementRequest<'_>) -> Result<(), String> {
-        let client = client_for(request.credential.url).await?;
+        let client = self.client_for(request.credential.url).await?;
         let kind = parse_kind(request.kind)?;
         set_enabled(
             &client,
@@ -1601,7 +1645,7 @@ impl Integration for DokployIntegration {
     }
 
     async fn setup_remote(&self, request: SetupRemoteRequest<'_>) -> Result<SetupOutcome, String> {
-        setup(request).await
+        setup(self, request).await
     }
 
     async fn deployment_status(
@@ -1609,7 +1653,7 @@ impl Integration for DokployIntegration {
         credential: Credential<'_>,
         resource: &str,
     ) -> Result<DeploymentStatus, String> {
-        latest_deployment(credential, resource).await
+        latest_deployment(self, credential, resource).await
     }
 
     async fn handle_event(&self, context: EventContext<'_>) -> Result<String, String> {
@@ -1618,7 +1662,7 @@ impl Integration for DokployIntegration {
             .ok_or("Choose a Dokploy deployment resource first.")?;
         let link: Link = serde_json::from_str(stored)
             .map_err(|error| format!("stored Dokploy resource is malformed: {error}"))?;
-        let client = client_for(context.credential.url).await?;
+        let client = self.client_for(context.credential.url).await?;
         match context.event {
             Event::Push(PushEvent {
                 reference,
@@ -1657,10 +1701,21 @@ impl Integration for DokployIntegration {
     }
 }
 
-pub(crate) static INTEGRATION: DokployIntegration = DokployIntegration;
+pub(crate) static INTEGRATION: DokployIntegration = DokployIntegration {
+    client_factory: None,
+};
 
 #[cfg(test)]
 mod tests {
+    static TEST_INTEGRATION: DokployIntegration = DokployIntegration::with_client_factory(|_| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(10))
+            .no_proxy()
+            .build()
+            .map_err(|error| error.to_string())
+    });
+
     use serde_json::json;
 
     use super::*;
@@ -1704,14 +1759,14 @@ mod tests {
     fn repository_settings_require_complete_resource_link() {
         let resource = json!({ "kind": "application", "id": "app-1" });
 
-        let result = INTEGRATION.validate_repository_settings(Some(&resource), None);
+        let result = TEST_INTEGRATION.validate_repository_settings(Some(&resource), None);
 
         assert!(result.is_err());
     }
 
     #[test]
     fn repository_settings_reject_local_deployment_configuration() {
-        let result = INTEGRATION.validate_repository_settings(None, Some(&json!({})));
+        let result = TEST_INTEGRATION.validate_repository_settings(None, Some(&json!({})));
 
         assert!(result.is_err());
     }
@@ -1973,7 +2028,7 @@ mod tests {
     #[tokio::test]
     async fn setup_creates_configures_and_reports_each_step() {
         let (base, calls, server) = setup_server(None).await;
-        let outcome = setup(setup_request(&base)).await;
+        let outcome = setup(&TEST_INTEGRATION, setup_request(&base)).await;
         server.abort();
         let outcome = outcome.unwrap();
 
@@ -2003,7 +2058,10 @@ mod tests {
     #[tokio::test]
     async fn setup_failure_undoes_what_it_created() {
         let (base, calls, server) = setup_server(Some("/api/domain.create")).await;
-        let error = setup(setup_request(&base)).await.err().unwrap();
+        let error = setup(&TEST_INTEGRATION, setup_request(&base))
+            .await
+            .err()
+            .unwrap();
         server.abort();
 
         assert!(error.contains("Domain already exists"), "{error}");
@@ -2138,6 +2196,7 @@ mod tests {
         let base = format!("http://{address}");
 
         let provisioned = create_source(
+            &TEST_INTEGRATION,
             Credential {
                 url: &base,
                 api_key: "api-key",
@@ -2217,6 +2276,7 @@ mod tests {
         let base = format!("http://{address}");
 
         let result = update_source_internal_url(
+            &TEST_INTEGRATION,
             Credential {
                 url: &base,
                 api_key: "api-key",
