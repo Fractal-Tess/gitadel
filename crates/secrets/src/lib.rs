@@ -28,7 +28,7 @@ use sea_orm::{
 };
 use sha2::Sha256;
 
-use crate::entity::{
+use gitadel_db::entity::{
     namespace_integration, namespace_mirror_identity, oidc_provider, repository_webhook, user_totp,
 };
 
@@ -40,14 +40,14 @@ const TEXT_PREFIX: &str = "v1:";
 
 /// Seals and opens stored secret values.
 #[derive(Clone)]
-pub(crate) struct SecretCipher {
+pub struct SecretCipher {
     cipher: Aes256Gcm,
 }
 
 /// What a text-column secret is, which fixes the associated data it is
 /// sealed with and the name an unreadable value is reported under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SecretKind {
+pub enum SecretKind {
     DokployApiKey,
     MirrorIdentitySecret,
     WebhookSecret,
@@ -80,7 +80,7 @@ impl SecretKind {
 /// A stored value that cannot be opened, almost always because the SSH host
 /// key changed since it was sealed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OpenError {
+pub struct OpenError {
     kind: SecretKind,
     id: String,
 }
@@ -101,7 +101,7 @@ impl std::error::Error for OpenError {}
 /// Sealing cannot fail for well-formed input; this only reports an AEAD
 /// failure, which would mean a broken cipher implementation.
 #[derive(Debug)]
-pub(crate) struct SealError;
+pub struct SealError;
 
 impl fmt::Display for SealError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -113,7 +113,7 @@ impl std::error::Error for SealError {}
 
 impl SecretCipher {
     /// Derives the sealing key from the SSH host key's private key material.
-    pub(crate) fn from_host_key(key: &PrivateKey) -> anyhow::Result<Self> {
+    pub fn from_host_key(key: &PrivateKey) -> anyhow::Result<Self> {
         let material = key
             .key_data()
             .encode_vec()
@@ -121,7 +121,7 @@ impl SecretCipher {
         Self::from_material(&material)
     }
 
-    pub(crate) fn from_material(material: &[u8]) -> anyhow::Result<Self> {
+    pub fn from_material(material: &[u8]) -> anyhow::Result<Self> {
         let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(KEY_CONTEXT)
             .map_err(|_| anyhow::anyhow!("invalid secret key context"))?;
         mac.update(material);
@@ -132,18 +132,14 @@ impl SecretCipher {
     }
 
     /// A cipher for tests, where no host key exists.
-    #[cfg(test)]
-    pub(crate) fn for_tests() -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_tests() -> Self {
         Self::from_material(b"gitadel test secret cipher").expect("test cipher")
     }
 
     /// Seals `value` bound to `associated_data`; the result is the random
     /// nonce followed by the ciphertext and tag.
-    pub(crate) fn seal_bytes(
-        &self,
-        associated_data: &[u8],
-        value: &[u8],
-    ) -> Result<Vec<u8>, SealError> {
+    pub fn seal_bytes(&self, associated_data: &[u8], value: &[u8]) -> Result<Vec<u8>, SealError> {
         let nonce_bytes: [u8; NONCE_BYTES] = rand::random();
         let nonce = Nonce::from(nonce_bytes);
         let ciphertext = self
@@ -164,7 +160,7 @@ impl SecretCipher {
 
     /// Opens a value from [`Self::seal_bytes`]; `None` when the key, the
     /// associated data, or the ciphertext does not match.
-    pub(crate) fn open_bytes(&self, associated_data: &[u8], sealed: &[u8]) -> Option<Vec<u8>> {
+    pub fn open_bytes(&self, associated_data: &[u8], sealed: &[u8]) -> Option<Vec<u8>> {
         let (nonce, ciphertext) = sealed.split_at_checked(NONCE_BYTES)?;
         let nonce = Nonce::try_from(nonce).ok()?;
         self.cipher
@@ -183,7 +179,7 @@ impl SecretCipher {
     }
 
     /// Seals a text-column secret for the row `id` of `kind`.
-    pub(crate) fn seal_text(
+    pub fn seal_text(
         &self,
         kind: SecretKind,
         id: &dyn fmt::Display,
@@ -195,7 +191,7 @@ impl SecretCipher {
 
     /// Opens a text-column secret. A value without the sealed prefix predates
     /// sealing and is returned as it is.
-    pub(crate) fn open_text(
+    pub fn open_text(
         &self,
         kind: SecretKind,
         id: &dyn fmt::Display,
@@ -217,22 +213,22 @@ impl SecretCipher {
 }
 
 /// Whether a stored text value is already sealed.
-pub(crate) fn is_sealed(stored: &str) -> bool {
+pub fn is_sealed(stored: &str) -> bool {
     stored.starts_with(TEXT_PREFIX)
 }
 
 /// How many rows the startup pass sealed, per kind.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct SealReport {
-    pub(crate) dokploy_api_keys: u64,
-    pub(crate) mirror_identity_secrets: u64,
-    pub(crate) webhook_secrets: u64,
-    pub(crate) oidc_client_secrets: u64,
-    pub(crate) totp_secrets: u64,
+pub struct SealReport {
+    pub dokploy_api_keys: u64,
+    pub mirror_identity_secrets: u64,
+    pub webhook_secrets: u64,
+    pub oidc_client_secrets: u64,
+    pub totp_secrets: u64,
 }
 
 impl SealReport {
-    pub(crate) fn total(&self) -> u64 {
+    pub fn total(&self) -> u64 {
         self.dokploy_api_keys
             + self.mirror_identity_secrets
             + self.webhook_secrets
@@ -244,7 +240,7 @@ impl SealReport {
 /// Seals every secret that is still stored as plain text. Safe to run on
 /// every start: sealed rows are left alone, and readers accept both forms,
 /// so the pass can run while requests are served.
-pub(crate) async fn seal_stored_secrets<C: ConnectionTrait>(
+pub async fn seal_stored_secrets<C: ConnectionTrait>(
     database: &C,
     cipher: &SecretCipher,
 ) -> Result<SealReport, anyhow::Error> {
@@ -412,9 +408,9 @@ mod tests {
         use sea_orm::{ActiveModelTrait, Set};
         use uuid::Uuid;
 
-        let database = crate::actions::test_support::database().await;
-        let owner = crate::actions::test_support::owner(&database, "alice").await;
-        let project = crate::actions::test_support::repository(&database, &owner, "project").await;
+        let database = gitadel_db::test_support::database().await;
+        let owner = gitadel_db::test_support::owner(&database, "alice").await;
+        let project = gitadel_db::test_support::repository(&database, &owner, "project").await;
         let cipher = SecretCipher::for_tests();
         let now = Utc::now();
         let integration = namespace_integration::ActiveModel {

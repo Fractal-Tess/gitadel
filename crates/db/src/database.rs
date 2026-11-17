@@ -7,11 +7,10 @@ use anyhow::{Context, Result};
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 
-use crate::{
-    config::DatabaseSettings,
-    filesystem::{create_private_directory, open_private_file, protect_file},
-    migration::Migrator,
-};
+use gitadel_config::DatabaseSettings;
+use gitadel_core::filesystem::{create_private_directory, open_private_file, protect_file};
+
+use crate::migration::Migrator;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Readers the read-only pool opens. WAL lets them run beside the single

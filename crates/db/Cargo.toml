@@ -1,0 +1,25 @@
+[package]
+name = "gitadel-db"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+gitadel-config.workspace = true
+gitadel-core.workspace = true
+sea-orm.workspace = true
+sea-orm-migration.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

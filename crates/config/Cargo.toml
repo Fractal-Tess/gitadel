@@ -1,0 +1,19 @@
+[package]
+name = "gitadel-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+config.workspace = true
+lettre.workspace = true
+serde.workspace = true
+url.workspace = true
+uuid.workspace = true
+utoipa.workspace = true

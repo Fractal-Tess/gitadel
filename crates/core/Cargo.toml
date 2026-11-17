@@ -1,0 +1,16 @@
+[package]
+name = "gitadel-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+chrono.workspace = true
+cron.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+url.workspace = true

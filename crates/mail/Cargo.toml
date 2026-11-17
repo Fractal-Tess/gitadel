@@ -1,0 +1,25 @@
+[package]
+name = "gitadel-mail"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+anyhow.workspace = true
+gitadel-config.workspace = true
+lettre.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+utoipa.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

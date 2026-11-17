@@ -16,7 +16,7 @@ use lettre::{
 use serde::Serialize;
 use tokio::sync::mpsc;
 
-use crate::config::{SmtpSettings, SmtpTls};
+use gitadel_config::{SmtpSettings, SmtpTls};
 
 /// Messages waiting beyond this are dropped with a warning rather than
 /// letting a dead relay grow memory without bound.
@@ -198,8 +198,8 @@ pub fn parse_address(value: &str) -> Option<lettre::Address> {
 
 /// Accept one SMTP session on a local port and return the first message's
 /// DATA section.
-#[cfg(test)]
-pub(crate) async fn fake_smtp_server() -> (u16, tokio::task::JoinHandle<String>) {
+#[cfg(any(test, feature = "test-support"))]
+pub async fn fake_smtp_server() -> (u16, tokio::task::JoinHandle<String>) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -235,8 +235,8 @@ pub(crate) async fn fake_smtp_server() -> (u16, tokio::task::JoinHandle<String>)
 }
 
 /// A mailer that talks to [`fake_smtp_server`] without TLS.
-#[cfg(test)]
-pub(crate) fn test_mailer(port: u16) -> Mailer {
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_mailer(port: u16) -> Mailer {
     Mailer::start(&SmtpSettings {
         host: "127.0.0.1".to_owned(),
         port: Some(port),

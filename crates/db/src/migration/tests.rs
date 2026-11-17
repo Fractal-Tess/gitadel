@@ -420,8 +420,8 @@ async fn webhook_retry_migration_leaves_queued_deliveries_due() {
     super::Migrator::up(&database, Some(before as u32))
         .await
         .unwrap();
-    let owner = crate::actions::test_support::owner(&database, "owner").await;
-    let repository = crate::actions::test_support::repository(&database, &owner, "project").await;
+    let owner = crate::test_support::owner(&database, "owner").await;
+    let repository = crate::test_support::repository(&database, &owner, "project").await;
     let webhook_id = Uuid::new_v4();
     let delivery_id = Uuid::new_v4();
     let at = "'2026-09-01T00:00:00+00:00'";
@@ -492,8 +492,8 @@ async fn cache_kind_migration_drops_borrowed_kinds_and_admits_the_new_ones() {
     super::Migrator::up(&database, Some(before as u32))
         .await
         .unwrap();
-    let owner = crate::actions::test_support::owner(&database, "owner").await;
-    let repository = crate::actions::test_support::repository(&database, &owner, "project").await;
+    let owner = crate::test_support::owner(&database, "owner").await;
+    let repository = crate::test_support::repository(&database, &owner, "project").await;
     let now = chrono::Utc::now();
     let entry = |kind: &str, key: &str| repository_cache_entry::ActiveModel {
         repository_id: Set(repository.id),
