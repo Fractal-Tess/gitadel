@@ -10,6 +10,7 @@ members = [
     "crates/integrations",
     "crates/actions",
     "crates/identity",
+    "crates/instance",
     "crates/repositories",
     "crates/api",
     "crates/server",
@@ -35,6 +36,7 @@ gitadel-backups = { path = "crates/backups" }
 gitadel-integrations = { path = "crates/integrations" }
 gitadel-actions = { path = "crates/actions" }
 gitadel-identity = { path = "crates/identity" }
+gitadel-instance = { path = "crates/instance" }
 gitadel-repositories = { path = "crates/repositories" }
 gitadel-api = { path = "crates/api" }
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }

@@ -2456,9 +2456,18 @@ version = "0.24.0"
 dependencies = [
  "anyhow",
  "clap",
+ "gitadel-actions",
  "gitadel-api",
+ "gitadel-backups",
  "gitadel-config",
+ "gitadel-core",
  "gitadel-db",
+ "gitadel-identity",
+ "gitadel-instance",
+ "gitadel-integrations",
+ "gitadel-mail",
+ "gitadel-repositories",
+ "gitadel-secrets",
  "gitadel-storage",
  "tokio",
  "tracing",
@@ -2478,7 +2487,6 @@ dependencies = [
  "quick-xml 0.42.0",
  "rand 0.10.3",
  "sea-orm",
- "sea-orm-migration",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -2516,6 +2524,7 @@ dependencies = [
  "gitadel-core",
  "gitadel-db",
  "gitadel-identity",
+ "gitadel-instance",
  "gitadel-integrations",
  "gitadel-mail",
  "gitadel-repositories",
@@ -2690,6 +2699,16 @@ dependencies = [
  "subtle",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "gitadel-instance"
+version = "0.24.0"
+dependencies = [
+ "gitadel-config",
+ "gitadel-core",
+ "gitadel-db",
+ "gitadel-identity",
 ]
 
 [[package]]

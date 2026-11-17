@@ -333,14 +333,9 @@ pub async fn claim(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::database;
     use gitadel_db::entity::action_job_token;
-    use sea_orm::{ActiveModelTrait, ConnectOptions, Database};
-    use sea_orm_migration::MigratorTrait;
-
-    use gitadel_db::{
-        entity::{namespace, user},
-        migration::Migrator,
-    };
+    use sea_orm::ActiveModelTrait;
 
     #[test]
     fn canonicalizes_the_official_runner_version() {
@@ -356,44 +351,8 @@ mod tests {
         assert_eq!(canonical_runner_version("vv13.0.0"), None);
     }
 
-    async fn database() -> DatabaseConnection {
-        let mut options = ConnectOptions::new("sqlite::memory:");
-        options.max_connections(1).sqlx_logging(false);
-        let database = Database::connect(options).await.unwrap();
-        Migrator::up(&database, None).await.unwrap();
-        database
-    }
-
     async fn owner(database: &DatabaseConnection, username: &str) -> Uuid {
-        let now = Utc::now();
-        let id = Uuid::new_v4();
-        user::ActiveModel {
-            id: Set(id),
-            username: Set(username.to_owned()),
-            password_hash: Set("unused".to_owned()),
-            is_admin: Set(false),
-            default_repository_visibility: Set("private".to_owned()),
-            theme_preference: Set("system".to_owned()),
-            motion_preference: Set("system".to_owned()),
-            disabled_at: Set(None),
-            avatar_updated_at: Set(None),
-            created_at: Set(now),
-            updated_at: Set(now),
-        }
-        .insert(database)
-        .await
-        .unwrap();
-        namespace::ActiveModel {
-            slug: Set(username.to_owned()),
-            kind: Set("user".to_owned()),
-            user_id: Set(Some(id)),
-            organization_id: Set(None),
-            created_at: Set(now),
-        }
-        .insert(database)
-        .await
-        .unwrap();
-        id
+        crate::test_support::owner(database, username).await.id
     }
 
     async fn queued_job(

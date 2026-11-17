@@ -1,5 +1,6 @@
 //! Database connections, entities, and schema migrations.
 
+pub mod audit;
 mod database;
 pub mod entity;
 pub mod migration;

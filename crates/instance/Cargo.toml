@@ -1,0 +1,16 @@
+[package]
+name = "gitadel-instance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Instance settings, branding and administration services"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+gitadel-config.workspace = true
+gitadel-core.workspace = true
+gitadel-db.workspace = true
+gitadel-identity.workspace = true

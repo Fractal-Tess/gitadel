@@ -14,11 +14,12 @@ Keep the split at the level of existing responsibilities:
 | `mail` | Mail transport and delivery |
 | `storage` | Blob backends, LFS and registry persistence |
 | `identity` | Accounts, authentication and authorization |
+| `instance` | Installation settings, branding and administration |
 | `repositories` | Git operations and repository services |
 | `actions` | Workflow planning and execution |
 | `integrations` | External provider clients and deployment operations |
 | `backups` | Archive creation, inspection, restore and backup providers |
-| `api` | HTTP handlers, transport DTOs, registered routes and OpenAPI |
+| `api` | HTTP/protocol adapters, transport DTOs, registered routes and OpenAPI |
 | `server` | Executable, service construction and process lifecycle |
 | `cli` | Remote command-line client |
 
@@ -28,6 +29,9 @@ Extract service operations with their tests, leaving request parsing and HTTP
 responses in `api`. Domain crates must not depend on `api` or `server`.
 Keep issues, releases and webhooks with repository services for now rather
 than creating a separate crate for every feature.
+
+The current refinement and its acceptance rules are in
+[API-BOUNDARIES.md](API-BOUNDARIES.md).
 
 The current extraction moves the main credential, workflow, Git, storage,
 integration and backup operations into these libraries. API still contains

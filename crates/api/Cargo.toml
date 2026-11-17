@@ -25,6 +25,7 @@ gitadel-backups.workspace = true
 gitadel-integrations.workspace = true
 gitadel-actions.workspace = true
 gitadel-identity.workspace = true
+gitadel-instance.workspace = true
 gitadel-repositories.workspace = true
 aes-gcm.workspace = true
 ammonia.workspace = true

@@ -30,5 +30,5 @@ uuid.workspace = true
 yaml_serde.workspace = true
 
 [dev-dependencies]
-sea-orm-migration.workspace = true
+gitadel-db = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
