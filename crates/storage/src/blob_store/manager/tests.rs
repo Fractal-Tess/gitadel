@@ -14,9 +14,9 @@ use crate::{
     config::Settings,
     database,
     entity::lfs_object,
-    identity,
+    lfs::LfsDomain,
     registry::storage::RegistryDomain,
-    storage::LfsDomain,
+    test_support,
 };
 
 fn domains() -> [Arc<dyn StorageDomain>; 2] {
@@ -43,9 +43,7 @@ impl Fixture {
         let database = database::connect_and_migrate(&settings.database)
             .await
             .unwrap();
-        let user = identity::bootstrap_admin(&database, "storage-test", "correct-horse".to_owned())
-            .await
-            .unwrap();
+        let user = test_support::owner(&database, "storage-test").await;
         let storage_key = Uuid::new_v4();
         let now = Utc::now();
         repository::ActiveModel {

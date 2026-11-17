@@ -29,7 +29,7 @@ use crate::{
 /// The local root drops the `registry/` prefix, so it holds one directory per
 /// repository storage key like the LFS root, plus `uploads/` for resumable
 /// upload sessions.
-pub(crate) struct RegistryDomain;
+pub struct RegistryDomain;
 
 #[async_trait]
 impl StorageDomain for RegistryDomain {
@@ -66,7 +66,7 @@ impl StorageDomain for RegistryDomain {
 
 /// The two kinds of registry payload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ObjectKind {
+pub enum ObjectKind {
     Blob,
     Manifest,
 }
@@ -89,7 +89,7 @@ impl ObjectKind {
 }
 
 /// The canonical key of a payload with SHA-256 `hex`.
-pub(crate) fn object_key(storage_key: Uuid, kind: ObjectKind, hex: &str) -> Result<ObjectKey> {
+pub fn object_key(storage_key: Uuid, kind: ObjectKind, hex: &str) -> Result<ObjectKey> {
     let hex = hex.parse::<BlobDigest>()?.to_hex();
     ObjectKey::new(format!(
         "registry/{storage_key}/{}/{}/{}/{hex}",
@@ -155,7 +155,7 @@ pub(crate) fn parse_key(key: &str) -> Option<ParsedKey<'_>> {
 /// migration a restart interrupted. Registry data earlier versions left in
 /// repository directories is moved to the registry root first, and its
 /// file-based metadata is imported into the database.
-pub(crate) async fn start(
+pub async fn start(
     database: &DatabaseConnection,
     settings: &StorageSettings,
 ) -> Result<Arc<DomainStorage>> {

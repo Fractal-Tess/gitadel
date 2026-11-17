@@ -54,7 +54,7 @@ const DETAILS: &[UsageDetail] = &[
 
 /// Registry usage: blob and manifest payloads from the active store, plus
 /// tags, images, and staged uploads from registry metadata.
-pub(crate) struct RegistryUsageProvider;
+pub struct RegistryUsageProvider;
 
 #[async_trait]
 impl DomainUsage for RegistryUsageProvider {

@@ -26,7 +26,7 @@ use crate::{
 /// Git LFS objects, keyed `<storage-key>/<oid[0..2]>/<oid[2..4]>/<oid>`.
 /// The `lfs_objects` catalog follows the objects: migrations backfill it and
 /// cutover reattributes it to the destination.
-pub(crate) struct LfsDomain;
+pub struct LfsDomain;
 
 #[async_trait]
 impl StorageDomain for LfsDomain {
@@ -92,7 +92,7 @@ impl StorageDomain for LfsDomain {
 
 /// Opens the LFS storage for a running server, failing any online migration
 /// a restart interrupted.
-pub(crate) async fn start(
+pub async fn start(
     database: &DatabaseConnection,
     settings: &StorageSettings,
 ) -> Result<Arc<DomainStorage>> {
@@ -242,7 +242,7 @@ async fn catalog_object(
 
 /// LFS usage, read from the `lfs_objects` catalog. An object shared by
 /// repositories counts once for each repository that owns it.
-pub(crate) struct LfsUsage;
+pub struct LfsUsage;
 
 #[async_trait]
 impl DomainUsage for LfsUsage {
@@ -278,7 +278,7 @@ mod tests {
     use crate::{
         blob_store::{BlobStore as _, FilesystemBlobStore, lfs_object_key, manager},
         entity::{storage_migration, storage_target},
-        identity,
+        test_support,
     };
     use sea_orm::ActiveModelTrait as _;
     use sha2::{Digest as _, Sha256};
@@ -315,13 +315,7 @@ mod tests {
         let database = database::connect_and_migrate(&settings.database)
             .await
             .unwrap();
-        let user = identity::bootstrap_admin(
-            &database,
-            "storage-test",
-            "correct-horse-battery".to_owned(),
-        )
-        .await
-        .unwrap();
+        let user = test_support::owner(&database, "storage-test").await;
         let repository_id = Uuid::new_v4();
         let storage_key = Uuid::new_v4();
         let now = Utc::now();

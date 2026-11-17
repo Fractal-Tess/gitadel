@@ -24,7 +24,7 @@ use crate::entity::{repository, storage_domain_state, storage_migration};
 
 /// Migration states. Every state but the terminal two holds the per-domain
 /// active-migration index.
-pub(crate) mod state {
+pub mod state {
     pub const PENDING: &str = "pending";
     pub const COPYING: &str = "copying";
     pub const VERIFYING: &str = "verifying";

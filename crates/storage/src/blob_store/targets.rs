@@ -522,12 +522,12 @@ mod tests {
         verify_ownership, write_ownership_marker,
     };
     use crate::{
-        actions::test_support,
         blob_store::{
             BlobDigest, BlobStore, FilesystemBlobStore, ObjectKey, ObjectPrefix, manager,
         },
         config::S3Settings,
         entity::{lfs_object, storage_domain_state, storage_migration},
+        test_support,
     };
 
     struct Scratch {

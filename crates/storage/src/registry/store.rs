@@ -39,8 +39,8 @@ use crate::{
     },
 };
 
-pub(super) const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
-pub(super) const MAX_BLOB_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+pub const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_BLOB_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 pub(super) const UPLOAD_TTL_SECONDS: u64 = 86_400;
 const LOCK_STRIPES: usize = 64;
 
@@ -58,7 +58,7 @@ enum DescriptorKind {
 }
 
 #[derive(Debug)]
-pub(crate) enum StoreError {
+pub enum StoreError {
     Io(std::io::Error),
     Invalid(String),
     UploadUnknown,
@@ -112,14 +112,14 @@ impl From<anyhow::Error> for StoreError {
 
 /// Entry point to registry metadata and upload staging.
 #[derive(Clone)]
-pub(crate) struct RegistryStore {
+pub struct RegistryStore {
     database: DatabaseConnection,
     uploads_root: Arc<PathBuf>,
 }
 
 /// One image of a repository.
 #[derive(Clone)]
-pub(crate) struct ImageStore {
+pub struct ImageStore {
     database: DatabaseConnection,
     repository_id: Uuid,
     storage_key: Uuid,
@@ -131,21 +131,21 @@ pub(crate) struct ImageStore {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct StoredManifest {
+pub struct StoredManifest {
     pub digest: String,
     pub media_type: String,
     pub bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ImageReferenceMetadata {
+pub struct ImageReferenceMetadata {
     pub tag: Option<String>,
     pub digest: String,
     pub updated_at: Option<String>,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ImageMetadata {
+pub struct ImageMetadata {
     pub suffix: String,
     pub size_bytes: u64,
     pub updated_at: Option<String>,
@@ -153,7 +153,7 @@ pub(crate) struct ImageMetadata {
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, utoipa::ToSchema)]
-pub(crate) struct RegistryUsage {
+pub struct RegistryUsage {
     pub object_count: u64,
     pub total_bytes: u64,
     pub blob_count: u64,
@@ -292,7 +292,7 @@ impl RegistryStore {
     }
 
     /// `store` is the registry domain's active store.
-    pub(crate) fn image(
+    pub fn image(
         &self,
         repository: &repository::Model,
         suffix: &str,
@@ -324,7 +324,7 @@ impl RegistryStore {
     }
 
     /// Images of a repository that hold at least one manifest.
-    pub(crate) async fn browse_images(
+    pub async fn browse_images(
         &self,
         repository_id: Uuid,
     ) -> Result<Vec<ImageMetadata>, StoreError> {
@@ -416,7 +416,7 @@ impl RegistryStore {
 }
 
 /// Where resumable upload sessions are staged.
-pub(crate) fn uploads_root(registry_root: &Path) -> PathBuf {
+pub fn uploads_root(registry_root: &Path) -> PathBuf {
     registry_root.join("uploads")
 }
 

@@ -70,10 +70,7 @@ struct Relocation {
 /// to `<registry_root>/<storage-key>/`. A rename is used when both sit on one
 /// filesystem; otherwise each file is copied, its size and SHA-256 verified,
 /// and only then removed from the source, so an interrupted run resumes safely.
-pub(crate) async fn relocate(
-    database: &DatabaseConnection,
-    settings: &StorageSettings,
-) -> Result<()> {
+pub async fn relocate(database: &DatabaseConnection, settings: &StorageSettings) -> Result<()> {
     if completed(database, RELOCATE).await? {
         return Ok(());
     }
