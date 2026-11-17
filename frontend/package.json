@@ -8,8 +8,8 @@
     "dev": "vite dev",
     "build": "bun scripts/checked-build.ts",
     "build:assets": "vite build",
-    "api:sdk": "openapi-ts && bun scripts/api-contracts.ts",
-    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "api:sdk": "svelte-kit sync && openapi-ts && bun scripts/api-contracts.ts",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "bun test",
     "test:e2e": "playwright test",
     "preview": "vite preview"
