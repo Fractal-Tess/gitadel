@@ -404,6 +404,58 @@ pub(crate) fn http_router(
         ))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CompletedService {
+    Http,
+    Ssh,
+    MirrorScheduler,
+    BackupScheduler,
+    ActionsScheduler,
+    IntegrityScheduler,
+}
+
+fn completed_service(
+    result: std::result::Result<Result<()>, tokio::task::JoinError>,
+    service: CompletedService,
+) -> (Result<ServerExit>, Option<CompletedService>) {
+    let context = match service {
+        CompletedService::Http => "HTTP server task failed",
+        CompletedService::Ssh => "SSH server task failed",
+        CompletedService::MirrorScheduler => "mirror scheduler task failed",
+        CompletedService::BackupScheduler => "backup scheduler task failed",
+        CompletedService::ActionsScheduler => "Actions scheduler task failed",
+        CompletedService::IntegrityScheduler => "integrity scheduler task failed",
+    };
+    (
+        result
+            .context(context)
+            .and_then(|result| result)
+            .map(|()| ServerExit::Shutdown),
+        Some(service),
+    )
+}
+
+fn abort_services(
+    completed: Option<CompletedService>,
+    workers: &[(CompletedService, tokio::task::AbortHandle)],
+    cancel_actions: impl FnOnce(),
+) {
+    for (service, task) in workers {
+        if *service != CompletedService::ActionsScheduler && completed != Some(*service) {
+            task.abort();
+        }
+    }
+    if completed != Some(CompletedService::ActionsScheduler) {
+        cancel_actions();
+        if let Some((_, task)) = workers
+            .iter()
+            .find(|(service, _)| *service == CompletedService::ActionsScheduler)
+        {
+            task.abort();
+        }
+    }
+}
+
 pub enum ServerExit {
     Shutdown,
     Maintenance(Box<MaintenanceAction>),
@@ -544,114 +596,36 @@ pub async fn serve(
         repository_state.clone(),
         actions_state.clone(),
     ));
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum CompletedService {
-        Http,
-        Ssh,
-        MirrorScheduler,
-        BackupScheduler,
-        ActionsScheduler,
-        IntegrityScheduler,
-    }
-
+    let workers = [
+        (CompletedService::Http, http.abort_handle()),
+        (CompletedService::Ssh, ssh.abort_handle()),
+        (
+            CompletedService::MirrorScheduler,
+            mirror_scheduler.abort_handle(),
+        ),
+        (
+            CompletedService::BackupScheduler,
+            backup_scheduler.abort_handle(),
+        ),
+        (
+            CompletedService::IntegrityScheduler,
+            integrity_scheduler.abort_handle(),
+        ),
+        (
+            CompletedService::ActionsScheduler,
+            actions_scheduler.abort_handle(),
+        ),
+    ];
     let (outcome, completed) = tokio::select! {
-        result = &mut http => {
-            ssh.abort();
-            mirror_scheduler.abort();
-            backup_scheduler.abort();
-            integrity_scheduler.abort();
-            actions_state.cancel();
-            actions_scheduler.abort();
-            (
-                result
-                    .context("HTTP server task failed")
-                    .and_then(|result| result)
-                    .map(|()| ServerExit::Shutdown),
-                Some(CompletedService::Http),
-            )
-        }
-        result = &mut ssh => {
-            http.abort();
-            mirror_scheduler.abort();
-            backup_scheduler.abort();
-            integrity_scheduler.abort();
-            actions_state.cancel();
-            actions_scheduler.abort();
-            (
-                result
-                    .context("SSH server task failed")
-                    .and_then(|result| result)
-                    .map(|()| ServerExit::Shutdown),
-                Some(CompletedService::Ssh),
-            )
-        }
-        result = &mut mirror_scheduler => {
-            http.abort();
-            ssh.abort();
-            backup_scheduler.abort();
-            integrity_scheduler.abort();
-            actions_state.cancel();
-            actions_scheduler.abort();
-            (
-                result
-                    .context("mirror scheduler task failed")
-                    .and_then(|result| result)
-                    .map(|()| ServerExit::Shutdown),
-                Some(CompletedService::MirrorScheduler),
-            )
-        }
-        result = &mut backup_scheduler => {
-            http.abort();
-            ssh.abort();
-            mirror_scheduler.abort();
-            integrity_scheduler.abort();
-            actions_state.cancel();
-            actions_scheduler.abort();
-            (
-                result
-                    .context("backup scheduler task failed")
-                    .and_then(|result| result)
-                    .map(|()| ServerExit::Shutdown),
-                Some(CompletedService::BackupScheduler),
-            )
-        }
-        result = &mut actions_scheduler => {
-            http.abort();
-            ssh.abort();
-            mirror_scheduler.abort();
-            backup_scheduler.abort();
-            integrity_scheduler.abort();
-            (
-                result
-                    .context("Actions scheduler task failed")
-                    .and_then(|result| result)
-                    .map(|()| ServerExit::Shutdown),
-                Some(CompletedService::ActionsScheduler),
-            )
-        }
-        result = &mut integrity_scheduler => {
-            http.abort();
-            ssh.abort();
-            mirror_scheduler.abort();
-            backup_scheduler.abort();
-            actions_state.cancel();
-            actions_scheduler.abort();
-            (
-                result
-                    .context("integrity scheduler task failed")
-                    .and_then(|result| result)
-                    .map(|()| ServerExit::Shutdown),
-                Some(CompletedService::IntegrityScheduler),
-            )
-        }
+        result = &mut http => completed_service(result, CompletedService::Http),
+        result = &mut ssh => completed_service(result, CompletedService::Ssh),
+        result = &mut mirror_scheduler => completed_service(result, CompletedService::MirrorScheduler),
+        result = &mut backup_scheduler => completed_service(result, CompletedService::BackupScheduler),
+        result = &mut actions_scheduler => completed_service(result, CompletedService::ActionsScheduler),
+        result = &mut integrity_scheduler => completed_service(result, CompletedService::IntegrityScheduler),
         Some(action) = maintenance_receiver.recv() => {
             shutdown.cancel();
-            ssh.abort();
-            mirror_scheduler.abort();
-            backup_scheduler.abort();
-            integrity_scheduler.abort();
-            actions_state.cancel();
-            actions_scheduler.abort();
+            abort_services(Some(CompletedService::Http), &workers, || actions_state.cancel());
             let http_completed =
                 tokio::time::timeout(Duration::from_secs(5), &mut http).await.is_ok();
             if !http_completed {
@@ -663,25 +637,22 @@ pub async fn serve(
             )
         }
     };
+    if !matches!(&outcome, Ok(ServerExit::Maintenance(_))) {
+        abort_services(completed, &workers, || actions_state.cancel());
+    }
     audit_retention.abort();
     let _ = audit_retention.await;
-    if completed != Some(CompletedService::Http) {
-        let _ = http.await;
-    }
-    if completed != Some(CompletedService::Ssh) {
-        let _ = ssh.await;
-    }
-    if completed != Some(CompletedService::MirrorScheduler) {
-        let _ = mirror_scheduler.await;
-    }
-    if completed != Some(CompletedService::BackupScheduler) {
-        let _ = backup_scheduler.await;
-    }
-    if completed != Some(CompletedService::ActionsScheduler) {
-        let _ = actions_scheduler.await;
-    }
-    if completed != Some(CompletedService::IntegrityScheduler) {
-        let _ = integrity_scheduler.await;
+    for (service, task) in [
+        (CompletedService::Http, http),
+        (CompletedService::Ssh, ssh),
+        (CompletedService::MirrorScheduler, mirror_scheduler),
+        (CompletedService::BackupScheduler, backup_scheduler),
+        (CompletedService::ActionsScheduler, actions_scheduler),
+        (CompletedService::IntegrityScheduler, integrity_scheduler),
+    ] {
+        if completed != Some(service) {
+            let _ = task.await;
+        }
     }
     repository_state.close_tasks();
     if matches!(&outcome, Ok(ServerExit::Maintenance(_))) {
@@ -1257,5 +1228,40 @@ mod tests {
                 .all(|source| source != "https:" && source != "*")
         );
         assert!(IMAGE_SOURCES.contains("https://img.shields.io"));
+    }
+    #[tokio::test]
+    async fn maintenance_keeps_http_alive_while_background_workers_stop() {
+        let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        let http = tokio::spawn(async move {
+            wait.await.unwrap();
+            Ok(())
+        });
+        let mut tasks = vec![(CompletedService::Http, http)];
+        for service in [
+            CompletedService::Ssh,
+            CompletedService::MirrorScheduler,
+            CompletedService::BackupScheduler,
+            CompletedService::IntegrityScheduler,
+            CompletedService::ActionsScheduler,
+        ] {
+            tasks.push((service, tokio::spawn(std::future::pending::<Result<()>>())));
+        }
+        let workers: Vec<_> = tasks
+            .iter()
+            .map(|(service, task)| (*service, task.abort_handle()))
+            .collect();
+        let mut actions_cancelled = false;
+        abort_services(Some(CompletedService::Http), &workers, || {
+            actions_cancelled = true
+        });
+        assert!(actions_cancelled);
+        release.send(()).unwrap();
+        for (service, task) in tasks {
+            if service == CompletedService::Http {
+                assert!(task.await.unwrap().is_ok());
+            } else {
+                assert!(task.await.unwrap_err().is_cancelled());
+            }
+        }
     }
 }
