@@ -59,5 +59,5 @@ Avoid a repository/Actions dependency cycle or a generic event bus.
 - Count actual deduplication separately from code moved between crates and
   from route annotations or tests. Report remaining boundaries explicitly.
 
-The uncompiled legacy OpenAPI catalog requires the owner's deletion approval;
-its removal does not block these changes.
+The historical uncompiled OpenAPI catalog was removed with the owner's approval.
+The handler-derived contract remains the sole source of API metadata.

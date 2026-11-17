@@ -111,6 +111,6 @@ Deeper structures remain runtime-validated. Path scalar types, native bodies,
 and HTTP statuses still require accurate handler annotations; JSON bodies,
 query DTOs, and JSON response DTOs are collected from the handler signature.
 
-The old `crates/api/src/openapi/operations/` files are no longer compiled or authoritative.
-They are retained pending approval to remove existing files under the workspace
-deletion rule.
+The historical, uncompiled `crates/api/src/openapi/operations/` catalog was
+removed with the owner's approval. Registered handlers remain the sole source
+for the live contract; do not reintroduce a parallel operation catalog.
