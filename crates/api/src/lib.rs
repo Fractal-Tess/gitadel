@@ -40,15 +40,3 @@ pub fn export_openapi() -> Result<String, serde_json::Error> {
 pub fn image_worker(path: &str, thumbnail: bool) -> anyhow::Result<()> {
     repository::image::worker(path, thumbnail)
 }
-
-/// Initialize the logging configuration used by the server and offline commands.
-pub fn init_tracing() {
-    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "gitadel=info,tower_http=info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-}

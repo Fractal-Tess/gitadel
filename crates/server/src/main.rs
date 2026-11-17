@@ -10,6 +10,18 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use config::{Cli, Settings};
 
+/// Initialize process logging before running the server or offline commands.
+fn init_tracing() {
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "gitadel=info,tower_http=info".into()),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+}
+
 #[cfg(feature = "api-contract-export")]
 fn main() -> Result<()> {
     print!("{}", gitadel_api::export_openapi()?);
@@ -36,7 +48,7 @@ fn main() -> Result<()> {
 #[tokio::main]
 #[cfg(not(feature = "api-contract-export"))]
 async fn run(cli: Cli) -> Result<()> {
-    gitadel_api::init_tracing();
+    init_tracing();
 
     if let Some(command) = cli.command() {
         return match command {
@@ -46,17 +58,18 @@ async fn run(cli: Cli) -> Result<()> {
             }
             config::GitadelCommand::Backup { command } => {
                 let settings = Settings::load(&cli)?;
-                gitadel_api::run_backup(command, &settings, cli.config_path()).await
+                gitadel_backups::archive::run(command, &settings, cli.config_path()).await
             }
             config::GitadelCommand::Lfs { command } => {
                 let settings = Settings::load(&cli)?;
-                let _storage_lock = gitadel_api::acquire_storage_lock(&settings.database)?;
+                let _storage_lock =
+                    gitadel_backups::archive::acquire_storage_lock(&settings.database)?;
                 storage::run(command, &settings).await
             }
         };
     }
     let settings = Settings::load(&cli)?;
-    let _storage_lock = gitadel_api::acquire_storage_lock(&settings.database)?;
+    let _storage_lock = gitadel_backups::archive::acquire_storage_lock(&settings.database)?;
     if let Some(username) = cli.bootstrap_admin() {
         if !cli.password_stdin() {
             bail!("--bootstrap-admin requires --password-stdin");

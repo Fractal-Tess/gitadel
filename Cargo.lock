@@ -2471,6 +2471,7 @@ dependencies = [
  "gitadel-storage",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -356,6 +356,54 @@ async fn reject_cross_site_cookie_requests(
     next.run(request).await
 }
 
+/// Build the HTTP and protocol adapters from already constructed handles.
+pub(crate) fn http_router(
+    settings: &Settings,
+    identity_state: &IdentityState,
+    repository_state: &RepositoryState,
+    actions_state: &ActionsState,
+) -> Router {
+    let git_http_state = GitHttpState::new(repository_state.clone(), actions_state.clone());
+    let api_router = Router::new()
+        .merge(crate::openapi::instance_router())
+        .merge(identity::router().with_state(identity_state.clone()))
+        .merge(repository::router().with_state(repository_state.clone()))
+        .merge(actions_state.api_router());
+    Router::new()
+        .merge(
+            Router::new()
+                .route("/healthz", get(health))
+                .with_state(identity_state.clone()),
+        )
+        .merge(identity::oauth_router().with_state(identity_state.clone()))
+        .nest("/api/v1", api_router)
+        .merge(actions_state.artifact_router())
+        .nest("/api/actions", actions_state.protocol_router())
+        .merge(repository::git_http_router().with_state(git_http_state))
+        .fallback(get(frontend))
+        .layer(CompressionLayer::new().compress_when(Compressible))
+        .layer(middleware::from_fn_with_state(
+            crate::registry::router(repository_state.clone()),
+            dispatch_registry,
+        ))
+        .layer(middleware::from_fn_with_state(
+            PublicOrigin(
+                settings
+                    .server
+                    .public_url
+                    .origin()
+                    .ascii_serialization()
+                    .into(),
+            ),
+            reject_cross_site_cookie_requests,
+        ))
+        .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn_with_state(
+            TrustedProxies(Arc::from(settings.server.trusted_proxies.as_slice())),
+            request_context,
+        ))
+}
+
 pub enum ServerExit {
     Shutdown,
     Maintenance(Box<MaintenanceAction>),
@@ -441,45 +489,12 @@ pub async fn serve(
     actions::bootstrap_system_runner(&actions_state)
         .await
         .context("could not prepare the configured system runner")?;
-    let git_http_state = GitHttpState::new(repository_state.clone(), actions_state.clone());
-    let api_router = Router::new()
-        .merge(crate::openapi::instance_router())
-        .merge(identity::router().with_state(identity_state.clone()))
-        .merge(repository::router().with_state(repository_state.clone()))
-        .merge(actions_state.api_router());
-    let app = Router::new()
-        .merge(
-            Router::new()
-                .route("/healthz", get(health))
-                .with_state(identity_state.clone()),
-        )
-        .merge(identity::oauth_router().with_state(identity_state.clone()))
-        .nest("/api/v1", api_router)
-        .merge(actions_state.artifact_router())
-        .nest("/api/actions", actions_state.protocol_router())
-        .merge(repository::git_http_router().with_state(git_http_state))
-        .fallback(get(frontend))
-        .layer(CompressionLayer::new().compress_when(Compressible))
-        .layer(middleware::from_fn_with_state(
-            crate::registry::router(repository_state.clone()),
-            dispatch_registry,
-        ))
-        .layer(middleware::from_fn_with_state(
-            PublicOrigin(
-                settings
-                    .server
-                    .public_url
-                    .origin()
-                    .ascii_serialization()
-                    .into(),
-            ),
-            reject_cross_site_cookie_requests,
-        ))
-        .layer(TraceLayer::new_for_http())
-        .layer(middleware::from_fn_with_state(
-            TrustedProxies(Arc::from(settings.server.trusted_proxies.as_slice())),
-            request_context,
-        ));
+    let app = http_router(
+        &settings,
+        &identity_state,
+        &repository_state,
+        &actions_state,
+    );
 
     info!(
         address = %http_bind,
@@ -697,6 +712,26 @@ struct MaintenanceStatusState {
     receiver: watch::Receiver<MaintenanceProgress>,
 }
 
+/// Render maintenance progress without owning the maintenance operation.
+pub(crate) fn maintenance_router(
+    operation_id: uuid::Uuid,
+    receiver: watch::Receiver<MaintenanceProgress>,
+) -> Router {
+    Router::new()
+        .route(
+            "/api/v1/admin/backups/progress/{operation_id}",
+            get(maintenance_progress),
+        )
+        .route(
+            "/api/v1/admin/storage/progress/{operation_id}",
+            get(maintenance_progress),
+        )
+        .with_state(MaintenanceStatusState {
+            operation_id,
+            receiver,
+        })
+}
+
 pub async fn perform_maintenance(settings: &Settings, action: MaintenanceAction) -> Result<()> {
     let reporter = MaintenanceProgressReporter::new(&action);
     let operation_id = action.operation_id();
@@ -717,20 +752,7 @@ pub async fn perform_maintenance(settings: &Settings, action: MaintenanceAction)
             } else {
                 None
             };
-            let state = MaintenanceStatusState {
-                operation_id,
-                receiver: reporter.subscribe(),
-            };
-            let app = Router::new()
-                .route(
-                    "/api/v1/admin/backups/progress/{operation_id}",
-                    get(maintenance_progress),
-                )
-                .route(
-                    "/api/v1/admin/storage/progress/{operation_id}",
-                    get(maintenance_progress),
-                )
-                .with_state(state);
+            let app = maintenance_router(operation_id, reporter.subscribe());
             let handle = axum_server::Handle::new();
             let server_handle = handle.clone();
             let task = tokio::spawn(async move {
