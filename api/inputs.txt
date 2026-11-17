@@ -1,8 +1,7 @@
 Cargo.toml
 Cargo.lock
-build.rs
 scripts/api-contract.sh
-src
+crates
 api/inputs.txt
 api/openapi.json
 frontend/src

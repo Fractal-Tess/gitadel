@@ -1,0 +1,23 @@
+[package]
+name = "gitadel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "A self-hosted Git service."
+
+[[bin]]
+name = "gitadel"
+path = "src/main.rs"
+
+[features]
+api-contract-export = ["gitadel-api/api-contract-export"]
+
+[dependencies]
+gitadel-api.workspace = true
+gitadel-config.workspace = true
+gitadel-db.workspace = true
+gitadel-storage.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

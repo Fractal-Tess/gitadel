@@ -1,0 +1,113 @@
+[package]
+name = "gitadel-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gitadel HTTP API and service integration"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+# Produces only an offline contract exporter; it cannot start a service.
+api-contract-export = []
+
+[dependencies]
+gitadel-config.workspace = true
+gitadel-core.workspace = true
+gitadel-db.workspace = true
+gitadel-secrets.workspace = true
+gitadel-mail.workspace = true
+gitadel-storage.workspace = true
+aes-gcm.workspace = true
+ammonia.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+argon2.workspace = true
+axum.workspace = true
+axum-extra.workspace = true
+base64.workspace = true
+bytes.workspace = true
+clap.workspace = true
+config.workspace = true
+comrak.workspace = true
+chrono.workspace = true
+cron.workspace = true
+globset.workspace = true
+hmac.workspace = true
+hex.workspace = true
+image.workspace = true
+lettre.workspace = true
+libc.workspace = true
+resvg.workspace = true
+mime_guess.workspace = true
+rand.workspace = true
+png.workspace = true
+prost.workspace = true
+qrcode.workspace = true
+quick-xml.workspace = true
+pbjson.workspace = true
+pbjson-types.workspace = true
+reqwest.workspace = true
+russh.workspace = true
+sea-orm.workspace = true
+sea-orm-migration.workspace = true
+regex.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+yaml_serde.workspace = true
+shlex.workspace = true
+sley.workspace = true
+sley-remote.workspace = true
+sley-fsck.workspace = true
+sley-gc.workspace = true
+sley-archive.workspace = true
+sley-transport.workspace = true
+sley-core.workspace = true
+sley-config.workspace = true
+sley-diff-merge.workspace = true
+sley-formats.workspace = true
+sley-odb.workspace = true
+sley-protocol.workspace = true
+sley-refs.workspace = true
+sley-rev.workspace = true
+sley-worktree.workspace = true
+rust-s3.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "time"] }
+toml.workspace = true
+tokio-util.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tokei.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url = { workspace = true, features = ["serde"] }
+uuid.workspace = true
+webauthn-rs.workspace = true
+fs2.workspace = true
+futures-util.workspace = true
+tar.workspace = true
+walkdir.workspace = true
+zstd.workspace = true
+axum-server.workspace = true
+rustls.workspace = true
+openidconnect.workspace = true
+utoipa.workspace = true
+utoipa-axum.workspace = true
+
+[build-dependencies]
+sha2-build.workspace = true
+pbjson-build.workspace = true
+prost-build.workspace = true
+protoc-bin-vendored.workspace = true
+
+[dev-dependencies]
+gitadel-db = { workspace = true, features = ["test-support"] }
+gitadel-mail = { workspace = true, features = ["test-support"] }

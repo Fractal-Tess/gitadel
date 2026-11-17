@@ -39,14 +39,16 @@
             cargo = rustToolchain;
             rustc = rustToolchain;
           };
-          # The CLI source intentionally excludes the server and frontend trees.
+          # Cargo loads every workspace manifest, but unselected crates need no
+          # sources because their targets have explicit paths.
           clientSource = lib.fileset.toSource {
             root = ./.;
             fileset = lib.fileset.unions [
               ./Cargo.toml
               ./Cargo.lock
               ./rust-toolchain.toml
-              ./cli
+              (lib.fileset.fileFilter (file: file.name == "Cargo.toml") ./crates)
+              ./crates/cli
             ];
           };
           commonRustAttrs = {
@@ -100,11 +102,9 @@
               ./Cargo.toml
               ./Cargo.lock
               ./rust-toolchain.toml
-              ./build.rs
               ./CHANGELOG.md
-              ./src
+              ./crates
               ./proto
-              ./cli
               ./frontend/static/favicon-light.png
               ./frontend/static/favicon-dark.png
             ];

@@ -1,6 +1,16 @@
 [workspace]
-members = ["cli"]
-default-members = ["."]
+members = [
+    "crates/config",
+    "crates/core",
+    "crates/db",
+    "crates/secrets",
+    "crates/mail",
+    "crates/storage",
+    "crates/api",
+    "crates/server",
+    "crates/cli",
+]
+default-members = ["crates/server"]
 resolver = "3"
 
 [workspace.package]
@@ -9,33 +19,14 @@ edition = "2024"
 rust-version = "1.98"
 license = "MIT"
 
-[package]
-name = "gitadel"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-description = "A self-hosted Git service."
-license.workspace = true
-build = "build.rs"
-
-[[bin]]
-name = "gitadel"
-path = "src/main.rs"
-
-[profile.release]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
-# Unwind so a panic in one request handler or `spawn_blocking` closure ends
-# that task alone instead of taking every in-flight clone and push with it.
-panic = "unwind"
-strip = "symbols"
-
-[features]
-# Produces only an offline contract exporter; it cannot start a service.
-api-contract-export = []
-
-[dependencies]
+[workspace.dependencies]
+gitadel-config = { path = "crates/config" }
+gitadel-core = { path = "crates/core" }
+gitadel-db = { path = "crates/db" }
+gitadel-secrets = { path = "crates/secrets" }
+gitadel-mail = { path = "crates/mail" }
+gitadel-storage = { path = "crates/storage" }
+gitadel-api = { path = "crates/api" }
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
 ammonia = "4.2.0"
 anyhow = "1.0.104"
@@ -95,7 +86,8 @@ sha1 = "0.11.0"
 sha2 = "0.11.0"
 subtle = "2.6.1"
 time = "0.3.55"
-tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "time"] }
+# Consumers select features so the standalone CLI keeps its smaller feature set.
+tokio = "1.53.1"
 toml = "1.1.6"
 tokio-util = { version = "0.7.19", features = ["io", "rt"] }
 tower = { version = "0.5.3", features = ["util"] }
@@ -103,7 +95,7 @@ tower-http = { version = "0.7.1", features = ["compression-br", "compression-gzi
 tokei = { git = "https://github.com/XAMPPRocky/tokei", rev = "c277b1515eff47937f3fe5214b817e8231321e07", default-features = false }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-url = { version = "2.5.8", features = ["serde"] }
+url = "2.5.8"
 uuid = { version = "1.26.1", features = ["serde", "v4"] }
 webauthn-rs = { version = "0.5.5", default-features = false, features = ["conditional-ui"] }
 fs2 = "0.4.3"
@@ -116,13 +108,22 @@ rustls = { version = "0.23.45", default-features = false, features = ["aws-lc-rs
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
 utoipa = { version = "=6.0.0", features = ["chrono", "uuid", "axum_extras"] }
 utoipa-axum = "=0.3.0"
-
-
-[build-dependencies]
-sha2 = "0.10.9"
+dirs = "7.0.0"
+rpassword = "7.5.4"
+# The build-time fingerprint retains SHA-256 0.10; runtime code uses 0.11.
+sha2-build = { package = "sha2", version = "0.10.9" }
 pbjson-build = "0.9.0"
 prost-build = "0.14.4"
 protoc-bin-vendored = "3.2.0"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+# Unwind so a panic in one request handler or `spawn_blocking` closure ends
+# that task alone instead of taking every in-flight clone and push with it.
+panic = "unwind"
+strip = "symbols"
 
 [patch.crates-io]
 aws-creds = { git = "https://github.com/aznashwan/rust-s3", rev = "01b6ccb9babf858475163a4b9bcd7dea3d56fd00" }

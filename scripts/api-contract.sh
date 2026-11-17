@@ -13,7 +13,7 @@ if [ -n "${GITADEL_OPENAPI_FILE:-}" ]; then
 elif [ -n "${GITADEL_OPENAPI_EXPORTER:-}" ]; then
   "$GITADEL_OPENAPI_EXPORTER" > "$scratch/openapi.json"
 else
-  cargo run --quiet --locked --offline --jobs "${CARGO_BUILD_JOBS:-2}" --features api-contract-export --bin gitadel > "$scratch/openapi.json"
+  cargo run --quiet --locked --offline --jobs "${CARGO_BUILD_JOBS:-2}" --package gitadel --features api-contract-export --bin gitadel > "$scratch/openapi.json"
 fi
 
 bun frontend/scripts/validate-openapi.ts "$scratch/openapi.json"

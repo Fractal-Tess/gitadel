@@ -318,7 +318,7 @@ Create an API token under **Account settings → Access**. Reads require `read`;
 
 ### Login on Linux, WSL, and other systems
 
-No NixOS service or desktop keyring is required. From a source checkout with the Rust toolchain installed, `cargo install --path cli --locked` installs the client on your Cargo binary path.
+No NixOS service or desktop keyring is required. From a source checkout with the Rust toolchain installed, `cargo install --path crates/cli --locked` installs the client on your Cargo binary path.
 
 ```bash
 gtd auth login

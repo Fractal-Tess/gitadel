@@ -5,14 +5,25 @@
 Use short role names for crate directories while keeping service-prefixed Cargo
 package names. This is a project convention, not a Rust or Cargo standard.
 
-The current layout already follows it: the server package `gitadel` stays at the
-repository root, and the `gitadel-cli` package stays in `cli/`. Their binary names
-remain `gitadel` and `gtd`.
+The root manifest is a virtual workspace. All nine crates live under `crates/`:
 
-If additional workspace crates are needed, use paths such as `crates/core/` or
-`crates/api/` with package names such as `gitadel-core` or `gitadel-api`, rather
-than repeating the service prefix in directory names. Do not split crates or
-move the root server solely to adopt those example paths.
+| Directory | Cargo package | Responsibility |
+| --- | --- | --- |
+| `config` | `gitadel-config` | Configuration and command-line options |
+| `core` | `gitadel-core` | Shared domain types and utilities |
+| `db` | `gitadel-db` | Entities, migrations, and database access |
+| `secrets` | `gitadel-secrets` | Secret storage and encryption |
+| `mail` | `gitadel-mail` | Mail delivery |
+| `storage` | `gitadel-storage` | Repository, LFS, registry, and backup storage |
+| `api` | `gitadel-api` | HTTP handlers, protocol integration, and service orchestration |
+| `server` | `gitadel` | Server executable `gitadel` |
+| `cli` | `gitadel-cli` | Remote client executable `gtd` |
+
+The default member is `crates/server`. Library packages use the `gitadel-`
+prefix; directory names express their role. Keep workspace package metadata
+and dependency versions in the root manifest. Library manifests explicitly
+declare `[lib] path = "src/lib.rs"` so CLI packaging can include unselected
+crates' manifests without their source trees.
 
 ## Development loop
 
@@ -51,13 +62,13 @@ retained build graphs in this project and was observed using more than 19 GiB.
 The backend process is:
 
 ```bash
-watchexec --restart --exts rs -- cargo run
+watchexec --restart --watch crates --watch Cargo.toml --exts rs,toml -- cargo run --package gitadel
 ```
 
 Only the backend owns a port. In debug builds the backend reads
 `frontend/build/` from disk on every request, so a completed frontend build is
-served without restarting Rust. The backend restarts only for Rust changes.
-Add `-w Cargo.toml` when editing dependencies.
+served without restarting Rust. The backend restarts for Rust source and
+workspace manifest changes.
 
 Keep the frontend and backend on one origin. Do not use
 `bun run --cwd frontend dev`; that server proxies only `/api` and `/healthz`,

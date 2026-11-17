@@ -17,7 +17,7 @@ processes:
 
   backend:
     description: Rebuild and restart Gitadel after Rust source changes
-    command: watchexec --restart --exts rs -- cargo run
+    command: watchexec --restart --watch crates --watch Cargo.toml --exts rs,toml -- cargo run --package gitadel
     depends_on:
       frontend:
         condition: process_healthy

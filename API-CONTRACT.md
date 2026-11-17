@@ -4,7 +4,7 @@ Gitadel keeps REST at `/api/v1`. The same Axum router builders register the
 handlers and collect their OpenAPI description through Utoipa 6.0.0 and
 utoipa-axum 0.3.0. Both versions are pinned in Cargo.toml.
 
-`src/openapi/typed.rs` collects JSON request bodies, every query extractor,
+`crates/api/src/openapi/typed.rs` collects JSON request bodies, every query extractor,
 and JSON response bodies from the registered function's Rust types. An old
 body annotation cannot silently override its actual `Json<T>` return type.
 Query DTOs derive `IntoParams` and `ToSchema`; body/error DTOs derive
@@ -38,7 +38,11 @@ gitadel openapi > openapi.json
 The `api-contract-export` Cargo feature produces a dedicated exporter that
 always prints the contract and cannot start the service. Nix uses this to
 generate/check the frontend before building the production server. This
-currently compiles the server crate twice; no extra workspace crate is needed.
+compiles `gitadel-api` in exporter and service configurations. The `gitadel`
+binary in `crates/server` forwards this feature to `gitadel-api`; the API
+crate owns the build script and registered handlers. The exporter source
+includes all workspace crates, protobuf definitions, the changelog, and the
+embedded favicons, without depending on generated frontend assets.
 
 `api/openapi.json`, `frontend/src/lib/api/generated/`, and `contracts.gen.ts`
 are checked in. Review their diffs after changing handlers or DTOs. The drift
@@ -107,6 +111,6 @@ Deeper structures remain runtime-validated. Path scalar types, native bodies,
 and HTTP statuses still require accurate handler annotations; JSON bodies,
 query DTOs, and JSON response DTOs are collected from the handler signature.
 
-The old `src/openapi/operations/` files are no longer compiled or authoritative.
+The old `crates/api/src/openapi/operations/` files are no longer compiled or authoritative.
 They are retained pending approval to remove existing files under the workspace
 deletion rule.
