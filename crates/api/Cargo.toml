@@ -21,6 +21,8 @@ gitadel-db.workspace = true
 gitadel-secrets.workspace = true
 gitadel-mail.workspace = true
 gitadel-storage.workspace = true
+gitadel-backups.workspace = true
+gitadel-integrations.workspace = true
 aes-gcm.workspace = true
 ammonia.workspace = true
 anyhow.workspace = true
@@ -109,5 +111,6 @@ prost-build.workspace = true
 protoc-bin-vendored.workspace = true
 
 [dev-dependencies]
+gitadel-secrets = { workspace = true, features = ["test-support"] }
 gitadel-db = { workspace = true, features = ["test-support"] }
 gitadel-mail = { workspace = true, features = ["test-support"] }

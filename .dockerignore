@@ -40,3 +40,16 @@ ssh-host-*
 *.tar.*
 *.zip
 *.log
+
+# Crate names can match runtime-state exclusions above. Include only source
+# and manifests for those crates; keep credentials and generated data excluded.
+!crates/backups/
+!crates/backups/Cargo.toml
+!crates/backups/src/
+!crates/backups/src/**/
+!crates/backups/src/**/*.rs
+!crates/secrets/
+!crates/secrets/Cargo.toml
+!crates/secrets/src/
+!crates/secrets/src/**/
+!crates/secrets/src/**/*.rs

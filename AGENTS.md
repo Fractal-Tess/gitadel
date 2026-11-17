@@ -5,7 +5,7 @@
 Use short role names for crate directories while keeping service-prefixed Cargo
 package names. This is a project convention, not a Rust or Cargo standard.
 
-The root manifest is a virtual workspace. All nine crates live under `crates/`:
+The root manifest is a virtual workspace. All Rust crates live under `crates/`:
 
 | Directory | Cargo package | Responsibility |
 | --- | --- | --- |
@@ -14,7 +14,9 @@ The root manifest is a virtual workspace. All nine crates live under `crates/`:
 | `db` | `gitadel-db` | Entities, migrations, and database access |
 | `secrets` | `gitadel-secrets` | Secret storage and encryption |
 | `mail` | `gitadel-mail` | Mail delivery |
-| `storage` | `gitadel-storage` | Repository, LFS, registry, and backup storage |
+| `storage` | `gitadel-storage` | Blob stores, LFS objects, registry persistence, and migrations |
+| `backups` | `gitadel-backups` | Backup archives, providers, restore, and schedule persistence |
+| `integrations` | `gitadel-integrations` | External provider clients and deployment operations |
 | `api` | `gitadel-api` | HTTP handlers, protocol integration, and service orchestration |
 | `server` | `gitadel` | Server executable `gitadel` |
 | `cli` | `gitadel-cli` | Remote client executable `gtd` |

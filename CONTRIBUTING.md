@@ -77,8 +77,7 @@ just frontend-hash
 ## Repository layout
 
 ```text
-src/            Rust server, offline maintenance, identity, Git, SSH, HTTP, and LFS
-cli/            Token-authenticated remote command-line client
+crates/         Rust libraries, server and CLI (see ARCHITECTURE.md for responsibilities)
 frontend/       SvelteKit web interface
 nix/            Separate NixOS server and client modules
 scripts/        Release and Nix dependency-hash helpers

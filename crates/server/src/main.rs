@@ -18,6 +18,10 @@ fn main() -> Result<()> {
 
 #[cfg(not(feature = "api-contract-export"))]
 fn main() -> Result<()> {
+    if gitadel_api::CONTRACT_EXPORT_ONLY {
+        print!("{}", gitadel_api::export_openapi()?);
+        return Ok(());
+    }
     let cli = Cli::parse();
     if matches!(cli.command(), Some(config::GitadelCommand::Openapi)) {
         print!("{}", gitadel_api::export_openapi()?);

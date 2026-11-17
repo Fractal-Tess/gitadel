@@ -2454,6 +2454,20 @@ dependencies = [
 name = "gitadel"
 version = "0.24.0"
 dependencies = [
+ "anyhow",
+ "clap",
+ "gitadel-api",
+ "gitadel-config",
+ "gitadel-db",
+ "gitadel-storage",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "gitadel-api"
+version = "0.24.0"
+dependencies = [
  "aes-gcm",
  "ammonia",
  "anyhow",
@@ -2471,6 +2485,14 @@ dependencies = [
  "cron",
  "fs2",
  "futures-util",
+ "gitadel-backups",
+ "gitadel-config",
+ "gitadel-core",
+ "gitadel-db",
+ "gitadel-integrations",
+ "gitadel-mail",
+ "gitadel-secrets",
+ "gitadel-storage",
  "globset",
  "hex",
  "hmac 0.13.0",
@@ -2541,6 +2563,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "gitadel-backups"
+version = "0.24.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fs2",
+ "futures-util",
+ "gitadel-config",
+ "gitadel-core",
+ "gitadel-db",
+ "gitadel-storage",
+ "hex",
+ "libc",
+ "rust-s3",
+ "sea-orm",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tar",
+ "tokio",
+ "tokio-util",
+ "toml 1.1.6+spec-1.1.0",
+ "tracing",
+ "url",
+ "utoipa",
+ "uuid",
+ "walkdir",
+ "zstd",
+]
+
+[[package]]
 name = "gitadel-cli"
 version = "0.24.0"
 dependencies = [
@@ -2553,6 +2609,121 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "gitadel-config"
+version = "0.24.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "config",
+ "lettre",
+ "serde",
+ "url",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
+name = "gitadel-core"
+version = "0.24.0"
+dependencies = [
+ "chrono",
+ "cron",
+ "reqwest 0.13.5",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "gitadel-db"
+version = "0.24.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "gitadel-config",
+ "gitadel-core",
+ "sea-orm",
+ "sea-orm-migration",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "gitadel-integrations"
+version = "0.24.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chrono",
+ "gitadel-core",
+ "reqwest 0.13.5",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "url",
+ "utoipa",
+]
+
+[[package]]
+name = "gitadel-mail"
+version = "0.24.0"
+dependencies = [
+ "anyhow",
+ "gitadel-config",
+ "lettre",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "utoipa",
+]
+
+[[package]]
+name = "gitadel-secrets"
+version = "0.24.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "base64 0.23.1",
+ "chrono",
+ "gitadel-db",
+ "hmac 0.13.0",
+ "rand 0.10.3",
+ "russh",
+ "sea-orm",
+ "sha2 0.11.0",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "gitadel-storage"
+version = "0.24.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "fs2",
+ "futures-util",
+ "gitadel-config",
+ "gitadel-core",
+ "gitadel-db",
+ "hex",
+ "rust-s3",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "tracing",
+ "url",
+ "utoipa",
+ "uuid",
+ "walkdir",
 ]
 
 [[package]]

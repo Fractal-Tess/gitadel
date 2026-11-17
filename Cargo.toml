@@ -6,6 +6,8 @@ members = [
     "crates/secrets",
     "crates/mail",
     "crates/storage",
+    "crates/backups",
+    "crates/integrations",
     "crates/api",
     "crates/server",
     "crates/cli",
@@ -26,6 +28,8 @@ gitadel-db = { path = "crates/db" }
 gitadel-secrets = { path = "crates/secrets" }
 gitadel-mail = { path = "crates/mail" }
 gitadel-storage = { path = "crates/storage" }
+gitadel-backups = { path = "crates/backups" }
+gitadel-integrations = { path = "crates/integrations" }
 gitadel-api = { path = "crates/api" }
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
 ammonia = "4.2.0"

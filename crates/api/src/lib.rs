@@ -14,6 +14,7 @@ mod server;
 
 use gitadel_config as config;
 use gitadel_core::{filesystem, network, schedule};
+#[cfg(test)]
 use gitadel_db as database;
 use gitadel_db::entity;
 #[cfg(test)]
@@ -25,6 +26,10 @@ use gitadel_storage::{blob_store, lfs as storage};
 pub use archive::{acquire_storage_lock, run as run_backup};
 pub use identity::bootstrap_admin;
 pub use server::{ServerExit, perform_maintenance, serve};
+
+/// Cargo can unify a dependency's features independently of the binary's.
+/// An exporter-only API build must never be used to start the service.
+pub const CONTRACT_EXPORT_ONLY: bool = cfg!(feature = "api-contract-export");
 
 /// Export the same registered contract served by `/api/v1/openapi.json`.
 pub fn export_openapi() -> Result<String, serde_json::Error> {
