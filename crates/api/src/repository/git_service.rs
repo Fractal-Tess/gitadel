@@ -105,7 +105,7 @@ mod tests {
     }
 
     fn main_guard() -> RefGuard {
-        RefGuard::for_tests(vec![test_rule("branch", "main")], None, false, &[])
+        RefGuard::from_rules(vec![test_rule("branch", "main")], None, false, &[])
     }
 
     #[test]
@@ -259,7 +259,7 @@ mod tests {
         GitRepository::init_bare(&server.0).unwrap();
         let base = commit(&server.0, "main", None, "base.txt");
         let next = commit(&server.0, "main", Some(base), "next.txt");
-        let guard = RefGuard::for_tests(vec![test_rule("tag", "v*")], None, false, &[]);
+        let guard = RefGuard::from_rules(vec![test_rule("tag", "v*")], None, false, &[]);
 
         let body = request(
             &[(ZERO.to_owned(), base.to_hex(), "refs/tags/v1")],

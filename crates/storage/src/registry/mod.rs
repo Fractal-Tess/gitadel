@@ -38,3 +38,9 @@ fn valid_component(value: &str) -> bool {
         bytes = &bytes[separator..];
     }
 }
+
+/// Shared persisted/OCI image-component grammar. Splitting namespace and Git
+/// repository coordinates remains the transport adapter's responsibility.
+pub fn valid_image_path_components(value: &str) -> bool {
+    value.len() <= 512 && value.split('/').all(valid_component)
+}

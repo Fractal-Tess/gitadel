@@ -11,8 +11,15 @@ path = "src/lib.rs"
 
 [dependencies]
 gitadel-core.workspace = true
+gitadel-db.workspace = true
+gitadel-identity.workspace = true
+gitadel-secrets.workspace = true
+sha2.workspace = true
+sea-orm.workspace = true
 gitadel-storage.workspace = true
 anyhow.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
 ammonia.workspace = true
 bytes.workspace = true
 chrono.workspace = true
@@ -26,6 +33,8 @@ serde_json.workspace = true
 sha1.workspace = true
 tokei.workspace = true
 sley.workspace = true
+sley-rev.workspace = true
+sley-diff-merge.workspace = true
 sley-core.workspace = true
 sley-config.workspace = true
 sley-fsck.workspace = true
@@ -39,3 +48,6 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-mu
 tokio-util.workspace = true
 url = { workspace = true, features = ["serde"] }
 uuid.workspace = true
+
+[dev-dependencies]
+gitadel-db = { workspace = true, features = ["test-support"] }

@@ -7,8 +7,7 @@ use super::{Permission, RepositoryState, browser::read_git, mirrors, validate_re
 use crate::{
     blob_store::ObjectPrefix,
     entity::{
-        lfs_object, namespace, organization_member, repository, repository_alias,
-        repository_collaborator, repository_favorite, repository_topic, topic, user,
+        lfs_object, namespace, repository, repository_favorite, repository_topic, topic, user,
     },
     identity::{ApiError, SCOPE_READ, SCOPE_WRITE, validate_slug},
 };
@@ -20,7 +19,7 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use chrono::Utc;
-use gitadel_repositories::branches::{select_default_branch, valid_branch_name};
+use gitadel_repositories::branches::select_default_branch;
 use sea_orm::sea_query::{Condition, Expr, LikeExpr, OnConflict};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, IntoActiveModel,
@@ -262,7 +261,7 @@ pub(super) async fn accessible_repositories_matching(
     } else {
         true
     };
-    let database = state.identity().read_database();
+    let database = state.identity().database();
 
     let Some(user_id) = user_id else {
         let repositories = repository::Entity::find()
@@ -283,80 +282,55 @@ pub(super) async fn accessible_repositories_matching(
     let favorites = repository_favorite::Entity::find()
         .filter(repository_favorite::Column::UserId.eq(user_id))
         .all(database);
-    let namespaces = namespace::Entity::find().all(database);
-    let memberships = organization_member::Entity::find()
-        .filter(organization_member::Column::UserId.eq(user_id))
-        .all(database);
-    let collaborators = repository_collaborator::Entity::find()
-        .filter(repository_collaborator::Column::UserId.eq(user_id))
-        .all(database);
     let repositories = repository::Entity::find()
-        .filter(repository::Column::DeletedAt.is_null())
+        .filter(gitadel_identity::permissions::repository_condition(
+            Some(user_id),
+            Permission::Read,
+        ))
         .filter(filter.condition())
         .order_by_desc(repository::Column::UpdatedAt)
         .all(database);
-    let (favorites, namespaces, memberships, collaborators, repositories) = tokio::try_join!(
-        favorites,
-        namespaces,
-        memberships,
-        collaborators,
-        repositories
-    )?;
-
+    let manageable = repository::Entity::find()
+        .filter(gitadel_identity::permissions::repository_condition(
+            Some(user_id),
+            Permission::Manage,
+        ))
+        .filter(filter.condition())
+        .all(database);
+    let writable = repository::Entity::find()
+        .filter(gitadel_identity::permissions::repository_condition(
+            Some(user_id),
+            Permission::Write,
+        ))
+        .filter(filter.condition())
+        .all(database);
+    let (favorites, repositories, manageable, writable) =
+        tokio::try_join!(favorites, repositories, manageable, writable)?;
     let favorite_ids = favorites
         .into_iter()
         .map(|favorite| favorite.repository_id)
         .collect();
-    let organization_roles: HashMap<Uuid, String> = memberships
+    let manageable: HashSet<_> = manageable
         .into_iter()
-        .map(|membership| (membership.organization_id, membership.role))
+        .map(|repository| repository.id)
         .collect();
-    let mut collaborator_ids = HashSet::new();
-    let mut writable_collaborator_ids = HashSet::new();
-    for collaborator in collaborators {
-        collaborator_ids.insert(collaborator.repository_id);
-        if collaborator.role == "write" {
-            writable_collaborator_ids.insert(collaborator.repository_id);
-        }
-    }
-    let mut readable_namespaces = HashSet::new();
-    let mut writable_namespaces = HashSet::new();
-    let mut manageable_namespaces = HashSet::new();
-    for namespace in namespaces {
-        let personally_owned = namespace.user_id == Some(user_id);
-        let organization_role = namespace
-            .organization_id
-            .and_then(|id| organization_roles.get(&id));
-        if personally_owned || organization_role.is_some() {
-            readable_namespaces.insert(namespace.slug.clone());
-        }
-        if personally_owned || organization_role.is_some() {
-            writable_namespaces.insert(namespace.slug.clone());
-        }
-        if personally_owned || organization_role.is_some_and(|role| role == "owner") {
-            manageable_namespaces.insert(namespace.slug);
-        }
-    }
+    let writable: HashSet<_> = writable
+        .into_iter()
+        .map(|repository| repository.id)
+        .collect();
 
     let mut accessible = Vec::with_capacity(repositories.len());
     let mut manageable_ids = HashSet::new();
     let mut writable_ids = HashSet::new();
     for repository in repositories {
-        let can_manage = manageable_namespaces.contains(&repository.namespace);
-        let can_read = repository.visibility == "public"
-            || readable_namespaces.contains(&repository.namespace)
-            || collaborator_ids.contains(&repository.id);
-        if !can_read {
-            continue;
-        }
+        let can_manage = manageable.contains(&repository.id);
         if can_manage {
             manageable_ids.insert(repository.id);
         }
         if has_write_scope
             && !repository.mirrored
             && repository.archived_at.is_none()
-            && (writable_namespaces.contains(&repository.namespace)
-                || writable_collaborator_ids.contains(&repository.id))
+            && writable.contains(&repository.id)
         {
             writable_ids.insert(repository.id);
         }
@@ -442,25 +416,13 @@ pub(super) async fn owned_namespace(
     slug: &str,
     actor_user_id: Uuid,
 ) -> Result<namespace::Model, ApiError> {
-    let owner = namespace::Entity::find_by_id(slug)
-        .one(state.identity().database())
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    match owner.kind.as_str() {
-        "user" if owner.user_id == Some(actor_user_id) => {}
-        "organization" => {
-            let organization_id = owner.organization_id.ok_or_else(ApiError::not_found)?;
-            organization_member::Entity::find_by_id((organization_id, actor_user_id))
-                .one(state.identity().database())
-                .await?
-                .filter(|membership| membership.role == "owner")
-                .ok_or_else(ApiError::not_found)?;
-        }
-        _ => return Err(ApiError::not_found()),
-    }
-    Ok(owner)
+    Ok(gitadel_identity::permissions::repository_namespace_owner(
+        state.identity().database(),
+        slug,
+        actor_user_id,
+    )
+    .await?)
 }
-
 pub(super) async fn create_owned_repository(
     state: &RepositoryState,
     actor_user_id: Uuid,
@@ -666,22 +628,7 @@ pub(super) async fn create_imported_repository(
         ));
     }
 
-    let owner = namespace::Entity::find_by_id(&namespace)
-        .one(state.identity().database())
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    match owner.kind.as_str() {
-        "user" if owner.user_id == Some(actor_user_id) => {}
-        "organization" => {
-            let organization_id = owner.organization_id.ok_or_else(ApiError::not_found)?;
-            organization_member::Entity::find_by_id((organization_id, actor_user_id))
-                .one(state.identity().database())
-                .await?
-                .filter(|membership| membership.role == "owner")
-                .ok_or_else(ApiError::not_found)?;
-        }
-        _ => return Err(ApiError::not_found()),
-    }
+    owned_namespace(state, &namespace, actor_user_id).await?;
     ensure_location_available(state, &namespace, &name).await?;
 
     let now = Utc::now();
@@ -1087,93 +1034,17 @@ pub async fn update_repository_control(
     state
         .authorize(&repository, Some(actor.user.id), Permission::Manage)
         .await?;
-    if request.description.is_none()
-        && request.visibility.is_none()
-        && request.default_branch.is_none()
-        && request.name.is_none()
-        && request.namespace.is_none()
-    {
-        return Err(ApiError::bad_request(
-            "Provide at least one repository control change.",
-        ));
-    }
-    let default_branch_changed = request.default_branch.is_some();
-
-    let description = request.description.map(normalize_description).transpose()?;
-    let visibility = request.visibility.map(validate_visibility).transpose()?;
-    let next_name = request
-        .name
-        .map(|value| validate_repository_name(&value))
-        .transpose()?;
-    let next_namespace = request
-        .namespace
-        .map(|value| validate_slug(&value, "Namespace"))
-        .transpose()?;
-    if next_namespace.is_some() && next_name.is_none() {
-        return Err(ApiError::bad_request(
-            "Transfers must include a repository name.",
-        ));
-    }
-    let moved = next_name.is_some() || next_namespace.is_some();
-    let target_name = next_name.unwrap_or_else(|| repository.name.clone());
-    let target_namespace = next_namespace.unwrap_or_else(|| repository.namespace.clone());
-    if moved {
-        ensure_owned_namespace(&state, actor.user.id, &target_namespace).await?;
-        if target_namespace != repository.namespace || target_name != repository.name {
-            ensure_location_available(&state, &target_namespace, &target_name).await?;
-        }
-    }
-
-    if let Some(default_branch) = request.default_branch.as_deref() {
-        set_default_branch(&state, &repository, default_branch).await?;
-    }
-
-    let transaction = state.identity().database().begin().await?;
-    let mut active: repository::ActiveModel = repository.clone().into();
-    if let Some(description) = description {
-        active.description = Set(description);
-    }
-    if let Some(visibility) = visibility {
-        active.visibility = Set(visibility);
-    }
-    if moved {
-        if target_namespace != repository.namespace || target_name != repository.name {
-            repository_alias::ActiveModel {
-                repository_id: Set(repository.id),
-                namespace: Set(repository.namespace.clone()),
-                name: Set(repository.name.clone()),
-                created_at: Set(Utc::now()),
-            }
-            .insert(&transaction)
-            .await?;
-        }
-        active.namespace = Set(target_namespace.clone());
-        active.name = Set(target_name.clone());
-        repository_collaborator::Entity::delete_many()
-            .filter(repository_collaborator::Column::RepositoryId.eq(repository.id))
-            .exec(&transaction)
-            .await?;
-    }
-    if let Some(default_branch) = request.default_branch {
-        active.default_branch = Set(Some(default_branch));
-    }
-    active.updated_at = Set(Utc::now());
-    let updated = active.update(&transaction).await?;
-    let action = if moved {
-        "repository.transfer"
-    } else {
-        "repository.update"
-    };
-    state
-        .identity()
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            action,
-            Some(format!("{}/{}", updated.namespace, updated.name)),
+    let (updated, default_branch_changed) = state
+        .lifecycle
+        .update_repository_control(
+            &super::principal(&headers, &jar)?,
+            repository.id,
+            request.into(),
+            gitadel_core::audit::AuditContext {
+                remote_address: crate::identity::remote_address(),
+            },
         )
         .await?;
-    transaction.commit().await?;
     if default_branch_changed {
         state.queue_repository_analysis(updated.id).await;
     }
@@ -1182,7 +1053,6 @@ pub async fn update_repository_control(
         updated, &state, false, true, can_write,
     )))
 }
-
 #[utoipa::path(
     post, path = "/repositories/{namespace}/{name}/archive",
     operation_id = "post_repositories_namespace_name_archive",
@@ -1259,9 +1129,7 @@ pub async fn delete_repository(
 
 /// Permanently removes repositories that earlier releases soft-deleted, since
 /// deletion no longer has a recovery period.
-pub(crate) async fn purge_soft_deleted_repositories(
-    state: &RepositoryState,
-) -> Result<(), ApiError> {
+pub async fn purge_soft_deleted_repositories(state: &RepositoryState) -> Result<(), ApiError> {
     let deleted = repository::Entity::find()
         .filter(repository::Column::DeletedAt.is_not_null())
         .all(state.identity().database())
@@ -1354,24 +1222,9 @@ async fn managed_repository(
         .authenticate(headers, jar, SCOPE_WRITE)
         .await?;
     let repository = state.find(namespace, name).await?;
-    let owner = namespace::Entity::find_by_id(&repository.namespace)
-        .one(state.identity().database())
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    let allowed = match owner.kind.as_str() {
-        "user" => owner.user_id == Some(actor.user.id),
-        "organization" => match owner.organization_id {
-            Some(id) => organization_member::Entity::find_by_id((id, actor.user.id))
-                .one(state.identity().database())
-                .await?
-                .is_some_and(|member| member.role == "owner"),
-            None => false,
-        },
-        _ => false,
-    };
-    if !allowed {
-        return Err(ApiError::not_found());
-    }
+    state
+        .authorize(&repository, Some(actor.user.id), Permission::Manage)
+        .await?;
     Ok((actor, repository))
 }
 
@@ -1380,131 +1233,40 @@ pub(super) async fn ensure_owned_namespace(
     actor_user_id: Uuid,
     slug: &str,
 ) -> Result<(), ApiError> {
-    let owner = namespace::Entity::find_by_id(slug)
-        .one(state.identity().database())
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    match owner.kind.as_str() {
-        "user" if owner.user_id == Some(actor_user_id) => Ok(()),
-        "organization" => {
-            let id = owner.organization_id.ok_or_else(ApiError::not_found)?;
-            organization_member::Entity::find_by_id((id, actor_user_id))
-                .one(state.identity().database())
-                .await?
-                .filter(|member| member.role == "owner")
-                .map(|_| ())
-                .ok_or_else(ApiError::not_found)
-        }
-        _ => Err(ApiError::not_found()),
-    }
+    gitadel_identity::permissions::repository_namespace_owner(
+        state.identity().database(),
+        slug,
+        actor_user_id,
+    )
+    .await?;
+    Ok(())
 }
-
 async fn ensure_location_available(
     state: &RepositoryState,
     namespace: &str,
     name: &str,
 ) -> Result<(), ApiError> {
-    let database = state.identity().database();
-    if repository::Entity::find()
-        .filter(repository::Column::Namespace.eq(namespace))
-        .filter(repository::Column::Name.eq(name))
-        .one(database)
-        .await?
-        .is_some()
-        || repository_alias::Entity::find_by_id((namespace.to_owned(), name.to_owned()))
-            .one(database)
-            .await?
-            .is_some()
-    {
-        return Err(ApiError::conflict(
-            "That repository location is already in use.",
-        ));
-    }
-    Ok(())
-}
-
-fn normalize_description(value: Option<String>) -> Result<Option<String>, ApiError> {
-    let value = value
-        .map(|description| description.trim().to_owned())
-        .filter(|description| !description.is_empty());
-    if value
-        .as_ref()
-        .is_some_and(|description| description.len() > 512)
-    {
-        return Err(ApiError::bad_request(
-            "Repository descriptions must be at most 512 characters.",
-        ));
-    }
-    Ok(value)
-}
-
-fn validate_visibility(value: String) -> Result<String, ApiError> {
-    match value.as_str() {
-        "public" | "private" => Ok(value),
-        _ => Err(ApiError::bad_request(
-            "Repository visibility must be public or private.",
-        )),
-    }
-}
-
-async fn set_default_branch(
-    state: &RepositoryState,
-    repository: &repository::Model,
-    branch: &str,
-) -> Result<(), ApiError> {
-    if !valid_branch_name(branch) {
-        return Err(ApiError::bad_request(
-            "Default branch is not a valid branch name.",
-        ));
-    }
-    let path = state.repository_path(repository);
-    let reference = format!("refs/heads/{branch}");
-    let reference_for_read = reference.clone();
-    read_git(path, move |git| {
-        if !git.reference_exists(&reference_for_read)? {
-            return Err(sley::GitError::NotFound(sley::NotFoundKind::Reference {
-                name: reference_for_read,
-            }));
-        }
-        git.set_head_symref(reference, sley::HeadUpdateOptions::new())
-            .map_err(|error| sley::GitError::Transaction(error.to_string()))
-    })
-    .await
-    .map_err(|_| ApiError::bad_request("Default branch must already exist."))
+    Ok(state
+        .lifecycle
+        .ensure_location_available(namespace, name)
+        .await?)
 }
 pub(super) async fn synchronize_default_head(
     state: &RepositoryState,
     repository: &repository::Model,
 ) -> Result<(), ApiError> {
-    let Some(branch) = repository.default_branch.as_deref() else {
-        return Ok(());
-    };
-    set_head_to_branch(state, repository, branch).await
+    Ok(state.lifecycle.synchronize_default_head(repository).await?)
 }
-
 async fn set_head_to_branch(
     state: &RepositoryState,
     repository: &repository::Model,
     branch: &str,
 ) -> Result<(), ApiError> {
-    if !valid_branch_name(branch) {
-        return Err(ApiError::bad_request(
-            "Default branch is not a valid branch name.",
-        ));
-    }
-    let path = state.repository_path(repository);
-    let reference = format!("refs/heads/{branch}");
-    let reference_for_read = reference.clone();
-    read_git(path, move |git| {
-        if !git.reference_exists(&reference_for_read)? {
-            return Ok(());
-        }
-        git.set_head_symref(reference, sley::HeadUpdateOptions::new())
-            .map_err(|error| sley::GitError::Transaction(error.to_string()))
-    })
-    .await
+    Ok(state
+        .lifecycle
+        .set_head_to_branch(repository, branch)
+        .await?)
 }
-
 #[utoipa::path(
     put, path = "/repositories/{namespace}/{name}/favorite",
     operation_id = "put_repositories_namespace_name_favorite",
@@ -1526,7 +1288,7 @@ pub async fn favorite_repository(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<StatusCode, ApiError> {
-    let (actor, repository) = state
+    let (_, repository) = state
         .authenticated_repository(
             &headers,
             &jar,
@@ -1536,22 +1298,18 @@ pub async fn favorite_repository(
             SCOPE_WRITE,
         )
         .await?;
-    if repository_favorite::Entity::find_by_id((actor.user.id, repository.id))
-        .one(state.identity().database())
-        .await?
-        .is_none()
-    {
-        repository_favorite::ActiveModel {
-            user_id: Set(actor.user.id),
-            repository_id: Set(repository.id),
-            created_at: Set(Utc::now()),
-        }
-        .insert(state.identity().database())
+    state
+        .lifecycle
+        .favorite_repository(
+            &super::principal(&headers, &jar)?,
+            repository.id,
+            gitadel_core::audit::AuditContext {
+                remote_address: crate::identity::remote_address(),
+            },
+        )
         .await?;
-    }
     Ok(StatusCode::NO_CONTENT)
 }
-
 #[utoipa::path(
     delete, path = "/repositories/{namespace}/{name}/favorite",
     operation_id = "delete_repositories_namespace_name_favorite",
@@ -1573,7 +1331,7 @@ pub async fn unfavorite_repository(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<StatusCode, ApiError> {
-    let (actor, repository) = state
+    let (_, repository) = state
         .authenticated_repository(
             &headers,
             &jar,
@@ -1583,12 +1341,18 @@ pub async fn unfavorite_repository(
             SCOPE_WRITE,
         )
         .await?;
-    repository_favorite::Entity::delete_by_id((actor.user.id, repository.id))
-        .exec(state.identity().database())
+    state
+        .lifecycle
+        .unfavorite_repository(
+            &super::principal(&headers, &jar)?,
+            repository.id,
+            gitadel_core::audit::AuditContext {
+                remote_address: crate::identity::remote_address(),
+            },
+        )
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
-
 #[derive(Serialize, ToSchema)]
 pub struct CollaboratorResponse {
     username: String,
@@ -1617,7 +1381,7 @@ pub async fn list_collaborators(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<Vec<CollaboratorResponse>>, ApiError> {
-    let (actor, repository) = state
+    let (_, repository) = state
         .authenticated_repository(
             &headers,
             &jar,
@@ -1627,28 +1391,22 @@ pub async fn list_collaborators(
             SCOPE_READ,
         )
         .await?;
-    state.personal_owner(&repository, &actor.user).await?;
-    let collaborators = repository_collaborator::Entity::find()
-        .filter(repository_collaborator::Column::RepositoryId.eq(repository.id))
-        .order_by_asc(repository_collaborator::Column::CreatedAt)
-        .all(state.identity().database())
-        .await?;
-    let mut response = Vec::with_capacity(collaborators.len());
-    for collaborator in collaborators {
-        if let Some(account) = user::Entity::find_by_id(collaborator.user_id)
-            .one(state.identity().database())
+    Ok(Json(
+        state
+            .lifecycle
+            .list_collaborators(
+                &super::principal(&headers, &jar)?,
+                repository.id,
+                gitadel_core::audit::AuditContext {
+                    remote_address: crate::identity::remote_address(),
+                },
+            )
             .await?
-        {
-            response.push(CollaboratorResponse {
-                username: account.username,
-                role: collaborator.role,
-                created_at: collaborator.created_at,
-            });
-        }
-    }
-    Ok(Json(response))
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    ))
 }
-
 #[derive(Deserialize, ToSchema)]
 pub struct AddCollaboratorRequest {
     username: String,
@@ -1678,7 +1436,7 @@ pub async fn add_collaborator(
     jar: CookieJar,
     Json(request): Json<AddCollaboratorRequest>,
 ) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
-    let (actor, repository) = state
+    let (_, repository) = state
         .authenticated_repository(
             &headers,
             &jar,
@@ -1688,64 +1446,23 @@ pub async fn add_collaborator(
             SCOPE_WRITE,
         )
         .await?;
-    state.personal_owner(&repository, &actor.user).await?;
-    if request.role != "read" && request.role != "write" {
-        return Err(ApiError::bad_request(
-            "Collaborator role must be read or write.",
-        ));
-    }
-    let username = validate_slug(&request.username, "Username")?;
-    let account = user::Entity::find()
-        .filter(user::Column::Username.eq(&username))
-        .filter(user::Column::DisabledAt.is_null())
-        .one(state.identity().database())
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    if account.id == actor.user.id {
-        return Err(ApiError::bad_request(
-            "The repository owner is not a collaborator.",
-        ));
-    }
-    if repository_collaborator::Entity::find_by_id((repository.id, account.id))
-        .one(state.identity().database())
-        .await?
-        .is_some()
-    {
-        return Err(ApiError::conflict(
-            "That user is already a repository collaborator.",
-        ));
-    }
-
-    let transaction = state.identity().database().begin().await?;
-    let collaborator = repository_collaborator::ActiveModel {
-        repository_id: Set(repository.id),
-        user_id: Set(account.id),
-        role: Set(request.role),
-        created_at: Set(Utc::now()),
-    }
-    .insert(&transaction)
-    .await?;
-    state
-        .identity()
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "repository.collaborator.add",
-            Some(format!("{namespace}/{name}/{username}")),
-        )
-        .await?;
-    transaction.commit().await?;
-
     Ok((
         StatusCode::CREATED,
-        Json(CollaboratorResponse {
-            username,
-            role: collaborator.role,
-            created_at: collaborator.created_at,
-        }),
+        Json(CollaboratorResponse::from(
+            state
+                .lifecycle
+                .add_collaborator(
+                    &super::principal(&headers, &jar)?,
+                    repository.id,
+                    request.into(),
+                    gitadel_core::audit::AuditContext {
+                        remote_address: crate::identity::remote_address(),
+                    },
+                )
+                .await?,
+        )),
     ))
 }
-
 #[utoipa::path(
     delete, path = "/repositories/{namespace}/{name}/collaborators/{username}",
     operation_id = "delete_repositories_namespace_name_collaborators_username",
@@ -1768,7 +1485,7 @@ pub async fn remove_collaborator(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<StatusCode, ApiError> {
-    let (actor, repository) = state
+    let (_, repository) = state
         .authenticated_repository(
             &headers,
             &jar,
@@ -1778,32 +1495,19 @@ pub async fn remove_collaborator(
             SCOPE_WRITE,
         )
         .await?;
-    state.personal_owner(&repository, &actor.user).await?;
-    let account = user::Entity::find()
-        .filter(user::Column::Username.eq(&username))
-        .one(state.identity().database())
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    let transaction = state.identity().database().begin().await?;
-    let deleted = repository_collaborator::Entity::delete_by_id((repository.id, account.id))
-        .exec(&transaction)
-        .await?;
-    if deleted.rows_affected == 0 {
-        return Err(ApiError::not_found());
-    }
     state
-        .identity()
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "repository.collaborator.remove",
-            Some(format!("{namespace}/{name}/{username}")),
+        .lifecycle
+        .remove_collaborator(
+            &super::principal(&headers, &jar)?,
+            repository.id,
+            username,
+            gitadel_core::audit::AuditContext {
+                remote_address: crate::identity::remote_address(),
+            },
         )
         .await?;
-    transaction.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
-
 async fn initialize_repository(path: &Path, object_format: ObjectFormat) -> Result<(), ApiError> {
     let owned_path = path.to_owned();
     tokio::task::spawn_blocking(move || {
@@ -1887,16 +1591,13 @@ async fn cleanup_repository_storage(repository_path: &Path, lfs_path: &Path) {
 pub(super) mod test_support {
     use std::{path::PathBuf, process::Command};
 
-    use chrono::Utc;
-    use sea_orm::{ActiveModelTrait, ConnectOptions, Database, DatabaseConnection, Set};
-    use sea_orm_migration::MigratorTrait;
+    use sea_orm::{ActiveModelTrait, DatabaseConnection, Set};
     use uuid::Uuid;
 
     use crate::{
         config::{AuthSettings, StorageSettings},
         entity::{repository, user},
         identity::IdentityState,
-        migration::Migrator,
         repository::RepositoryState,
     };
 
@@ -1915,10 +1616,7 @@ pub(super) mod test_support {
 
     pub(in crate::repository) async fn instance() -> TestInstance {
         let root = std::env::temp_dir().join(format!("gitadel-handler-test-{}", Uuid::new_v4()));
-        let mut options = ConnectOptions::new("sqlite::memory:");
-        options.max_connections(1).sqlx_logging(false);
-        let database = Database::connect(options).await.unwrap();
-        Migrator::up(&database, None).await.unwrap();
+        let database = gitadel_db::test_support::database().await;
         let public_url = url::Url::parse("https://gitadel.test").unwrap();
         let identity = IdentityState::new(
             database.clone(),
@@ -1961,30 +1659,11 @@ pub(super) mod test_support {
         /// A public repository row, so handlers can be called anonymously. No
         /// Git directory is created for it.
         pub(in crate::repository) async fn repository(&self, name: &str) -> repository::Model {
-            let now = Utc::now();
-            repository::ActiveModel {
-                id: Set(Uuid::new_v4()),
-                namespace: Set(self.owner.username.clone()),
-                name: Set(name.to_owned()),
-                description: Set(None),
-                website_url: Set(None),
-                visibility: Set("public".to_owned()),
-                object_format: Set("sha1".to_owned()),
-                mirrored: Set(false),
-                default_branch: Set(Some("main".to_owned())),
-                issue_counter: Set(0),
-                storage_key: Set(Uuid::new_v4()),
-                created_by: Set(self.owner.id),
-                archived_at: Set(None),
-                deleted_at: Set(None),
-                icon_updated_at: Set(None),
-                icon_source: Set(None),
-                created_at: Set(now),
-                updated_at: Set(now),
-            }
-            .insert(&self.database)
-            .await
-            .unwrap()
+            let repository =
+                gitadel_db::test_support::repository(&self.database, &self.owner, name).await;
+            let mut active: repository::ActiveModel = repository.into();
+            active.visibility = Set("public".to_owned());
+            active.update(&self.database).await.unwrap()
         }
 
         /// A public repository with an empty bare Git directory behind it.
@@ -2262,5 +1941,38 @@ mod tests {
         git(&path, &["branch", "--delete", "--force", "beta"]);
         assert_eq!(selected_branch(&path, None), None);
         fs::remove_dir_all(path).expect("remove test repository");
+    }
+}
+
+impl From<UpdateRepositoryControlRequest>
+    for gitadel_repositories::lifecycle::UpdateRepositoryControlRequest
+{
+    fn from(value: UpdateRepositoryControlRequest) -> Self {
+        Self {
+            description: value.description,
+            visibility: value.visibility,
+            default_branch: value.default_branch,
+            name: value.name,
+            namespace: value.namespace,
+        }
+    }
+}
+
+impl From<gitadel_repositories::lifecycle::CollaboratorResponse> for CollaboratorResponse {
+    fn from(value: gitadel_repositories::lifecycle::CollaboratorResponse) -> Self {
+        Self {
+            username: value.username,
+            role: value.role,
+            created_at: value.created_at,
+        }
+    }
+}
+
+impl From<AddCollaboratorRequest> for gitadel_repositories::lifecycle::AddCollaboratorRequest {
+    fn from(value: AddCollaboratorRequest) -> Self {
+        Self {
+            username: value.username,
+            role: value.role,
+        }
     }
 }

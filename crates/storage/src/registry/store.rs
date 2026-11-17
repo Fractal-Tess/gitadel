@@ -3,7 +3,6 @@
 //! the registry domain's active store; resumable uploads stay on local disk
 //! under `<registry_root>/uploads/` until they are verified and published.
 
-use axum::body::Body;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use sea_orm::{
@@ -795,13 +794,18 @@ impl ImageStore {
         Ok(Some(self.reconcile_upload(&directory).await?))
     }
 
-    pub async fn append_upload(
+    pub async fn append_upload<S, B, E>(
         &self,
         id: Uuid,
         owner: Uuid,
-        body: Body,
+        mut stream: S,
         range: Option<(u64, u64)>,
-    ) -> Result<u64, StoreError> {
+    ) -> Result<u64, StoreError>
+    where
+        S: futures_util::Stream<Item = Result<B, E>> + Unpin,
+        B: AsRef<[u8]>,
+        E: fmt::Display,
+    {
         self.check_valid()?;
         let _guard = upload_lock(&self.upload_path(id)).await;
         let directory = self
@@ -825,11 +829,11 @@ impl ImageStore {
         let mut output = OpenOptions::new().write(true).open(&data).await?;
         output.seek(SeekFrom::Start(original)).await?;
         let mut received = 0_u64;
-        let mut stream = body.into_data_stream();
         let result = async {
             while let Some(chunk) = stream.next().await {
                 let chunk =
                     chunk.map_err(|error| StoreError::Invalid(format!("upload body: {error}")))?;
+                let chunk = chunk.as_ref();
                 let chunk_len = u64::try_from(chunk.len()).map_err(|_| StoreError::TooLarge)?;
                 received = received
                     .checked_add(chunk_len)
@@ -841,7 +845,7 @@ impl ImageStore {
                 if expected.is_some_and(|expected| received > expected) {
                     return Err(StoreError::RangeInvalid);
                 }
-                output.write_all(&chunk).await?;
+                output.write_all(chunk).await?;
             }
             if expected.is_some_and(|expected| expected != received) {
                 return Err(StoreError::RangeInvalid);

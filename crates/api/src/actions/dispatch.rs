@@ -11,19 +11,17 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::json;
+#[cfg(test)]
 use yaml_serde::Value;
 
 use crate::{
     identity::{ApiError, SCOPE_READ, SCOPE_WRITE},
-    repository::{Permission, read_git},
+    repository::Permission,
 };
 
-use super::{
-    ActionsState,
-    api::RunSummary,
-    workflow::{self, RunTrigger},
-};
+use super::{ActionsState, api::RunSummary};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -63,11 +61,13 @@ impl From<gitadel_actions::dispatch::DispatchInput> for DispatchInput {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn parse_inputs(config: Option<&Value>) -> Result<Vec<DispatchInput>, String> {
     gitadel_actions::dispatch::parse_inputs(config)
         .map(|inputs| inputs.into_iter().map(Into::into).collect())
 }
 
+#[cfg(test)]
 fn resolve_inputs(
     declared: &[DispatchInput],
     provided: &BTreeMap<String, serde_json::Value>,
@@ -99,62 +99,8 @@ pub(crate) fn router() -> utoipa_axum::router::OpenApiRouter<ActionsState> {
         .api_routes(crate::openapi::routes!(crate::actions::dispatch::dispatch))
 }
 
-/// Rejects revision syntax so a ref names exactly one branch or tag.
-fn valid_reference(reference: &str) -> bool {
-    !reference.is_empty()
-        && reference.len() <= 255
-        && !reference.contains("..")
-        && !reference.contains("@{")
-        && !reference.starts_with('-')
-        && !reference.ends_with('/')
-        && !reference.chars().any(|character| {
-            character.is_control()
-                || matches!(character, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\')
-        })
-}
-
-/// Resolves a branch, tag, or full ref name to `(full ref, commit OID)`.
-async fn resolve_reference(
-    state: &ActionsState,
-    repository: &crate::entity::repository::Model,
-    reference: Option<&str>,
-) -> Result<(String, String), ApiError> {
-    let reference = match reference.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(reference) => reference.to_owned(),
-        None => repository
-            .default_branch
-            .clone()
-            .ok_or_else(|| ApiError::bad_request("The repository has no default branch."))?,
-    };
-    if !valid_reference(&reference) {
-        return Err(ApiError::bad_request(
-            "The ref is not a valid branch or tag.",
-        ));
-    }
-    let candidates = if reference.starts_with("refs/heads/") || reference.starts_with("refs/tags/")
-    {
-        vec![reference.clone()]
-    } else {
-        vec![
-            format!("refs/heads/{reference}"),
-            format!("refs/tags/{reference}"),
-        ]
-    };
-    let path = state.repository().repository_path(repository);
-    read_git(path, move |git| {
-        for candidate in candidates {
-            if let Ok(oid) = git.rev_parse(&candidate)
-                && let Ok(commit) = git.peel_to_commit_oid(oid)
-            {
-                return Ok(Some((candidate, commit.to_hex())));
-            }
-        }
-        Ok(None)
-    })
-    .await?
-    .ok_or_else(|| ApiError::bad_request("The branch or tag does not exist."))
-}
-
+#[cfg(test)]
+use gitadel_actions::service_dispatch::valid_reference;
 #[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]
 struct WorkflowsQuery {
@@ -204,61 +150,21 @@ async fn list_workflows(
     Query(query): Query<WorkflowsQuery>,
 ) -> Result<Json<WorkflowsResponse>, ApiError> {
     let repository = state.repository().find(&namespace, &name).await?;
-    let user_id = state
+    let _user_id = state
         .repository()
         .identity()
         .optional_user(&headers, &jar, SCOPE_READ)
         .await?
         .map(|user| user.id);
-    state
-        .repository()
-        .authorize(&repository, user_id, Permission::Read)
-        .await?;
-    let can_dispatch = user_id.is_some()
-        && repository.archived_at.is_none()
-        && !repository.mirrored
-        && state
-            .repository()
-            .can_access(&repository, user_id, Permission::Write)
-            .await?;
-    let (reference, commit) =
-        resolve_reference(&state, &repository, query.reference.as_deref()).await?;
-    let workflows = workflow::discover(&state, &repository, commit.clone())
-        .await?
-        .into_iter()
-        .map(|discovered| match discovered {
-            Ok(plan) => {
-                let dispatchable = plan.has_trigger("workflow_dispatch");
-                let inputs = if dispatchable {
-                    parse_inputs(plan.trigger_config("workflow_dispatch")).unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
-                WorkflowResponse {
-                    path: plan.path,
-                    name: plan.name,
-                    dispatchable,
-                    inputs,
-                    error: None,
-                }
-            }
-            Err(diagnostic) => WorkflowResponse {
-                name: diagnostic.path.clone(),
-                path: diagnostic.path,
-                dispatchable: false,
-                inputs: Vec::new(),
-                error: Some(diagnostic.summary),
-            },
-        })
-        .collect();
-    Ok(Json(WorkflowsResponse {
-        reference,
-        commit,
-        can_dispatch,
-        workflows,
-    }))
+    let result = gitadel_actions::service_dispatch::list_workflows(
+        state.service(),
+        repository.id,
+        &crate::repository::principal(&headers, &jar)?,
+        query.reference.as_deref(),
+    )
+    .await?;
+    Ok(Json(result.into()))
 }
-
 #[derive(Deserialize, utoipa::ToSchema)]
 struct DispatchRequest {
     /// Workflow path, such as `.forgejo/workflows/ci.yml`, or its file name.
@@ -291,7 +197,7 @@ async fn dispatch(
     jar: CookieJar,
     Json(request): Json<DispatchRequest>,
 ) -> Result<(StatusCode, Json<RunSummary>), ApiError> {
-    let (actor, repository) = state
+    let (_, repository) = state
         .repository()
         .authenticated_repository(
             &headers,
@@ -302,69 +208,22 @@ async fn dispatch(
             SCOPE_WRITE,
         )
         .await?;
-    let (reference, commit) =
-        resolve_reference(&state, &repository, request.reference.as_deref()).await?;
-    let wanted = request.workflow.trim();
-    let discovered = workflow::discover(&state, &repository, commit.clone())
-        .await?
-        .into_iter()
-        .find(|discovered| {
-            let path = match discovered {
-                Ok(plan) => &plan.path,
-                Err(diagnostic) => &diagnostic.path,
-            };
-            path == wanted || path.rsplit('/').next() == Some(wanted)
-        })
-        .ok_or_else(|| ApiError::bad_request("The workflow does not exist at that ref."))?;
-    let plan = discovered.map_err(|diagnostic| {
-        ApiError::bad_request(format!("The workflow is invalid: {}", diagnostic.summary))
-    })?;
-    if !plan.has_trigger("workflow_dispatch") {
-        return Err(ApiError::bad_request(
-            "The workflow does not declare the workflow_dispatch trigger.",
-        ));
-    }
-    let declared =
-        parse_inputs(plan.trigger_config("workflow_dispatch")).map_err(ApiError::bad_request)?;
-    let inputs = resolve_inputs(&declared, &request.inputs).map_err(ApiError::bad_request)?;
-    let event_json = json!({
-        "inputs": inputs,
-        "ref": reference,
-        "workflow": plan.path,
-        "repository": {
-            "full_name": format!("{}/{}", repository.namespace, repository.name),
-            "default_branch": repository.default_branch,
+    let run = gitadel_actions::service_dispatch::dispatch(
+        state.service(),
+        &crate::repository::principal(&headers, &jar)?,
+        repository.id,
+        gitadel_actions::service_dispatch::DispatchRequest {
+            workflow: request.workflow,
+            reference: request.reference,
+            inputs: request.inputs,
         },
-        "sender": { "login": actor.user.username },
-    });
-    let trigger = RunTrigger {
-        event: "workflow_dispatch",
-        reference: &reference,
-        before: "",
-        after: &commit,
-        actor: Some(&actor.user),
-        event_json,
-    };
-    let run = workflow::enqueue_plan(
-        state.repository().identity().database(),
-        &repository,
-        &trigger,
-        plan,
+        gitadel_core::audit::AuditContext {
+            remote_address: crate::identity::remote_address(),
+        },
     )
     .await?;
-    super::events::spawn_run_requested(state.repository(), run.id);
-    state
-        .repository()
-        .identity()
-        .audit(
-            Some(actor.user.id),
-            "actions.run.dispatch",
-            Some(run.id.to_string()),
-        )
-        .await?;
     Ok((StatusCode::CREATED, Json(run.into())))
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,6 +294,29 @@ mod tests {
             "", "main~1", "main^", "a..b", "HEAD@{1}", "-x", "a b", "x:y",
         ] {
             assert!(!valid_reference(invalid), "{invalid}");
+        }
+    }
+}
+
+impl From<gitadel_actions::service_dispatch::WorkflowResponse> for WorkflowResponse {
+    fn from(value: gitadel_actions::service_dispatch::WorkflowResponse) -> Self {
+        Self {
+            path: value.path,
+            name: value.name,
+            dispatchable: value.dispatchable,
+            inputs: value.inputs.into_iter().map(Into::into).collect(),
+            error: value.error,
+        }
+    }
+}
+
+impl From<gitadel_actions::service_dispatch::WorkflowsResponse> for WorkflowsResponse {
+    fn from(value: gitadel_actions::service_dispatch::WorkflowsResponse) -> Self {
+        Self {
+            reference: value.reference,
+            commit: value.commit,
+            can_dispatch: value.can_dispatch,
+            workflows: value.workflows.into_iter().map(Into::into).collect(),
         }
     }
 }

@@ -48,12 +48,12 @@ pub(crate) mod topics;
 pub(crate) mod webhook_events;
 pub(crate) mod webhooks;
 pub(crate) mod websites;
-pub(crate) use browser::{read_git, render_markdown};
+pub(crate) use browser::render_markdown;
 
-pub(crate) use git_http::GitHttpState;
-pub(crate) use integrity::serve_integrity_scheduler;
-pub(crate) use mirror_scheduler::serve_mirror_scheduler;
-pub(crate) use resources::purge_soft_deleted_repositories;
+pub use git_http::GitHttpState;
+pub use integrity::serve_integrity_scheduler;
+pub use mirror_scheduler::serve_mirror_scheduler;
+pub use resources::purge_soft_deleted_repositories;
 pub(crate) use statuses::statuses_for_commits;
 
 fn service_error(error: gitadel_repositories::Error) -> ApiError {
@@ -64,7 +64,7 @@ fn service_error(error: gitadel_repositories::Error) -> ApiError {
     }
 }
 
-pub(crate) async fn recover_imports(state: &RepositoryState) -> Result<(), ApiError> {
+pub async fn recover_imports(state: &RepositoryState) -> Result<(), ApiError> {
     imports::recover_interrupted(state).await
 }
 
@@ -78,10 +78,7 @@ use std::{
 
 use axum::Router;
 use axum_extra::extract::cookie::CookieJar;
-use sea_orm::{
-    ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
-    sea_query::OnConflict,
-};
+use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio_util::task::TaskTracker;
@@ -91,16 +88,25 @@ use uuid::Uuid;
 use crate::{
     blob_store::{BlobStore, ObjectKey, ObjectPrefix, lfs_object_key},
     config::StorageSettings,
-    entity::{
-        namespace, organization_member, repository, repository_alias, repository_cache_entry,
-        repository_collaborator, user,
-    },
+    entity::{repository, repository_cache_entry},
     filesystem::create_private_directory_async,
     identity::{ApiError, AuthenticatedUser, IdentityState},
 };
 
+/// Domain handles supplied by runtime construction.
+pub struct RepositoryServices {
+    pub webhook_outbox: gitadel_repositories::webhook_outbox::WebhookOutbox,
+    pub lifecycle: gitadel_repositories::lifecycle::LifecycleService,
+    pub cache: gitadel_repositories::cache::RepositoryCache,
+    pub lfs_storage: Arc<crate::blob_store::DomainStorage>,
+    pub registry_storage: Arc<crate::blob_store::DomainStorage>,
+}
+
 #[derive(Clone)]
 pub struct RepositoryState {
+    webhook_outbox: gitadel_repositories::webhook_outbox::WebhookOutbox,
+    cache: gitadel_repositories::cache::RepositoryCache,
+    lifecycle: Arc<gitadel_repositories::lifecycle::LifecycleService>,
     identity: IdentityState,
     repository_root: Arc<PathBuf>,
     archive_cache_root: Arc<PathBuf>,
@@ -127,11 +133,26 @@ pub struct RepositoryState {
     tasks: TaskTracker,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Permission {
-    Read,
-    Write,
-    Manage,
+pub use gitadel_identity::permissions::RepositoryPermission as Permission;
+
+/// Extract transport credentials without discarding their source or scopes.
+pub(crate) fn principal(
+    headers: &axum::http::HeaderMap,
+    jar: &CookieJar,
+) -> Result<gitadel_identity::permissions::RepositoryPrincipal, ApiError> {
+    use gitadel_identity::permissions::RepositoryPrincipal;
+    if let Some(value) = headers.get(axum::http::header::AUTHORIZATION) {
+        let value = value.to_str().map_err(|_| ApiError::unauthorized())?;
+        let raw = value
+            .strip_prefix("Bearer ")
+            .or_else(|| value.strip_prefix("token "))
+            .ok_or_else(ApiError::unauthorized)?;
+        return Ok(RepositoryPrincipal::token(raw.to_owned()));
+    }
+    Ok(match jar.get(crate::identity::SESSION_COOKIE) {
+        Some(cookie) => RepositoryPrincipal::session(cookie.value().to_owned()),
+        None => RepositoryPrincipal::anonymous(),
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,7 +214,42 @@ impl RepositoryState {
         mirrors::cleanup_lfs_staging(&settings.lfs_root).await?;
         create_private_directory_async(&settings.registry_root).await?;
         create_private_directory_async(&settings.actions_artifact_root).await?;
-        let state = Self {
+        let services = RepositoryServices {
+            webhook_outbox: gitadel_repositories::webhook_outbox::WebhookOutbox::new(
+                identity.database().clone(),
+                identity.secret_cipher().clone(),
+                TaskTracker::new(),
+            ),
+            lifecycle: gitadel_repositories::lifecycle::LifecycleService::new(
+                identity.database().clone(),
+                settings.repository_root.clone(),
+            ),
+            cache: gitadel_repositories::cache::RepositoryCache::new(
+                identity.database().clone(),
+                identity.read_database().clone(),
+            ),
+            lfs_storage,
+            registry_storage,
+        };
+        let state = Self::from_services(identity, settings, public_url, ssh_port, services)?;
+        state.recover_metadata().await?;
+        Ok(state)
+    }
+
+    /// Build HTTP handles around supplied domain services. Starts no workers.
+    pub fn from_services(
+        identity: IdentityState,
+        settings: StorageSettings,
+        public_url: Url,
+        ssh_port: u16,
+        services: RepositoryServices,
+    ) -> Result<Self, anyhow::Error> {
+        let archive_cache_root = settings.repository_root.join(".cache/source-archives");
+        let tasks = services.webhook_outbox.task_tracker().clone();
+        Ok(Self {
+            webhook_outbox: services.webhook_outbox,
+            cache: services.cache,
+            lifecycle: Arc::new(services.lifecycle),
             identity,
             repository_root: Arc::new(settings.repository_root),
             archive_cache_root: Arc::new(archive_cache_root),
@@ -211,38 +267,41 @@ impl RepositoryState {
             mirror_slots: Arc::new(Semaphore::new(MIRROR_SYNC_CONCURRENCY)),
             mirror_syncing: mirrors::MirrorBusySet::default(),
             github_known_hosts: Arc::new(Mutex::new(None)),
-            registry_storage,
+            registry_storage: services.registry_storage,
             lfs_root: Arc::new(settings.lfs_root),
             registry_root: Arc::new(settings.registry_root),
-            lfs_storage,
+            lfs_storage: services.lfs_storage,
             public_url: Arc::new(public_url),
             ssh_port,
             lfs_tokens: Arc::new(RwLock::new(HashMap::new())),
             webhook_client: webhooks::webhook_client()?,
-            tasks: TaskTracker::new(),
-        };
-        resources::backfill_legacy_empty_defaults(&state).await?;
-        let background = state.clone();
-        state.spawn_task(async move {
-            let result = async {
-                let mut pages = repository::Entity::find()
-                    .filter(repository::Column::DeletedAt.is_null())
-                    .order_by_asc(repository::Column::Id)
-                    .paginate(background.identity.database(), 50);
-                while let Some(repositories) = pages.fetch_and_next().await? {
-                    for repository in repositories {
-                        if let Err(error) = browser::warm_repository_analysis(&background, &repository).await {
-                            tracing::warn!(%error, repository_id = %repository.id, "could not backfill repository analysis");
-                        }
-                    }
+            tasks,
+        })
+    }
+
+    /// Finite metadata recovery, separate from background analysis supervision.
+    pub async fn recover_metadata(&self) -> Result<(), ApiError> {
+        resources::backfill_legacy_empty_defaults(self).await
+    }
+
+    /// Finite warmup pass; the server may supervise this concurrently with serving.
+    #[allow(
+        dead_code,
+        reason = "parent server will supervise the explicit warmup future"
+    )]
+    pub async fn warm_analysis(&self) -> Result<(), ApiError> {
+        let mut pages = repository::Entity::find()
+            .filter(repository::Column::DeletedAt.is_null())
+            .order_by_asc(repository::Column::Id)
+            .paginate(self.identity.database(), 50);
+        while let Some(repositories) = pages.fetch_and_next().await? {
+            for repository in repositories {
+                if let Err(error) = browser::warm_repository_analysis(self, &repository).await {
+                    tracing::warn!(%error, repository_id = %repository.id, "could not backfill repository analysis");
                 }
-                Ok::<_, ApiError>(())
-            }.await;
-            if let Err(error) = result {
-                tracing::warn!(%error, "repository analysis backfill failed");
             }
-        });
-        Ok(state)
+        }
+        Ok(())
     }
 
     pub(crate) fn spawn_task<F>(&self, task: F)
@@ -252,11 +311,11 @@ impl RepositoryState {
         self.tasks.spawn(task);
     }
 
-    pub(crate) fn close_tasks(&self) {
+    pub fn close_tasks(&self) {
         self.tasks.close();
     }
 
-    pub(crate) async fn wait_for_tasks(&self) {
+    pub async fn wait_for_tasks(&self) {
         self.tasks.wait().await;
     }
 
@@ -265,6 +324,10 @@ impl RepositoryState {
     }
     pub(super) fn http_client(&self) -> &reqwest::Client {
         &self.webhook_client
+    }
+
+    pub(crate) fn repository_root(&self) -> &Path {
+        &self.repository_root
     }
 
     pub fn repository_path(&self, repository: &repository::Model) -> PathBuf {
@@ -443,89 +506,27 @@ impl RepositoryState {
         }
     }
 
-    async fn cached_value<T>(
+    async fn cached_value<T: DeserializeOwned>(
         &self,
         repository_id: Uuid,
         kind: &str,
-        cache_key: &str,
-    ) -> Result<Option<T>, ApiError>
-    where
-        T: DeserializeOwned,
-    {
-        let id = (repository_id, kind.to_owned(), cache_key.to_owned());
-        let Some(entry) = repository_cache_entry::Entity::find_by_id(id.clone())
-            .one(self.identity.read_database())
-            .await?
-        else {
-            return Ok(None);
-        };
-        if entry.expires_at <= chrono::Utc::now() {
-            repository_cache_entry::Entity::delete_by_id(id)
-                .exec(self.identity.database())
-                .await?;
-            return Ok(None);
-        }
-        match serde_json::from_str(&entry.payload_json) {
-            Ok(value) => Ok(Some(value)),
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    %repository_id,
-                    cache_kind = kind,
-                    "discarding invalid repository cache entry"
-                );
-                repository_cache_entry::Entity::delete_by_id(id)
-                    .exec(self.identity.database())
-                    .await?;
-                Ok(None)
-            }
-        }
+        key: &str,
+    ) -> Result<Option<T>, ApiError> {
+        Ok(self.cache.cached_value(repository_id, kind, key).await?)
     }
-
-    async fn cache_value<T>(
+    async fn cache_value<T: Serialize + ?Sized>(
         &self,
         repository_id: Uuid,
         kind: &str,
-        cache_key: &str,
+        key: &str,
         value: &T,
         lifetime: Duration,
-    ) -> Result<(), ApiError>
-    where
-        T: Serialize + ?Sized,
-    {
-        let now = chrono::Utc::now();
-        let expires_at = now + chrono::Duration::from_std(lifetime).map_err(ApiError::internal)?;
-        let entry = repository_cache_entry::ActiveModel {
-            repository_id: Set(repository_id),
-            kind: Set(kind.to_owned()),
-            cache_key: Set(cache_key.to_owned()),
-            payload_json: Set(serde_json::to_string(value).map_err(ApiError::internal)?),
-            expires_at: Set(expires_at),
-            created_at: Set(now),
-        };
-        repository_cache_entry::Entity::insert(entry)
-            .on_conflict(
-                OnConflict::columns([
-                    repository_cache_entry::Column::RepositoryId,
-                    repository_cache_entry::Column::Kind,
-                    repository_cache_entry::Column::CacheKey,
-                ])
-                .update_columns([
-                    repository_cache_entry::Column::PayloadJson,
-                    repository_cache_entry::Column::ExpiresAt,
-                    repository_cache_entry::Column::CreatedAt,
-                ])
-                .to_owned(),
-            )
-            .exec(self.identity.database())
-            .await?;
-        repository_cache_entry::Entity::delete_many()
-            .filter(repository_cache_entry::Column::ExpiresAt.lte(now))
-            .exec(self.identity.database())
-            .await?;
-        Ok(())
+    ) -> Result<(), ApiError> {
+        Ok(self
+            .cache
+            .cache_value(repository_id, kind, key, value, lifetime)
+            .await?)
     }
-
     async fn cached_overview(
         &self,
         repository_id: Uuid,
@@ -764,34 +765,7 @@ impl RepositoryState {
     }
 
     pub async fn find(&self, namespace: &str, name: &str) -> Result<repository::Model, ApiError> {
-        let repository = self.find_including_deleted(namespace, name).await?;
-        if repository.deleted_at.is_some() {
-            return Err(ApiError::not_found());
-        }
-        Ok(repository)
-    }
-
-    pub async fn find_including_deleted(
-        &self,
-        namespace: &str,
-        name: &str,
-    ) -> Result<repository::Model, ApiError> {
-        if let Some(repository) = repository::Entity::find()
-            .filter(repository::Column::Namespace.eq(namespace))
-            .filter(repository::Column::Name.eq(name))
-            .one(self.identity.database())
-            .await?
-        {
-            return Ok(repository);
-        }
-        let alias = repository_alias::Entity::find_by_id((namespace.to_owned(), name.to_owned()))
-            .one(self.identity.database())
-            .await?
-            .ok_or_else(ApiError::not_found)?;
-        repository::Entity::find_by_id(alias.repository_id)
-            .one(self.identity.database())
-            .await?
-            .ok_or_else(ApiError::not_found)
+        Ok(self.lifecycle.find(namespace, name).await?)
     }
 
     pub async fn authorize(
@@ -800,17 +774,13 @@ impl RepositoryState {
         user_id: Option<Uuid>,
         permission: Permission,
     ) -> Result<(), ApiError> {
-        // Access comes first: the read-only answers below would otherwise
-        // tell a caller without access that a private repository exists.
-        if !self.can_access(repository, user_id, permission).await? {
-            return Err(ApiError::not_found());
-        }
-        if permission == Permission::Write && repository.archived_at.is_some() {
-            return Err(ApiError::forbidden("Archived repositories are read-only."));
-        }
-        if permission == Permission::Write && repository.mirrored {
-            return Err(ApiError::forbidden("Mirrored repositories are read-only."));
-        }
+        gitadel_identity::permissions::authorize_repository(
+            self.identity.database(),
+            repository.id,
+            user_id,
+            permission,
+        )
+        .await?;
         Ok(())
     }
 
@@ -820,46 +790,13 @@ impl RepositoryState {
         user_id: Option<Uuid>,
         permission: Permission,
     ) -> Result<bool, ApiError> {
-        if repository.deleted_at.is_some() {
-            return Ok(false);
-        }
-        if permission == Permission::Read && repository.visibility == "public" {
-            return Ok(true);
-        }
-        let Some(user_id) = user_id else {
-            return Ok(false);
-        };
-        let namespace = namespace::Entity::find_by_id(&repository.namespace)
-            .one(self.identity.database())
-            .await?
-            .ok_or_else(ApiError::not_found)?;
-
-        match namespace.kind.as_str() {
-            "user" if namespace.user_id == Some(user_id) => Ok(true),
-            "user" if permission == Permission::Manage => Ok(false),
-            "user" => Ok(
-                repository_collaborator::Entity::find_by_id((repository.id, user_id))
-                    .one(self.identity.database())
-                    .await?
-                    .is_some_and(|collaborator| {
-                        permission == Permission::Read || collaborator.role == "write"
-                    }),
-            ),
-            "organization" => {
-                let Some(organization_id) = namespace.organization_id else {
-                    return Ok(false);
-                };
-                Ok(
-                    organization_member::Entity::find_by_id((organization_id, user_id))
-                        .one(self.identity.database())
-                        .await?
-                        .is_some_and(|membership| {
-                            permission != Permission::Manage || membership.role == "owner"
-                        }),
-                )
-            }
-            _ => Ok(false),
-        }
+        Ok(gitadel_identity::permissions::can_access_repository(
+            self.identity.database(),
+            repository.id,
+            user_id,
+            permission,
+        )
+        .await?)
     }
 
     pub async fn authenticated_repository(
@@ -876,21 +813,6 @@ impl RepositoryState {
         self.authorize(&repository, Some(actor.user.id), permission)
             .await?;
         Ok((actor, repository))
-    }
-
-    pub async fn personal_owner(
-        &self,
-        repository: &repository::Model,
-        actor: &user::Model,
-    ) -> Result<(), ApiError> {
-        let namespace = namespace::Entity::find_by_id(&repository.namespace)
-            .one(self.identity.database())
-            .await?
-            .ok_or_else(ApiError::not_found)?;
-        if namespace.kind != "user" || namespace.user_id != Some(actor.id) {
-            return Err(ApiError::not_found());
-        }
-        Ok(())
     }
 }
 
@@ -1229,35 +1151,11 @@ pub async fn serve_ssh(
 ) -> Result<(), anyhow::Error> {
     ssh::serve(settings, state, actions).await
 }
-const RESERVED_REPOSITORY_NAMES: &[&str] = &[
-    "integrations",
-    "members",
-    "mirror-credentials",
-    "runners",
-    "settings",
-];
 
 pub fn validate_repository_name(value: &str) -> Result<String, ApiError> {
-    let name = value.trim();
-
-    let valid_length = (1..=100).contains(&name.len());
-    let valid_chars = name
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
-    let lower_name = name.to_ascii_lowercase();
-    let reserved =
-        matches!(name, "." | "..") || name.contains("..") || lower_name.ends_with(".git");
-    if RESERVED_REPOSITORY_NAMES.contains(&lower_name.as_str()) {
-        return Err(ApiError::bad_request(format!(
-            "The repository name '{name}' is reserved for namespace management.",
-        )));
-    }
-    if !valid_length || !valid_chars || reserved {
-        return Err(ApiError::bad_request(
-            "Repository names may contain letters, numbers, periods, underscores, and hyphens.",
-        ));
-    }
-    Ok(name.to_owned())
+    Ok(gitadel_repositories::lifecycle::validate_repository_name(
+        value,
+    )?)
 }
 
 #[cfg(test)]

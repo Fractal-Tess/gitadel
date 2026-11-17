@@ -1,12 +1,7 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
     future::Future,
-    path::Path,
-    sync::{
-        Arc, LazyLock,
-        atomic::{AtomicI64, Ordering},
-    },
-    time::{Duration, Instant},
+    sync::atomic::{AtomicI64, Ordering},
+    time::Duration,
 };
 
 use axum::{
@@ -16,23 +11,18 @@ use axum::{
     response::IntoResponse,
 };
 use axum_extra::extract::cookie::CookieJar;
-use chrono::{DateTime, Utc};
-use futures_util::TryStreamExt as _;
-use hmac::{Hmac, KeyInit as _, Mac};
+use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, ExprTrait,
-    QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait, sea_query::Expr,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::Sha256;
-use sley::{DiffNameStatusOptions, ReferenceTarget};
-use tokio::sync::Semaphore;
 use url::Url;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use super::{Permission, RepositoryState, browser::read_git};
+use super::{Permission, RepositoryState};
 use crate::{
     actions::ActionsState,
     entity::{
@@ -44,15 +34,8 @@ use crate::{
     secrets::{SecretCipher, SecretKind},
 };
 
-pub(super) type RefSnapshot = BTreeMap<String, String>;
-
 /// Maximum number of delivery records kept per webhook.
 const WEBHOOK_DELIVERY_HISTORY_LIMIT: usize = 50;
-
-/// Maximum number of response body characters stored per delivery.
-const WEBHOOK_DELIVERY_BODY_LIMIT: usize = 2048;
-const WEBHOOK_RESPONSE_BYTE_LIMIT: usize = WEBHOOK_DELIVERY_BODY_LIMIT * 4;
-const WEBHOOK_DELIVERY_CONCURRENCY: usize = 8;
 
 /// Event names a webhook may subscribe to, in display order.
 ///
@@ -66,16 +49,10 @@ pub(crate) const WEBHOOK_EVENTS: &[&str] = &[
     "issue_comment",
     "workflow_run",
 ];
-/// How many times one delivery is attempted before it is recorded as failed.
-const WEBHOOK_MAX_ATTEMPTS: i32 = 5;
-/// A delivery claimed this long ago without finishing belonged to a worker
-/// that died; requests themselves time out after ten seconds.
-const WEBHOOK_STALE_AFTER_SECONDS: i64 = 60;
+/// Keep expired credential cleanup on the existing hourly cadence.
 const SESSION_SWEEP_INTERVAL_SECONDS: i64 = 60 * 60;
 static LAST_SESSION_SWEEP: AtomicI64 = AtomicI64::new(0);
 const DEFAULT_WEBHOOK_EVENT: &str = "push";
-static WEBHOOK_DELIVERY_SLOTS: LazyLock<Arc<Semaphore>> =
-    LazyLock::new(|| Arc::new(Semaphore::new(WEBHOOK_DELIVERY_CONCURRENCY)));
 
 #[derive(Serialize, ToSchema)]
 struct WebhookConfigResponse {
@@ -684,28 +661,55 @@ pub async fn ping_webhook(
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub(super) async fn snapshot_refs(path: &Path) -> Result<RefSnapshot, ApiError> {
-    let path = path.to_owned();
-    read_git(path, |repository| {
-        let mut snapshot = RefSnapshot::new();
-        for reference in repository
-            .references()
-            .list_refs_with_prefix("refs/heads")?
-        {
-            if let ReferenceTarget::Direct(oid) = reference.target {
-                snapshot.insert(reference.name, oid.to_hex());
-            }
-        }
-        for reference in repository.references().list_refs_with_prefix("refs/tags")? {
-            if let ReferenceTarget::Direct(oid) = reference.target {
-                snapshot.insert(reference.name, oid.to_hex());
-            }
-        }
-        Ok(snapshot)
-    })
-    .await
-}
+pub(super) use gitadel_repositories::post_write::{RefSnapshot, snapshot_refs};
 
+struct LegacyPostWrite<'a> {
+    repository: &'a RepositoryState,
+    actions: &'a ActionsState,
+}
+#[async_trait::async_trait]
+impl gitadel_repositories::post_write::PostWriteEffects for LegacyPostWrite<'_> {
+    async fn deployments_enabled(
+        &self,
+        repository_id: Uuid,
+    ) -> Result<bool, gitadel_identity::IdentityError> {
+        super::integrations::has_enabled(self.repository, repository_id)
+            .await
+            .map_err(|error| gitadel_identity::IdentityError::internal(error.to_string()))
+    }
+    async fn actions(
+        &self,
+        repository: &repository::Model,
+        actor_id: Uuid,
+        change: &gitadel_repositories::post_write::PreparedRef,
+    ) -> Result<(), String> {
+        crate::actions::workflow::ingest_push(
+            self.actions,
+            repository,
+            actor_id,
+            &change.reference,
+            &change.before,
+            &change.after,
+            &change.zero,
+            change.changed_paths.clone(),
+        )
+        .await
+        .map_err(|error| error.to_string())
+    }
+    fn deploy(
+        &self,
+        repository: &repository::Model,
+        change: &gitadel_repositories::post_write::PreparedRef,
+    ) {
+        super::integrations::dispatch_push(
+            self.repository,
+            repository,
+            &change.reference,
+            change.deleted(),
+            change.payload.clone(),
+        );
+    }
+}
 pub(super) async fn dispatch_push(
     state: &RepositoryState,
     actions: &ActionsState,
@@ -713,79 +717,26 @@ pub(super) async fn dispatch_push(
     actor_user_id: Uuid,
     before: RefSnapshot,
 ) -> Result<(), ApiError> {
-    let hooks = active_hooks(state, repository.id).await?;
-    let integrations_enabled = super::integrations::has_enabled(state, repository.id).await?;
-    let path = state.repository_path(repository);
-    let after = snapshot_refs(&path).await?;
-    let actor = user::Entity::find_by_id(actor_user_id)
-        .one(state.identity().database())
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    let zero = if repository.object_format == "sha256" {
-        "0".repeat(64)
-    } else {
-        "0".repeat(40)
+    let service = gitadel_repositories::post_write::PostWriteService::new(
+        state.identity().database().clone(),
+        gitadel_repositories::content::RepositoryContent::new(
+            state.repository_root.as_ref().clone(),
+        ),
+        state.webhook_outbox.clone(),
+    );
+    let presentation = gitadel_repositories::post_write::PushPresentation {
+        public_url: state.public_url.as_ref().clone(),
+        http_clone_url: state.http_clone_url(repository),
+        ssh_clone_url: state.ssh_clone_url(repository),
     };
-
-    for (reference, old_oid, new_oid) in changed_refs(&before, &after, &zero) {
-        let commits = commit_entries(&path, old_oid, new_oid, &zero).await;
-        let changed_paths = pushed_paths(&commits);
-        let pushed = PushedRef {
-            reference,
-            before: old_oid,
-            after: new_oid,
-            zero: &zero,
-        };
-        let payload = push_payload(state, repository, &actor, &pushed, commits);
-        if let Err(error) = crate::actions::workflow::ingest_push(
-            actions,
-            repository,
-            actor_user_id,
-            reference,
-            old_oid,
-            new_oid,
-            &zero,
-            changed_paths,
-        )
-        .await
-        {
-            tracing::error!(
-                %error,
-                repository_id = %repository.id,
-                reference,
-                commit = new_oid,
-                "could not enqueue Actions workflows"
-            );
-        }
-        for hook in hooks.iter().filter(|hook| subscribes(hook, "push")) {
-            insert_delivery(state, hook, "push", &payload).await?;
-        }
-        if old_oid == zero || new_oid == zero {
-            let event = if old_oid == zero { "create" } else { "delete" };
-            let subscribed = hooks
-                .iter()
-                .filter(|hook| subscribes(hook, event))
-                .collect::<Vec<_>>();
-            if !subscribed.is_empty()
-                && let Some(ref_payload) =
-                    ref_event_payload(state, repository, &actor, reference, new_oid, event)
-            {
-                for hook in subscribed {
-                    insert_delivery(state, hook, event, &ref_payload).await?;
-                }
-            }
-        }
-        if integrations_enabled {
-            super::integrations::dispatch_push(
-                state,
-                repository,
-                reference,
-                new_oid == zero,
-                payload,
-            );
-        }
-    }
-    process_pending_deliveries(state).await
+    let effects = LegacyPostWrite {
+        repository: state,
+        actions,
+    };
+    let prepared = service
+        .prepare(repository, actor_user_id, before, &presentation, &effects)
+        .await?;
+    Ok(service.deliver(prepared, &effects).await?)
 }
 
 /// Queue `event` for every active hook of the repository subscribed to it.
@@ -852,46 +803,6 @@ fn subscribes(hook: &repository_webhook::Model, event: &str) -> bool {
 }
 
 /// Payload for the `create` and `delete` events, shaped like GitHub and Gitea.
-fn ref_event_payload(
-    state: &RepositoryState,
-    repository: &repository::Model,
-    actor: &user::Model,
-    reference: &str,
-    sha: &str,
-    event: &str,
-) -> Option<Value> {
-    let (ref_type, name) = if let Some(name) = reference.strip_prefix("refs/heads/") {
-        ("branch", name)
-    } else {
-        ("tag", reference.strip_prefix("refs/tags/")?)
-    };
-    let mut payload = json!({
-        "ref": name,
-        "ref_type": ref_type,
-        "pusher_type": "user",
-        "repository": repository_payload(state, repository),
-        "sender": user_payload(actor),
-    });
-    if event == "create" {
-        payload["sha"] = json!(sha);
-        payload["master_branch"] = json!(repository.default_branch);
-        payload["description"] = json!(repository.description);
-    }
-    Some(payload)
-}
-
-fn pushed_paths(commits: &[Value]) -> Vec<String> {
-    let mut paths = BTreeSet::new();
-    for commit in commits {
-        for field in ["added", "modified", "removed"] {
-            if let Some(values) = commit.get(field).and_then(Value::as_array) {
-                paths.extend(values.iter().filter_map(Value::as_str).map(str::to_owned));
-            }
-        }
-    }
-    paths.into_iter().collect()
-}
-
 async fn queue_ping(
     state: RepositoryState,
     hook: repository_webhook::Model,
@@ -925,81 +836,12 @@ async fn insert_delivery(
     event: &str,
     payload: &Value,
 ) -> Result<(), ApiError> {
-    repository_webhook_delivery::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        webhook_id: Set(hook.id),
-        event: Set(event.to_owned()),
-        payload: Set(payload.to_string()),
-        response_status: Set(None),
-        response_body: Set(None),
-        duration_ms: Set(0),
-        created_at: Set(Utc::now()),
-        status: Set("pending".to_owned()),
-        attempt_count: Set(0),
-        attempted_at: Set(None),
-        next_attempt_at: Set(None),
-    }
-    .insert(state.identity().database())
-    .await?;
-    Ok(())
+    Ok(outbox(state).insert_delivery(hook, event, payload).await?)
 }
 
 pub(super) async fn process_pending_deliveries(state: &RepositoryState) -> Result<(), ApiError> {
-    let database = state.identity().database();
-    sweep_expired_sessions(database).await;
-    recover_stale_deliveries(database, Utc::now()).await?;
-    loop {
-        let Ok(permit) = Arc::clone(&WEBHOOK_DELIVERY_SLOTS).try_acquire_owned() else {
-            break;
-        };
-        let Some(delivery) = next_due_delivery(database, Utc::now()).await? else {
-            break;
-        };
-        let claimed = repository_webhook_delivery::Entity::update_many()
-            .col_expr(
-                repository_webhook_delivery::Column::Status,
-                Expr::value("delivering"),
-            )
-            .col_expr(
-                repository_webhook_delivery::Column::AttemptCount,
-                Expr::col(repository_webhook_delivery::Column::AttemptCount).add(1),
-            )
-            .col_expr(
-                repository_webhook_delivery::Column::AttemptedAt,
-                Expr::value(Utc::now()),
-            )
-            .filter(repository_webhook_delivery::Column::Id.eq(delivery.id))
-            .filter(repository_webhook_delivery::Column::Status.eq("pending"))
-            .exec(database)
-            .await?;
-        if claimed.rows_affected == 0 {
-            continue;
-        }
-        let delivery = repository_webhook_delivery::Entity::find_by_id(delivery.id)
-            .one(database)
-            .await?
-            .ok_or_else(ApiError::not_found)?;
-        let Some(hook) = repository_webhook::Entity::find_by_id(delivery.webhook_id)
-            .one(database)
-            .await?
-        else {
-            continue;
-        };
-        let worker_state = state.clone();
-        let task_state = worker_state.clone();
-        task_state.spawn_task(async move {
-            let _permit = permit;
-            if let Err(error) = deliver(&worker_state, &hook, &delivery).await {
-                let message = error.to_string();
-                if let Err(record_error) =
-                    finish_delivery(&worker_state, &hook, &delivery, None, 0, Some(message)).await
-                {
-                    tracing::warn!(%record_error, webhook_id = %hook.id, delivery_id = %delivery.id, "could not record failed webhook delivery");
-                }
-            }
-        });
-    }
-    Ok(())
+    sweep_expired_sessions(state.identity().database()).await;
+    Ok(outbox(state).process_pending_deliveries().await?)
 }
 
 /// Remove expired browser sessions and OAuth access tokens at most once per
@@ -1033,232 +875,6 @@ async fn sweep_expired_sessions(database: &DatabaseConnection) {
         Ok(removed) => tracing::debug!(removed, "removed expired OAuth refresh tokens"),
         Err(error) => tracing::warn!(%error, "could not remove expired OAuth refresh tokens"),
     }
-}
-
-async fn deliver(
-    state: &RepositoryState,
-    hook: &repository_webhook::Model,
-    delivery: &repository_webhook_delivery::Model,
-) -> Result<(), ApiError> {
-    let body = delivery.payload.as_bytes();
-    let endpoint = Url::parse(&hook.url).map_err(ApiError::internal)?;
-    let client = pinned_public_http_client(&endpoint, Duration::from_secs(10))
-        .await
-        .map_err(ApiError::bad_request)?;
-    let mut request = client
-        .post(endpoint)
-        .header("content-type", "application/json")
-        .header("user-agent", "Gitadel-Hookshot/1.0")
-        .header("x-github-event", &delivery.event)
-        .header("x-github-delivery", delivery.id.to_string())
-        .header("x-github-hook-id", hook.id.to_string())
-        .header("x-gitadel-event", &delivery.event)
-        .body(body.to_vec());
-    if let Some(secret) = &hook.secret {
-        let secret = state.identity().secret_cipher().open_text(
-            SecretKind::WebhookSecret,
-            &hook.id,
-            secret,
-        )?;
-        request = request.header("x-hub-signature-256", signature(&secret, body)?);
-    }
-
-    let started = Instant::now();
-    let (status, response_body) = match request.send().await {
-        Ok(response) => {
-            let status = i32::from(response.status().as_u16());
-            let mut stream = response.bytes_stream();
-            let mut bytes = Vec::with_capacity(WEBHOOK_RESPONSE_BYTE_LIMIT);
-            while bytes.len() < WEBHOOK_RESPONSE_BYTE_LIMIT {
-                let Some(chunk) = stream.try_next().await.map_err(ApiError::internal)? else {
-                    break;
-                };
-                let remaining = WEBHOOK_RESPONSE_BYTE_LIMIT - bytes.len();
-                bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-            }
-            let text = String::from_utf8_lossy(&bytes).into_owned();
-            (Some(status), (!text.is_empty()).then_some(text))
-        }
-        Err(error) => (None, Some(error.to_string())),
-    };
-    let duration_ms = i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX);
-    finish_delivery(state, hook, delivery, status, duration_ms, response_body).await
-}
-
-async fn finish_delivery(
-    state: &RepositoryState,
-    hook: &repository_webhook::Model,
-    delivery: &repository_webhook_delivery::Model,
-    response_status: Option<i32>,
-    duration_ms: i32,
-    response_body: Option<String>,
-) -> Result<(), ApiError> {
-    record_attempt(
-        state.identity().database(),
-        hook,
-        delivery,
-        response_status,
-        duration_ms,
-        response_body,
-        Utc::now(),
-    )
-    .await
-}
-
-/// How long to wait after the given number of failed attempts, or `None` once
-/// the delivery has used every attempt. Five attempts span about an hour:
-/// immediately, then after 1, 5, 15, and 45 minutes.
-fn retry_delay(attempt_count: i32) -> Option<chrono::Duration> {
-    let minutes = match attempt_count {
-        ..=1 => 1,
-        2 => 5,
-        3 => 15,
-        4 => 45,
-        _ => return None,
-    };
-    (attempt_count < WEBHOOK_MAX_ATTEMPTS).then(|| chrono::Duration::minutes(minutes))
-}
-
-/// Whether another attempt could plausibly succeed. A receiver that answers
-/// with a client error has seen the payload and refused it, so resending the
-/// same bytes is pointless; a timeout, connection failure, rate limit, or
-/// server error is worth waiting out.
-fn is_retryable(event: &str, response_status: Option<i32>) -> bool {
-    // A ping is a manual connectivity check whose result should be immediate.
-    if event == "ping" {
-        return false;
-    }
-    match response_status {
-        None => true,
-        Some(status) => matches!(status, 408 | 425 | 429) || status >= 500,
-    }
-}
-
-/// Record the outcome of one attempt: completed, failed for good, or back in
-/// the outbox with the time of its next attempt.
-async fn record_attempt(
-    database: &DatabaseConnection,
-    hook: &repository_webhook::Model,
-    delivery: &repository_webhook_delivery::Model,
-    response_status: Option<i32>,
-    duration_ms: i32,
-    response_body: Option<String>,
-    now: DateTime<Utc>,
-) -> Result<(), ApiError> {
-    let successful = response_status.is_some_and(|status| (200..300).contains(&status));
-    let retry_at = (!successful && is_retryable(&delivery.event, response_status))
-        .then(|| retry_delay(delivery.attempt_count))
-        .flatten()
-        .map(|delay| now + delay);
-    let status = if successful {
-        "completed"
-    } else if retry_at.is_some() {
-        "pending"
-    } else {
-        "failed"
-    };
-    let mut active: repository_webhook_delivery::ActiveModel = delivery.clone().into();
-    active.status = Set(status.to_owned());
-    active.next_attempt_at = Set(retry_at);
-    active.response_status = Set(response_status);
-    active.response_body = Set(response_body.as_ref().map(|body| {
-        body.chars()
-            .take(WEBHOOK_DELIVERY_BODY_LIMIT)
-            .collect::<String>()
-    }));
-    active.duration_ms = Set(duration_ms);
-    active.update(database).await?;
-
-    let mut active_hook: repository_webhook::ActiveModel = hook.clone().into();
-    active_hook.last_delivery_at = Set(Some(now));
-    active_hook.last_response_status = Set(response_status);
-    active_hook.last_response_message = Set(response_body
-        .as_ref()
-        .map(|body| body.chars().take(512).collect::<String>()));
-    active_hook.update(database).await?;
-    prune_deliveries(database, hook.id).await
-}
-
-/// Return deliveries whose worker died mid-request to the outbox, and give up
-/// on those that have already used every attempt so a delivery that keeps
-/// killing its worker cannot be retried forever.
-async fn recover_stale_deliveries(
-    database: &DatabaseConnection,
-    now: DateTime<Utc>,
-) -> Result<(), ApiError> {
-    let stale = now - chrono::Duration::seconds(WEBHOOK_STALE_AFTER_SECONDS);
-    repository_webhook_delivery::Entity::update_many()
-        .col_expr(
-            repository_webhook_delivery::Column::Status,
-            Expr::value("failed"),
-        )
-        .col_expr(
-            repository_webhook_delivery::Column::ResponseBody,
-            Expr::value("The delivery was interrupted before it finished."),
-        )
-        .filter(repository_webhook_delivery::Column::Status.eq("delivering"))
-        .filter(repository_webhook_delivery::Column::AttemptedAt.lt(stale))
-        .filter(repository_webhook_delivery::Column::AttemptCount.gte(WEBHOOK_MAX_ATTEMPTS))
-        .exec(database)
-        .await?;
-    repository_webhook_delivery::Entity::update_many()
-        .col_expr(
-            repository_webhook_delivery::Column::Status,
-            Expr::value("pending"),
-        )
-        .col_expr(
-            repository_webhook_delivery::Column::NextAttemptAt,
-            Expr::value(Option::<DateTime<Utc>>::None),
-        )
-        .filter(repository_webhook_delivery::Column::Status.eq("delivering"))
-        .filter(repository_webhook_delivery::Column::AttemptedAt.lt(stale))
-        .exec(database)
-        .await?;
-    Ok(())
-}
-
-/// The oldest pending delivery whose next attempt is due.
-async fn next_due_delivery(
-    database: &DatabaseConnection,
-    now: DateTime<Utc>,
-) -> Result<Option<repository_webhook_delivery::Model>, ApiError> {
-    Ok(repository_webhook_delivery::Entity::find()
-        .filter(repository_webhook_delivery::Column::Status.eq("pending"))
-        .filter(
-            Condition::any()
-                .add(repository_webhook_delivery::Column::NextAttemptAt.is_null())
-                .add(repository_webhook_delivery::Column::NextAttemptAt.lte(now)),
-        )
-        .order_by_asc(repository_webhook_delivery::Column::CreatedAt)
-        .one(database)
-        .await?)
-}
-
-async fn prune_deliveries(database: &DatabaseConnection, webhook_id: Uuid) -> Result<(), ApiError> {
-    let terminal = ["completed", "failed"];
-    let keep = repository_webhook_delivery::Entity::find()
-        .filter(repository_webhook_delivery::Column::WebhookId.eq(webhook_id))
-        .filter(repository_webhook_delivery::Column::Status.is_in(terminal))
-        .order_by_desc(repository_webhook_delivery::Column::CreatedAt)
-        .limit(WEBHOOK_DELIVERY_HISTORY_LIMIT as u64)
-        .all(database)
-        .await?;
-    if keep.len() < WEBHOOK_DELIVERY_HISTORY_LIMIT {
-        return Ok(());
-    }
-    repository_webhook_delivery::Entity::delete_many()
-        .filter(repository_webhook_delivery::Column::WebhookId.eq(webhook_id))
-        .filter(repository_webhook_delivery::Column::Status.is_in(terminal))
-        .filter(
-            repository_webhook_delivery::Column::Id.is_not_in(
-                keep.into_iter()
-                    .map(|delivery| delivery.id)
-                    .collect::<Vec<_>>(),
-            ),
-        )
-        .exec(database)
-        .await?;
-    Ok(())
 }
 
 async fn find_hook(
@@ -1361,182 +977,6 @@ fn validate_secret(secret: Option<String>) -> Result<Option<String>, ApiError> {
     Ok(secret)
 }
 
-fn changed_refs<'a>(
-    before: &'a RefSnapshot,
-    after: &'a RefSnapshot,
-    zero: &'a str,
-) -> Vec<(&'a str, &'a str, &'a str)> {
-    let mut names = before.keys().chain(after.keys()).collect::<Vec<_>>();
-    names.sort_unstable();
-    names.dedup();
-    names
-        .into_iter()
-        .filter_map(|name| {
-            let old_oid = before.get(name).map_or(zero, String::as_str);
-            let new_oid = after.get(name).map_or(zero, String::as_str);
-            (old_oid != new_oid).then_some((name.as_str(), old_oid, new_oid))
-        })
-        .collect()
-}
-
-/// Maximum commits enumerated per pushed ref.
-///
-/// Gitea caps its own push payloads similarly; a branch created from a large
-/// import would otherwise walk the entire history.
-const PUSH_COMMIT_LIMIT: usize = 50;
-
-/// The four values describing one pushed ref, which always travel together.
-struct PushedRef<'a> {
-    reference: &'a str,
-    before: &'a str,
-    after: &'a str,
-    zero: &'a str,
-}
-
-fn push_payload(
-    state: &RepositoryState,
-    repository: &repository::Model,
-    actor: &user::Model,
-    pushed: &PushedRef<'_>,
-    commits: Vec<Value>,
-) -> Value {
-    let PushedRef {
-        reference,
-        before,
-        after,
-        zero,
-    } = *pushed;
-    json!({
-        "ref": reference,
-        "before": before,
-        "after": after,
-        "created": before == zero,
-        "deleted": after == zero,
-        "forced": false,
-        "base_ref": null,
-        "compare": null,
-        "head_commit": commits.last().cloned(),
-        "commits": commits,
-        "repository": repository_payload(state, repository),
-        "pusher": { "name": actor.username },
-        "sender": user_payload(actor),
-    })
-}
-
-/// Enumerate the commits a push introduced, with their changed paths.
-///
-/// Consumers filter on these paths — Dokploy's watch paths are exactly this —
-/// so an empty list silently disables that filtering. Failures degrade to an
-/// empty list rather than blocking the push.
-async fn commit_entries(path: &Path, before: &str, after: &str, zero: &str) -> Vec<Value> {
-    if after == zero {
-        return Vec::new();
-    }
-    let is_new = before == zero;
-    let path = path.to_owned();
-    let before = before.to_owned();
-    let after = after.to_owned();
-    read_git(path, move |repository| {
-        let mut selection = sley_rev::RevisionSelection::new();
-        if is_new {
-            selection.add_spec(&after)?;
-        } else {
-            selection.add_spec(format!("{before}..{after}"))?;
-        }
-        let resolved = selection.resolve(
-            repository.git_dir(),
-            repository.object_format(),
-            repository.object_database(),
-        )?;
-        let mut commits = resolved.selected_commit_oids(
-            repository.git_dir(),
-            repository.object_format(),
-            repository.object_database(),
-            false,
-        )?;
-        commits.truncate(PUSH_COMMIT_LIMIT);
-        commits.reverse();
-        let mut entries = Vec::with_capacity(commits.len());
-        for oid in commits {
-            let commit = repository.read_commit(&oid)?;
-            let options = DiffNameStatusOptions {
-                detect_renames: true,
-                ..DiffNameStatusOptions::default()
-            };
-            let changes = if let Some(parent) = commit.parents.first().copied() {
-                let parent_tree = repository.read_commit(&parent)?.tree;
-                sley_diff_merge::diff_name_status_trees_with_options(
-                    repository.object_database(),
-                    repository.object_format(),
-                    &parent_tree,
-                    &commit.tree,
-                    options,
-                )?
-            } else {
-                sley_diff_merge::diff_name_status_empty_tree_with_options(
-                    repository.object_database(),
-                    repository.object_format(),
-                    &commit.tree,
-                    options,
-                )?
-            };
-            let mut added = Vec::new();
-            let mut modified = Vec::new();
-            let mut removed = Vec::new();
-            for change in changes {
-                let path = String::from_utf8_lossy(change.path.as_bytes()).into_owned();
-                match change.status {
-                    sley_diff_merge::NameStatus::Added => added.push(path),
-                    sley_diff_merge::NameStatus::Deleted => removed.push(path),
-                    sley_diff_merge::NameStatus::Renamed(_)
-                    | sley_diff_merge::NameStatus::Copied(_) => {
-                        if let Some(old_path) = change.old_path {
-                            removed.push(String::from_utf8_lossy(old_path.as_bytes()).into_owned());
-                        }
-                        added.push(path);
-                    }
-                    _ => modified.push(path),
-                }
-            }
-            let message = String::from_utf8_lossy(&commit.message).trim().to_owned();
-            let author = commit.author_signature();
-            let committer = commit.committer_signature();
-            let timestamp = committer
-                .as_ref()
-                .and_then(|signature| DateTime::<Utc>::from_timestamp(signature.time.seconds, 0))
-                .map_or_else(String::new, |timestamp| timestamp.to_rfc3339());
-            let author_name = author.as_ref().map_or_else(String::new, |signature| {
-                String::from_utf8_lossy(signature.name.as_bytes()).into_owned()
-            });
-            let author_email = author.as_ref().map_or_else(String::new, |signature| {
-                String::from_utf8_lossy(signature.email.as_bytes()).into_owned()
-            });
-            let committer_name = committer.as_ref().map_or_else(String::new, |signature| {
-                String::from_utf8_lossy(signature.name.as_bytes()).into_owned()
-            });
-            let committer_email = committer.as_ref().map_or_else(String::new, |signature| {
-                String::from_utf8_lossy(signature.email.as_bytes()).into_owned()
-            });
-            entries.push(json!({
-                "id": oid.to_hex(),
-                "message": message.lines().next().unwrap_or_default(),
-                "timestamp": timestamp,
-                "author": { "name": author_name, "email": author_email },
-                "committer": { "name": committer_name, "email": committer_email },
-                "added": added,
-                "modified": modified,
-                "removed": removed,
-            }));
-        }
-        Ok(entries)
-    })
-    .await
-    .unwrap_or_else(|error| {
-        tracing::warn!(%error, "listing pushed commits failed");
-        Vec::new()
-    })
-}
-
 pub(super) fn repository_payload(state: &RepositoryState, repository: &repository::Model) -> Value {
     let full_name = format!("{}/{}", repository.namespace, repository.name);
     json!({
@@ -1580,19 +1020,6 @@ pub(super) fn public_url(state: &RepositoryState, path: &str) -> String {
     url.to_string()
 }
 
-fn signature(secret: &str, body: &[u8]) -> Result<String, ApiError> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).map_err(ApiError::internal)?;
-    mac.update(body);
-    let digest = mac.finalize().into_bytes();
-    let mut encoded = String::with_capacity(7 + digest.len() * 2);
-    encoded.push_str("sha256=");
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(encoded, "{byte:02x}");
-    }
-    Ok(encoded)
-}
-
 pub(super) fn webhook_client() -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -1603,6 +1030,7 @@ pub(super) fn webhook_client() -> Result<reqwest::Client, reqwest::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::DateTime;
 
     fn events(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -1966,3 +1394,12 @@ mod tests {
         );
     }
 }
+
+fn outbox(state: &RepositoryState) -> &gitadel_repositories::webhook_outbox::WebhookOutbox {
+    &state.webhook_outbox
+}
+#[cfg(test)]
+use gitadel_repositories::webhook_outbox::{
+    WEBHOOK_MAX_ATTEMPTS, is_retryable, next_due_delivery, record_attempt,
+    recover_stale_deliveries, retry_delay,
+};

@@ -11,8 +11,16 @@ path = "src/lib.rs"
 
 [dependencies]
 gitadel-config.workspace = true
+gitadel-core.workspace = true
+gitadel-repositories.workspace = true
+sley.workspace = true
+anyhow.workspace = true
+gitadel-identity.workspace = true
+gitadel-secrets.workspace = true
 gitadel-db.workspace = true
 base64.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
 chrono.workspace = true
 cron.workspace = true
 globset.workspace = true
@@ -30,5 +38,6 @@ uuid.workspace = true
 yaml_serde.workspace = true
 
 [dev-dependencies]
+gitadel-secrets = { workspace = true, features = ["test-support"] }
 gitadel-db = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

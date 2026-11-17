@@ -2,16 +2,6 @@ use axum::http::{HeaderMap, header};
 pub(crate) use gitadel_actions::tokens::*;
 use sea_orm::ConnectionTrait;
 
-pub(crate) async fn authenticate_job_bearer<C: ConnectionTrait>(
-    database: &C,
-    headers: &HeaderMap,
-) -> Result<Option<AuthenticatedJob>, sea_orm::DbErr> {
-    let Some(raw) = bearer_token(headers) else {
-        return Ok(None);
-    };
-    authenticate_job(database, raw).await
-}
-
 pub(crate) async fn authenticate_job_api_token<C: ConnectionTrait>(
     database: &C,
     headers: &HeaderMap,
@@ -22,7 +12,7 @@ pub(crate) async fn authenticate_job_api_token<C: ConnectionTrait>(
     authenticate_job(database, raw).await
 }
 
-fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let (scheme, token) = value.split_once(' ')?;
     (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty()).then_some(token)

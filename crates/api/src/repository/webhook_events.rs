@@ -20,61 +20,7 @@ use crate::{
     identity::ApiError,
 };
 
-/// Actions reported through the `issues` event.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum IssueAction {
-    Opened,
-    Edited,
-    Closed,
-    Reopened,
-    Deleted,
-    Assigned,
-    Unassigned,
-    Labeled,
-    Unlabeled,
-}
-
-impl IssueAction {
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Opened => "opened",
-            Self::Edited => "edited",
-            Self::Closed => "closed",
-            Self::Reopened => "reopened",
-            Self::Deleted => "deleted",
-            Self::Assigned => "assigned",
-            Self::Unassigned => "unassigned",
-            Self::Labeled => "labeled",
-            Self::Unlabeled => "unlabeled",
-        }
-    }
-}
-
-/// Actions reported through the `issue_comment` and `release` events.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ChangeAction {
-    Created,
-    Edited,
-    Deleted,
-}
-
-impl ChangeAction {
-    const fn comment_name(self) -> &'static str {
-        match self {
-            Self::Created => "created",
-            Self::Edited => "edited",
-            Self::Deleted => "deleted",
-        }
-    }
-
-    const fn release_name(self) -> &'static str {
-        match self {
-            Self::Created => "published",
-            Self::Edited => "updated",
-            Self::Deleted => "deleted",
-        }
-    }
-}
+pub(crate) use gitadel_repositories::issue_effects::{ChangeAction, IssueAction};
 
 /// Emit one `issues` event. `extra` is merged into the top-level payload
 /// (for example `changes`, `label`, or `assignee`).

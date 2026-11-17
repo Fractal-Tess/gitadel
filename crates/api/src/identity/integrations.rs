@@ -4,35 +4,19 @@
 //! settings reference an instance by ID, so labels and credentials can change
 //! without breaking repository links.
 
-use std::collections::HashMap;
-
 use axum::{
     Json,
     extract::{Path, State},
     http::{HeaderMap, StatusCode, header},
 };
 use axum_extra::extract::cookie::CookieJar;
-use chrono::Utc;
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, IntoActiveModel, QueryFilter,
-    QueryOrder, Set, TransactionTrait,
-};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::entity::{dokploy_source_binding, namespace_integration, oauth_application};
-use crate::identity::{hash_secret, random_secret};
-use crate::integrations::{
-    Credential, PROVIDERS, Provider, RemoteSource, SourceApplication, TestReport, provider,
-};
-use crate::secrets::{SecretCipher, SecretKind};
-
 use super::oauth::{ACCESS_TOKEN_LIFETIME, TokenPair};
 use super::{ApiError, AuthenticatedUser, IdentityState, SCOPE_READ, SCOPE_WRITE};
-
-const MAX_API_KEY_LENGTH: usize = 512;
-const MAX_NAME_LENGTH: usize = 80;
+use crate::secrets::SecretCipher;
 
 #[derive(Serialize, ToSchema)]
 pub struct ProviderResponse {
@@ -41,18 +25,6 @@ pub struct ProviderResponse {
     description: &'static str,
     icon: &'static str,
     source_required: bool,
-}
-
-impl From<&'static Provider> for ProviderResponse {
-    fn from(provider: &'static Provider) -> Self {
-        Self {
-            slug: provider.slug,
-            name: provider.name,
-            description: provider.description,
-            icon: provider.icon,
-            source_required: provider.source_required,
-        }
-    }
 }
 
 #[derive(Serialize, ToSchema)]
@@ -77,41 +49,6 @@ pub struct SourceBindingSummary {
     managed: bool,
 }
 
-impl From<&dokploy_source_binding::Model> for SourceBindingSummary {
-    fn from(binding: &dokploy_source_binding::Model) -> Self {
-        Self {
-            id: binding.gitea_id.clone(),
-            name: "Gitea provider".to_owned(),
-            managed: binding.managed,
-        }
-    }
-}
-
-impl IntegrationResponse {
-    fn new(
-        provider: &'static Provider,
-        integration: namespace_integration::Model,
-        binding: Option<&dokploy_source_binding::Model>,
-        default_internal_url: &str,
-    ) -> Self {
-        let internal_url = integration
-            .dokploy_internal_url
-            .clone()
-            .unwrap_or_else(|| default_internal_url.to_owned());
-        Self {
-            id: integration.id,
-            provider: provider.slug,
-            provider_name: provider.name,
-            name: integration.name,
-            enabled: integration.enabled,
-            url: integration.url,
-            internal_url,
-            api_key_set: true,
-            source: binding.map(SourceBindingSummary::from),
-        }
-    }
-}
-
 #[derive(Serialize, ToSchema)]
 pub struct NamespaceIntegrationsResponse {
     namespace: String,
@@ -133,19 +70,6 @@ pub struct RemoteSourceResponse {
     targets_instance: bool,
     /// Why this provider cannot be used by this Gitadel, if it cannot.
     problem: Option<String>,
-}
-
-impl RemoteSourceResponse {
-    fn new(source: &RemoteSource, public_url: &str) -> Self {
-        Self {
-            id: source.id.clone(),
-            name: source.name.clone(),
-            ready: source.ready && source.targets(public_url),
-            url: source.url.clone(),
-            targets_instance: source.targets(public_url),
-            problem: source.problem(public_url),
-        }
-    }
 }
 
 #[derive(Serialize, ToSchema)]
@@ -175,10 +99,6 @@ pub struct SourceAttempt {
     url: String,
     error: String,
 }
-
-/// What a Gitadel-managed Dokploy provider may do: read repositories and the
-/// account they belong to.
-const DOKPLOY_SCOPE: &str = "read:repository read:user";
 
 #[derive(Serialize, ToSchema)]
 pub struct SourceBindingStatus {
@@ -252,39 +172,13 @@ pub async fn list_integrations(
     jar: CookieJar,
     Path(slug): Path<String>,
 ) -> Result<Json<NamespaceIntegrationsResponse>, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_READ).await?;
-    authorize_namespace(&state, &actor, &slug).await?;
-    let stored = namespace_integration::Entity::find()
-        .filter(namespace_integration::Column::Namespace.eq(slug.clone()))
-        .order_by_asc(namespace_integration::Column::CreatedAt)
-        .all(state.database())
-        .await?;
-    let bindings = dokploy_source_binding::Entity::find()
-        .filter(
-            dokploy_source_binding::Column::IntegrationId
-                .is_in(stored.iter().map(|integration| integration.id)),
-        )
-        .all(state.database())
-        .await?
-        .into_iter()
-        .map(|binding| (binding.integration_id, binding))
-        .collect::<HashMap<_, _>>();
-    let integrations = stored
-        .into_iter()
-        .filter_map(|row| {
-            provider(&row.provider).map(|provider| {
-                let binding = bindings.get(&row.id);
-                IntegrationResponse::new(provider, row, binding, state.public_url.as_str())
-            })
-        })
-        .collect();
-    Ok(Json(NamespaceIntegrationsResponse {
-        namespace: slug,
-        providers: PROVIDERS.iter().map(ProviderResponse::from).collect(),
-        integrations,
-    }))
+    let _actor = state.authenticate(&headers, &jar, SCOPE_READ).await?;
+    Ok(Json(NamespaceIntegrationsResponse::from(
+        service(&state)
+            .list_integrations(&crate::repository::principal(&headers, &jar)?, slug)
+            .await?,
+    )))
 }
-
 #[utoipa::path(
     post, path = "/namespaces/{slug}/integrations",
     operation_id = "post_namespaces_slug_integrations",
@@ -307,51 +201,20 @@ pub async fn create_integration(
     Path(slug): Path<String>,
     Json(request): Json<CreateIntegrationRequest>,
 ) -> Result<(StatusCode, Json<IntegrationResponse>), ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
-    authorize_namespace(&state, &actor, &slug).await?;
-    let provider = provider(&request.provider).ok_or_else(ApiError::not_found)?;
-    let name = validate_name(&request.name)?;
-    let url = validate_outbound_url(&request.url, provider.name).await?;
-    let api_key = validate_api_key(&request.api_key, true)?.expect("required key was validated");
-    let internal_url = validate_url(&request.internal_url, "Gitadel")?;
-    let now = Utc::now();
-    let id = Uuid::new_v4();
-    let sealed = seal_api_key(state.secret_cipher(), id, &api_key)?;
-    let transaction = state.database().begin().await?;
-    let integration = namespace_integration::ActiveModel {
-        id: Set(id),
-        namespace: Set(slug.clone()),
-        provider: Set(provider.slug.to_owned()),
-        name: Set(name),
-        enabled: Set(true),
-        url: Set(url),
-        api_key: Set(sealed),
-        dokploy_internal_url: Set(Some(internal_url)),
-        created_at: Set(now),
-        updated_at: Set(now),
-    }
-    .insert(&transaction)
-    .await?;
-    state
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "integration.create",
-            Some(format!("{slug}/{}", integration.id)),
-        )
-        .await?;
-    transaction.commit().await?;
+    let _actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
     Ok((
         StatusCode::CREATED,
-        Json(IntegrationResponse::new(
-            provider,
-            integration,
-            None,
-            state.public_url.as_str(),
+        Json(IntegrationResponse::from(
+            service(&state)
+                .create_integration(
+                    &crate::repository::principal(&headers, &jar)?,
+                    slug,
+                    request.into(),
+                )
+                .await?,
         )),
     ))
 }
-
 #[utoipa::path(
     put, path = "/namespaces/{slug}/integrations/{id}",
     operation_id = "put_namespaces_slug_integrations_id",
@@ -375,93 +238,18 @@ pub async fn update_integration(
     Path((slug, id)): Path<(String, Uuid)>,
     Json(request): Json<UpdateIntegrationRequest>,
 ) -> Result<Json<IntegrationResponse>, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
-    authorize_namespace(&state, &actor, &slug).await?;
-    let existing = owned_integration(state.secret_cipher(), state.database(), &slug, id).await?;
-    let provider = provider(&existing.provider).ok_or_else(ApiError::not_found)?;
-    let binding = source_binding(state.database(), id).await?;
-    let url = match request.url.as_deref() {
-        Some(url) => Some(validate_outbound_url(url, provider.name).await?),
-        None => None,
-    };
-    let api_key = validate_api_key(request.api_key.as_deref().unwrap_or_default(), false)?;
-    let internal_url = request
-        .internal_url
-        .as_deref()
-        .map(|url| validate_url(url, "Gitadel"))
-        .transpose()?;
-    if binding.is_some()
-        && (url.as_ref().is_some_and(|url| url != &existing.url)
-            || api_key
-                .as_ref()
-                .is_some_and(|api_key| api_key != &existing.api_key))
-    {
-        return Err(ApiError::conflict(
-            "Disconnect the Dokploy source before changing this connection's URL or API key.",
-        ));
-    }
-    if let Some(binding) = binding.as_ref().filter(|binding| binding.managed)
-        && internal_url.as_ref().is_some_and(|internal_url| {
-            internal_url
-                != existing
-                    .dokploy_internal_url
-                    .as_deref()
-                    .unwrap_or(state.public_url.as_str())
-        })
-    {
-        provider
-            .integration
-            .update_remote_source_internal_url(
-                Credential {
-                    url: &existing.url,
-                    api_key: &existing.api_key,
-                    source_id: Some(&binding.gitea_id),
-                },
-                &binding.gitea_id,
-                internal_url.as_deref().expect("change was checked"),
+    let _actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
+    Ok(Json(IntegrationResponse::from(
+        service(&state)
+            .update_integration(
+                &crate::repository::principal(&headers, &jar)?,
+                slug,
+                id,
+                request.into(),
             )
-            .await
-            .map_err(ApiError::bad_request)?;
-    }
-
-    let transaction = state.database().begin().await?;
-    let mut active = stored_integration(&transaction, &slug, id)
-        .await?
-        .into_active_model();
-    if let Some(name) = request.name {
-        active.name = Set(validate_name(&name)?);
-    }
-    if let Some(enabled) = request.enabled {
-        active.enabled = Set(enabled);
-    }
-    if let Some(url) = url {
-        active.url = Set(url);
-    }
-    if let Some(api_key) = api_key {
-        active.api_key = Set(seal_api_key(state.secret_cipher(), id, &api_key)?);
-    }
-    if let Some(internal_url) = internal_url {
-        active.dokploy_internal_url = Set(Some(internal_url));
-    }
-    active.updated_at = Set(Utc::now());
-    let integration = active.update(&transaction).await?;
-    state
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "integration.update",
-            Some(format!("{slug}/{id}")),
-        )
-        .await?;
-    transaction.commit().await?;
-    Ok(Json(IntegrationResponse::new(
-        provider,
-        integration,
-        binding.as_ref(),
-        state.public_url.as_str(),
+            .await?,
     )))
 }
-
 #[utoipa::path(
     delete, path = "/namespaces/{slug}/integrations/{id}",
     operation_id = "delete_namespaces_slug_integrations_id",
@@ -483,32 +271,10 @@ pub async fn delete_integration(
     jar: CookieJar,
     Path((slug, id)): Path<(String, Uuid)>,
 ) -> Result<StatusCode, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
-    authorize_namespace(&state, &actor, &slug).await?;
-    let integration = owned_integration(state.secret_cipher(), state.database(), &slug, id).await?;
-    let binding = source_binding(state.database(), id).await?;
-    if let Some(binding) = binding.as_ref() {
-        let provider = provider(&integration.provider).ok_or_else(ApiError::not_found)?;
-        cleanup_managed_source(provider, &integration, binding).await;
-    }
-    let transaction = state.database().begin().await?;
-    namespace_integration::Entity::delete_by_id(id)
-        .exec(&transaction)
+    let _actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
+    service(&state)
+        .delete_integration(&crate::repository::principal(&headers, &jar)?, slug, id)
         .await?;
-    if let Some(application_id) = binding.and_then(|binding| binding.oauth_application_id) {
-        oauth_application::Entity::delete_by_id(application_id)
-            .exec(&transaction)
-            .await?;
-    }
-    state
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "integration.delete",
-            Some(format!("{slug}/{id}")),
-        )
-        .await?;
-    transaction.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 /// Return one stored key only to the namespace owner and prevent caching.
@@ -539,17 +305,20 @@ pub async fn get_integration_credential(
     ),
     ApiError,
 > {
-    let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
-    authorize_namespace(&state, &actor, &slug).await?;
-    let stored = owned_integration(state.secret_cipher(), state.database(), &slug, id).await?;
+    let _actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
-        Json(IntegrationCredentialResponse {
-            api_key: stored.api_key,
-        }),
+        Json(IntegrationCredentialResponse::from(
+            service(&state)
+                .get_integration_credential(
+                    &crate::repository::principal(&headers, &jar)?,
+                    slug,
+                    id,
+                )
+                .await?,
+        )),
     ))
 }
-
 #[utoipa::path(
     get, path = "/namespaces/{slug}/integrations/{id}/source",
     operation_id = "get_namespaces_slug_integrations_id_source",
@@ -571,31 +340,13 @@ pub async fn get_integration_source(
     jar: CookieJar,
     Path((slug, id)): Path<(String, Uuid)>,
 ) -> Result<Json<SourceConnectionResponse>, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_READ).await?;
-    authorize_namespace(&state, &actor, &slug).await?;
-    let integration = owned_integration(state.secret_cipher(), state.database(), &slug, id).await?;
-    let provider = provider(&integration.provider).ok_or_else(ApiError::not_found)?;
-    if !provider.source_required {
-        return Err(ApiError::not_found());
-    }
-    let binding = source_binding(state.database(), id).await?;
-    let sources = provider
-        .integration
-        .remote_sources(Credential {
-            url: &integration.url,
-            api_key: &integration.api_key,
-            source_id: binding.as_ref().map(|binding| binding.gitea_id.as_str()),
-        })
-        .await
-        .map_err(ApiError::bad_request)?;
-    Ok(Json(source_connection_response(
-        provider,
-        binding.as_ref(),
-        &sources,
-        state.public_url.as_str(),
+    let _actor = state.authenticate(&headers, &jar, SCOPE_READ).await?;
+    Ok(Json(SourceConnectionResponse::from(
+        service(&state)
+            .get_integration_source(&crate::repository::principal(&headers, &jar)?, slug, id)
+            .await?,
     )))
 }
-
 #[utoipa::path(
     post, path = "/namespaces/{slug}/integrations/{id}/source",
     operation_id = "post_namespaces_slug_integrations_id_source",
@@ -619,187 +370,21 @@ pub async fn configure_integration_source(
     Path((slug, id)): Path<(String, Uuid)>,
     Json(request): Json<ConfigureSourceRequest>,
 ) -> Result<(StatusCode, Json<SourceConnectionResponse>), ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
-    authorize_namespace(&state, &actor, &slug).await?;
-    let integration = owned_integration(state.secret_cipher(), state.database(), &slug, id).await?;
-    let provider = provider(&integration.provider).ok_or_else(ApiError::not_found)?;
-    if !provider.source_required {
-        return Err(ApiError::not_found());
-    }
-    if source_binding(state.database(), id).await?.is_some() {
-        return Err(ApiError::conflict(
-            "Disconnect the current Dokploy source before choosing another one.",
-        ));
-    }
-
-    let credential = Credential {
-        url: &integration.url,
-        api_key: &integration.api_key,
-        source_id: None,
-    };
-    let (binding, sources) = match request {
-        ConfigureSourceRequest::Bind { source_id } => {
-            let source_id = source_id.trim();
-            if source_id.is_empty() {
-                return Err(ApiError::bad_request("Choose a Dokploy Gitea provider."));
-            }
-            let sources = provider
-                .integration
-                .remote_sources(credential)
-                .await
-                .map_err(ApiError::bad_request)?;
-            let source = sources
-                .iter()
-                .find(|source| source.id == source_id)
-                .ok_or_else(|| {
-                    ApiError::bad_request("That Dokploy Gitea provider is no longer available.")
-                })?;
-            if let Some(problem) = source.problem(state.public_url.as_str()) {
-                return Err(ApiError::bad_request(problem));
-            }
-            let now = Utc::now();
-            let transaction = state.database().begin().await?;
-            let binding = dokploy_source_binding::ActiveModel {
-                integration_id: Set(id),
-                gitea_id: Set(source.id.clone()),
-                git_provider_id: Set(source.parent_id.clone()),
-                oauth_application_id: Set(None),
-                managed: Set(false),
-                created_at: Set(now),
-                updated_at: Set(now),
-            }
-            .insert(&transaction)
-            .await?;
-            state
-                .audit_on(
-                    &transaction,
-                    Some(actor.user.id),
-                    "integration.source.connect",
-                    Some(format!("{slug}/{id}/{}", binding.gitea_id)),
+    let _actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(SourceConnectionResponse::from(
+            service(&state)
+                .configure_integration_source(
+                    &crate::repository::principal(&headers, &jar)?,
+                    slug,
+                    id,
+                    request.into(),
                 )
-                .await?;
-            transaction.commit().await?;
-            (binding, sources)
-        }
-        ConfigureSourceRequest::Create { name } => {
-            if actor.via_api_token {
-                return Err(ApiError::forbidden(
-                    "Create and authorize Dokploy source providers from a browser session.",
-                ));
-            }
-            let name = validate_name(&name)?;
-            let redirect_uri = format!(
-                "{}/api/providers/gitea/callback",
-                integration.url.trim_end_matches('/')
-            );
-            let client_id = format!("goc_{}", random_secret(24));
-            let client_secret = format!("gcs_{}", random_secret(32));
-            let application_id = Uuid::new_v4();
-            // Gitadel issues Dokploy's tokens itself, so the provider works
-            // without anyone completing an OAuth authorization in Dokploy.
-            let tokens = TokenPair::generate();
-            let expires_at = Utc::now() + ACCESS_TOKEN_LIFETIME;
-            let internal_url = integration
-                .dokploy_internal_url
-                .as_deref()
-                .unwrap_or(state.public_url.as_str());
-            let provisioned = match provider
-                .integration
-                .provision_remote_source(
-                    credential,
-                    SourceApplication {
-                        name: &name,
-                        client_id: &client_id,
-                        client_secret: &client_secret,
-                        redirect_uri: &redirect_uri,
-                        public_url: state.public_url.as_str(),
-                        internal_url,
-                        access_token: &tokens.access_token,
-                        refresh_token: &tokens.refresh_token,
-                        expires_at: expires_at.timestamp(),
-                        username: &actor.user.username,
-                    },
-                )
-                .await
-            {
-                Ok(provisioned) => provisioned,
-                Err(error) => return Err(ApiError::bad_request(error)),
-            };
-            let transaction = state.database().begin().await?;
-            let now = Utc::now();
-            let binding_result: Result<dokploy_source_binding::Model, ApiError> = async {
-                let application = oauth_application::ActiveModel {
-                    id: Set(application_id),
-                    user_id: Set(actor.user.id),
-                    name: Set(format!("Dokploy: {}", integration.name)),
-                    client_id: Set(client_id),
-                    client_secret_hash: Set(hash_secret(&client_secret)),
-                    redirect_uri: Set(redirect_uri),
-                    created_at: Set(Utc::now()),
-                }
-                .insert(&transaction)
-                .await?;
-                tokens
-                    .store(&transaction, application.id, actor.user.id, DOKPLOY_SCOPE)
-                    .await?;
-                let binding = dokploy_source_binding::ActiveModel {
-                    integration_id: Set(id),
-                    gitea_id: Set(provisioned.id.clone()),
-                    git_provider_id: Set(provisioned.parent_id.clone()),
-                    oauth_application_id: Set(Some(application.id)),
-                    managed: Set(true),
-                    created_at: Set(now),
-                    updated_at: Set(now),
-                }
-                .insert(&transaction)
-                .await?;
-                state
-                    .audit_on(
-                        &transaction,
-                        Some(actor.user.id),
-                        "integration.source.connect",
-                        Some(format!("{slug}/{id}/{}", binding.gitea_id)),
-                    )
-                    .await?;
-                transaction.commit().await?;
-                Ok(binding)
-            }
-            .await;
-            let binding = match binding_result {
-                Ok(binding) => binding,
-                Err(error) => {
-                    if let Err(cleanup_error) = provider
-                        .integration
-                        .remove_remote_source(credential, &provisioned.parent_id)
-                        .await
-                    {
-                        tracing::warn!(%cleanup_error, integration_id = %id, "could not remove orphaned Dokploy source");
-                    }
-                    return Err(error);
-                }
-            };
-            let source = RemoteSource {
-                id: provisioned.id,
-                parent_id: provisioned.parent_id,
-                name,
-                ready: true,
-                authorization_url: provisioned.authorization_url,
-                url: Some(state.public_url.as_str().trim_end_matches('/').to_owned()),
-            };
-            (binding, vec![source])
-        }
-    };
-    let check = verify_source(&state, provider, &slug, &integration, &binding).await?;
-    let mut response = source_connection_response(
-        provider,
-        Some(&binding),
-        &sources,
-        state.public_url.as_str(),
-    );
-    response.check = Some(check);
-    Ok((StatusCode::CREATED, Json(response)))
+                .await?,
+        )),
+    ))
 }
-
 /// Check that Dokploy reaches Gitadel through the bound provider. When it
 /// cannot and Gitadel manages the provider, try the other addresses this
 /// instance answers on and keep the first one that works.
@@ -824,135 +409,13 @@ pub async fn verify_integration_source(
     jar: CookieJar,
     Path((slug, id)): Path<(String, Uuid)>,
 ) -> Result<Json<SourceCheckResponse>, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
-    authorize_namespace(&state, &actor, &slug).await?;
-    let integration = owned_integration(state.secret_cipher(), state.database(), &slug, id).await?;
-    let provider = provider(&integration.provider).ok_or_else(ApiError::not_found)?;
-    let binding = source_binding(state.database(), id)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("Connect a Dokploy source first."))?;
-    Ok(Json(
-        verify_source(&state, provider, &slug, &integration, &binding).await?,
-    ))
+    let _actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
+    Ok(Json(SourceCheckResponse::from(
+        service(&state)
+            .verify_integration_source(&crate::repository::principal(&headers, &jar)?, slug, id)
+            .await?,
+    )))
 }
-
-async fn verify_source(
-    state: &IdentityState,
-    provider: &'static Provider,
-    slug: &str,
-    integration: &namespace_integration::Model,
-    binding: &dokploy_source_binding::Model,
-) -> Result<SourceCheckResponse, ApiError> {
-    let credential = Credential {
-        url: &integration.url,
-        api_key: &integration.api_key,
-        source_id: Some(&binding.gitea_id),
-    };
-    let current = integration
-        .dokploy_internal_url
-        .clone()
-        .unwrap_or_else(|| state.public_url.as_str().trim_end_matches('/').to_owned());
-    let mut attempts = Vec::new();
-    match provider.integration.check_remote_source(credential).await {
-        Ok(repositories) => {
-            return Ok(SourceCheckResponse {
-                reachable: true,
-                internal_url: current,
-                repositories: Some(repositories),
-                attempts,
-            });
-        }
-        Err(error) => attempts.push(SourceAttempt {
-            url: current.clone(),
-            error,
-        }),
-    }
-    if !binding.managed {
-        return Ok(SourceCheckResponse {
-            reachable: false,
-            internal_url: current,
-            repositories: None,
-            attempts,
-        });
-    }
-    for candidate in candidate_internal_urls(state.public_url.as_str()).await {
-        if attempts.iter().any(|attempt| attempt.url == candidate) {
-            continue;
-        }
-        let result = match provider
-            .integration
-            .update_remote_source_internal_url(credential, &binding.gitea_id, &candidate)
-            .await
-        {
-            Ok(()) => provider.integration.check_remote_source(credential).await,
-            Err(error) => Err(error),
-        };
-        match result {
-            Ok(repositories) => {
-                let mut active = stored_integration(state.database(), slug, integration.id)
-                    .await?
-                    .into_active_model();
-                active.dokploy_internal_url = Set(Some(candidate.clone()));
-                active.updated_at = Set(Utc::now());
-                active.update(state.database()).await?;
-                return Ok(SourceCheckResponse {
-                    reachable: true,
-                    internal_url: candidate,
-                    repositories: Some(repositories),
-                    attempts,
-                });
-            }
-            Err(error) => attempts.push(SourceAttempt {
-                url: candidate,
-                error,
-            }),
-        }
-    }
-    // Nothing worked; leave the provider on the address the user chose.
-    if let Err(error) = provider
-        .integration
-        .update_remote_source_internal_url(credential, &binding.gitea_id, &current)
-        .await
-    {
-        tracing::warn!(%error, "could not restore the Dokploy provider's internal URL");
-    }
-    Ok(SourceCheckResponse {
-        reachable: false,
-        internal_url: current,
-        repositories: None,
-        attempts,
-    })
-}
-
-/// Addresses a remote service might reach this instance on: the public URL,
-/// then each address its host name resolves to here (a VPN or LAN address
-/// that the remote's containers can reach without resolving the name).
-async fn candidate_internal_urls(public_url: &str) -> Vec<String> {
-    let mut candidates = vec![public_url.trim_end_matches('/').to_owned()];
-    let Ok(parsed) = url::Url::parse(public_url) else {
-        return candidates;
-    };
-    let (Some(host), Some(port)) = (parsed.host_str(), parsed.port_or_known_default()) else {
-        return candidates;
-    };
-    if let Ok(addresses) = tokio::net::lookup_host((host, port)).await {
-        for address in addresses {
-            if address.ip().is_loopback() {
-                continue;
-            }
-            let mut candidate = parsed.clone();
-            if candidate.set_ip_host(address.ip()).is_err() {
-                continue;
-            }
-            let candidate = candidate.as_str().trim_end_matches('/').to_owned();
-            if !candidates.contains(&candidate) {
-                candidates.push(candidate);
-            }
-        }
-    }
-    candidates
-}
-
 #[utoipa::path(
     delete, path = "/namespaces/{slug}/integrations/{id}/source",
     operation_id = "delete_namespaces_slug_integrations_id_source",
@@ -974,35 +437,12 @@ pub async fn disconnect_integration_source(
     jar: CookieJar,
     Path((slug, id)): Path<(String, Uuid)>,
 ) -> Result<StatusCode, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
-    authorize_namespace(&state, &actor, &slug).await?;
-    let integration = owned_integration(state.secret_cipher(), state.database(), &slug, id).await?;
-    let provider = provider(&integration.provider).ok_or_else(ApiError::not_found)?;
-    let binding = source_binding(state.database(), id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    cleanup_managed_source(provider, &integration, &binding).await;
-    let transaction = state.database().begin().await?;
-    dokploy_source_binding::Entity::delete_by_id(id)
-        .exec(&transaction)
+    let _actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
+    service(&state)
+        .disconnect_integration_source(&crate::repository::principal(&headers, &jar)?, slug, id)
         .await?;
-    if let Some(application_id) = binding.oauth_application_id {
-        oauth_application::Entity::delete_by_id(application_id)
-            .exec(&transaction)
-            .await?;
-    }
-    state
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "integration.source.disconnect",
-            Some(format!("{slug}/{id}/{}", binding.gitea_id)),
-        )
-        .await?;
-    transaction.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
-
 /// Verify credentials before storing a new namespace integration.
 #[utoipa::path(
     post, path = "/namespaces/{slug}/integrations/test",
@@ -1026,14 +466,17 @@ pub async fn test_new_integration(
     Path(slug): Path<String>,
     Json(request): Json<TestIntegrationRequest>,
 ) -> Result<Json<IntegrationTestResponse>, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
-    authorize_namespace(&state, &actor, &slug).await?;
-    let provider = provider(&request.provider).ok_or_else(ApiError::not_found)?;
-    let url = validate_outbound_url(&request.url, provider.name).await?;
-    let api_key = validate_api_key(&request.api_key, true)?.expect("required key was validated");
-    test_credential(provider, &url, &api_key, None).await
+    let _actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
+    Ok(Json(IntegrationTestResponse::from(
+        service(&state)
+            .test_new_integration(
+                &crate::repository::principal(&headers, &jar)?,
+                slug,
+                request.into(),
+            )
+            .await?,
+    )))
 }
-
 /// Verify one stored credential without returning the key in the response.
 #[utoipa::path(
     post, path = "/namespaces/{slug}/integrations/{id}/test",
@@ -1056,171 +499,13 @@ pub async fn test_integration(
     jar: CookieJar,
     Path((slug, id)): Path<(String, Uuid)>,
 ) -> Result<Json<IntegrationTestResponse>, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_READ).await?;
-    authorize_namespace(&state, &actor, &slug).await?;
-    let stored = owned_integration(state.secret_cipher(), state.database(), &slug, id).await?;
-    let provider = provider(&stored.provider).ok_or_else(ApiError::not_found)?;
-    let binding = source_binding(state.database(), id).await?;
-    test_credential(
-        provider,
-        &stored.url,
-        &stored.api_key,
-        binding.as_ref().map(|binding| binding.gitea_id.as_str()),
-    )
-    .await
+    let _actor = state.authenticate(&headers, &jar, SCOPE_READ).await?;
+    Ok(Json(IntegrationTestResponse::from(
+        service(&state)
+            .test_integration(&crate::repository::principal(&headers, &jar)?, slug, id)
+            .await?,
+    )))
 }
-
-async fn test_credential(
-    provider: &'static Provider,
-    url: &str,
-    api_key: &str,
-    source_id: Option<&str>,
-) -> Result<Json<IntegrationTestResponse>, ApiError> {
-    let TestReport { account, warnings } = provider
-        .integration
-        .test(Credential {
-            url,
-            api_key,
-            source_id,
-        })
-        .await
-        .map_err(|error| {
-            ApiError::bad_request(format!(
-                "{} rejected the credential: {error}",
-                provider.name
-            ))
-        })?;
-    Ok(Json(IntegrationTestResponse { account, warnings }))
-}
-fn source_connection_response(
-    provider: &'static Provider,
-    binding: Option<&dokploy_source_binding::Model>,
-    sources: &[RemoteSource],
-    public_url: &str,
-) -> SourceConnectionResponse {
-    let binding = binding.map(|binding| {
-        let remote = sources.iter().find(|source| source.id == binding.gitea_id);
-        SourceBindingStatus {
-            id: binding.gitea_id.clone(),
-            name: remote
-                .map(|source| source.name.clone())
-                .unwrap_or_else(|| "Gitea provider".to_owned()),
-            managed: binding.managed,
-            ready: remote.is_some_and(|source| source.ready && source.targets(public_url)),
-            authorization_url: remote.map(|source| source.authorization_url.clone()),
-            url: remote.and_then(|source| source.url.clone()),
-            targets_instance: remote.is_none_or(|source| source.targets(public_url)),
-            problem: match remote {
-                Some(source) => source.problem(public_url),
-                None => Some(
-                    "The bound Dokploy provider no longer exists. Disconnect it and choose another."
-                        .to_owned(),
-                ),
-            },
-        }
-    });
-    SourceConnectionResponse {
-        required: provider.source_required,
-        binding,
-        sources: sources
-            .iter()
-            .map(|source| RemoteSourceResponse::new(source, public_url))
-            .collect(),
-        check: None,
-    }
-}
-
-async fn cleanup_managed_source(
-    provider: &'static Provider,
-    integration: &namespace_integration::Model,
-    binding: &dokploy_source_binding::Model,
-) {
-    if !binding.managed {
-        return;
-    }
-    if let Err(error) = provider
-        .integration
-        .remove_remote_source(
-            Credential {
-                url: &integration.url,
-                api_key: &integration.api_key,
-                source_id: Some(&binding.gitea_id),
-            },
-            &binding.git_provider_id,
-        )
-        .await
-    {
-        tracing::warn!(
-            %error,
-            integration_id = %integration.id,
-            source_id = %binding.gitea_id,
-            "could not remove managed Dokploy source"
-        );
-    }
-}
-
-async fn source_binding<C>(
-    database: &C,
-    integration_id: Uuid,
-) -> Result<Option<dokploy_source_binding::Model>, ApiError>
-where
-    C: ConnectionTrait,
-{
-    Ok(dokploy_source_binding::Entity::find_by_id(integration_id)
-        .one(database)
-        .await?)
-}
-
-/// The stored row, with the API key still sealed.
-async fn stored_integration<C>(
-    database: &C,
-    namespace: &str,
-    id: Uuid,
-) -> Result<namespace_integration::Model, ApiError>
-where
-    C: sea_orm::ConnectionTrait,
-{
-    namespace_integration::Entity::find_by_id(id)
-        .filter(namespace_integration::Column::Namespace.eq(namespace))
-        .one(database)
-        .await?
-        .ok_or_else(ApiError::not_found)
-}
-
-/// The row with its API key opened for use.
-async fn owned_integration<C>(
-    cipher: &SecretCipher,
-    database: &C,
-    namespace: &str,
-    id: Uuid,
-) -> Result<namespace_integration::Model, ApiError>
-where
-    C: sea_orm::ConnectionTrait,
-{
-    open_api_key(cipher, stored_integration(database, namespace, id).await?)
-}
-
-/// Replaces the sealed API key of a loaded row with its plain value, so
-/// callers can hand it to the provider. Fails with an error naming the
-/// integration when the key was sealed under another host key.
-pub(crate) fn open_api_key(
-    cipher: &SecretCipher,
-    mut integration: namespace_integration::Model,
-) -> Result<namespace_integration::Model, ApiError> {
-    integration.api_key = cipher.open_text(
-        SecretKind::DokployApiKey,
-        &integration.id,
-        &integration.api_key,
-    )?;
-    Ok(integration)
-}
-
-fn seal_api_key(cipher: &SecretCipher, id: Uuid, api_key: &str) -> Result<String, ApiError> {
-    cipher
-        .seal_text(SecretKind::DokployApiKey, &id, api_key)
-        .map_err(ApiError::internal)
-}
-
 /// Only a namespace's owner may read or change its credentials.
 pub(crate) async fn authorize_namespace(
     state: &IdentityState,
@@ -1230,128 +515,232 @@ pub(crate) async fn authorize_namespace(
     Ok(gitadel_identity::permissions::authorize_namespace(state.database(), actor, slug).await?)
 }
 
+fn service(state: &IdentityState) -> gitadel_integrations::connections::ConnectionService<'_> {
+    gitadel_integrations::connections::ConnectionService::new(
+        state.database(),
+        state.secret_cipher(),
+        &state.public_url,
+        &LegacySourceTokens,
+        gitadel_core::audit::AuditContext {
+            remote_address: super::remote_address(),
+        },
+    )
+}
+struct LegacySourceTokens;
+#[async_trait::async_trait]
+impl gitadel_integrations::connections::SourceTokenPort for LegacySourceTokens {
+    fn generate(&self) -> gitadel_integrations::connections::SourceTokens {
+        let pair = TokenPair::generate();
+        gitadel_integrations::connections::SourceTokens {
+            access_token: pair.access_token,
+            refresh_token: pair.refresh_token,
+        }
+    }
+    fn access_token_lifetime(&self) -> chrono::Duration {
+        ACCESS_TOKEN_LIFETIME
+    }
+    async fn store(
+        &self,
+        tokens: &gitadel_integrations::connections::SourceTokens,
+        transaction: &sea_orm::DatabaseTransaction,
+        application_id: Uuid,
+        user_id: Uuid,
+        scope: &str,
+    ) -> Result<(), gitadel_identity::IdentityError> {
+        TokenPair {
+            access_token: tokens.access_token.clone(),
+            refresh_token: tokens.refresh_token.clone(),
+        }
+        .store(transaction, application_id, user_id, scope)
+        .await?;
+        Ok(())
+    }
+}
+pub(crate) fn open_api_key(
+    cipher: &SecretCipher,
+    integration: crate::entity::namespace_integration::Model,
+) -> Result<crate::entity::namespace_integration::Model, ApiError> {
+    Ok(gitadel_integrations::connections::open_api_key(
+        cipher,
+        integration,
+    )?)
+}
 pub(crate) fn validate_name(value: &str) -> Result<String, ApiError> {
-    let name = value.trim();
-    if name.is_empty() || name.len() > MAX_NAME_LENGTH {
-        return Err(ApiError::bad_request(
-            "Integration names must contain between 1 and 80 characters.",
-        ));
-    }
-    Ok(name.to_owned())
+    Ok(gitadel_integrations::connections::validate_name(value)?)
 }
 
-fn validate_api_key(value: &str, required: bool) -> Result<Option<String>, ApiError> {
-    let key = value.trim();
-    if key.is_empty() {
-        return if required {
-            Err(ApiError::bad_request("An API key is required."))
-        } else {
-            Ok(None)
-        };
-    }
-    if key.len() > MAX_API_KEY_LENGTH {
-        return Err(ApiError::bad_request(
-            "API keys cannot exceed 512 characters.",
-        ));
-    }
-    Ok(Some(key.to_owned()))
-}
-
-fn validate_url(value: &str, name: &str) -> Result<String, ApiError> {
-    Ok(parse_url(value, name)?
-        .as_str()
-        .trim_end_matches('/')
-        .to_owned())
-}
-
-fn parse_url(value: &str, name: &str) -> Result<url::Url, ApiError> {
-    let url = url::Url::parse(value.trim()).map_err(|_| {
-        ApiError::bad_request(format!("The {name} URL must be a valid HTTP or HTTPS URL."))
-    })?;
-    if !matches!(url.scheme(), "http" | "https")
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || url.as_str().len() > 2048
-    {
-        return Err(ApiError::bad_request(format!(
-            "The {name} URL must be an HTTP or HTTPS URL without credentials, a query, or a fragment."
-        )));
-    }
-    Ok(url)
-}
-
-/// Validate a URL that Gitadel itself will send requests to.
-///
-/// Beyond the syntax rules, the host must not resolve to this machine or to a
-/// link-local address such as a cloud metadata service. Private networks stay
-/// allowed because providers normally run on one. The same check runs again,
-/// with the address pinned, whenever a request is made.
-async fn validate_outbound_url(value: &str, name: &str) -> Result<String, ApiError> {
-    let url = parse_url(value, name)?;
-    crate::network::pinned_service_http_client(&url, std::time::Duration::from_secs(10))
-        .await
-        .map_err(|error| ApiError::bad_request(format!("The {name} URL was refused: {error}")))?;
-    Ok(url.as_str().trim_end_matches('/').to_owned())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn urls_reject_credentials_queries_and_fragments() {
-        for refused in [
-            "http://127.0.0.1:9000/x?",
-            "http://dokploy.example/x?a=b",
-            "http://dokploy.example/#fragment",
-            "http://user@dokploy.example/",
-            "http://user:secret@dokploy.example/",
-            "ftp://dokploy.example/",
-            "not a url",
-        ] {
-            assert!(validate_url(refused, "Dokploy").is_err(), "{refused}");
+impl From<gitadel_integrations::connections::ProviderResponse> for ProviderResponse {
+    fn from(value: gitadel_integrations::connections::ProviderResponse) -> Self {
+        Self {
+            slug: value.slug,
+            name: value.name,
+            description: value.description,
+            icon: value.icon,
+            source_required: value.source_required,
         }
-        assert_eq!(
-            validate_url(" https://dokploy.example/base/ ", "Dokploy")
-                .ok()
-                .as_deref(),
-            Some("https://dokploy.example/base")
-        );
     }
+}
 
-    #[tokio::test]
-    async fn outbound_urls_refuse_loopback_and_metadata_but_allow_private_networks() {
-        for refused in [
-            "http://127.0.0.1:9000",
-            "http://localhost:9000",
-            "http://[::1]:9000",
-            "http://169.254.169.254",
-            "http://[fe80::1]",
-            "http://0.0.0.0:9000",
-            "http://[::ffff:127.0.0.1]",
-        ] {
-            assert!(
-                validate_outbound_url(refused, "Dokploy").await.is_err(),
-                "{refused}"
-            );
+impl From<gitadel_integrations::connections::IntegrationResponse> for IntegrationResponse {
+    fn from(value: gitadel_integrations::connections::IntegrationResponse) -> Self {
+        Self {
+            id: value.id,
+            provider: value.provider,
+            provider_name: value.provider_name,
+            name: value.name,
+            enabled: value.enabled,
+            url: value.url,
+            internal_url: value.internal_url,
+            api_key_set: value.api_key_set,
+            source: value.source.map(Into::into),
         }
-        for allowed in [
-            "http://10.0.0.5:3000",
-            "http://192.168.1.20:3000",
-            "http://100.64.0.5:3000",
-            "http://[fd00::5]:3000",
-        ] {
-            assert_eq!(
-                validate_outbound_url(allowed, "Dokploy")
-                    .await
-                    .ok()
-                    .as_deref(),
-                Some(allowed),
-                "{allowed}"
-            );
+    }
+}
+
+impl From<gitadel_integrations::connections::SourceBindingSummary> for SourceBindingSummary {
+    fn from(value: gitadel_integrations::connections::SourceBindingSummary) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            managed: value.managed,
+        }
+    }
+}
+
+impl From<gitadel_integrations::connections::NamespaceIntegrationsResponse>
+    for NamespaceIntegrationsResponse
+{
+    fn from(value: gitadel_integrations::connections::NamespaceIntegrationsResponse) -> Self {
+        Self {
+            namespace: value.namespace,
+            providers: value.providers.into_iter().map(Into::into).collect(),
+            integrations: value.integrations.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<gitadel_integrations::connections::IntegrationCredentialResponse>
+    for IntegrationCredentialResponse
+{
+    fn from(value: gitadel_integrations::connections::IntegrationCredentialResponse) -> Self {
+        Self {
+            api_key: value.api_key,
+        }
+    }
+}
+
+impl From<gitadel_integrations::connections::RemoteSourceResponse> for RemoteSourceResponse {
+    fn from(value: gitadel_integrations::connections::RemoteSourceResponse) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            ready: value.ready,
+            url: value.url,
+            targets_instance: value.targets_instance,
+            problem: value.problem,
+        }
+    }
+}
+
+impl From<gitadel_integrations::connections::SourceConnectionResponse>
+    for SourceConnectionResponse
+{
+    fn from(value: gitadel_integrations::connections::SourceConnectionResponse) -> Self {
+        Self {
+            required: value.required,
+            binding: value.binding.map(Into::into),
+            sources: value.sources.into_iter().map(Into::into).collect(),
+            check: value.check.map(Into::into),
+        }
+    }
+}
+
+impl From<gitadel_integrations::connections::SourceCheckResponse> for SourceCheckResponse {
+    fn from(value: gitadel_integrations::connections::SourceCheckResponse) -> Self {
+        Self {
+            reachable: value.reachable,
+            internal_url: value.internal_url,
+            repositories: value.repositories,
+            attempts: value.attempts.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<gitadel_integrations::connections::SourceAttempt> for SourceAttempt {
+    fn from(value: gitadel_integrations::connections::SourceAttempt) -> Self {
+        Self {
+            url: value.url,
+            error: value.error,
+        }
+    }
+}
+
+impl From<gitadel_integrations::connections::SourceBindingStatus> for SourceBindingStatus {
+    fn from(value: gitadel_integrations::connections::SourceBindingStatus) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            managed: value.managed,
+            ready: value.ready,
+            authorization_url: value.authorization_url,
+            url: value.url,
+            targets_instance: value.targets_instance,
+            problem: value.problem,
+        }
+    }
+}
+
+impl From<CreateIntegrationRequest>
+    for gitadel_integrations::connections::CreateIntegrationRequest
+{
+    fn from(value: CreateIntegrationRequest) -> Self {
+        Self {
+            provider: value.provider,
+            name: value.name,
+            url: value.url,
+            api_key: value.api_key,
+            internal_url: value.internal_url,
+        }
+    }
+}
+
+impl From<UpdateIntegrationRequest>
+    for gitadel_integrations::connections::UpdateIntegrationRequest
+{
+    fn from(value: UpdateIntegrationRequest) -> Self {
+        Self {
+            name: value.name,
+            enabled: value.enabled,
+            url: value.url,
+            api_key: value.api_key,
+            internal_url: value.internal_url,
+        }
+    }
+}
+
+impl From<TestIntegrationRequest> for gitadel_integrations::connections::TestIntegrationRequest {
+    fn from(value: TestIntegrationRequest) -> Self {
+        Self {
+            provider: value.provider,
+            url: value.url,
+            api_key: value.api_key,
+        }
+    }
+}
+
+impl From<gitadel_integrations::connections::IntegrationTestResponse> for IntegrationTestResponse {
+    fn from(value: gitadel_integrations::connections::IntegrationTestResponse) -> Self {
+        Self {
+            account: value.account,
+            warnings: value.warnings,
+        }
+    }
+}
+impl From<ConfigureSourceRequest> for gitadel_integrations::connections::ConfigureSourceRequest {
+    fn from(value: ConfigureSourceRequest) -> Self {
+        match value {
+            ConfigureSourceRequest::Bind { source_id } => Self::Bind { source_id },
+            ConfigureSourceRequest::Create { name } => Self::Create { name },
         }
     }
 }

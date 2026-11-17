@@ -11,6 +11,12 @@ path = "src/lib.rs"
 
 [dependencies]
 gitadel-core.workspace = true
+gitadel-db.workspace = true
+gitadel-identity.workspace = true
+gitadel-secrets.workspace = true
+sea-orm.workspace = true
+uuid.workspace = true
+tokio.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 reqwest.workspace = true

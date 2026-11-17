@@ -1115,22 +1115,7 @@ where
     T: Send + 'static,
     F: FnOnce(&GitRepository) -> sley::Result<T> + Send + 'static,
 {
-    tokio::task::spawn_blocking(move || {
-        let repository = GitRepository::open_exact_bare(path)?;
-        operation(&repository)
-    })
-    .await
-    .map_err(ApiError::internal)?
-    .map_err(map_git_error)
-}
-
-fn map_git_error(error: GitError) -> ApiError {
-    match error {
-        GitError::InvalidObjectId(_) | GitError::InvalidPath(_) | GitError::NotFound(_) => {
-            ApiError::not_found()
-        }
-        error => ApiError::internal(error),
-    }
+    Ok(gitadel_repositories::content::read_git(path, operation).await?)
 }
 
 pub(super) fn normalize_browse_path(path: &str) -> Result<String, ApiError> {

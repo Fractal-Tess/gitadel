@@ -12,7 +12,7 @@ use crate::entity::{repository, repository_mirror};
 const SCHEDULER_INTERVAL: Duration = Duration::from_secs(30);
 const SCHEDULER_BATCH_SIZE: u64 = 16;
 
-pub(crate) async fn serve_mirror_scheduler(state: RepositoryState) -> Result<(), anyhow::Error> {
+pub async fn serve_mirror_scheduler(state: RepositoryState) -> Result<(), anyhow::Error> {
     let mut interval = tokio::time::interval(SCHEDULER_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {

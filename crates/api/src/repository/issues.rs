@@ -1,8 +1,3 @@
-use std::{
-    collections::{BTreeSet, HashMap},
-    path::PathBuf,
-};
-
 use axum::{
     Json,
     body::Body,
@@ -11,53 +6,20 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
-use chrono::{Duration, Utc};
-use futures_util::TryStreamExt as _;
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, ExprTrait, FromQueryResult, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
-};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use tokio::{fs, io::AsyncWriteExt as _};
 use tokio_util::io::ReaderStream;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{
-    Permission, RepositoryState, notifications, render_markdown,
-    resources::{IN_QUERY_CHUNK, PageWindow, total_count_header},
-    webhook_events::{self, ChangeAction, IssueAction},
+    Permission, RepositoryState, notifications, render_markdown, resources::total_count_header,
+    webhook_events,
 };
 use crate::{
-    entity::{
-        issue_attachment, issue_comment, issue_label, issue_label_assignment, namespace,
-        organization_member, repository, repository_collaborator, repository_issue, user,
-    },
-    filesystem::create_private_directory_async,
+    entity::{issue_comment, repository, repository_issue, user},
     identity::{ApiError, SCOPE_WRITE},
 };
-
-const MAX_ISSUE_TITLE_LENGTH: usize = 255;
-const MAX_ISSUE_BODY_LENGTH: usize = 1_000_000;
-const MAX_LABEL_NAME_LENGTH: usize = 64;
-const MAX_ISSUE_ATTACHMENT_BYTES: u64 = 10 * 1024 * 1024;
-const MAX_ATTACHMENTS_PER_ISSUE: u64 = 20;
-const MAX_USER_ATTACHMENT_BYTES: i64 = 256 * 1024 * 1024;
-const MAX_USER_ATTACHMENTS: i64 = 256;
-const MAX_USER_UNBOUND_ATTACHMENT_BYTES: i64 = 64 * 1024 * 1024;
-const MAX_USER_UNBOUND_ATTACHMENTS: i64 = 16;
-const MAX_REPOSITORY_ATTACHMENT_BYTES: i64 = 2 * 1024 * 1024 * 1024;
-const MAX_REPOSITORY_ATTACHMENTS: i64 = 2_048;
-const MAX_INSTANCE_ATTACHMENT_BYTES: i64 = 20 * 1024 * 1024 * 1024;
-const MAX_INSTANCE_ATTACHMENTS: i64 = 20_000;
-const UNBOUND_ATTACHMENT_LIFETIME: Duration = Duration::hours(1);
-const ATTACHMENT_CLEANUP_BATCH_SIZE: u64 = 100;
-
-#[derive(FromQueryResult)]
-struct AttachmentUsage {
-    count: i64,
-    bytes: Option<i64>,
-}
 
 #[derive(Clone, Serialize, ToSchema)]
 pub struct IssueUserResponse {
@@ -216,44 +178,25 @@ pub async fn list_issues(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
-    let (repository, viewer_id, can_write) =
+    let (repository, _viewer_id, _) =
         issue_context(&state, &headers, &jar, &namespace, &name).await?;
-    let window = PageWindow::new(query.page, query.per_page);
-    let mut select = repository_issue::Entity::find()
-        .filter(repository_issue::Column::RepositoryId.eq(repository.id));
-    if let Some(issue_state) = query.state.as_deref() {
-        validate_issue_state(issue_state)?;
-        select = select.filter(repository_issue::Column::State.eq(issue_state));
-    }
-    if let Some(query) = query
-        .q
-        .map(|query| query.trim().to_owned())
-        .filter(|query| !query.is_empty())
-    {
-        select = select.filter(
-            repository_issue::Column::Title
-                .contains(&query)
-                .or(repository_issue::Column::Body.contains(&query)),
-        );
-    }
-    let total = select
-        .clone()
-        .count(state.identity().read_database())
-        .await?;
-    let issues = select
-        .order_by_desc(repository_issue::Column::UpdatedAt)
-        // Issues touched in the same instant keep one order across pages.
-        .order_by_desc(repository_issue::Column::Number)
-        .offset(window.offset)
-        .limit(window.limit)
-        .all(state.identity().read_database())
+    let (total, issues) = service(&state)
+        .list_issues(
+            repository.id,
+            &crate::repository::principal(&headers, &jar)?,
+            query.into(),
+        )
         .await?;
     Ok((
         total_count_header(total),
-        Json(issue_responses(&state, issues, viewer_id, can_write).await?),
+        Json(
+            issues
+                .into_iter()
+                .map(Into::into)
+                .collect::<Vec<IssueResponse>>(),
+        ),
     ))
 }
-
 #[utoipa::path(
     get, path = "/repositories/{namespace}/{name}/issues/{number}",
     operation_id = "get_repositories_namespace_name_issues_number",
@@ -277,14 +220,19 @@ pub async fn get_issue(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<IssueResponse>, ApiError> {
-    let (repository, viewer_id, can_write) =
+    let (repository, _viewer_id, _) =
         issue_context(&state, &headers, &jar, &namespace, &name).await?;
-    let issue = find_issue(&state, repository.id, number).await?;
     Ok(Json(
-        issue_response(&state, issue, viewer_id, can_write).await?,
+        service(&state)
+            .get_issue(
+                repository.id,
+                &crate::repository::principal(&headers, &jar)?,
+                number,
+            )
+            .await?
+            .into(),
     ))
 }
-
 #[utoipa::path(
     post, path = "/repositories/{namespace}/{name}/issues",
     operation_id = "post_repositories_namespace_name_issues",
@@ -308,7 +256,7 @@ pub async fn create_issue(
     jar: CookieJar,
     Json(request): Json<CreateIssueRequest>,
 ) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
-    let (actor, repository) = state
+    let (_, repository) = state
         .authenticated_repository(
             &headers,
             &jar,
@@ -318,95 +266,19 @@ pub async fn create_issue(
             SCOPE_WRITE,
         )
         .await?;
-    let can_write = state
-        .can_access(&repository, Some(actor.user.id), Permission::Write)
-        .await?;
-    if (!request.label_ids.is_empty() || request.assignee.is_some()) && !can_write {
-        return Err(ApiError::forbidden(
-            "Write access is required to assign issues or apply labels.",
-        ));
-    }
-    let title = validate_issue_title(&request.title)?;
-    let body = validate_issue_body(request.body)?;
-    let assignee_user_id = if let Some(username) = request.assignee.as_deref() {
-        assignee_id(&state, &repository, username).await?
-    } else {
-        None
-    };
-    validate_label_ids(&state, repository.id, &request.label_ids).await?;
-    let transaction = state.identity().database().begin().await?;
-    repository::Entity::update_many()
-        .col_expr(
-            repository::Column::IssueCounter,
-            sea_orm::sea_query::Expr::col(repository::Column::IssueCounter).add(1),
-        )
-        .filter(repository::Column::Id.eq(repository.id))
-        .exec(&transaction)
-        .await?;
-    let number = repository::Entity::find_by_id(repository.id)
-        .one(&transaction)
-        .await?
-        .ok_or_else(ApiError::not_found)?
-        .issue_counter;
-    let now = Utc::now();
-    let issue = repository_issue::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        repository_id: Set(repository.id),
-        number: Set(number),
-        author_user_id: Set(actor.user.id),
-        title: Set(title),
-        body: Set(body),
-        state: Set("open".to_owned()),
-        assignee_user_id: Set(assignee_user_id),
-        created_at: Set(now),
-        updated_at: Set(now),
-        closed_at: Set(None),
-        external_source: Set(None),
-        external_id: Set(None),
-        external_url: Set(None),
-        external_author: Set(None),
-        external_author_url: Set(None),
-        external_updated_at: Set(None),
-    }
-    .insert(&transaction)
-    .await?;
-    replace_issue_labels_on(&transaction, issue.id, &request.label_ids).await?;
-    bind_issue_attachments(
-        &state,
-        &transaction,
-        repository.id,
-        issue.id,
-        &request.attachment_ids,
-        actor.user.id,
-        can_write,
-    )
-    .await?;
-    state
-        .identity()
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "repository.issue.create",
-            Some(format!("{namespace}/{name}/{}", issue.number)),
-        )
-        .await?;
-    transaction.commit().await?;
-    webhook_events::issue(
-        &state,
-        &repository,
-        &actor.user,
-        &issue,
-        IssueAction::Opened,
-        serde_json::json!({}),
-    )
-    .await;
-    notifications::issue_opened(&state, &repository, &actor.user, &issue);
     Ok((
         StatusCode::CREATED,
-        Json(issue_response(&state, issue, Some(actor.user.id), can_write).await?),
+        Json(IssueResponse::from(
+            service(&state)
+                .create_issue(
+                    repository.id,
+                    &crate::repository::principal(&headers, &jar)?,
+                    request.into(),
+                )
+                .await?,
+        )),
     ))
 }
-
 #[utoipa::path(
     patch, path = "/repositories/{namespace}/{name}/issues/{number}",
     operation_id = "patch_repositories_namespace_name_issues_number",
@@ -431,96 +303,26 @@ pub async fn update_issue(
     jar: CookieJar,
     Json(request): Json<UpdateIssueRequest>,
 ) -> Result<Json<IssueResponse>, ApiError> {
-    let actor = state
+    let _actor = state
         .identity()
         .authenticate(&headers, &jar, SCOPE_WRITE)
         .await?;
     let repository = state.find(&namespace, &name).await?;
     state
-        .authorize(&repository, Some(actor.user.id), Permission::Read)
+        .authorize(&repository, Some(_actor.user.id), Permission::Read)
         .await?;
-    let can_write = state
-        .can_access(&repository, Some(actor.user.id), Permission::Write)
-        .await?;
-    let stored = find_issue(&state, repository.id, number).await?;
-    if stored.external_source.is_some() {
-        return Err(ApiError::forbidden(
-            "Issues imported from an upstream forge are read-only.",
-        ));
-    }
-    if stored.author_user_id != actor.user.id && !can_write {
-        return Err(ApiError::not_found());
-    }
-    if (request.assignee.is_some() || request.label_ids.is_some()) && !can_write {
-        return Err(ApiError::forbidden(
-            "Write access is required to assign issues or change labels.",
-        ));
-    }
-    let label_ids = request.label_ids;
-    let previous_labels = if let Some(ids) = label_ids.as_deref() {
-        validate_label_ids(&state, repository.id, ids).await?;
-        Some(assigned_label_ids(&state, stored.id).await?)
-    } else {
-        None
-    };
-    let previous = stored.clone();
-    let mut issue: repository_issue::ActiveModel = stored.into();
-    if let Some(title) = request.title {
-        issue.title = Set(validate_issue_title(&title)?);
-    }
-    if let Some(body) = request.body {
-        issue.body = Set(validate_issue_body(body)?);
-    }
-    if let Some(issue_state) = request.state {
-        validate_issue_state(&issue_state)?;
-        issue.closed_at = Set((issue_state == "closed").then(Utc::now));
-        issue.state = Set(issue_state);
-    }
-    if let Some(username) = request.assignee {
-        issue.assignee_user_id = Set(assignee_id(&state, &repository, &username).await?);
-    }
-    issue.updated_at = Set(Utc::now());
-    let transaction = state.identity().database().begin().await?;
-    let issue = issue.update(&transaction).await?;
-    if let Some(ids) = label_ids.as_deref() {
-        replace_issue_labels_on(&transaction, issue.id, ids).await?;
-    }
-    if let Some(ids) = request.attachment_ids.as_deref() {
-        bind_issue_attachments(
-            &state,
-            &transaction,
-            repository.id,
-            issue.id,
-            ids,
-            actor.user.id,
-            can_write,
-        )
-        .await?;
-    }
-    state
-        .identity()
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "repository.issue.update",
-            Some(format!("{namespace}/{name}/{number}")),
-        )
-        .await?;
-    transaction.commit().await?;
-    emit_issue_update_events(
-        &state,
-        &repository,
-        &actor.user,
-        &previous,
-        &issue,
-        previous_labels.as_deref().zip(label_ids.as_deref()),
-    )
-    .await;
     Ok(Json(
-        issue_response(&state, issue, Some(actor.user.id), can_write).await?,
+        service(&state)
+            .update_issue(
+                repository.id,
+                &crate::repository::principal(&headers, &jar)?,
+                number,
+                request.into(),
+            )
+            .await?
+            .into(),
     ))
 }
-
 #[utoipa::path(
     delete, path = "/repositories/{namespace}/{name}/issues/{number}",
     operation_id = "delete_repositories_namespace_name_issues_number",
@@ -543,7 +345,7 @@ pub async fn delete_issue(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<StatusCode, ApiError> {
-    let (actor, repository) = state
+    let (_, repository) = state
         .authenticated_repository(
             &headers,
             &jar,
@@ -553,40 +355,15 @@ pub async fn delete_issue(
             SCOPE_WRITE,
         )
         .await?;
-    let issue = find_issue(&state, repository.id, number).await?;
-    if issue.external_source.is_some() {
-        return Err(ApiError::forbidden(
-            "Issues imported from an upstream forge are read-only.",
-        ));
-    }
-    let attachments = issue_attachment::Entity::find()
-        .filter(issue_attachment::Column::IssueId.eq(issue.id))
-        .all(state.identity().database())
-        .await?;
-    let deleted_event =
-        webhook_events::prepare_issue_deleted(&state, &repository, &actor.user, &issue).await;
-    let transaction = state.identity().database().begin().await?;
-    repository_issue::Entity::delete_by_id(issue.id)
-        .exec(&transaction)
-        .await?;
-    state
-        .identity()
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "repository.issue.delete",
-            Some(format!("{namespace}/{name}/{number}")),
+    service(&state)
+        .delete_issue(
+            repository.id,
+            &crate::repository::principal(&headers, &jar)?,
+            number,
         )
         .await?;
-    transaction.commit().await?;
-    webhook_events::send_prepared(&state, repository.id, "issues", deleted_event).await;
-    let directory = issue_attachment_directory(&state, &repository);
-    for attachment in attachments {
-        let _ = fs::remove_file(directory.join(attachment.id.to_string())).await;
-    }
     Ok(StatusCode::NO_CONTENT)
 }
-
 #[utoipa::path(
     get, path = "/repositories/{namespace}/{name}/issues/{number}/comments",
     operation_id = "get_repositories_namespace_name_issues_number_comments",
@@ -610,19 +387,21 @@ pub async fn list_comments(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<Vec<IssueCommentResponse>>, ApiError> {
-    let (repository, viewer_id, can_write) =
+    let (repository, _viewer_id, _) =
         issue_context(&state, &headers, &jar, &namespace, &name).await?;
-    let issue = find_issue(&state, repository.id, number).await?;
-    let comments = issue_comment::Entity::find()
-        .filter(issue_comment::Column::IssueId.eq(issue.id))
-        .order_by_asc(issue_comment::Column::CreatedAt)
-        .all(state.identity().read_database())
-        .await?;
     Ok(Json(
-        comment_responses(&state, comments, viewer_id, can_write).await?,
+        service(&state)
+            .list_comments(
+                repository.id,
+                &crate::repository::principal(&headers, &jar)?,
+                number,
+            )
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<IssueCommentResponse>>(),
     ))
 }
-
 #[utoipa::path(
     post, path = "/repositories/{namespace}/{name}/issues/{number}/comments",
     operation_id = "post_repositories_namespace_name_issues_number_comments",
@@ -647,7 +426,7 @@ pub async fn create_comment(
     jar: CookieJar,
     Json(request): Json<CommentRequest>,
 ) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
-    let (actor, repository) = state
+    let (_, repository) = state
         .authenticated_repository(
             &headers,
             &jar,
@@ -657,61 +436,20 @@ pub async fn create_comment(
             SCOPE_WRITE,
         )
         .await?;
-    let issue = find_issue(&state, repository.id, number).await?;
-    if issue.external_source.is_some() {
-        return Err(ApiError::forbidden(
-            "Comments on imported upstream issues are read-only.",
-        ));
-    }
-    let body = validate_comment_body(request.body)?;
-    let now = Utc::now();
-    let transaction = state.identity().database().begin().await?;
-    let comment = issue_comment::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        issue_id: Set(issue.id),
-        author_user_id: Set(actor.user.id),
-        body: Set(body),
-        created_at: Set(now),
-        updated_at: Set(now),
-        external_source: Set(None),
-        external_id: Set(None),
-        external_url: Set(None),
-        external_author: Set(None),
-        external_author_url: Set(None),
-        external_updated_at: Set(None),
-    }
-    .insert(&transaction)
-    .await?;
-    let mut active_issue: repository_issue::ActiveModel = issue.into();
-    active_issue.updated_at = Set(now);
-    let issue = active_issue.update(&transaction).await?;
-    state
-        .identity()
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "repository.issue.comment.create",
-            Some(format!("{namespace}/{name}/{number}/{}", comment.id)),
-        )
-        .await?;
-    transaction.commit().await?;
-    webhook_events::issue_comment(
-        &state,
-        &repository,
-        &actor.user,
-        &issue,
-        &comment,
-        ChangeAction::Created,
-        None,
-    )
-    .await;
-    notifications::issue_commented(&state, &repository, &actor.user, &issue, &comment);
     Ok((
         StatusCode::CREATED,
-        Json(comment_response(&state, comment, Some(actor.user.id), false).await?),
+        Json(IssueCommentResponse::from(
+            service(&state)
+                .create_comment(
+                    repository.id,
+                    &crate::repository::principal(&headers, &jar)?,
+                    number,
+                    request.into(),
+                )
+                .await?,
+        )),
     ))
 }
-
 #[utoipa::path(
     patch, path = "/repositories/{namespace}/{name}/issues/{number}/comments/{id}",
     operation_id = "patch_repositories_namespace_name_issues_number_comments_id",
@@ -737,49 +475,27 @@ pub async fn update_comment(
     jar: CookieJar,
     Json(request): Json<CommentRequest>,
 ) -> Result<Json<IssueCommentResponse>, ApiError> {
-    let actor = state
+    let _actor = state
         .identity()
         .authenticate(&headers, &jar, SCOPE_WRITE)
         .await?;
     let repository = state.find(&namespace, &name).await?;
     state
-        .authorize(&repository, Some(actor.user.id), Permission::Read)
+        .authorize(&repository, Some(_actor.user.id), Permission::Read)
         .await?;
-    let can_write = state
-        .can_access(&repository, Some(actor.user.id), Permission::Write)
-        .await?;
-    let issue = find_issue(&state, repository.id, number).await?;
-    let stored = find_comment(&state, issue.id, id).await?;
-    if stored.external_source.is_some() {
-        return Err(ApiError::forbidden(
-            "Comments imported from an upstream forge are read-only.",
-        ));
-    }
-    if stored.author_user_id != actor.user.id && !can_write {
-        return Err(ApiError::not_found());
-    }
-    let previous_body = stored.body.clone();
-    let mut comment: issue_comment::ActiveModel = stored.into();
-    comment.body = Set(validate_comment_body(request.body)?);
-    comment.updated_at = Set(Utc::now());
-    let comment = comment.update(state.identity().database()).await?;
-    if comment.body != previous_body {
-        webhook_events::issue_comment(
-            &state,
-            &repository,
-            &actor.user,
-            &issue,
-            &comment,
-            ChangeAction::Edited,
-            Some(&previous_body),
-        )
-        .await;
-    }
     Ok(Json(
-        comment_response(&state, comment, Some(actor.user.id), can_write).await?,
+        service(&state)
+            .update_comment(
+                repository.id,
+                &crate::repository::principal(&headers, &jar)?,
+                number,
+                id,
+                request.into(),
+            )
+            .await?
+            .into(),
     ))
 }
-
 #[utoipa::path(
     delete, path = "/repositories/{namespace}/{name}/issues/{number}/comments/{id}",
     operation_id = "delete_repositories_namespace_name_issues_number_comments_id",
@@ -803,43 +519,24 @@ pub async fn delete_comment(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<StatusCode, ApiError> {
-    let actor = state
+    let _actor = state
         .identity()
         .authenticate(&headers, &jar, SCOPE_WRITE)
         .await?;
     let repository = state.find(&namespace, &name).await?;
     state
-        .authorize(&repository, Some(actor.user.id), Permission::Read)
+        .authorize(&repository, Some(_actor.user.id), Permission::Read)
         .await?;
-    let can_write = state
-        .can_access(&repository, Some(actor.user.id), Permission::Write)
+    service(&state)
+        .delete_comment(
+            repository.id,
+            &crate::repository::principal(&headers, &jar)?,
+            number,
+            id,
+        )
         .await?;
-    let issue = find_issue(&state, repository.id, number).await?;
-    let comment = find_comment(&state, issue.id, id).await?;
-    if comment.external_source.is_some() {
-        return Err(ApiError::forbidden(
-            "Comments imported from an upstream forge are read-only.",
-        ));
-    }
-    if comment.author_user_id != actor.user.id && !can_write {
-        return Err(ApiError::not_found());
-    }
-    issue_comment::Entity::delete_by_id(comment.id)
-        .exec(state.identity().database())
-        .await?;
-    webhook_events::issue_comment(
-        &state,
-        &repository,
-        &actor.user,
-        &issue,
-        &comment,
-        ChangeAction::Deleted,
-        None,
-    )
-    .await;
     Ok(StatusCode::NO_CONTENT)
 }
-
 #[utoipa::path(
     get, path = "/repositories/{namespace}/{name}/issue-labels",
     operation_id = "get_repositories_namespace_name_issue_labels",
@@ -862,15 +559,20 @@ pub async fn list_labels(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<Vec<IssueLabelResponse>>, ApiError> {
-    let (repository, _, _) = issue_context(&state, &headers, &jar, &namespace, &name).await?;
-    let labels = issue_label::Entity::find()
-        .filter(issue_label::Column::RepositoryId.eq(repository.id))
-        .order_by_asc(issue_label::Column::Name)
-        .all(state.identity().read_database())
-        .await?;
-    Ok(Json(labels.into_iter().map(label_response).collect()))
+    let (repository, _viewer_id, _) =
+        issue_context(&state, &headers, &jar, &namespace, &name).await?;
+    Ok(Json(
+        service(&state)
+            .list_labels(
+                repository.id,
+                &crate::repository::principal(&headers, &jar)?,
+            )
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<IssueLabelResponse>>(),
+    ))
 }
-
 #[utoipa::path(
     post, path = "/repositories/{namespace}/{name}/issue-labels",
     operation_id = "post_repositories_namespace_name_issue_labels",
@@ -904,24 +606,19 @@ pub async fn create_label(
             SCOPE_WRITE,
         )
         .await?;
-    let label = issue_label::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        repository_id: Set(repository.id),
-        name: Set(validate_label_name(&request.name)?),
-        color: Set(validate_label_color(&request.color)?),
-        description: Set(validate_label_description(request.description)?),
-        external_source: Set(None),
-        external_instance_url: Set(None),
-        external_id: Set(None),
-        external_url: Set(None),
-        external_updated_at: Set(None),
-        created_at: Set(Utc::now()),
-    }
-    .insert(state.identity().database())
-    .await?;
-    Ok((StatusCode::CREATED, Json(label_response(label))))
+    Ok((
+        StatusCode::CREATED,
+        Json(IssueLabelResponse::from(
+            service(&state)
+                .create_label(
+                    repository.id,
+                    &crate::repository::principal(&headers, &jar)?,
+                    request.into(),
+                )
+                .await?,
+        )),
+    ))
 }
-
 #[utoipa::path(
     patch, path = "/repositories/{namespace}/{name}/issue-labels/{id}",
     operation_id = "patch_repositories_namespace_name_issue_labels_id",
@@ -956,22 +653,18 @@ pub async fn update_label(
             SCOPE_WRITE,
         )
         .await?;
-    let stored = find_label(&state, repository.id, id).await?;
-    let mut label: issue_label::ActiveModel = stored.into();
-    if let Some(name) = request.name {
-        label.name = Set(validate_label_name(&name)?);
-    }
-    if let Some(color) = request.color {
-        label.color = Set(validate_label_color(&color)?);
-    }
-    if let Some(description) = request.description {
-        label.description = Set(validate_label_description(description)?);
-    }
-    Ok(Json(label_response(
-        label.update(state.identity().database()).await?,
-    )))
+    Ok(Json(
+        service(&state)
+            .update_label(
+                repository.id,
+                &crate::repository::principal(&headers, &jar)?,
+                id,
+                request.into(),
+            )
+            .await?
+            .into(),
+    ))
 }
-
 #[utoipa::path(
     delete, path = "/repositories/{namespace}/{name}/issue-labels/{id}",
     operation_id = "delete_repositories_namespace_name_issue_labels_id",
@@ -1004,13 +697,15 @@ pub async fn delete_label(
             SCOPE_WRITE,
         )
         .await?;
-    let label = find_label(&state, repository.id, id).await?;
-    issue_label::Entity::delete_by_id(label.id)
-        .exec(state.identity().database())
+    service(&state)
+        .delete_label(
+            repository.id,
+            &crate::repository::principal(&headers, &jar)?,
+            id,
+        )
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
-
 #[utoipa::path(
     get, path = "/repositories/{namespace}/{name}/assignable-users",
     operation_id = "get_repositories_namespace_name_assignable_users",
@@ -1033,50 +728,20 @@ pub async fn list_assignable_users(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<Vec<IssueUserResponse>>, ApiError> {
-    let (repository, _, _) = issue_context(&state, &headers, &jar, &namespace, &name).await?;
-    let database = state.identity().database();
-    let namespace = namespace::Entity::find_by_id(&repository.namespace)
-        .one(database)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    let mut user_ids = BTreeSet::new();
-    match namespace.kind.as_str() {
-        "user" => {
-            if let Some(owner_id) = namespace.user_id {
-                user_ids.insert(owner_id);
-            }
-            let collaborators = repository_collaborator::Entity::find()
-                .filter(repository_collaborator::Column::RepositoryId.eq(repository.id))
-                .filter(repository_collaborator::Column::Role.eq("write"))
-                .all(database)
-                .await?;
-            user_ids.extend(collaborators.into_iter().map(|item| item.user_id));
-        }
-        "organization" => {
-            if let Some(organization_id) = namespace.organization_id {
-                let members = organization_member::Entity::find()
-                    .filter(organization_member::Column::OrganizationId.eq(organization_id))
-                    .all(database)
-                    .await?;
-                user_ids.extend(members.into_iter().map(|member| member.user_id));
-            }
-        }
-        _ => {}
-    }
-    let mut users = Vec::with_capacity(user_ids.len());
-    for id in user_ids {
-        if let Some(account) = user::Entity::find_by_id(id).one(database).await? {
-            users.push(IssueUserResponse {
-                id: account.id,
-                username: account.username,
-                avatar_updated_at: account.avatar_updated_at,
-            });
-        }
-    }
-    users.sort_unstable_by(|left, right| left.username.cmp(&right.username));
-    Ok(Json(users))
+    let (repository, _viewer_id, _) =
+        issue_context(&state, &headers, &jar, &namespace, &name).await?;
+    Ok(Json(
+        service(&state)
+            .list_assignable_users(
+                repository.id,
+                &crate::repository::principal(&headers, &jar)?,
+            )
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<IssueUserResponse>>(),
+    ))
 }
-
 #[utoipa::path(
     post, path = "/repositories/{namespace}/{name}/markdown-preview",
     operation_id = "post_repositories_namespace_name_markdown_preview",
@@ -1132,7 +797,7 @@ pub async fn upload_attachment(
     jar: CookieJar,
     body: Body,
 ) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
-    let (actor, repository) = state
+    let (_, repository) = state
         .authenticated_repository(
             &headers,
             &jar,
@@ -1142,182 +807,26 @@ pub async fn upload_attachment(
             SCOPE_WRITE,
         )
         .await?;
-    let attachment_name = validate_attachment_name(&query.name)?;
-    let attachment_id = Uuid::new_v4();
-    let directory = issue_attachment_directory(&state, &repository);
-    create_private_directory_async(&directory)
-        .await
-        .map_err(ApiError::internal)?;
-    let path = directory.join(attachment_id.to_string());
-    let temporary_path = directory.join(format!(".{attachment_id}.upload"));
-    let mut output = fs::File::create(&temporary_path)
-        .await
-        .map_err(ApiError::internal)?;
-    let mut stream = body.into_data_stream();
-    let mut size = 0_u64;
-    while let Some(chunk) = stream.try_next().await.map_err(ApiError::internal)? {
-        size = size.saturating_add(chunk.len() as u64);
-        if size > MAX_ISSUE_ATTACHMENT_BYTES {
-            drop(output);
-            let _ = fs::remove_file(&temporary_path).await;
-            return Err(ApiError::bad_request(
-                "Issue attachments cannot exceed 10 MiB.",
-            ));
-        }
-        output.write_all(&chunk).await.map_err(ApiError::internal)?;
-    }
-    output.flush().await.map_err(ApiError::internal)?;
-    output.sync_all().await.map_err(ApiError::internal)?;
-    drop(output);
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("application/octet-stream")
-        .chars()
-        .take(255)
-        .collect::<String>();
-    let transaction = state.identity().database().begin().await?;
-    let persistence = async {
-        enforce_attachment_quotas(
-            &transaction,
-            repository.id,
-            actor.user.id,
-            i64::try_from(size).map_err(ApiError::internal)?,
-        )
-        .await?;
-        fs::rename(&temporary_path, &path)
-            .await
-            .map_err(ApiError::internal)?;
-        let attachment = issue_attachment::ActiveModel {
-            id: Set(attachment_id),
-            repository_id: Set(repository.id),
-            issue_id: Set(None),
-            uploader_user_id: Set(actor.user.id),
-            name: Set(attachment_name),
-            content_type: Set(content_type),
-            size_bytes: Set(size as i64),
-            created_at: Set(Utc::now()),
-        }
-        .insert(&transaction)
-        .await?;
-        state
-            .identity()
-            .audit_on(
-                &transaction,
-                Some(actor.user.id),
-                "repository.issue.attachment.upload",
-                Some(format!("{namespace}/{name}/{}", attachment.id)),
-            )
-            .await?;
-        transaction.commit().await?;
-        Ok::<_, ApiError>(attachment)
-    }
-    .await;
-    let attachment = match persistence {
-        Ok(attachment) => attachment,
-        Err(error) => {
-            let _ = fs::remove_file(&temporary_path).await;
-            let _ = fs::remove_file(&path).await;
-            return Err(error);
-        }
-    };
+        .to_owned();
     Ok((
         StatusCode::CREATED,
-        Json(attachment_response(&repository, attachment)),
+        Json(IssueAttachmentResponse::from(
+            service(&state)
+                .upload_attachment(
+                    repository.id,
+                    &crate::repository::principal(&headers, &jar)?,
+                    query.into(),
+                    content_type,
+                    body.into_data_stream(),
+                )
+                .await?,
+        )),
     ))
 }
-
-async fn enforce_attachment_quotas<C>(
-    database: &C,
-    repository_id: Uuid,
-    uploader_user_id: Uuid,
-    incoming_bytes: i64,
-) -> Result<(), ApiError>
-where
-    C: sea_orm::ConnectionTrait,
-{
-    let unbound = attachment_usage(database, None, Some(uploader_user_id), true).await?;
-    ensure_attachment_quota(
-        unbound,
-        incoming_bytes,
-        MAX_USER_UNBOUND_ATTACHMENTS,
-        MAX_USER_UNBOUND_ATTACHMENT_BYTES,
-        "You have too many unattached issue uploads. Attach or delete an upload before retrying.",
-    )?;
-    let user = attachment_usage(database, None, Some(uploader_user_id), false).await?;
-    ensure_attachment_quota(
-        user,
-        incoming_bytes,
-        MAX_USER_ATTACHMENTS,
-        MAX_USER_ATTACHMENT_BYTES,
-        "Your issue attachment storage quota is full.",
-    )?;
-    let repository = attachment_usage(database, Some(repository_id), None, false).await?;
-    ensure_attachment_quota(
-        repository,
-        incoming_bytes,
-        MAX_REPOSITORY_ATTACHMENTS,
-        MAX_REPOSITORY_ATTACHMENT_BYTES,
-        "This repository's issue attachment storage quota is full.",
-    )?;
-    let instance = attachment_usage(database, None, None, false).await?;
-    ensure_attachment_quota(
-        instance,
-        incoming_bytes,
-        MAX_INSTANCE_ATTACHMENTS,
-        MAX_INSTANCE_ATTACHMENT_BYTES,
-        "The instance issue attachment storage quota is full.",
-    )
-}
-
-async fn attachment_usage<C>(
-    database: &C,
-    repository_id: Option<Uuid>,
-    uploader_user_id: Option<Uuid>,
-    unbound_only: bool,
-) -> Result<AttachmentUsage, ApiError>
-where
-    C: sea_orm::ConnectionTrait,
-{
-    let mut query = issue_attachment::Entity::find()
-        .select_only()
-        .column_as(issue_attachment::Column::Id.count(), "count")
-        .column_as(issue_attachment::Column::SizeBytes.sum(), "bytes");
-    if let Some(repository_id) = repository_id {
-        query = query.filter(issue_attachment::Column::RepositoryId.eq(repository_id));
-    }
-    if let Some(uploader_user_id) = uploader_user_id {
-        query = query.filter(issue_attachment::Column::UploaderUserId.eq(uploader_user_id));
-    }
-    if unbound_only {
-        query = query.filter(issue_attachment::Column::IssueId.is_null());
-    }
-    query
-        .into_model::<AttachmentUsage>()
-        .one(database)
-        .await?
-        .ok_or_else(|| ApiError::internal("attachment usage query returned no row"))
-}
-
-fn ensure_attachment_quota(
-    usage: AttachmentUsage,
-    incoming_bytes: i64,
-    max_count: i64,
-    max_bytes: i64,
-    message: &'static str,
-) -> Result<(), ApiError> {
-    if usage.count.saturating_add(1) > max_count
-        || usage
-            .bytes
-            .unwrap_or_default()
-            .saturating_add(incoming_bytes)
-            > max_bytes
-    {
-        return Err(ApiError::too_many_requests(message));
-    }
-    Ok(())
-}
-
 #[utoipa::path(
     get, path = "/repositories/{namespace}/{name}/issue-attachments/{attachment_id}",
     operation_id = "get_repositories_namespace_name_issue_attachments_attachment_id",
@@ -1344,22 +853,13 @@ pub async fn download_attachment(
     let (repository, _) = state
         .readable_repository(&headers, &jar, &namespace, &name)
         .await?;
-    let attachment = issue_attachment::Entity::find_by_id(attachment_id)
-        .filter(issue_attachment::Column::RepositoryId.eq(repository.id))
-        .one(state.identity().database())
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    let file = fs::File::open(
-        issue_attachment_directory(&state, &repository).join(attachment.id.to_string()),
-    )
-    .await
-    .map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            ApiError::not_found()
-        } else {
-            ApiError::internal(error)
-        }
-    })?;
+    let (attachment, file) = service(&state)
+        .download_attachment(
+            repository.id,
+            &crate::repository::principal(&headers, &jar)?,
+            attachment_id,
+        )
+        .await?;
     let mut response = Response::new(Body::from_stream(ReaderStream::new(file)));
     let inline = matches!(
         attachment.content_type.as_str(),
@@ -1401,7 +901,6 @@ pub async fn download_attachment(
     );
     Ok(response)
 }
-
 #[utoipa::path(
     delete, path = "/repositories/{namespace}/{name}/issue-attachments/{attachment_id}",
     operation_id = "delete_repositories_namespace_name_issue_attachments_attachment_id",
@@ -1424,7 +923,7 @@ pub async fn delete_attachment(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<StatusCode, ApiError> {
-    let (actor, repository) = state
+    let (_, repository) = state
         .authenticated_repository(
             &headers,
             &jar,
@@ -1434,190 +933,15 @@ pub async fn delete_attachment(
             SCOPE_WRITE,
         )
         .await?;
-    let attachment = issue_attachment::Entity::find_by_id(attachment_id)
-        .filter(issue_attachment::Column::RepositoryId.eq(repository.id))
-        .one(state.identity().database())
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    let can_write = state
-        .can_access(&repository, Some(actor.user.id), Permission::Write)
+    service(&state)
+        .delete_attachment(
+            repository.id,
+            &crate::repository::principal(&headers, &jar)?,
+            attachment_id,
+        )
         .await?;
-    if attachment.uploader_user_id != actor.user.id && !can_write {
-        return Err(ApiError::not_found());
-    }
-    let path = issue_attachment_directory(&state, &repository).join(attachment.id.to_string());
-    let trash = path.with_extension(format!("delete-{}", Uuid::new_v4().simple()));
-    let moved = match fs::rename(&path, &trash).await {
-        Ok(()) => true,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => return Err(ApiError::internal(error)),
-    };
-    let transaction = state.identity().database().begin().await?;
-    let persistence = async {
-        issue_attachment::Entity::delete_by_id(attachment.id)
-            .exec(&transaction)
-            .await?;
-        state
-            .identity()
-            .audit_on(
-                &transaction,
-                Some(actor.user.id),
-                "repository.issue.attachment.delete",
-                Some(format!("{namespace}/{name}/{}", attachment.id)),
-            )
-            .await?;
-        transaction.commit().await?;
-        Ok::<(), ApiError>(())
-    }
-    .await;
-    if let Err(error) = persistence {
-        if moved {
-            let _ = fs::rename(&trash, &path).await;
-        }
-        return Err(error);
-    }
-    if moved {
-        let _ = fs::remove_file(trash).await;
-    }
     Ok(StatusCode::NO_CONTENT)
 }
-
-async fn assigned_label_ids(
-    state: &RepositoryState,
-    issue_id: Uuid,
-) -> Result<Vec<Uuid>, ApiError> {
-    Ok(issue_label_assignment::Entity::find()
-        .filter(issue_label_assignment::Column::IssueId.eq(issue_id))
-        .all(state.identity().database())
-        .await?
-        .into_iter()
-        .map(|assignment| assignment.label_id)
-        .collect())
-}
-
-/// Translate one issue update into the GitHub-style `issues` actions it implies.
-async fn emit_issue_update_events(
-    state: &RepositoryState,
-    repository: &repository::Model,
-    actor: &user::Model,
-    previous: &repository_issue::Model,
-    issue: &repository_issue::Model,
-    labels: Option<(&[Uuid], &[Uuid])>,
-) {
-    let mut changes = serde_json::Map::new();
-    if previous.title != issue.title {
-        changes.insert(
-            "title".to_owned(),
-            serde_json::json!({ "from": previous.title }),
-        );
-    }
-    if previous.body != issue.body {
-        changes.insert(
-            "body".to_owned(),
-            serde_json::json!({ "from": previous.body }),
-        );
-    }
-    if !changes.is_empty() {
-        webhook_events::issue(
-            state,
-            repository,
-            actor,
-            issue,
-            IssueAction::Edited,
-            serde_json::json!({ "changes": changes }),
-        )
-        .await;
-    }
-    if previous.state != issue.state {
-        let action = if issue.state == "closed" {
-            IssueAction::Closed
-        } else {
-            IssueAction::Reopened
-        };
-        webhook_events::issue(
-            state,
-            repository,
-            actor,
-            issue,
-            action,
-            serde_json::json!({}),
-        )
-        .await;
-    }
-    if previous.assignee_user_id != issue.assignee_user_id {
-        if let Some(old) = previous.assignee_user_id {
-            emit_assignment(
-                state,
-                repository,
-                actor,
-                issue,
-                IssueAction::Unassigned,
-                old,
-            )
-            .await;
-        }
-        if let Some(new) = issue.assignee_user_id {
-            emit_assignment(state, repository, actor, issue, IssueAction::Assigned, new).await;
-            notifications::issue_assigned(state, repository, actor, issue);
-        }
-    }
-    let Some((before, after)) = labels else {
-        return;
-    };
-    let changed = before
-        .iter()
-        .filter(|id| !after.contains(id))
-        .map(|id| (IssueAction::Unlabeled, *id))
-        .chain(
-            after
-                .iter()
-                .filter(|id| !before.contains(id))
-                .map(|id| (IssueAction::Labeled, *id)),
-        )
-        .collect::<Vec<_>>();
-    for (action, label_id) in changed {
-        let label = match issue_label::Entity::find_by_id(label_id)
-            .one(state.identity().database())
-            .await
-        {
-            Ok(Some(label)) => label,
-            Ok(None) => continue,
-            Err(error) => {
-                tracing::warn!(%error, %label_id, "could not load label for webhook event");
-                continue;
-            }
-        };
-        webhook_events::issue(
-            state,
-            repository,
-            actor,
-            issue,
-            action,
-            serde_json::json!({ "label": webhook_events::label_payload(&label) }),
-        )
-        .await;
-    }
-}
-
-async fn emit_assignment(
-    state: &RepositoryState,
-    repository: &repository::Model,
-    actor: &user::Model,
-    issue: &repository_issue::Model,
-    action: IssueAction,
-    assignee_id: Uuid,
-) {
-    let assignee = user::Entity::find_by_id(assignee_id)
-        .one(state.identity().database())
-        .await
-        .ok()
-        .flatten();
-    let extra = serde_json::json!({
-        "assignee": assignee.as_ref().map(super::webhooks::user_payload),
-    });
-    webhook_events::issue(state, repository, actor, issue, action, extra).await;
-}
-
 async fn issue_context(
     state: &RepositoryState,
     headers: &HeaderMap,
@@ -1632,150 +956,6 @@ async fn issue_context(
         .can_access(&repository, viewer_id, Permission::Write)
         .await?;
     Ok((repository, viewer_id, can_write))
-}
-
-async fn bind_issue_attachments<C>(
-    _state: &RepositoryState,
-    transaction: &C,
-    repository_id: Uuid,
-    issue_id: Uuid,
-    ids: &[Uuid],
-    actor_id: Uuid,
-    can_write: bool,
-) -> Result<(), ApiError>
-where
-    C: sea_orm::ConnectionTrait,
-{
-    let unique_ids = ids.iter().copied().collect::<BTreeSet<_>>();
-    if unique_ids.len() != ids.len() {
-        return Err(ApiError::bad_request(
-            "Issue attachments cannot contain duplicate IDs.",
-        ));
-    }
-    let mut attached = issue_attachment::Entity::find()
-        .filter(issue_attachment::Column::IssueId.eq(issue_id))
-        .count(transaction)
-        .await?;
-    for id in unique_ids {
-        let attachment = issue_attachment::Entity::find_by_id(id)
-            .filter(issue_attachment::Column::RepositoryId.eq(repository_id))
-            .one(transaction)
-            .await?
-            .ok_or_else(|| {
-                ApiError::bad_request("Every attachment must belong to this repository.")
-            })?;
-        if attachment.issue_id.is_some_and(|bound| bound != issue_id)
-            || (attachment.uploader_user_id != actor_id && !can_write)
-        {
-            return Err(ApiError::bad_request(
-                "The attachment cannot be added to this issue.",
-            ));
-        }
-        if attachment.issue_id.is_none() {
-            if attached >= MAX_ATTACHMENTS_PER_ISSUE {
-                return Err(ApiError::bad_request(format!(
-                    "Issues cannot contain more than {MAX_ATTACHMENTS_PER_ISSUE} attachments.",
-                )));
-            }
-            attached = attached.saturating_add(1);
-        }
-        let mut active: issue_attachment::ActiveModel = attachment.into();
-        active.issue_id = Set(Some(issue_id));
-        active.update(transaction).await?;
-    }
-    Ok(())
-}
-
-fn issue_attachment_directory(state: &RepositoryState, repository: &repository::Model) -> PathBuf {
-    state
-        .lfs_repository_path(repository)
-        .join("issue-attachments")
-}
-
-pub(super) async fn cleanup_expired_attachments(state: &RepositoryState) -> Result<(), ApiError> {
-    let cutoff = Utc::now() - UNBOUND_ATTACHMENT_LIFETIME;
-    let attachments = issue_attachment::Entity::find()
-        .filter(issue_attachment::Column::IssueId.is_null())
-        .filter(issue_attachment::Column::CreatedAt.lt(cutoff))
-        .order_by_asc(issue_attachment::Column::CreatedAt)
-        .limit(ATTACHMENT_CLEANUP_BATCH_SIZE)
-        .all(state.identity().database())
-        .await?;
-    for attachment in attachments {
-        let Some(repository) = repository::Entity::find_by_id(attachment.repository_id)
-            .one(state.identity().database())
-            .await?
-        else {
-            continue;
-        };
-        let path = issue_attachment_directory(state, &repository).join(attachment.id.to_string());
-        let trash = path.with_extension(format!("expire-{}", Uuid::new_v4().simple()));
-        let moved = match fs::rename(&path, &trash).await {
-            Ok(()) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => {
-                tracing::warn!(%error, attachment_id = %attachment.id, "could not stage expired issue attachment for deletion");
-                continue;
-            }
-        };
-        let deleted = issue_attachment::Entity::delete_many()
-            .filter(issue_attachment::Column::Id.eq(attachment.id))
-            .filter(issue_attachment::Column::IssueId.is_null())
-            .filter(issue_attachment::Column::CreatedAt.lt(cutoff))
-            .exec(state.identity().database())
-            .await;
-        match deleted {
-            Ok(result) if result.rows_affected == 1 => {
-                if moved {
-                    let _ = fs::remove_file(&trash).await;
-                }
-            }
-            Ok(_) => {
-                if moved {
-                    let _ = fs::rename(&trash, &path).await;
-                }
-            }
-            Err(error) => {
-                if moved {
-                    let _ = fs::rename(&trash, &path).await;
-                }
-                return Err(error.into());
-            }
-        }
-    }
-    Ok(())
-}
-fn attachment_response(
-    repository: &repository::Model,
-    attachment: issue_attachment::Model,
-) -> IssueAttachmentResponse {
-    IssueAttachmentResponse {
-        id: attachment.id,
-        url: format!(
-            "/api/v1/repositories/{}/{}/issue-attachments/{}",
-            repository.namespace, repository.name, attachment.id
-        ),
-        name: attachment.name,
-        content_type: attachment.content_type,
-        size_bytes: attachment.size_bytes,
-        created_at: attachment.created_at,
-    }
-}
-
-fn validate_attachment_name(value: &str) -> Result<String, ApiError> {
-    let value = value.trim();
-    if value.is_empty()
-        || value.len() > 255
-        || value == "."
-        || value == ".."
-        || value.contains(['/', '\\'])
-        || value.chars().any(char::is_control)
-    {
-        return Err(ApiError::bad_request(
-            "The attachment file name is not valid.",
-        ));
-    }
-    Ok(value.to_owned())
 }
 
 fn ascii_download_name(value: &str) -> String {
@@ -1796,480 +976,11 @@ fn ascii_download_name(value: &str) -> String {
     }
 }
 
-async fn find_issue(
-    state: &RepositoryState,
-    repository_id: Uuid,
-    number: i64,
-) -> Result<repository_issue::Model, ApiError> {
-    repository_issue::Entity::find()
-        .filter(repository_issue::Column::RepositoryId.eq(repository_id))
-        .filter(repository_issue::Column::Number.eq(number))
-        .one(state.identity().database())
-        .await?
-        .ok_or_else(ApiError::not_found)
-}
-
-async fn find_comment(
-    state: &RepositoryState,
-    issue_id: Uuid,
-    id: Uuid,
-) -> Result<issue_comment::Model, ApiError> {
-    issue_comment::Entity::find_by_id(id)
-        .filter(issue_comment::Column::IssueId.eq(issue_id))
-        .one(state.identity().database())
-        .await?
-        .ok_or_else(ApiError::not_found)
-}
-
-async fn find_label(
-    state: &RepositoryState,
-    repository_id: Uuid,
-    id: Uuid,
-) -> Result<issue_label::Model, ApiError> {
-    issue_label::Entity::find_by_id(id)
-        .filter(issue_label::Column::RepositoryId.eq(repository_id))
-        .one(state.identity().database())
-        .await?
-        .ok_or_else(ApiError::not_found)
-}
-
-async fn issue_responses(
-    state: &RepositoryState,
-    issues: Vec<repository_issue::Model>,
-    viewer_id: Option<Uuid>,
-    can_write: bool,
-) -> Result<Vec<IssueResponse>, ApiError> {
-    if issues.is_empty() {
-        return Ok(Vec::new());
-    }
-    let database = state.identity().database();
-    let issue_ids = issues.iter().map(|issue| issue.id).collect::<Vec<_>>();
-    // One query per related table for the whole page, however long it is.
-    let user_ids = issues
-        .iter()
-        .flat_map(|issue| [Some(issue.author_user_id), issue.assignee_user_id])
-        .flatten()
-        .collect();
-    let users = issue_users(state, user_ids).await?;
-    let mut assignments = Vec::new();
-    let mut comment_counts = HashMap::with_capacity(issues.len());
-    for ids in issue_ids.chunks(IN_QUERY_CHUNK) {
-        assignments.extend(
-            issue_label_assignment::Entity::find()
-                .filter(issue_label_assignment::Column::IssueId.is_in(ids.iter().copied()))
-                .all(database)
-                .await?,
-        );
-        comment_counts.extend(
-            issue_comment::Entity::find()
-                .select_only()
-                .column(issue_comment::Column::IssueId)
-                .column_as(issue_comment::Column::Id.count(), "comments")
-                .filter(issue_comment::Column::IssueId.is_in(ids.iter().copied()))
-                .group_by(issue_comment::Column::IssueId)
-                .into_tuple::<(Uuid, i64)>()
-                .all(database)
-                .await?,
-        );
-    }
-    let label_ids = assignments
-        .iter()
-        .map(|assignment| assignment.label_id)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let mut labels = HashMap::with_capacity(label_ids.len());
-    for ids in label_ids.chunks(IN_QUERY_CHUNK) {
-        labels.extend(
-            issue_label::Entity::find()
-                .filter(issue_label::Column::Id.is_in(ids.iter().copied()))
-                .all(database)
-                .await?
-                .into_iter()
-                .map(|label| (label.id, label_response(label))),
-        );
-    }
-    let mut issue_labels = HashMap::<Uuid, Vec<IssueLabelResponse>>::new();
-    for assignment in assignments {
-        if let Some(label) = labels.get(&assignment.label_id) {
-            issue_labels
-                .entry(assignment.issue_id)
-                .or_default()
-                .push(label.clone());
-        }
-    }
-
-    issues
-        .into_iter()
-        .map(|issue| {
-            let author = users
-                .get(&issue.author_user_id)
-                .cloned()
-                .ok_or_else(ApiError::not_found)?;
-            let assignee = issue
-                .assignee_user_id
-                .map(|id| users.get(&id).cloned().ok_or_else(ApiError::not_found))
-                .transpose()?;
-            let mut labels = issue_labels.remove(&issue.id).unwrap_or_default();
-            labels.sort_unstable_by(|left, right| left.name.cmp(&right.name));
-            let comment_count = comment_counts
-                .get(&issue.id)
-                .map_or(0, |count| u64::try_from(*count).unwrap_or_default());
-            Ok(build_issue_response(
-                issue,
-                author,
-                assignee,
-                labels,
-                comment_count,
-                viewer_id,
-                can_write,
-            ))
-        })
-        .collect()
-}
-
-async fn issue_response(
-    state: &RepositoryState,
-    issue: repository_issue::Model,
-    viewer_id: Option<Uuid>,
-    can_write: bool,
-) -> Result<IssueResponse, ApiError> {
-    issue_responses(state, vec![issue], viewer_id, can_write)
-        .await?
-        .pop()
-        .ok_or_else(|| ApiError::internal("issue response was not built"))
-}
-
-fn build_issue_response(
-    issue: repository_issue::Model,
-    author: IssueUserResponse,
-    assignee: Option<IssueUserResponse>,
-    labels: Vec<IssueLabelResponse>,
-    comment_count: u64,
-    viewer_id: Option<Uuid>,
-    can_write: bool,
-) -> IssueResponse {
-    let external_author = issue
-        .external_author
-        .as_ref()
-        .zip(issue.external_author_url.as_ref())
-        .map(|(username, profile_url)| ExternalIssueAuthorResponse {
-            username: username.clone(),
-            profile_url: profile_url.clone(),
-        });
-    let imported = issue.external_source.is_some();
-    IssueResponse {
-        id: issue.id,
-        number: issue.number,
-        title: issue.title,
-        rendered_body: render_markdown(&issue.body),
-        body: issue.body,
-        state: issue.state,
-        author,
-        assignee,
-        labels,
-        comment_count,
-        created_at: issue.created_at,
-        updated_at: issue.updated_at,
-        closed_at: issue.closed_at,
-        external_url: issue.external_url,
-        external_author,
-        can_edit: !imported && (viewer_id == Some(issue.author_user_id) || can_write),
-        can_manage: !imported && can_write,
-    }
-}
-
-async fn comment_responses(
-    state: &RepositoryState,
-    comments: Vec<issue_comment::Model>,
-    viewer_id: Option<Uuid>,
-    can_write: bool,
-) -> Result<Vec<IssueCommentResponse>, ApiError> {
-    let user_ids = comments
-        .iter()
-        .map(|comment| comment.author_user_id)
-        .collect();
-    let users = issue_users(state, user_ids).await?;
-    comments
-        .into_iter()
-        .map(|comment| {
-            let author = users
-                .get(&comment.author_user_id)
-                .cloned()
-                .ok_or_else(ApiError::not_found)?;
-            Ok(build_comment_response(
-                comment, author, viewer_id, can_write,
-            ))
-        })
-        .collect()
-}
-
-async fn comment_response(
-    state: &RepositoryState,
-    comment: issue_comment::Model,
-    viewer_id: Option<Uuid>,
-    can_write: bool,
-) -> Result<IssueCommentResponse, ApiError> {
-    comment_responses(state, vec![comment], viewer_id, can_write)
-        .await?
-        .pop()
-        .ok_or_else(|| ApiError::internal("comment response was not built"))
-}
-
-fn build_comment_response(
-    comment: issue_comment::Model,
-    author: IssueUserResponse,
-    viewer_id: Option<Uuid>,
-    can_write: bool,
-) -> IssueCommentResponse {
-    let external_author = comment
-        .external_author
-        .as_ref()
-        .zip(comment.external_author_url.as_ref())
-        .map(|(username, profile_url)| ExternalIssueAuthorResponse {
-            username: username.clone(),
-            profile_url: profile_url.clone(),
-        });
-    let imported = comment.external_source.is_some();
-    IssueCommentResponse {
-        id: comment.id,
-        rendered_body: render_markdown(&comment.body),
-        body: comment.body,
-        author,
-        created_at: comment.created_at,
-        updated_at: comment.updated_at,
-        external_url: comment.external_url,
-        external_author,
-        can_edit: !imported && (viewer_id == Some(comment.author_user_id) || can_write),
-    }
-}
-
-/// The accounts behind `ids`, loaded together rather than one query each.
-async fn issue_users(
-    state: &RepositoryState,
-    ids: BTreeSet<Uuid>,
-) -> Result<HashMap<Uuid, IssueUserResponse>, ApiError> {
-    let ids = ids.into_iter().collect::<Vec<_>>();
-    let mut users = HashMap::with_capacity(ids.len());
-    for ids in ids.chunks(IN_QUERY_CHUNK) {
-        users.extend(
-            user::Entity::find()
-                .filter(user::Column::Id.is_in(ids.iter().copied()))
-                .all(state.identity().database())
-                .await?
-                .into_iter()
-                .map(|account| {
-                    (
-                        account.id,
-                        IssueUserResponse {
-                            id: account.id,
-                            username: account.username,
-                            avatar_updated_at: account.avatar_updated_at,
-                        },
-                    )
-                }),
-        );
-    }
-    Ok(users)
-}
-
-async fn assignee_id(
-    state: &RepositoryState,
-    repository: &repository::Model,
-    username: &str,
-) -> Result<Option<Uuid>, ApiError> {
-    let username = username.trim();
-    if username.is_empty() {
-        return Ok(None);
-    }
-    let account = user::Entity::find()
-        .filter(user::Column::Username.eq(username))
-        .one(state.identity().database())
-        .await?
-        .ok_or_else(|| ApiError::bad_request("The selected assignee does not exist."))?;
-    if !state
-        .can_access(repository, Some(account.id), Permission::Write)
-        .await?
-    {
-        return Err(ApiError::bad_request(
-            "The assignee must have write access to this repository.",
-        ));
-    }
-    Ok(Some(account.id))
-}
-
-async fn validate_label_ids(
-    state: &RepositoryState,
-    repository_id: Uuid,
-    ids: &[Uuid],
-) -> Result<(), ApiError> {
-    for id in ids {
-        find_label(state, repository_id, *id)
-            .await
-            .map_err(|_| ApiError::bad_request("Every label must belong to this repository."))?;
-    }
-    Ok(())
-}
-
-async fn replace_issue_labels_on<C>(
-    database: &C,
-    issue_id: Uuid,
-    label_ids: &[Uuid],
-) -> Result<(), ApiError>
-where
-    C: sea_orm::ConnectionTrait,
-{
-    issue_label_assignment::Entity::delete_many()
-        .filter(issue_label_assignment::Column::IssueId.eq(issue_id))
-        .exec(database)
-        .await?;
-    for label_id in label_ids {
-        issue_label_assignment::ActiveModel {
-            issue_id: Set(issue_id),
-            label_id: Set(*label_id),
-        }
-        .insert(database)
-        .await?;
-    }
-    Ok(())
-}
-
-fn label_response(label: issue_label::Model) -> IssueLabelResponse {
-    IssueLabelResponse {
-        id: label.id,
-        name: label.name,
-        color: label.color,
-        description: label.description,
-        external_url: label.external_url,
-    }
-}
-
-// Consumed by the repository import metadata worker.
-pub(super) struct ImportedLabel {
-    pub(super) external_source: String,
-    pub(super) external_instance_url: String,
-    pub(super) external_id: String,
-    pub(super) external_url: Option<String>,
-    pub(super) name: String,
-    pub(super) color: String,
-    pub(super) description: String,
-    pub(super) external_updated_at: Option<chrono::DateTime<Utc>>,
-}
-
-// Consumed by the repository import metadata worker.
-pub(super) async fn upsert_imported_label(
-    state: &super::RepositoryState,
-    repository_id: Uuid,
-    label: ImportedLabel,
-) -> Result<(), crate::identity::ApiError> {
-    let database = state.identity().database();
-    if let Some(current) = issue_label::Entity::find()
-        .filter(issue_label::Column::RepositoryId.eq(repository_id))
-        .filter(issue_label::Column::ExternalSource.eq(&label.external_source))
-        .filter(issue_label::Column::ExternalInstanceUrl.eq(&label.external_instance_url))
-        .filter(issue_label::Column::ExternalId.eq(&label.external_id))
-        .one(database)
-        .await?
-    {
-        let mut active: issue_label::ActiveModel = current.into();
-        active.name = Set(label.name);
-        active.color = Set(label.color);
-        active.description = Set(label.description);
-        active.external_url = Set(label.external_url);
-        active.external_updated_at = Set(label.external_updated_at);
-        active.update(database).await?;
-    } else {
-        issue_label::ActiveModel {
-            id: Set(Uuid::new_v4()),
-            repository_id: Set(repository_id),
-            name: Set(label.name),
-            color: Set(label.color),
-            description: Set(label.description),
-            external_source: Set(Some(label.external_source)),
-            external_instance_url: Set(Some(label.external_instance_url)),
-            external_id: Set(Some(label.external_id)),
-            external_url: Set(label.external_url),
-            external_updated_at: Set(label.external_updated_at),
-            created_at: Set(Utc::now()),
-        }
-        .insert(database)
-        .await?;
-    }
-    Ok(())
-}
-
-fn validate_issue_title(value: &str) -> Result<String, ApiError> {
-    let value = value.trim();
-    if value.is_empty() || value.len() > MAX_ISSUE_TITLE_LENGTH {
-        return Err(ApiError::bad_request(
-            "Issue titles must be between 1 and 255 characters.",
-        ));
-    }
-    Ok(value.to_owned())
-}
-
-fn validate_issue_body(value: String) -> Result<String, ApiError> {
-    if value.len() > MAX_ISSUE_BODY_LENGTH {
-        return Err(ApiError::bad_request(
-            "Issue descriptions must be at most 1,000,000 characters.",
-        ));
-    }
-    Ok(value)
-}
-
-fn validate_comment_body(value: String) -> Result<String, ApiError> {
-    let value = value.trim();
-    if value.is_empty() || value.len() > MAX_ISSUE_BODY_LENGTH {
-        return Err(ApiError::bad_request(
-            "Comments must be between 1 and 1,000,000 characters.",
-        ));
-    }
-    Ok(value.to_owned())
-}
-
-fn validate_issue_state(value: &str) -> Result<(), ApiError> {
-    if matches!(value, "open" | "closed") {
-        Ok(())
-    } else {
-        Err(ApiError::bad_request("Issue state must be open or closed."))
-    }
-}
-
-fn validate_label_name(value: &str) -> Result<String, ApiError> {
-    let value = value.trim();
-    if value.is_empty() || value.len() > MAX_LABEL_NAME_LENGTH {
-        return Err(ApiError::bad_request(
-            "Label names must be between 1 and 64 characters.",
-        ));
-    }
-    Ok(value.to_owned())
-}
-
-fn validate_label_color(value: &str) -> Result<String, ApiError> {
-    let value = value.trim().trim_start_matches('#').to_ascii_lowercase();
-    if value.len() != 6 || !value.chars().all(|character| character.is_ascii_hexdigit()) {
-        return Err(ApiError::bad_request(
-            "Label colors must be six hexadecimal digits.",
-        ));
-    }
-    Ok(value)
-}
-
-fn validate_label_description(value: String) -> Result<String, ApiError> {
-    let value = value.trim();
-    if value.len() > 255 {
-        return Err(ApiError::bad_request(
-            "Label descriptions must be at most 255 characters.",
-        ));
-    }
-    Ok(value.to_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use axum::{
         extract::{Path as AxumPath, Query, State},
-        http::{HeaderMap, StatusCode},
+        http::HeaderMap,
         response::IntoResponse as _,
     };
     use axum_extra::extract::cookie::CookieJar;
@@ -2278,7 +989,7 @@ mod tests {
     use serde_json::Value;
     use uuid::Uuid;
 
-    use super::{AttachmentUsage, ListIssuesQuery, ensure_attachment_quota, list_issues};
+    use super::{ListIssuesQuery, list_issues};
     use crate::{
         entity::{issue_comment, issue_label, issue_label_assignment, repository_issue},
         repository::resources::test_support::{TestInstance, instance},
@@ -2474,40 +1185,283 @@ mod tests {
         assert_eq!(plain["comment_count"], 0);
         assert_eq!(plain["labels"], Value::Array(Vec::new()));
     }
+}
 
-    #[test]
-    fn attachment_quota_accepts_the_exact_boundary() {
-        let result = ensure_attachment_quota(
-            AttachmentUsage {
-                count: 2,
-                bytes: Some(90),
-            },
-            10,
-            3,
-            100,
-            "quota",
-        );
-
-        assert!(result.is_ok(), "{result:?}");
+fn service(state: &RepositoryState) -> gitadel_repositories::issues::IssueService<'_> {
+    gitadel_repositories::issues::IssueService::new(
+        state.identity().database(),
+        state.lfs_root.as_ref(),
+        std::sync::Arc::new(LegacyIssueEffects(state.clone())),
+        gitadel_core::audit::AuditContext {
+            remote_address: crate::identity::remote_address(),
+        },
+    )
+}
+struct LegacyIssueEffects(RepositoryState);
+#[async_trait::async_trait]
+impl gitadel_repositories::issue_effects::IssueEffects for LegacyIssueEffects {
+    async fn issue(
+        &self,
+        repository: &repository::Model,
+        actor: &user::Model,
+        issue: &repository_issue::Model,
+        action: gitadel_repositories::issue_effects::IssueAction,
+        extra: serde_json::Value,
+    ) {
+        webhook_events::issue(&self.0, repository, actor, issue, action, extra).await;
     }
-
-    #[test]
-    fn attachment_quota_rejects_an_excess_object() {
-        let error = ensure_attachment_quota(
-            AttachmentUsage {
-                count: 3,
-                bytes: Some(90),
-            },
-            1,
-            3,
-            100,
-            "quota",
+    async fn comment(
+        &self,
+        repository: &repository::Model,
+        actor: &user::Model,
+        issue: &repository_issue::Model,
+        comment: &issue_comment::Model,
+        action: gitadel_repositories::issue_effects::ChangeAction,
+        previous_body: Option<&str>,
+    ) {
+        webhook_events::issue_comment(
+            &self.0,
+            repository,
+            actor,
+            issue,
+            comment,
+            action,
+            previous_body,
         )
-        .expect_err("reject attachment count above quota");
+        .await;
+    }
+    async fn prepare_deleted(
+        &self,
+        repository: &repository::Model,
+        actor: &user::Model,
+        issue: &repository_issue::Model,
+    ) -> Option<serde_json::Value> {
+        webhook_events::prepare_issue_deleted(&self.0, repository, actor, issue).await
+    }
+    async fn send_deleted(&self, repository_id: Uuid, payload: Option<serde_json::Value>) {
+        webhook_events::send_prepared(&self.0, repository_id, "issues", payload).await;
+    }
+    fn opened(
+        &self,
+        repository: &repository::Model,
+        actor: &user::Model,
+        issue: &repository_issue::Model,
+    ) {
+        notifications::issue_opened(&self.0, repository, actor, issue);
+    }
+    fn assigned(
+        &self,
+        repository: &repository::Model,
+        actor: &user::Model,
+        issue: &repository_issue::Model,
+    ) {
+        notifications::issue_assigned(&self.0, repository, actor, issue);
+    }
+    fn commented(
+        &self,
+        repository: &repository::Model,
+        actor: &user::Model,
+        issue: &repository_issue::Model,
+        comment: &issue_comment::Model,
+    ) {
+        notifications::issue_commented(&self.0, repository, actor, issue, comment);
+    }
+}
+pub(super) async fn cleanup_expired_attachments(state: &RepositoryState) -> Result<(), ApiError> {
+    Ok(gitadel_repositories::issues::cleanup_expired_attachments(&service(state)).await?)
+}
 
-        assert_eq!(
-            error.into_response().status(),
-            StatusCode::TOO_MANY_REQUESTS
-        );
+impl From<gitadel_repositories::issues::IssueUserResponse> for IssueUserResponse {
+    fn from(value: gitadel_repositories::issues::IssueUserResponse) -> Self {
+        Self {
+            id: value.id,
+            username: value.username,
+            avatar_updated_at: value.avatar_updated_at,
+        }
+    }
+}
+
+impl From<gitadel_repositories::issues::IssueLabelResponse> for IssueLabelResponse {
+    fn from(value: gitadel_repositories::issues::IssueLabelResponse) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            color: value.color,
+            description: value.description,
+            external_url: value.external_url,
+        }
+    }
+}
+
+impl From<gitadel_repositories::issues::ExternalIssueAuthorResponse>
+    for ExternalIssueAuthorResponse
+{
+    fn from(value: gitadel_repositories::issues::ExternalIssueAuthorResponse) -> Self {
+        Self {
+            username: value.username,
+            profile_url: value.profile_url,
+        }
+    }
+}
+
+impl From<gitadel_repositories::issues::IssueResponse> for IssueResponse {
+    fn from(value: gitadel_repositories::issues::IssueResponse) -> Self {
+        Self {
+            id: value.id,
+            number: value.number,
+            title: value.title,
+            body: value.body,
+            rendered_body: value.rendered_body,
+            state: value.state,
+            author: value.author.into(),
+            assignee: value.assignee.map(Into::into),
+            labels: value.labels.into_iter().map(Into::into).collect(),
+            comment_count: value.comment_count,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+            closed_at: value.closed_at,
+            external_url: value.external_url,
+            external_author: value.external_author.map(Into::into),
+            can_edit: value.can_edit,
+            can_manage: value.can_manage,
+        }
+    }
+}
+
+impl From<gitadel_repositories::issues::IssueAttachmentResponse> for IssueAttachmentResponse {
+    fn from(value: gitadel_repositories::issues::IssueAttachmentResponse) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            content_type: value.content_type,
+            size_bytes: value.size_bytes,
+            created_at: value.created_at,
+            url: value.url,
+        }
+    }
+}
+
+impl From<gitadel_repositories::issues::RenderedMarkdownResponse> for RenderedMarkdownResponse {
+    fn from(value: gitadel_repositories::issues::RenderedMarkdownResponse) -> Self {
+        Self {
+            rendered_html: value.rendered_html,
+        }
+    }
+}
+
+impl From<gitadel_repositories::issues::IssueCommentResponse> for IssueCommentResponse {
+    fn from(value: gitadel_repositories::issues::IssueCommentResponse) -> Self {
+        Self {
+            id: value.id,
+            body: value.body,
+            rendered_body: value.rendered_body,
+            author: value.author.into(),
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+            external_url: value.external_url,
+            external_author: value.external_author.map(Into::into),
+            can_edit: value.can_edit,
+        }
+    }
+}
+
+impl From<ListIssuesQuery> for gitadel_repositories::issues::ListIssuesQuery {
+    fn from(value: ListIssuesQuery) -> Self {
+        Self {
+            state: value.state,
+            q: value.q,
+            page: value.page,
+            per_page: value.per_page,
+        }
+    }
+}
+
+impl From<CreateIssueRequest> for gitadel_repositories::issues::CreateIssueRequest {
+    fn from(value: CreateIssueRequest) -> Self {
+        Self {
+            title: value.title,
+            body: value.body,
+            label_ids: value.label_ids,
+            attachment_ids: value.attachment_ids,
+            assignee: value.assignee,
+        }
+    }
+}
+
+impl From<UpdateIssueRequest> for gitadel_repositories::issues::UpdateIssueRequest {
+    fn from(value: UpdateIssueRequest) -> Self {
+        Self {
+            title: value.title,
+            body: value.body,
+            state: value.state,
+            assignee: value.assignee,
+            label_ids: value.label_ids,
+            attachment_ids: value.attachment_ids,
+        }
+    }
+}
+
+impl From<CommentRequest> for gitadel_repositories::issues::CommentRequest {
+    fn from(value: CommentRequest) -> Self {
+        Self { body: value.body }
+    }
+}
+
+impl From<UploadAttachmentQuery> for gitadel_repositories::issues::UploadAttachmentQuery {
+    fn from(value: UploadAttachmentQuery) -> Self {
+        Self { name: value.name }
+    }
+}
+
+impl From<PreviewMarkdownRequest> for gitadel_repositories::issues::PreviewMarkdownRequest {
+    fn from(value: PreviewMarkdownRequest) -> Self {
+        Self {
+            markdown: value.markdown,
+        }
+    }
+}
+
+impl From<CreateLabelRequest> for gitadel_repositories::issues::CreateLabelRequest {
+    fn from(value: CreateLabelRequest) -> Self {
+        Self {
+            name: value.name,
+            color: value.color,
+            description: value.description,
+        }
+    }
+}
+
+impl From<UpdateLabelRequest> for gitadel_repositories::issues::UpdateLabelRequest {
+    fn from(value: UpdateLabelRequest) -> Self {
+        Self {
+            name: value.name,
+            color: value.color,
+            description: value.description,
+        }
+    }
+}
+
+pub(super) use gitadel_repositories::issues::ImportedLabel;
+
+// Consumed by the repository import metadata worker.
+pub(super) async fn upsert_imported_label(
+    state: &RepositoryState,
+    repository_id: Uuid,
+    label: ImportedLabel,
+) -> Result<(), ApiError> {
+    Ok(
+        gitadel_repositories::issues::upsert_imported_label(&service(state), repository_id, label)
+            .await?,
+    )
+}
+
+impl From<gitadel_repositories::issues::IssueError> for ApiError {
+    fn from(error: gitadel_repositories::issues::IssueError) -> Self {
+        match error {
+            gitadel_repositories::issues::IssueError::Identity(error) => error.into(),
+            gitadel_repositories::issues::IssueError::Quota(message) => {
+                ApiError::too_many_requests(message)
+            }
+        }
     }
 }

@@ -48,14 +48,14 @@ const MAX_CONCURRENT_SERVICES: usize = 64;
 const SERVICE_SLOT_WAIT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
-pub(crate) struct GitHttpState {
+pub struct GitHttpState {
     repository: RepositoryState,
     actions: ActionsState,
     service_slots: Arc<Semaphore>,
 }
 
 impl GitHttpState {
-    pub(crate) fn new(repository: RepositoryState, actions: ActionsState) -> Self {
+    pub fn new(repository: RepositoryState, actions: ActionsState) -> Self {
         Self {
             repository,
             actions,

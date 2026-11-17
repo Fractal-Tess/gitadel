@@ -286,6 +286,28 @@ impl RegistryAuth {
         Ok(actor)
     }
 
+    pub(crate) async fn catalog_principal(
+        &self,
+        token: &str,
+    ) -> Result<gitadel_identity::permissions::RepositoryPrincipal, RegistryError> {
+        let granted = self.lookup(token).await?;
+        if !granted.scopes.iter().any(|scope| {
+            scope.repository.as_ref() == "_catalog" && scope.actions.contains(Actions::PULL)
+        }) {
+            return Err(RegistryError::unauthorized(
+                "The token does not grant this scope.",
+            ));
+        }
+        Ok(match &granted.credential {
+            Credential::Anonymous => {
+                gitadel_identity::permissions::RepositoryPrincipal::anonymous()
+            }
+            Credential::Gitadel(source) => {
+                gitadel_identity::permissions::RepositoryPrincipal::token(source.to_string())
+            }
+        })
+    }
+
     pub(crate) async fn verify_root(
         &self,
         state: &RepositoryState,

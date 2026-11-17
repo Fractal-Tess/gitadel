@@ -20,7 +20,7 @@ use tokio::{fs, task, time};
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const SCHEDULER_RETRY: Duration = Duration::from_secs(60);
 
-pub(crate) async fn serve_integrity_scheduler(state: RepositoryState) -> Result<()> {
+pub async fn serve_integrity_scheduler(state: RepositoryState) -> Result<()> {
     let mut settings_changed = state.identity().subscribe_integrity_settings();
 
     loop {

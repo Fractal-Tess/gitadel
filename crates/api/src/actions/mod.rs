@@ -3,7 +3,6 @@ pub(crate) mod artifacts;
 pub(crate) mod dispatch;
 pub(crate) mod events;
 pub(crate) mod logs;
-pub(crate) mod matrix;
 pub(crate) mod protocol;
 pub(crate) mod rerun;
 pub(crate) mod runners;
@@ -15,43 +14,55 @@ pub(crate) mod test_support;
 pub(crate) mod tokens;
 pub(crate) mod workflow;
 
-use std::{os::unix::fs::PermissionsExt, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use axum::Router;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    config::ActionsSettings, entity::action_runner, filesystem::create_private_directory_async,
-    repository::RepositoryState,
-};
+use crate::{config::ActionsSettings, repository::RepositoryState};
 
 pub(crate) use gitadel_actions::REQUIRED_RUNNER_VERSION;
 
 #[derive(Clone)]
-pub(crate) struct ActionsState {
+pub struct ActionsState {
     repository: RepositoryState,
-    settings: Arc<ActionsSettings>,
-    secret_cipher: Arc<secrets::SecretCipher>,
+    service: Arc<gitadel_actions::ActionsService>,
     shutdown: CancellationToken,
 }
 
 impl ActionsState {
-    pub(crate) fn new(
+    pub fn new(
         repository: RepositoryState,
         settings: ActionsSettings,
         secret_cipher: secrets::SecretCipher,
     ) -> Self {
+        let service = gitadel_actions::ActionsService::new(
+            repository.identity().database().clone(),
+            gitadel_repositories::content::RepositoryContent::new(
+                repository.repository_root().to_path_buf(),
+            ),
+            settings,
+            secret_cipher,
+            repository.actions_artifact_root().to_path_buf(),
+            Arc::new(LegacyRunEffects(repository.clone())),
+        );
+        Self::from_service(repository, service)
+    }
+    pub fn from_service(
+        repository: RepositoryState,
+        service: gitadel_actions::ActionsService,
+    ) -> Self {
         Self {
             repository,
-            settings: Arc::new(settings),
-            secret_cipher: Arc::new(secret_cipher),
+            service: Arc::new(service),
             shutdown: CancellationToken::new(),
         }
     }
-
+    pub fn service(&self) -> &gitadel_actions::ActionsService {
+        &self.service
+    }
     pub(crate) fn secret_cipher(&self) -> &secrets::SecretCipher {
-        &self.secret_cipher
+        self.service.secret_cipher()
     }
 
     pub(crate) fn repository(&self) -> &RepositoryState {
@@ -59,7 +70,7 @@ impl ActionsState {
     }
 
     pub(crate) fn settings(&self) -> &ActionsSettings {
-        &self.settings
+        self.service.settings()
     }
 
     /// Origin used for every URL handed to jobs, without a trailing slash.
@@ -67,7 +78,7 @@ impl ActionsState {
     /// Runners and job containers often reach Gitadel over a private network,
     /// so `actions.internal_url` takes precedence over the public URL.
     pub(crate) fn job_origin(&self) -> String {
-        self.settings
+        self.settings()
             .internal_url
             .as_deref()
             .unwrap_or_else(|| self.repository.public_url().as_str())
@@ -76,7 +87,7 @@ impl ActionsState {
     }
 
     pub(crate) fn protocol_router(&self) -> Router {
-        protocol::router(self.settings.max_log_request_bytes).with_state(self.clone())
+        protocol::router(self.settings().max_log_request_bytes).with_state(self.clone())
     }
 
     pub(crate) fn artifact_router(&self) -> Router {
@@ -87,7 +98,7 @@ impl ActionsState {
         contract_router().with_state(self.clone()).into()
     }
 
-    pub(crate) fn cancel(&self) {
+    pub fn cancel(&self) {
         self.shutdown.cancel();
     }
 }
@@ -98,48 +109,14 @@ pub(crate) fn contract_router() -> utoipa_axum::router::OpenApiRouter<ActionsSta
         .merge(dispatch::router())
 }
 
-pub(crate) async fn bootstrap_system_runner(state: &ActionsState) -> anyhow::Result<()> {
-    let Some(settings) = state.settings.system_runner.as_ref() else {
-        return Ok(());
-    };
-    let name = runners::validate_registration(&settings.name, &settings.labels)
-        .map_err(anyhow::Error::msg)?;
-    let database = state.repository.identity().database();
-    let registered = action_runner::Entity::find()
-        .filter(action_runner::Column::Namespace.is_null())
-        .filter(action_runner::Column::Name.eq(&name))
-        .filter(action_runner::Column::DisabledAt.is_null())
-        .filter(action_runner::Column::DeletedAt.is_null())
-        .one(database)
-        .await?
-        .is_some();
-    if registered {
-        if tokio::fs::try_exists(&settings.registration_token_file).await? {
-            tokio::fs::remove_file(&settings.registration_token_file).await?;
-        }
-        return Ok(());
-    }
-
-    let raw =
-        tokens::issue_registration(database, None, None, name, settings.labels.clone()).await?;
-    let parent = settings
-        .registration_token_file
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("system runner token file requires a parent directory"))?;
-    create_private_directory_async(parent).await?;
-    tokio::fs::write(&settings.registration_token_file, raw).await?;
-    tokio::fs::set_permissions(
-        &settings.registration_token_file,
-        std::fs::Permissions::from_mode(0o600),
-    )
-    .await?;
-    Ok(())
+pub async fn bootstrap_system_runner(state: &ActionsState) -> anyhow::Result<()> {
+    state.service().bootstrap_system_runner().await
 }
 
 /// Scheduler ticks between full schedule scans (15 s x 20 = 5 minutes).
 const SCHEDULE_SCAN_TICKS: u32 = 20;
 
-pub(crate) async fn serve_actions_scheduler(state: ActionsState) -> anyhow::Result<()> {
+pub async fn serve_actions_scheduler(state: ActionsState) -> anyhow::Result<()> {
     let mut interval = tokio::time::interval(Duration::from_secs(15));
     let mut ticks = 0u32;
     loop {
@@ -192,5 +169,18 @@ pub(crate) mod proto {
             env!("OUT_DIR"),
             "/github.actions.results.api.v1.serde.rs"
         ));
+    }
+}
+
+struct LegacyRunEffects(RepositoryState);
+impl gitadel_actions::RunEffects for LegacyRunEffects {
+    fn requested(&self, id: uuid::Uuid) {
+        events::spawn_run_requested(&self.0, id);
+    }
+    fn completed(&self, id: uuid::Uuid) {
+        events::spawn_run_completed(&self.0, id);
+    }
+    fn requested_and_completed(&self, id: uuid::Uuid) {
+        events::spawn_run_requested_and_completed(&self.0, id);
     }
 }

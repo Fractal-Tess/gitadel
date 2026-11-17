@@ -7,7 +7,8 @@ use axum::{
     response::{IntoResponse, Response},
     routing::any,
 };
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, DbErr, Statement};
+#[cfg(test)]
+use sea_orm::DatabaseConnection;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
@@ -582,7 +583,10 @@ async fn upload(
             }
             check_blob_body(headers)?;
             let id = store.start_upload(owner).await?;
-            let offset = match store.append_upload(id, owner, body, None).await {
+            let offset = match store
+                .append_upload(id, owner, body.into_data_stream(), None)
+                .await
+            {
                 Ok(offset) => offset,
                 Err(error) => {
                     let _ = store.cancel_upload(id, owner).await;
@@ -611,7 +615,10 @@ async fn upload(
         (&Method::PATCH, Some(id)) => {
             check_blob_body(headers)?;
             let range = upload_range(headers)?;
-            match store.append_upload(id, owner, body, range).await {
+            match store
+                .append_upload(id, owner, body.into_data_stream(), range)
+                .await
+            {
                 Ok(offset) => upload_response(StatusCode::ACCEPTED, id, offset, image),
                 Err(StoreError::RangeInvalid) => upload_range_error(&store, id, owner, image).await,
                 Err(error) => Err(error.into()),
@@ -623,7 +630,10 @@ async fn upload(
             validate_digest(digest)?;
             check_blob_body(headers)?;
             let range = upload_range(headers)?;
-            if let Err(error) = store.append_upload(id, owner, body, range).await {
+            if let Err(error) = store
+                .append_upload(id, owner, body.into_data_stream(), range)
+                .await
+            {
                 return match error {
                     StoreError::RangeInvalid => upload_range_error(&store, id, owner, image).await,
                     other => Err(other.into()),
@@ -825,26 +835,38 @@ async fn catalog(
     if method != Method::GET {
         return Err(RegistryError::method_not_allowed("Use GET."));
     }
-    let actor = if headers.contains_key(header::AUTHORIZATION) {
+    let principal = if headers.contains_key(header::AUTHORIZATION) {
         let token = bearer(headers)
             .ok_or_else(|| RegistryError::challenge(challenge(state, "_catalog", Actions::PULL)))?;
         state
             .auth
-            .verify(&state.repositories, token, "_catalog", Actions::PULL)
+            .catalog_principal(token)
             .await
             .map_err(|error| error.with_challenge(challenge(state, "_catalog", Actions::PULL)))?
     } else {
-        None
+        gitadel_identity::permissions::RepositoryPrincipal::anonymous()
     };
     let parameters = parameters(query)?;
     let size = page_size(&parameters)?;
     let last = parameter(&parameters, "last").unwrap_or("");
-    let (names, more) = catalog_page(state.repositories.identity().database(), actor, last, size)
-        .await
-        .map_err(|error| {
+    let (names, more) = gitadel_repositories::registry::catalog_page(
+        state.repositories.identity().database(),
+        &principal,
+        last,
+        size,
+    )
+    .await
+    .map_err(|error| match error {
+        gitadel_identity::IdentityError::Unauthorized
+        | gitadel_identity::IdentityError::Forbidden(_) => {
+            RegistryError::unauthorized("The source credential is no longer valid.")
+                .with_challenge(challenge(state, "_catalog", Actions::PULL))
+        }
+        error => {
             tracing::error!(%error, "Registry catalog query failed");
             RegistryError::internal()
-        })?;
+        }
+    })?;
     let mut response = Json(serde_json::json!({"repositories": names})).into_response();
     if more && let Some(last) = names.last() {
         next_link(&mut response, "/v2/_catalog", size, last)?;
@@ -852,68 +874,8 @@ async fn catalog(
     Ok(response)
 }
 
-/// One page of image names the actor may pull, in name order after `last`,
-/// and whether more follow.
-///
-/// The catalog is reachable without credentials, so its cost must not grow
-/// with the number of repositories: readability, the `last` cursor, ordering,
-/// and the page limit are all applied by one statement over the images that
-/// exist, rather than by an access query and an image listing per repository.
-///
-/// The readability rule restates `RepositoryState::can_access` for
-/// `Permission::Read` and has to change with it.
-async fn catalog_page(
-    database: &DatabaseConnection,
-    actor: Option<Uuid>,
-    last: &str,
-    size: usize,
-) -> Result<(Vec<String>, bool), DbErr> {
-    let mut readable = "r.visibility = 'public'".to_owned();
-    if actor.is_some() {
-        readable.push_str(
-            " OR r.namespace IN (SELECT slug FROM namespaces WHERE kind = 'user' AND user_id = ?1) \
-             OR (r.id IN (SELECT repository_id FROM repository_collaborators WHERE user_id = ?1) \
-                 AND r.namespace IN (SELECT slug FROM namespaces WHERE kind = 'user')) \
-             OR r.namespace IN (SELECT slug FROM namespaces WHERE kind = 'organization' \
-                 AND organization_id IN \
-                     (SELECT organization_id FROM organization_members WHERE user_id = ?1))",
-        );
-    }
-    let sql = format!(
-        "SELECT image FROM (\
-             SELECT r.namespace || '/' || r.name || \
-                    CASE WHEN i.name = '' THEN '' ELSE '/' || i.name END AS image \
-             FROM registry_images i JOIN repositories r ON r.id = i.repository_id \
-             WHERE r.deleted_at IS NULL AND ({readable})\
-         ) WHERE image > ?2 ORDER BY image LIMIT ?3"
-    );
-    let limit = size as u64 + 1;
-    let mut names = Vec::with_capacity(size + 1);
-    let mut cursor = last.to_owned();
-    loop {
-        let rows = database
-            .query_all_raw(Statement::from_sql_and_values(
-                DbBackend::Sqlite,
-                &sql,
-                [actor.into(), cursor.as_str().into(), limit.into()],
-            ))
-            .await?;
-        let fetched = rows.len() as u64;
-        for row in rows {
-            cursor = row.try_get::<String>("", "image")?;
-            // Rows written by an older layout may not name a pullable image.
-            if names.len() <= size && parse_image_name(&cursor).is_ok() {
-                names.push(cursor.clone());
-            }
-        }
-        if names.len() > size || fetched < limit {
-            break;
-        }
-    }
-    let more = names.len() > size;
-    names.truncate(size);
-    Ok((names, more))
-}
+#[cfg(test)]
+use gitadel_repositories::registry::catalog_page_for_actor as catalog_page;
 
 async fn referrers(
     state: &RegistryState,

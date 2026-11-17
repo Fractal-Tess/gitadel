@@ -1,7 +1,8 @@
 //! Repository services shared by HTTP, SSH, imports and background mirrors.
 //!
-//! Callers own authentication and authorization; these services receive only
-//! repository paths, transport policy decisions and storage handles.
+//! Domain operations retain credential source and enforce repository policy.
+//! Git primitives receive paths and ref-policy snapshots. Callers own transport
+//! parsing, protocol responses and worker supervision.
 
 pub mod analysis;
 pub mod archive;
@@ -44,3 +45,14 @@ impl std::fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+pub mod cache;
+pub mod content;
+pub mod issue_effects;
+pub mod issues;
+pub mod lifecycle;
+pub mod post_write;
+pub mod protection;
+pub mod registry;
+pub mod topics;
+pub mod webhook_outbox;

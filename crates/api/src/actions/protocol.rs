@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use axum::{
     Router,
@@ -10,21 +10,17 @@ use axum::{
 };
 use chrono::{TimeZone, Utc};
 use prost::Message;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::{Serialize, de::DeserializeOwned};
+#[cfg(test)]
 use serde_json::json;
 use uuid::Uuid;
-
-use crate::entity::{action_job, action_job_need, action_run, repository, user};
 
 use super::{
     ActionsState,
     logs::{self, IncomingLogRow},
-    matrix,
     proto::{ping, runner},
     runners::{self, RunnerError},
-    runs::{self, StateError, TaskResult},
-    secrets,
+    runs::{StateError, TaskResult},
 };
 
 const PROTO_CONTENT_TYPE: &str = "application/proto";
@@ -90,14 +86,11 @@ async fn declare(State(state): State<ActionsState>, headers: HeaderMap, body: By
         headers,
         body,
         |request| async move {
-            let row = runners::declare(
-                state.repository().identity().database(),
-                authenticated,
-                &request.version,
-                &request.labels,
-            )
-            .await
-            .map_err(map_runner_error)?;
+            let row = state
+                .service()
+                .declare_runner(&authenticated, &request.version, &request.labels)
+                .await
+                .map_err(map_runner_error)?;
             Ok(runner::DeclareResponse {
                 runner: Some(runner_message(&row, String::new())),
             })
@@ -184,21 +177,17 @@ async fn fetch_single_task(
 
 async fn claim_until(
     state: &ActionsState,
-    runner: &crate::entity::action_runner::Model,
+    runner: &gitadel_actions::runner_service::RunnerCredential,
     request_key: Uuid,
     handle: Option<i64>,
 ) -> Result<Option<runners::ClaimedJob>, RunnerError> {
     let deadline = tokio::time::Instant::now()
         + std::time::Duration::from_secs(state.settings().fetch_timeout_seconds);
     loop {
-        let claimed = runners::claim(
-            state.repository().identity().database(),
-            runner,
-            request_key,
-            handle,
-            state.settings().runner_loss_seconds,
-        )
-        .await?;
+        let claimed = state
+            .service()
+            .claim_task(runner, request_key, handle)
+            .await?;
         if claimed.is_some() || tokio::time::Instant::now() >= deadline {
             return Ok(claimed);
         }
@@ -238,20 +227,18 @@ async fn update_task(
             let sent_outputs = outputs.keys().cloned().collect();
             let steps_json = serde_json::to_string(&task_state.steps)
                 .map_err(|error| ConnectError::internal(error.to_string()))?;
-            let (job, completed) = runs::update_task(
-                state.repository().identity().database(),
-                authenticated.id,
-                task_state.id,
-                result,
-                outputs,
-                steps_json,
-                state.settings().runner_loss_seconds,
-            )
-            .await
-            .map_err(map_state_error)?;
-            if let Some(run_id) = completed {
-                super::events::spawn_run_completed(state.repository(), run_id);
-            }
+            let job = state
+                .service()
+                .update_runner_task(&authenticated, task_state.id, result, outputs, steps_json)
+                .await
+                .map_err(|error| match error {
+                    gitadel_actions::runner_service::RunnerUpdateError::Credential(error) => {
+                        map_runner_error(error)
+                    }
+                    gitadel_actions::runner_service::RunnerUpdateError::State(error) => {
+                        map_state_error(error)
+                    }
+                })?;
             let mut response_state = task_state;
             if job.status == "cancelled" {
                 response_state.result = runner::Result::Cancelled as i32;
@@ -291,17 +278,11 @@ async fn update_log(
                     content: row.content,
                 })
                 .collect();
-            let ack_index = logs::append(
-                state.repository().identity().database(),
-                authenticated.id,
-                request.task_id,
-                request.index,
-                rows,
-                state.settings().max_log_row_bytes,
-                state.settings().max_job_log_bytes,
-            )
-            .await
-            .map_err(map_log_error)?;
+            let ack_index = state
+                .service()
+                .append_logs(&authenticated, request.task_id, request.index, rows)
+                .await
+                .map_err(map_log_error)?;
             Ok(runner::UpdateLogResponse { ack_index })
         },
     )
@@ -316,105 +297,59 @@ async fn task_message(
     state: &ActionsState,
     claimed: runners::ClaimedJob,
 ) -> Result<runner::Task, ConnectError> {
-    let database = state.repository().identity().database();
-    let run = action_run::Entity::find_by_id(claimed.job.run_id)
-        .one(database)
-        .await
-        .map_err(database_error)?
-        .ok_or_else(|| ConnectError::internal("assigned run is missing"))?;
-    let repository = repository::Entity::find_by_id(run.repository_id)
-        .one(database)
-        .await
-        .map_err(database_error)?
-        .ok_or_else(|| ConnectError::internal("assigned repository is missing"))?;
-    let actor = match run.actor_id {
-        Some(actor_id) => user::Entity::find_by_id(actor_id)
-            .one(database)
-            .await
-            .map_err(database_error)?
-            .map(|actor| actor.username)
-            .unwrap_or_default(),
-        None => repository.namespace.clone(),
-    };
-    let ref_name = run
-        .ref_name
-        .strip_prefix("refs/heads/")
-        .or_else(|| run.ref_name.strip_prefix("refs/tags/"))
-        .unwrap_or(&run.ref_name);
-    let ref_type = if run.ref_name.starts_with("refs/tags/") {
-        "tag"
-    } else {
-        "branch"
-    };
-    let event =
-        serde_json::from_str::<serde_json::Value>(&run.event_json).unwrap_or_else(|_| json!({}));
-    let server_url = state.job_origin();
-    let context_json = json!({
-        "action": "", "action_path": "", "action_ref": "", "action_repository": "",
-        "actor": actor, "api_url": format!("{server_url}/api/v1"), "base_ref": "",
-        "event": event, "event_name": run.event, "event_path": "", "graphql_url": "",
-        "head_ref": "", "job": matrix::base_job_key(&claimed.job.job_key), "ref": run.ref_name, "ref_name": ref_name,
-        "ref_protected": false, "ref_type": ref_type, "repository": format!("{}/{}", repository.namespace, repository.name),
-        "repository_id": repository.id.to_string(), "repository_owner": repository.namespace,
-        "retention_days": state.settings().retention_days.to_string(),
-        "run_attempt": run.run_attempt.to_string(), "run_id": run.id.to_string(),
-        "run_number": run.number.to_string(), "runtime_token": claimed.checkout_token,
-        "server_url": server_url, "sha": run.after_sha,
-        "token": claimed.checkout_token, "workflow": run.workflow_name,
-        "workflow_ref": format!("{}/{}/{}@{}", repository.namespace, repository.name, run.workflow_path, run.ref_name),
-        "workflow_sha": run.after_sha, "workspace": "",
-        "forgejo_default_actions_url": state.settings().default_actions_origin,
-        "forgejo_server_version": env!("CARGO_PKG_VERSION"),
-        "clone_url": format!("{server_url}/{}/{}.git", repository.namespace, repository.name),
-    });
-    let context = serde_json::from_value(context_json)
-        .map_err(|error| ConnectError::internal(error.to_string()))?;
-    let edges = action_job_need::Entity::find()
-        .filter(action_job_need::Column::JobId.eq(claimed.job.id))
-        .all(database)
-        .await
-        .map_err(database_error)?;
-    // A matrix job is needed as a whole: it fails if any expansion failed,
-    // and its outputs merge those of every expansion.
-    let mut needs: HashMap<String, runner::TaskNeed> = HashMap::new();
-    for edge in edges {
-        if let Some(job) = action_job::Entity::find_by_id(edge.needed_job_id)
-            .one(database)
-            .await
-            .map_err(database_error)?
-        {
-            let outputs: HashMap<String, String> =
-                serde_json::from_str(&job.outputs).unwrap_or_default();
-            let result = protocol_result(job.result.as_deref().unwrap_or(&job.status));
-            let need = needs
-                .entry(edge.needed_job_key)
-                .or_insert_with(|| runner::TaskNeed {
-                    outputs: HashMap::new(),
-                    result: result as i32,
-                });
-            need.outputs.extend(outputs);
-            need.result = merge_results(need.result, result as i32);
+    let task = gitadel_actions::tasks::prepare_task(
+        state.service(),
+        claimed,
+        state.job_origin(),
+        env!("CARGO_PKG_VERSION"),
+    )
+    .await
+    .map_err(|error| match error {
+        gitadel_actions::tasks::TaskPreparationError::Unauthorized => {
+            ConnectError::unauthenticated("The job lease is no longer valid.")
         }
-    }
-    let values = secrets::job_values(database, state.secret_cipher(), &repository)
-        .await
-        .map_err(database_error)?;
-    let mut secrets = values.secrets;
-    // Reserved prefixes keep user secrets from shadowing the job token.
-    for name in ["GITHUB_TOKEN", "GITEA_TOKEN", "FORGEJO_TOKEN"] {
-        secrets.insert(name.to_owned(), claimed.checkout_token.clone());
-    }
+        gitadel_actions::tasks::TaskPreparationError::Database(error) => database_error(error),
+        gitadel_actions::tasks::TaskPreparationError::Internal(message) => {
+            ConnectError::internal(message)
+        }
+    })?;
     Ok(runner::Task {
-        id: claimed.job.id,
-        workflow_payload: Some(claimed.job.workflow_payload),
-        context: Some(context),
-        secrets,
+        id: task.id,
+        workflow_payload: Some(task.workflow_payload),
+        context: Some(
+            serde_json::from_value(task.context)
+                .map_err(|error| ConnectError::internal(error.to_string()))?,
+        ),
+        secrets: task.secrets,
+        needs: task
+            .needs
+            .into_iter()
+            .map(|(key, need)| {
+                (
+                    key,
+                    runner::TaskNeed {
+                        outputs: need.outputs,
+                        result: task_conclusion(need.result) as i32,
+                    },
+                )
+            })
+            .collect(),
+        vars: task.vars,
         machine: String::new(),
-        needs,
-        vars: values.vars,
     })
 }
+fn task_conclusion(value: gitadel_actions::tasks::TaskConclusion) -> runner::Result {
+    use gitadel_actions::tasks::TaskConclusion;
+    match value {
+        TaskConclusion::Success => runner::Result::Success,
+        TaskConclusion::Skipped => runner::Result::Skipped,
+        TaskConclusion::Unspecified => runner::Result::Unspecified,
+        TaskConclusion::Cancelled => runner::Result::Cancelled,
+        TaskConclusion::Failure => runner::Result::Failure,
+    }
+}
 
+#[cfg(test)]
 fn merge_results(current: i32, next: i32) -> i32 {
     let rank = |result: i32| match runner::Result::try_from(result) {
         Ok(runner::Result::Failure) => 4,
@@ -430,25 +365,19 @@ fn merge_results(current: i32, next: i32) -> i32 {
     }
 }
 
-fn protocol_result(result: &str) -> runner::Result {
-    match result {
-        "success" => runner::Result::Success,
-        "failure" => runner::Result::Failure,
-        "cancelled" => runner::Result::Cancelled,
-        "skipped" => runner::Result::Skipped,
-        _ => runner::Result::Unspecified,
-    }
-}
-
 async fn authenticate(
     state: &ActionsState,
     headers: &HeaderMap,
-) -> Result<crate::entity::action_runner::Model, ConnectError> {
+) -> Result<gitadel_actions::runner_service::RunnerCredential, ConnectError> {
     let uuid = required_header(headers, "x-runner-uuid")?;
     let token = required_header(headers, "x-runner-token")?;
-    runners::authenticate(state.repository().identity().database(), uuid, token)
+    let credential =
+        gitadel_actions::runner_service::RunnerCredential::new(uuid.to_owned(), token.to_owned());
+    credential
+        .authenticate(state.repository().identity().database())
         .await
-        .map_err(map_runner_error)
+        .map_err(map_runner_error)?;
+    Ok(credential)
 }
 
 fn request_key(headers: &HeaderMap) -> Result<Uuid, ConnectError> {
@@ -639,6 +568,7 @@ fn map_state_error(error: StateError) -> ConnectError {
 
 fn map_log_error(error: logs::LogError) -> ConnectError {
     match error {
+        logs::LogError::Credential(error) => map_runner_error(error),
         logs::LogError::ForeignTask => ConnectError::new(
             StatusCode::NOT_FOUND,
             "not_found",

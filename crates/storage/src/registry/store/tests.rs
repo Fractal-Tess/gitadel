@@ -1,7 +1,7 @@
 //! Every scenario runs against the local registry root and an object-store
 //! double without hard links or file moves, as a storage target would be.
 
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 
 use super::*;
 use crate::{
@@ -68,7 +68,12 @@ impl Fixture {
         let digest = test_support::digest(bytes);
         let id = image.start_upload(self.uploader).await.unwrap();
         image
-            .append_upload(id, self.uploader, Body::from(bytes), None)
+            .append_upload(
+                id,
+                self.uploader,
+                Body::from(bytes).into_data_stream(),
+                None,
+            )
             .await
             .unwrap();
         image
@@ -139,7 +144,7 @@ async fn cancelled_chunks_resume_without_blocking_other_uploads() {
         let id = fixture.image.start_upload(owner).await.unwrap();
         fixture
             .image
-            .append_upload(id, owner, Body::from("head"), None)
+            .append_upload(id, owner, Body::from("head").into_data_stream(), None)
             .await
             .unwrap();
         let (sent, received) = tokio::sync::oneshot::channel();
@@ -153,7 +158,12 @@ async fn cancelled_chunks_resume_without_blocking_other_uploads() {
         let image = fixture.image.clone();
         let pending = tokio::spawn(async move {
             image
-                .append_upload(id, owner, Body::from_stream(stream), None)
+                .append_upload(
+                    id,
+                    owner,
+                    Body::from_stream(stream).into_data_stream(),
+                    None,
+                )
                 .await
         });
         received.await.unwrap();
@@ -170,7 +180,12 @@ async fn cancelled_chunks_resume_without_blocking_other_uploads() {
         let reopened = fixture.image(&fixture.repository, "");
         assert_eq!(reopened.upload_status(id, owner).await.unwrap(), Some(4));
         reopened
-            .append_upload(id, owner, Body::from("tail"), Some((4, 7)))
+            .append_upload(
+                id,
+                owner,
+                Body::from("tail").into_data_stream(),
+                Some((4, 7)),
+            )
             .await
             .unwrap();
         let digest = test_support::digest(b"headtail");
@@ -196,7 +211,7 @@ async fn upload_sessions_belong_to_their_owner_and_image() {
         assert!(matches!(
             fixture
                 .image
-                .append_upload(id, stranger, Body::from("stolen"), None)
+                .append_upload(id, stranger, Body::from("stolen").into_data_stream(), None)
                 .await,
             Err(StoreError::UploadUnknown)
         ));
