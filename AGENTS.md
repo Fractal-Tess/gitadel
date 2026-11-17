@@ -1,5 +1,19 @@
 # Working on Gitadel
 
+## Rust crate directory names
+
+Use short role names for crate directories while keeping service-prefixed Cargo
+package names. This is a project convention, not a Rust or Cargo standard.
+
+The current layout already follows it: the server package `gitadel` stays at the
+repository root, and the `gitadel-cli` package stays in `cli/`. Their binary names
+remain `gitadel` and `gtd`.
+
+If additional workspace crates are needed, use paths such as `crates/core/` or
+`crates/api/` with package names such as `gitadel-core` or `gitadel-api`, rather
+than repeating the service prefix in directory names. Do not split crates or
+move the root server solely to adopt those example paths.
+
 ## Development loop
 
 Enter the Nix dev shell, then run:
