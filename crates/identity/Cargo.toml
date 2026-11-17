@@ -10,6 +10,20 @@ description = "Gitadel account and credential services"
 path = "src/lib.rs"
 
 [dependencies]
+gitadel-core.workspace = true
+gitadel-config.workspace = true
+gitadel-mail.workspace = true
+url.workspace = true
+webauthn-rs.workspace = true
+tracing.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+openidconnect.workspace = true
+qrcode.workspace = true
+lettre.workspace = true
+png.workspace = true
+reqwest.workspace = true
+russh.workspace = true
 gitadel-db.workspace = true
 gitadel-secrets.workspace = true
 hmac.workspace = true

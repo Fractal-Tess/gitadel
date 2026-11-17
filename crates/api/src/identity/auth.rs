@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use axum::{
     Json,
     extract::{Path, State},
@@ -7,29 +5,18 @@ use axum::{
     response::IntoResponse,
 };
 use axum_extra::extract::cookie::CookieJar;
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseTransaction, EntityTrait,
-    PaginatorTrait, QueryFilter, QueryOrder, Set, TransactionTrait, sea_query::Expr,
-};
+#[cfg(test)]
+use sea_orm::ActiveModelTrait;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 use webauthn_rs::prelude::{
-    CreationChallengeResponse, DiscoverableKey, Passkey, PublicKeyCredential,
-    RegisterPublicKeyCredential, RequestChallengeResponse,
+    CreationChallengeResponse, PublicKeyCredential, RegisterPublicKeyCredential,
+    RequestChallengeResponse,
 };
 
-use super::{
-    ApiError, IdentityState, RegistrationChallenge, UserResponse, hash_password, hash_secret,
-    random_secret, validate_name, validate_slug, verify_password,
-};
-use crate::entity::{
-    action_runner, action_runner_registration_token, action_secret, action_variable, invitation,
-    namespace, namespace_integration, namespace_mirror_identity, namespace_pin, passkey,
-    repository, repository_alias, repository_import, repository_import_item, user,
-};
+use super::{ApiError, IdentityState, UserResponse};
 
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct AuthStatusResponse {
@@ -58,16 +45,17 @@ pub async fn status(
     State(state): State<IdentityState>,
     jar: CookieJar,
 ) -> Result<Json<AuthStatusResponse>, ApiError> {
-    let setup_required = user::Entity::find().count(state.database()).await? == 0;
-    let account = state.session_user(&jar).await?;
-    let mut authentication = super::sso::public_configuration(state.database()).await?;
-    authentication.passkey_enabled &= state.passkeys_available();
+    let status = domain::status(
+        &state.auth_service(),
+        jar.get(super::SESSION_COOKIE).map(|cookie| cookie.value()),
+    )
+    .await?;
     Ok(Json(AuthStatusResponse {
-        setup_required,
-        authenticated: account.is_some(),
-        authentication,
-        user: account.map(UserResponse::from),
-        email_enabled: state.mailer().is_enabled(),
+        setup_required: status.setup_required,
+        authenticated: status.account.is_some(),
+        user: status.account.map(Into::into),
+        authentication: status.authentication.into(),
+        email_enabled: status.email_enabled,
     }))
 }
 
@@ -113,57 +101,29 @@ pub async fn login(
     jar: CookieJar,
     Json(request): Json<CredentialsRequest>,
 ) -> Result<(CookieJar, Json<LoginResponse>), ApiError> {
-    if !super::sso::public_configuration(state.database())
-        .await?
-        .password_enabled
+    match domain::login(
+        &state.auth_service(),
+        domain::CredentialsRequest {
+            username: request.username,
+            password: request.password,
+        },
+    )
+    .await?
     {
-        return Err(ApiError::forbidden("Password login is disabled."));
-    }
-    state.enforce_auth_rate_limit("password-source", 20).await?;
-    let username = validate_slug(&request.username, "Username")?;
-    state.enforce_account_auth_rate_limit(&username, 8).await?;
-    let account = user::Entity::find()
-        .filter(user::Column::Username.eq(username))
-        .filter(user::Column::DisabledAt.is_null())
-        .one(state.database())
-        .await?;
-    let encoded = account
-        .as_ref()
-        .map(|account| account.password_hash.clone())
-        .unwrap_or_else(|| state.dummy_password_hash());
-    let valid = verify_password(request.password, encoded).await?;
-    let Some(account) = account else {
-        return Err(invalid_credentials());
-    };
-    if !valid {
-        return Err(invalid_credentials());
-    }
-
-    // A correct password alone does not sign in an account with a second
-    // factor; the browser receives a short-lived challenge instead.
-    if super::two_factor::is_enabled(state.database(), account.id).await? {
-        let challenge_id = state.insert_pending_login(account.id).await?;
-        return Ok((
+        domain::LoginOutcome::Authenticated(grant) => Ok((
+            jar.add(state.session_cookie(grant.token)),
+            Json(LoginResponse::Authenticated(AuthResponse {
+                user: grant.user.into(),
+            })),
+        )),
+        domain::LoginOutcome::TwoFactor { challenge_id } => Ok((
             jar,
             Json(LoginResponse::TwoFactor(TwoFactorChallengeResponse {
                 two_factor_required: true,
                 challenge_id,
             })),
-        ));
+        )),
     }
-
-    let transaction = state.database().begin().await?;
-    let (_, cookie) = state.create_session_on(&transaction, account.id).await?;
-    state
-        .audit_on(&transaction, Some(account.id), "auth.login.password", None)
-        .await?;
-    transaction.commit().await?;
-    Ok((
-        jar.add(cookie),
-        Json(LoginResponse::Authenticated(AuthResponse {
-            user: account.into(),
-        })),
-    ))
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -190,53 +150,18 @@ pub async fn finish_two_factor_login(
     jar: CookieJar,
     Json(request): Json<TwoFactorLoginRequest>,
 ) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
-    state
-        .enforce_auth_rate_limit("two-factor-source", 20)
-        .await?;
-    let Some(user_id) = state.pending_login_user(&request.challenge_id).await else {
-        return Err(ApiError::bad_request(
-            "The sign-in attempt expired. Sign in again.",
-        ));
-    };
-    state
-        .enforce_account_auth_rate_limit(&format!("two-factor:{user_id}"), 8)
-        .await?;
-
-    let transaction = state.database().begin().await?;
-    let Some(factor) = super::two_factor::verify_second_factor(
-        &transaction,
-        state.secret_cipher(),
-        user_id,
-        &request.code,
+    let grant = domain::finish_two_factor_login(
+        &state.auth_service(),
+        domain::TwoFactorLoginRequest {
+            challenge_id: request.challenge_id,
+            code: request.code,
+        },
     )
-    .await?
-    else {
-        drop(transaction);
-        state
-            .record_pending_login_failure(&request.challenge_id)
-            .await;
-        return Err(super::two_factor::invalid_code());
-    };
-    let account = user::Entity::find_by_id(user_id)
-        .filter(user::Column::DisabledAt.is_null())
-        .one(&transaction)
-        .await?
-        .ok_or_else(invalid_credentials)?;
-    let (_, cookie) = state.create_session_on(&transaction, account.id).await?;
-    state
-        .audit_on(
-            &transaction,
-            Some(account.id),
-            "auth.login.password",
-            Some(format!("two_factor:{}", factor.label())),
-        )
-        .await?;
-    transaction.commit().await?;
-    state.finish_pending_login(&request.challenge_id).await;
+    .await?;
     Ok((
-        jar.add(cookie),
+        jar.add(state.session_cookie(grant.token)),
         Json(AuthResponse {
-            user: account.into(),
+            user: grant.user.into(),
         }),
     ))
 }
@@ -288,20 +213,18 @@ pub async fn update_username(
     Json(request): Json<UpdateUsernameRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
     let actor = state
-        .authenticate(&headers, &jar, super::SCOPE_WRITE)
+        .authenticate_principal(&headers, &jar, super::SCOPE_WRITE)
         .await?;
-    require_browser_session(actor.via_api_token)?;
-
-    let username = validate_slug(&request.username, "Username")?;
-    if username == actor.user.username {
-        return Ok(Json(AuthResponse {
-            user: actor.user.into(),
-        }));
-    }
-
-    let account = rename_account(&state, actor.user, username).await?;
     Ok(Json(AuthResponse {
-        user: account.into(),
+        user: domain::update_username(
+            &state.auth_service(),
+            &actor,
+            domain::UpdateUsernameRequest {
+                username: request.username,
+            },
+        )
+        .await?
+        .into(),
     }))
 }
 
@@ -329,35 +252,18 @@ pub async fn update_repository_preferences(
     Json(request): Json<UpdateRepositoryPreferencesRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
     let actor = state
-        .authenticate(&headers, &jar, super::SCOPE_WRITE)
+        .authenticate_principal(&headers, &jar, super::SCOPE_WRITE)
         .await?;
-    require_browser_session(actor.via_api_token)?;
-    if !matches!(
-        request.default_repository_visibility.as_str(),
-        "public" | "private"
-    ) {
-        return Err(ApiError::bad_request(
-            "Default repository visibility must be public or private.",
-        ));
-    }
-
-    let actor_id = actor.user.id;
-    let transaction = state.database().begin().await?;
-    let mut account: user::ActiveModel = actor.user.into();
-    account.default_repository_visibility = Set(request.default_repository_visibility);
-    account.updated_at = Set(Utc::now());
-    let account = account.update(&transaction).await?;
-    state
-        .audit_on(
-            &transaction,
-            Some(actor_id),
-            "account.repository_preferences.update",
-            None,
-        )
-        .await?;
-    transaction.commit().await?;
     Ok(Json(AuthResponse {
-        user: account.into(),
+        user: domain::update_repository_preferences(
+            &state.auth_service(),
+            &actor,
+            domain::UpdateRepositoryPreferencesRequest {
+                default_repository_visibility: request.default_repository_visibility,
+            },
+        )
+        .await?
+        .into(),
     }))
 }
 
@@ -385,36 +291,18 @@ pub async fn update_theme_preference(
     Json(request): Json<UpdateThemePreferenceRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
     let actor = state
-        .authenticate(&headers, &jar, super::SCOPE_WRITE)
+        .authenticate_principal(&headers, &jar, super::SCOPE_WRITE)
         .await?;
-    require_browser_session(actor.via_api_token)?;
-    if !matches!(
-        request.theme_preference.as_str(),
-        "system" | "light" | "dark"
-    ) {
-        return Err(ApiError::bad_request(
-            "Theme preference must be system, light, or dark.",
-        ));
-    }
-
-    let actor_id = actor.user.id;
-    let theme_preference = request.theme_preference;
-    let transaction = state.database().begin().await?;
-    let mut account: user::ActiveModel = actor.user.into();
-    account.theme_preference = Set(theme_preference.clone());
-    account.updated_at = Set(Utc::now());
-    let account = account.update(&transaction).await?;
-    state
-        .audit_on(
-            &transaction,
-            Some(actor_id),
-            "account.theme_preference.update",
-            Some(theme_preference),
-        )
-        .await?;
-    transaction.commit().await?;
     Ok(Json(AuthResponse {
-        user: account.into(),
+        user: domain::update_theme_preference(
+            &state.auth_service(),
+            &actor,
+            domain::UpdateThemePreferenceRequest {
+                theme_preference: request.theme_preference,
+            },
+        )
+        .await?
+        .into(),
     }))
 }
 
@@ -444,33 +332,18 @@ pub async fn update_motion_preference(
     Json(request): Json<UpdateMotionPreferenceRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
     let actor = state
-        .authenticate(&headers, &jar, super::SCOPE_WRITE)
+        .authenticate_principal(&headers, &jar, super::SCOPE_WRITE)
         .await?;
-    require_browser_session(actor.via_api_token)?;
-    if !matches!(request.motion_preference.as_str(), "system" | "reduce") {
-        return Err(ApiError::bad_request(
-            "Motion preference must be system or reduce.",
-        ));
-    }
-
-    let actor_id = actor.user.id;
-    let motion_preference = request.motion_preference;
-    let transaction = state.database().begin().await?;
-    let mut account: user::ActiveModel = actor.user.into();
-    account.motion_preference = Set(motion_preference.clone());
-    account.updated_at = Set(Utc::now());
-    let account = account.update(&transaction).await?;
-    state
-        .audit_on(
-            &transaction,
-            Some(actor_id),
-            "account.motion_preference.update",
-            Some(motion_preference),
-        )
-        .await?;
-    transaction.commit().await?;
     Ok(Json(AuthResponse {
-        user: account.into(),
+        user: domain::update_motion_preference(
+            &state.auth_service(),
+            &actor,
+            domain::UpdateMotionPreferenceRequest {
+                motion_preference: request.motion_preference,
+            },
+        )
+        .await?
+        .into(),
     }))
 }
 
@@ -499,152 +372,32 @@ pub async fn update_password(
     Json(request): Json<UpdatePasswordRequest>,
 ) -> Result<StatusCode, ApiError> {
     let actor = state
-        .authenticate(&headers, &jar, super::SCOPE_WRITE)
+        .authenticate_principal(&headers, &jar, super::SCOPE_WRITE)
         .await?;
-    require_browser_session(actor.via_api_token)?;
-    verify_current_password(&actor.user, request.current_password).await?;
-    if verify_password(
-        request.new_password.clone(),
-        actor.user.password_hash.clone(),
-    )
-    .await?
-    {
-        return Err(ApiError::bad_request(
-            "Choose a password that differs from your current password.",
-        ));
-    }
-
-    let password_hash = hash_password(request.new_password).await?;
     let current_session_hash = jar
         .get(super::SESSION_COOKIE)
-        .map(|cookie| super::hash_secret(cookie.value()))
-        .ok_or_else(ApiError::unauthorized)?;
-    let transaction = state.database().begin().await?;
-    gitadel_identity::replace_password_on(
-        &transaction,
-        &actor.user,
-        password_hash,
-        &current_session_hash,
+        .map(|cookie| super::hash_secret(cookie.value()));
+    domain::update_password(
+        &state.auth_service(),
+        &actor,
+        domain::UpdatePasswordRequest {
+            current_password: request.current_password,
+            new_password: request.new_password,
+        },
+        current_session_hash,
     )
     .await?;
-    state
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "account.password.update",
-            None,
-        )
-        .await?;
-    transaction.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn verify_current_password(
-    account: &user::Model,
-    current_password: String,
-) -> Result<(), ApiError> {
-    Ok(gitadel_identity::verify_current_password(account, current_password).await?)
-}
-
+#[cfg(test)]
 pub(super) fn require_browser_session(via_api_token: bool) -> Result<(), ApiError> {
-    if via_api_token {
-        return Err(ApiError::forbidden(
-            "Update account credentials from a browser session.",
-        ));
-    }
-    Ok(())
-}
-
-/// Point every row that names a namespace by slug at its new slug.
-///
-/// Shared by user and organisation renames so the two cannot drift apart: a
-/// table missed here keeps referencing the old slug, which either fails the
-/// rename on a foreign key or silently orphans the rows. The caller owns the
-/// `namespaces` row itself.
-pub(super) async fn move_namespace_resources<C: ConnectionTrait>(
-    connection: &C,
-    current_slug: &str,
-    next_slug: &str,
-) -> Result<(), sea_orm::DbErr> {
-    macro_rules! move_rows {
-        ($($entity:ident . $column:ident),+ $(,)?) => {$(
-            $entity::Entity::update_many()
-                .col_expr($entity::Column::$column, Expr::value(next_slug))
-                .filter($entity::Column::$column.eq(current_slug))
-                .exec(connection)
-                .await?;
-        )+};
-    }
-    move_rows!(
-        repository.Namespace,
-        repository_alias.Namespace,
-        repository_import.TargetNamespace,
-        repository_import_item.TargetNamespace,
-        namespace_integration.Namespace,
-        namespace_mirror_identity.Namespace,
-        namespace_pin.Namespace,
-        action_runner.Namespace,
-        action_runner_registration_token.Namespace,
-        action_secret.Namespace,
-        action_variable.Namespace,
-    );
-    Ok(())
-}
-
-async fn rename_account(
-    state: &IdentityState,
-    account: user::Model,
-    username: String,
-) -> Result<user::Model, ApiError> {
-    let transaction = state.database().begin().await?;
-    let previous_username = account.username.clone();
-    let account = rename_user_namespace(&transaction, account, &username).await?;
-    state
-        .audit_on(
-            &transaction,
-            Some(account.id),
-            "account.username.update",
-            Some(format!("{previous_username} -> {username}")),
-        )
-        .await?;
-    transaction.commit().await?;
-    Ok(account)
+    Ok(domain::require_browser_session(via_api_token)?)
 }
 
 /// Rename a user and their personal namespace inside the caller's transaction.
-async fn rename_user_namespace(
-    transaction: &DatabaseTransaction,
-    account: user::Model,
-    username: &str,
-) -> Result<user::Model, ApiError> {
-    if namespace::Entity::find_by_id(username)
-        .one(transaction)
-        .await?
-        .is_some()
-    {
-        return Err(ApiError::conflict("That username is already in use."));
-    }
-
-    // The slug is a primary key that other tables reference, so the children
-    // and the parent cannot both be valid until every statement has run.
-    transaction
-        .execute_unprepared("PRAGMA defer_foreign_keys = ON")
-        .await?;
-    move_namespace_resources(transaction, &account.username, username).await?;
-    let namespace_update = namespace::Entity::update_many()
-        .col_expr(namespace::Column::Slug, Expr::value(username))
-        .filter(namespace::Column::UserId.eq(account.id))
-        .exec(transaction)
-        .await?;
-    if namespace_update.rows_affected != 1 {
-        return Err(ApiError::internal("the user namespace is missing"));
-    }
-
-    let mut active: user::ActiveModel = account.into();
-    active.username = Set(username.to_owned());
-    active.updated_at = Set(Utc::now());
-    Ok(active.update(transaction).await?)
-}
+#[cfg(test)]
+use gitadel_identity::accounts::rename_user_namespace;
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct SetupRequest {
@@ -672,32 +425,20 @@ pub async fn setup(
     jar: CookieJar,
     Json(request): Json<SetupRequest>,
 ) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
-    if !state.setup_token_matches(&request.token).await {
-        return Err(ApiError::bad_request(
-            "The setup link is invalid or was already used. Restart Gitadel to print a new one.",
-        ));
-    }
-    // bootstrap_admin refuses once any account exists, so concurrent
-    // submissions cannot create a second administrator.
-    let account =
-        super::bootstrap_admin(state.database(), &request.username, request.password).await?;
-    state.clear_setup_token().await;
-    let transaction = state.database().begin().await?;
-    state
-        .audit_on(
-            &transaction,
-            Some(account.id),
-            "account.setup",
-            Some(account.username.clone()),
-        )
-        .await?;
-    let (_, cookie) = state.create_session_on(&transaction, account.id).await?;
-    transaction.commit().await?;
+    let grant = domain::setup(
+        &state.auth_service(),
+        domain::SetupRequest {
+            token: request.token,
+            username: request.username,
+            password: request.password,
+        },
+    )
+    .await?;
     Ok((
         StatusCode::CREATED,
-        jar.add(cookie),
+        jar.add(state.session_cookie(grant.token)),
         Json(AuthResponse {
-            user: account.into(),
+            user: grant.user.into(),
         }),
     ))
 }
@@ -727,69 +468,20 @@ pub async fn register(
     jar: CookieJar,
     Json(request): Json<InvitationRegistrationRequest>,
 ) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
-    let username = validate_slug(&request.username, "Username")?;
-    let transaction = state.database().begin().await?;
-    let now = Utc::now();
-    let reserved = invitation::Entity::update_many()
-        .col_expr(invitation::Column::UsedAt, Expr::value(Some(now)))
-        .filter(invitation::Column::TokenHash.eq(hash_secret(&request.token)))
-        .filter(invitation::Column::UsedAt.is_null())
-        .filter(invitation::Column::ExpiresAt.gt(now))
-        .exec(&transaction)
-        .await?;
-    if reserved.rows_affected != 1 {
-        return Err(ApiError::bad_request(
-            "The invitation is invalid or has expired.",
-        ));
-    }
-    if namespace::Entity::find_by_id(&username)
-        .one(&transaction)
-        .await?
-        .is_some()
-    {
-        return Err(ApiError::conflict("That username is already in use."));
-    }
-    let password_hash = hash_password(request.password).await?;
-
-    let account = user::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        username: Set(username.clone()),
-        password_hash: Set(password_hash),
-        is_admin: Set(false),
-        default_repository_visibility: Set("private".to_owned()),
-        theme_preference: Set("system".to_owned()),
-        motion_preference: Set("system".to_owned()),
-        disabled_at: Set(None),
-        avatar_updated_at: Set(None),
-        created_at: Set(now),
-        updated_at: Set(now),
-    }
-    .insert(&transaction)
+    let grant = domain::register(
+        &state.auth_service(),
+        domain::InvitationRegistrationRequest {
+            token: request.token,
+            username: request.username,
+            password: request.password,
+        },
+    )
     .await?;
-    namespace::ActiveModel {
-        slug: Set(username.clone()),
-        kind: Set("user".to_owned()),
-        user_id: Set(Some(account.id)),
-        organization_id: Set(None),
-        created_at: Set(now),
-    }
-    .insert(&transaction)
-    .await?;
-    state
-        .audit_on(
-            &transaction,
-            Some(account.id),
-            "account.register",
-            Some(username),
-        )
-        .await?;
-    let (_, cookie) = state.create_session_on(&transaction, account.id).await?;
-    transaction.commit().await?;
     Ok((
         StatusCode::CREATED,
-        jar.add(cookie),
+        jar.add(state.session_cookie(grant.token)),
         Json(AuthResponse {
-            user: account.into(),
+            user: grant.user.into(),
         }),
     ))
 }
@@ -824,43 +516,21 @@ pub async fn create_invitation(
     Json(request): Json<CreateInvitationRequest>,
 ) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let actor = state
-        .authenticate(&headers, &jar, super::SCOPE_WRITE)
+        .authenticate_principal(&headers, &jar, super::SCOPE_WRITE)
         .await?;
-    if !actor.user.is_admin {
-        return Err(ApiError::forbidden(
-            "Only an administrator can create invitations.",
-        ));
-    }
-    let lifetime = request
-        .expires_in_hours
-        .map(chrono::Duration::hours)
-        .unwrap_or_else(|| state.invitation_lifetime());
-    if lifetime <= chrono::Duration::zero() || lifetime > chrono::Duration::days(30) {
-        return Err(ApiError::bad_request(
-            "Invitation lifetime must be between 1 hour and 30 days.",
-        ));
-    }
-
-    let token = format!("gti_{}", random_secret(32));
-    let now = Utc::now();
-    let expires_at = now + lifetime;
-    let transaction = state.database().begin().await?;
-    invitation::ActiveModel {
-        token_hash: Set(hash_secret(&token)),
-        created_by: Set(actor.user.id),
-        expires_at: Set(expires_at),
-        used_at: Set(None),
-        created_at: Set(now),
-    }
-    .insert(&transaction)
-    .await?;
-    state
-        .audit_on(&transaction, Some(actor.user.id), "invitation.create", None)
-        .await?;
-    transaction.commit().await?;
     Ok((
         StatusCode::CREATED,
-        Json(InvitationResponse { token, expires_at }),
+        Json::<InvitationResponse>(
+            domain::create_invitation(
+                &state.auth_service(),
+                &actor,
+                domain::CreateInvitationRequest {
+                    expires_in_hours: request.expires_in_hours,
+                },
+            )
+            .await?
+            .into(),
+        ),
     ))
 }
 
@@ -889,21 +559,13 @@ pub async fn list_passkeys(
     jar: CookieJar,
 ) -> Result<Json<Vec<PasskeyResponse>>, ApiError> {
     let actor = state
-        .authenticate(&headers, &jar, super::SCOPE_READ)
-        .await?;
-    let rows = passkey::Entity::find()
-        .filter(passkey::Column::UserId.eq(actor.user.id))
-        .order_by_asc(passkey::Column::CreatedAt)
-        .all(state.database())
+        .authenticate_principal(&headers, &jar, super::SCOPE_READ)
         .await?;
     Ok(Json(
-        rows.into_iter()
-            .map(|row| PasskeyResponse {
-                id: row.id,
-                name: row.name,
-                created_at: row.created_at,
-                last_used_at: row.last_used_at,
-            })
+        domain::list_passkeys(&state.auth_service(), &actor)
+            .await?
+            .into_iter()
+            .map(Into::into)
             .collect(),
     ))
 }
@@ -939,72 +601,20 @@ pub async fn start_passkey_registration(
     jar: CookieJar,
     Json(request): Json<StartPasskeyRegistrationRequest>,
 ) -> Result<Json<PasskeyCreationResponse>, ApiError> {
-    if !super::sso::public_configuration(state.database())
-        .await?
-        .passkey_enabled
-    {
-        return Err(ApiError::forbidden("Passkeys are disabled."));
-    }
+    domain::check_passkey_registration(&state.auth_service()).await?;
+
     let actor = state
-        .authenticate(&headers, &jar, super::SCOPE_WRITE)
+        .authenticate_principal(&headers, &jar, super::SCOPE_WRITE)
         .await?;
-    if actor.via_api_token {
-        tracing::warn!(
-            user_id = %actor.user.id,
-            reason = "api_token_session",
-            "passkey registration rejected"
-        );
-        return Err(ApiError::forbidden(
-            "Register passkeys from a browser session.",
-        ));
-    }
-    let name = validate_name(&request.name, "Passkey name")?;
-    let stored = passkey::Entity::find()
-        .filter(passkey::Column::UserId.eq(actor.user.id))
-        .all(state.database())
-        .await?;
-    let mut excluded = Vec::with_capacity(stored.len());
-    for row in stored {
-        let credential: Passkey =
-            serde_json::from_str(&row.credential).map_err(ApiError::internal)?;
-        excluded.push(credential.cred_id().clone());
-    }
-    let excluded_count = excluded.len();
-    let (options, registration) = state
-        .webauthn()?
-        .start_passkey_registration(
-            actor.user.id,
-            &actor.user.username,
-            &actor.user.username,
-            Some(excluded),
+    Ok(Json(
+        domain::start_passkey_registration(
+            &state.auth_service(),
+            &actor,
+            domain::StartPasskeyRegistrationRequest { name: request.name },
         )
-        .map_err(|error| {
-            tracing::warn!(
-                %error,
-                user_id = %actor.user.id,
-                "could not create passkey registration challenge"
-            );
-            ApiError::internal(error)
-        })?;
-    let challenge_id = random_secret(24);
-    state.registration_challenges().await.insert(
-        challenge_id.clone(),
-        RegistrationChallenge {
-            user_id: actor.user.id,
-            name,
-            state: registration,
-            created_at: Instant::now(),
-        },
-    );
-    tracing::info!(
-        user_id = %actor.user.id,
-        excluded_credentials = excluded_count,
-        "passkey registration challenge issued"
-    );
-    Ok(Json(PasskeyCreationResponse {
-        challenge_id,
-        options,
-    }))
+        .await?
+        .into(),
+    ))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -1034,60 +644,17 @@ pub async fn finish_passkey_registration(
     Json(request): Json<FinishPasskeyRegistrationRequest>,
 ) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let actor = state
-        .authenticate(&headers, &jar, super::SCOPE_WRITE)
+        .authenticate_principal(&headers, &jar, super::SCOPE_WRITE)
         .await?;
-    let challenge = state
-        .registration_challenges()
-        .await
-        .remove(&request.challenge_id)
-        .filter(|challenge| challenge.user_id == actor.user.id);
-    let Some(challenge) = challenge else {
-        tracing::warn!(
-            user_id = %actor.user.id,
-            reason = "challenge_missing_or_wrong_user",
-            "passkey registration rejected"
-        );
-        return Err(ApiError::bad_request(
-            "The passkey registration challenge expired.",
-        ));
-    };
-    let credential = state
-        .webauthn()?
-        .finish_passkey_registration(&request.credential, &challenge.state)
-        .map_err(|error| {
-            tracing::warn!(
-                %error,
-                user_id = %actor.user.id,
-                "passkey registration verification failed"
-            );
-            ApiError::bad_request("The passkey registration could not be verified.")
-        })?;
-    let transaction = state.database().begin().await?;
-    let row = passkey::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        user_id: Set(actor.user.id),
-        name: Set(challenge.name),
-        credential_id: Set(URL_SAFE_NO_PAD.encode(credential.cred_id())),
-        credential: Set(serde_json::to_string(&credential).map_err(ApiError::internal)?),
-        created_at: Set(Utc::now()),
-        last_used_at: Set(None),
-    }
-    .insert(&transaction)
+    domain::finish_passkey_registration(
+        &state.auth_service(),
+        &actor,
+        domain::FinishPasskeyRegistrationRequest {
+            challenge_id: request.challenge_id,
+            credential: request.credential,
+        },
+    )
     .await?;
-    state
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "passkey.create",
-            Some(row.id.to_string()),
-        )
-        .await?;
-    transaction.commit().await?;
-    tracing::info!(
-        user_id = %actor.user.id,
-        passkey_id = %row.id,
-        "passkey registration completed"
-    );
     Ok(StatusCode::CREATED)
 }
 
@@ -1112,29 +679,9 @@ pub async fn delete_passkey(
     jar: CookieJar,
 ) -> Result<StatusCode, ApiError> {
     let actor = state
-        .authenticate(&headers, &jar, super::SCOPE_WRITE)
+        .authenticate_principal(&headers, &jar, super::SCOPE_WRITE)
         .await?;
-    // Removing a sign-in credential is as sensitive as adding one: a leaked
-    // write token must not be able to strip an account's passkeys.
-    require_browser_session(actor.via_api_token)?;
-    let transaction = state.database().begin().await?;
-    let result = passkey::Entity::delete_many()
-        .filter(passkey::Column::Id.eq(id))
-        .filter(passkey::Column::UserId.eq(actor.user.id))
-        .exec(&transaction)
-        .await?;
-    if result.rows_affected == 0 {
-        return Err(ApiError::not_found());
-    }
-    state
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "passkey.delete",
-            Some(id.to_string()),
-        )
-        .await?;
-    transaction.commit().await?;
+    domain::delete_passkey(&state.auth_service(), &actor, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1161,29 +708,11 @@ pub struct PasskeyRequestResponse {
 pub async fn start_passkey_login(
     State(state): State<IdentityState>,
 ) -> Result<Json<PasskeyRequestResponse>, ApiError> {
-    if !super::sso::public_configuration(state.database())
-        .await?
-        .passkey_enabled
-    {
-        return Err(ApiError::forbidden("Passkey login is disabled."));
-    }
-    state.enforce_auth_rate_limit("passkey-start", 30).await?;
-    let (options, authentication) = state
-        .webauthn()?
-        .start_discoverable_authentication()
-        .map_err(|error| {
-            tracing::warn!(%error, "could not create discoverable passkey login challenge");
-            ApiError::internal(error)
-        })?;
-    let challenge_id = random_secret(24);
-    state
-        .insert_authentication_challenge(challenge_id.clone(), authentication)
-        .await?;
-    tracing::info!("discoverable passkey login challenge issued");
-    Ok(Json(PasskeyRequestResponse {
-        challenge_id,
-        options,
-    }))
+    Ok(Json(
+        domain::start_passkey_login(&state.auth_service())
+            .await?
+            .into(),
+    ))
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -1212,120 +741,98 @@ pub async fn finish_passkey_login(
     jar: CookieJar,
     Json(request): Json<FinishPasskeyLoginRequest>,
 ) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
-    let challenge = state
-        .authentication_challenges()
-        .await
-        .remove(&request.challenge_id);
-    let Some(challenge) = challenge else {
-        tracing::warn!(
-            reason = "challenge_missing_or_expired",
-            "passkey login rejected"
-        );
-        return Err(ApiError::bad_request(
-            "The passkey login challenge expired.",
-        ));
-    };
-    let (user_id, credential_id) = state
-        .webauthn()?
-        .identify_discoverable_authentication(&request.credential)
-        .map_err(|error| {
-            tracing::warn!(%error, "could not identify discoverable passkey");
-            invalid_credentials()
-        })?;
-    let credential_id = URL_SAFE_NO_PAD.encode(credential_id);
-    let transaction = state.database().begin().await?;
-    let stored = passkey::Entity::find()
-        .filter(passkey::Column::UserId.eq(user_id))
-        .filter(passkey::Column::CredentialId.eq(credential_id))
-        .one(&transaction)
-        .await?;
-    let Some(stored) = stored else {
-        tracing::warn!(
-            %user_id,
-            reason = "credential_not_registered",
-            "discoverable passkey login rejected"
-        );
-        return Err(invalid_credentials());
-    };
-    let passkey_id = stored.id;
-    let mut credential: Passkey =
-        serde_json::from_str(&stored.credential).map_err(ApiError::internal)?;
-    let discoverable = DiscoverableKey::from(&credential);
-    let result = state
-        .webauthn()?
-        .finish_discoverable_authentication(&request.credential, challenge.state, &[discoverable])
-        .map_err(|error| {
-            tracing::warn!(
-                %error,
-                %user_id,
-                "discoverable passkey login verification failed"
-            );
-            invalid_credentials()
-        })?;
-    credential.update_credential(&result);
-    let mut active: passkey::ActiveModel = stored.into();
-    active.credential = Set(serde_json::to_string(&credential).map_err(ApiError::internal)?);
-    active.last_used_at = Set(Some(Utc::now()));
-    active.update(&transaction).await?;
-
-    let account = user::Entity::find_by_id(user_id)
-        .filter(user::Column::DisabledAt.is_null())
-        .one(&transaction)
-        .await?;
-    let Some(account) = account else {
-        tracing::warn!(
-            %user_id,
-            reason = "account_disabled_or_deleted",
-            "discoverable passkey login rejected"
-        );
-        return Err(invalid_credentials());
-    };
-    let (_, cookie) = state.create_session_on(&transaction, account.id).await?;
-    state
-        .audit_on(&transaction, Some(account.id), "auth.login.passkey", None)
-        .await?;
-    transaction.commit().await?;
-    tracing::info!(
-        user_id = %account.id,
-        %passkey_id,
-        "passkey login completed"
-    );
+    let grant = domain::finish_passkey_login(
+        &state.auth_service(),
+        domain::FinishPasskeyLoginRequest {
+            challenge_id: request.challenge_id,
+            credential: request.credential,
+        },
+    )
+    .await?;
     Ok((
-        jar.add(cookie),
+        jar.add(state.session_cookie(grant.token)),
         Json(AuthResponse {
-            user: account.into(),
+            user: grant.user.into(),
         }),
     ))
 }
 
-fn invalid_credentials() -> ApiError {
-    ApiError {
-        status: StatusCode::UNAUTHORIZED,
-        code: "invalid_credentials",
-        message: "The username or credential was not accepted.".to_owned(),
+use gitadel_identity::auth as domain;
+impl From<domain::InvitationResponse> for InvitationResponse {
+    fn from(value: domain::InvitationResponse) -> Self {
+        Self {
+            token: value.token,
+            expires_at: value.expires_at,
+        }
+    }
+}
+
+#[cfg(test)]
+use super::hash_secret;
+#[cfg(test)]
+use crate::entity::action_runner;
+#[cfg(test)]
+use crate::entity::action_runner_registration_token;
+#[cfg(test)]
+use crate::entity::action_secret;
+#[cfg(test)]
+use crate::entity::action_variable;
+#[cfg(test)]
+use crate::entity::namespace;
+#[cfg(test)]
+use crate::entity::namespace_integration;
+#[cfg(test)]
+use crate::entity::namespace_mirror_identity;
+#[cfg(test)]
+use crate::entity::namespace_pin;
+#[cfg(test)]
+use crate::entity::repository;
+#[cfg(test)]
+use crate::entity::repository_alias;
+#[cfg(test)]
+use crate::entity::user;
+#[cfg(test)]
+use sea_orm::EntityTrait;
+#[cfg(test)]
+use sea_orm::Set;
+#[cfg(test)]
+use sea_orm::TransactionTrait;
+impl From<domain::PasskeyResponse> for PasskeyResponse {
+    fn from(value: domain::PasskeyResponse) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            created_at: value.created_at,
+            last_used_at: value.last_used_at,
+        }
+    }
+}
+impl From<domain::PasskeyCreationResponse> for PasskeyCreationResponse {
+    fn from(value: domain::PasskeyCreationResponse) -> Self {
+        Self {
+            challenge_id: value.challenge_id,
+            options: value.options,
+        }
+    }
+}
+impl From<domain::PasskeyRequestResponse> for PasskeyRequestResponse {
+    fn from(value: domain::PasskeyRequestResponse) -> Self {
+        Self {
+            challenge_id: value.challenge_id,
+            options: value.options,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::entity::session;
-    use sea_orm::{ConnectOptions, Database, DatabaseConnection, NotSet};
-    use sea_orm_migration::MigratorTrait;
+    use sea_orm::{DatabaseConnection, NotSet};
 
     use super::*;
-    use crate::{actions::test_support, migration::Migrator};
+    use crate::actions::test_support;
 
-    async fn database() -> DatabaseConnection {
-        let mut options = ConnectOptions::new("sqlite::memory:");
-        options.max_connections(1).sqlx_logging(false);
-        let database = Database::connect(options).await.unwrap();
-        database
-            .execute_unprepared("PRAGMA foreign_keys = ON")
-            .await
-            .unwrap();
-        Migrator::up(&database, None).await.unwrap();
-        database
-    }
+    use gitadel_db::test_support::database;
 
     /// Every namespace-scoped table a personal namespace can own rows in.
     async fn namespace_resources(database: &DatabaseConnection, owner: &user::Model) {

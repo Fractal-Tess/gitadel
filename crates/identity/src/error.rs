@@ -3,6 +3,9 @@
 pub enum IdentityError {
     BadRequest(String),
     Unauthorized,
+    InvalidCredentials,
+    InvalidTwoFactorCode,
+    RateLimited(String),
     NotFound,
     Forbidden(String),
     Conflict(String),
@@ -16,6 +19,9 @@ impl IdentityError {
     }
     pub fn unauthorized() -> Self {
         Self::Unauthorized
+    }
+    pub fn too_many_requests(message: impl Into<String>) -> Self {
+        Self::RateLimited(message.into())
     }
     pub fn not_found() -> Self {
         Self::NotFound
@@ -38,6 +44,9 @@ impl std::fmt::Display for IdentityError {
             | Self::Forbidden(message)
             | Self::Conflict(message)
             | Self::Internal(message) => f.write_str(message),
+            Self::RateLimited(message) => f.write_str(message),
+            Self::InvalidCredentials => f.write_str("The username or credential was not accepted."),
+            Self::InvalidTwoFactorCode => f.write_str("The authentication code was not accepted."),
             Self::Unauthorized => f.write_str("Sign in to continue."),
             Self::NotFound => f.write_str("Not found."),
             Self::SecretOpen(error) => error.fmt(f),

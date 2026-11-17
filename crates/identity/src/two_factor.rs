@@ -229,3 +229,276 @@ pub fn verify_totp(
     }
     Ok(None)
 }
+
+use crate::{Principal, runtime::AuthService, verify_password};
+use sea_orm::{PaginatorTrait, TransactionTrait};
+const TOTP_SECRET_BYTES: usize = 20;
+pub struct TwoFactorStatusResponse {
+    pub enabled: bool,
+    pub confirmed_at: Option<chrono::DateTime<Utc>>,
+    pub recovery_codes_remaining: u64,
+}
+
+pub struct EnrollmentResponse {
+    pub secret: String,
+    pub otpauth_uri: String,
+    pub qr_svg: String,
+}
+
+pub struct ConfirmEnrollmentRequest {
+    pub code: String,
+}
+
+pub struct RecoveryCodesResponse {
+    pub recovery_codes: Vec<String>,
+}
+
+pub struct ReauthenticationRequest {
+    pub password: Option<String>,
+    pub code: Option<String>,
+}
+
+pub async fn status(
+    state: &AuthService<'_>,
+    actor: &Principal,
+) -> Result<TwoFactorStatusResponse, IdentityError> {
+    let actor = state.require_actor(actor, false, crate::SCOPE_READ).await?;
+    let confirmed_at = user_totp::Entity::find_by_id(actor.user.id)
+        .one(state.database())
+        .await?
+        .and_then(|stored| stored.confirmed_at);
+    let recovery_codes_remaining = user_recovery_code::Entity::find()
+        .filter(user_recovery_code::Column::UserId.eq(actor.user.id))
+        .filter(user_recovery_code::Column::UsedAt.is_null())
+        .count(state.database())
+        .await?;
+    Ok(TwoFactorStatusResponse {
+        enabled: confirmed_at.is_some(),
+        confirmed_at,
+        recovery_codes_remaining,
+    })
+}
+pub async fn start_enrollment(
+    state: &AuthService<'_>,
+    actor: &Principal,
+) -> Result<EnrollmentResponse, IdentityError> {
+    let actor = state
+        .require_actor(actor, false, crate::SCOPE_WRITE)
+        .await?;
+    crate::auth::require_browser_session(actor.via_api_token)?;
+    let mut secret = [0_u8; TOTP_SECRET_BYTES];
+    rand::rng().fill(&mut secret);
+
+    let transaction = state.database().begin().await?;
+    if is_enabled(&transaction, actor.user.id).await? {
+        return Err(IdentityError::conflict(
+            "Two-factor authentication is already enabled.",
+        ));
+    }
+    // Starting again replaces an unconfirmed secret, so an abandoned QR code
+    // never becomes valid later.
+    user_totp::Entity::delete_by_id(actor.user.id)
+        .exec(&transaction)
+        .await?;
+    let sealed = state
+        .secret_cipher()
+        .seal_text(
+            SecretKind::TotpSecret,
+            &actor.user.id,
+            &URL_SAFE_NO_PAD.encode(secret),
+        )
+        .map_err(IdentityError::internal)?;
+    user_totp::ActiveModel {
+        user_id: Set(actor.user.id),
+        secret: Set(sealed),
+        confirmed_at: Set(None),
+        last_used_step: Set(None),
+        created_at: Set(Utc::now()),
+    }
+    .insert(&transaction)
+    .await?;
+    transaction.commit().await?;
+
+    let encoded = base32(&secret);
+    let host = state.public_url().host_str().unwrap_or("gitadel");
+    let otpauth_uri = otpauth_uri(&encoded, &actor.user.username, host)?;
+    let qr_svg = qr_svg(&otpauth_uri)?;
+    Ok(EnrollmentResponse {
+        secret: encoded,
+        otpauth_uri,
+        qr_svg,
+    })
+}
+pub async fn confirm_enrollment(
+    state: &AuthService<'_>,
+    actor: &Principal,
+    request: ConfirmEnrollmentRequest,
+) -> Result<RecoveryCodesResponse, IdentityError> {
+    let actor = state
+        .require_actor(actor, false, crate::SCOPE_WRITE)
+        .await?;
+    crate::auth::require_browser_session(actor.via_api_token)?;
+    state
+        .enforce_account_auth_rate_limit(&format!("two-factor:{}", actor.user.id), 8)
+        .await?;
+    let transaction = state.database().begin().await?;
+    let stored = user_totp::Entity::find_by_id(actor.user.id)
+        .one(&transaction)
+        .await?
+        .filter(|stored| stored.confirmed_at.is_none())
+        .ok_or_else(|| IdentityError::bad_request("Start two-factor enrollment first."))?;
+    let secret = decode_secret(state.secret_cipher(), actor.user.id, &stored.secret)?;
+    let Some(step) = verify_totp(&secret, &request.code, Utc::now().timestamp(), None)? else {
+        return Err(invalid_code());
+    };
+    let mut active: user_totp::ActiveModel = stored.into();
+    active.confirmed_at = Set(Some(Utc::now()));
+    active.last_used_step = Set(Some(step));
+    active.update(&transaction).await?;
+    let recovery_codes = replace_recovery_codes(&transaction, actor.user.id).await?;
+    state
+        .audit_on(
+            &transaction,
+            Some(actor.user.id),
+            "account.two_factor.enable",
+            None,
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(RecoveryCodesResponse { recovery_codes })
+}
+pub async fn regenerate_recovery_codes(
+    state: &AuthService<'_>,
+    actor: &Principal,
+    request: ReauthenticationRequest,
+) -> Result<RecoveryCodesResponse, IdentityError> {
+    let actor = state
+        .require_actor(actor, false, crate::SCOPE_WRITE)
+        .await?;
+    crate::auth::require_browser_session(actor.via_api_token)?;
+    let transaction = state.database().begin().await?;
+    if !is_enabled(&transaction, actor.user.id).await? {
+        return Err(IdentityError::bad_request(
+            "Two-factor authentication is not enabled.",
+        ));
+    }
+    reauthenticate(state, &transaction, &actor.user, request).await?;
+    let recovery_codes = replace_recovery_codes(&transaction, actor.user.id).await?;
+    state
+        .audit_on(
+            &transaction,
+            Some(actor.user.id),
+            "account.two_factor.recovery_codes.regenerate",
+            None,
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(RecoveryCodesResponse { recovery_codes })
+}
+pub async fn disable(
+    state: &AuthService<'_>,
+    actor: &Principal,
+    request: ReauthenticationRequest,
+) -> Result<(), IdentityError> {
+    let actor = state
+        .require_actor(actor, false, crate::SCOPE_WRITE)
+        .await?;
+    crate::auth::require_browser_session(actor.via_api_token)?;
+    let transaction = state.database().begin().await?;
+    if !is_enabled(&transaction, actor.user.id).await? {
+        return Err(IdentityError::bad_request(
+            "Two-factor authentication is not enabled.",
+        ));
+    }
+    reauthenticate(state, &transaction, &actor.user, request).await?;
+    remove_on(&transaction, actor.user.id).await?;
+    state
+        .audit_on(
+            &transaction,
+            Some(actor.user.id),
+            "account.two_factor.disable",
+            None,
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+async fn reauthenticate<C: ConnectionTrait>(
+    state: &AuthService<'_>,
+    connection: &C,
+    account: &gitadel_db::entity::user::Model,
+    request: ReauthenticationRequest,
+) -> Result<(), IdentityError> {
+    state
+        .enforce_account_auth_rate_limit(&format!("two-factor:{}", account.id), 8)
+        .await?;
+    if let Some(code) = request.code.filter(|code| !code.trim().is_empty()) {
+        if crate::two_factor::verify_confirmed_totp(
+            connection,
+            state.secret_cipher(),
+            account.id,
+            &code,
+        )
+        .await?
+        {
+            return Ok(());
+        }
+        return Err(invalid_code());
+    }
+    if let Some(password) = request.password.filter(|password| !password.is_empty()) {
+        if verify_password(password, account.password_hash.clone()).await? {
+            return Ok(());
+        }
+        return Err(IdentityError::bad_request(
+            "The current password is incorrect.",
+        ));
+    }
+    Err(IdentityError::bad_request(
+        "Enter your password or a current authentication code.",
+    ))
+}
+pub fn base32(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(5) * 8);
+    let mut buffer = 0_u32;
+    let mut bits = 0_u32;
+    for &byte in bytes {
+        buffer = (buffer << 8) | u32::from(byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            encoded.push(char::from(
+                BASE32_ALPHABET[((buffer >> bits) & 31) as usize],
+            ));
+        }
+        buffer &= (1 << bits) - 1;
+    }
+    if bits > 0 {
+        encoded.push(char::from(
+            BASE32_ALPHABET[((buffer << (5 - bits)) & 31) as usize],
+        ));
+    }
+    encoded
+}
+pub fn otpauth_uri(secret: &str, username: &str, host: &str) -> Result<String, IdentityError> {
+    let mut uri = url::Url::parse("otpauth://totp/").map_err(IdentityError::internal)?;
+    uri.set_path(&format!("Gitadel:{username}@{host}"));
+    uri.query_pairs_mut()
+        .append_pair("secret", secret)
+        .append_pair("issuer", "Gitadel")
+        .append_pair("algorithm", "SHA1")
+        .append_pair("digits", &TOTP_DIGITS.to_string())
+        .append_pair("period", &TOTP_PERIOD_SECONDS.to_string());
+    Ok(uri.into())
+}
+pub fn qr_svg(value: &str) -> Result<String, IdentityError> {
+    let code = qrcode::QrCode::new(value.as_bytes()).map_err(IdentityError::internal)?;
+    Ok(code
+        .render::<qrcode::render::svg::Color<'_>>()
+        .min_dimensions(192, 192)
+        .dark_color(qrcode::render::svg::Color("#000000"))
+        .light_color(qrcode::render::svg::Color("#ffffff"))
+        .build())
+}
+pub fn invalid_code() -> IdentityError {
+    IdentityError::InvalidTwoFactorCode
+}

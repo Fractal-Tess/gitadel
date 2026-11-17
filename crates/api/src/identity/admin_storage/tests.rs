@@ -32,6 +32,20 @@ struct Fixture {
 }
 
 impl Fixture {
+    async fn principal(&self) -> gitadel_identity::Principal {
+        let raw = gitadel_identity::create_session_on(
+            self.state.database(),
+            self.admin_id,
+            chrono::Duration::hours(1),
+        )
+        .await
+        .unwrap();
+        gitadel_identity::IdentityService::new(self.state.database())
+            .authenticate_session_principal(&raw)
+            .await
+            .unwrap()
+    }
+
     async fn new() -> Self {
         let root = std::env::temp_dir().join(format!("gitadel-admin-storage-{}", Uuid::new_v4()));
         tokio::fs::create_dir_all(&root).await.unwrap();
@@ -39,6 +53,7 @@ impl Fixture {
         settings.database.url = format!("sqlite://{}?mode=rwc", root.join("gitadel.db").display());
         settings.storage.repository_root = root.join("repositories");
         settings.storage.lfs_root = root.join("lfs");
+        settings.storage.registry_root = root.join("registry");
         settings.storage.actions_artifact_root = root.join("actions");
         // The identity state derives its secret key from the host key.
         settings.ssh.host_key = root.join("ssh-host-key");
@@ -198,9 +213,14 @@ impl Fixture {
     }
 
     async fn page(&self, domain: &str, query: RepositoryUsageQuery) -> RepositoryUsagePage {
-        repositories(&self.state, &self.domain(domain).await, &query)
-            .await
-            .unwrap()
+        repositories(
+            &self.state,
+            &self.domain(domain).await,
+            &query,
+            &self.principal().await,
+        )
+        .await
+        .unwrap()
     }
 
     async fn names(&self, domain: &str, query: RepositoryUsageQuery) -> Vec<String> {
@@ -288,9 +308,13 @@ fn legacy_responses_flatten_domain_details() {
 async fn status_reports_local_storage_and_totals() {
     for name in DOMAIN_NAMES {
         let fixture = Fixture::with_usage(name).await;
-        let status = status(&fixture.state, &fixture.domain(name).await)
-            .await
-            .unwrap();
+        let status = status(
+            &fixture.state,
+            &fixture.domain(name).await,
+            &fixture.principal().await,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             (
                 status.name,
@@ -311,9 +335,13 @@ async fn status_reports_local_storage_and_totals() {
 #[tokio::test]
 async fn empty_status_reports_every_detail_counter() {
     let fixture = Fixture::new().await;
-    let status = status(&fixture.state, &fixture.domain("registry").await)
-        .await
-        .unwrap();
+    let status = status(
+        &fixture.state,
+        &fixture.domain("registry").await,
+        &fixture.principal().await,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         status
             .usage
@@ -338,9 +366,13 @@ async fn empty_status_reports_every_detail_counter() {
 #[tokio::test]
 async fn registry_status_reports_domain_details() {
     let fixture = Fixture::with_usage("registry").await;
-    let status = status(&fixture.state, &fixture.domain("registry").await)
-        .await
-        .unwrap();
+    let status = status(
+        &fixture.state,
+        &fixture.domain("registry").await,
+        &fixture.principal().await,
+    )
+    .await
+    .unwrap();
     assert_eq!(status.usage.usage.details.get("blob_count"), Some(&5));
     assert!(
         status
@@ -469,7 +501,9 @@ async fn repositories_reject_invalid_queries() {
         ] {
             let description = format!("{name}: {query:?}");
             assert_eq!(
-                status_of(repositories(&fixture.state, &domain, &query).await),
+                status_of(
+                    repositories(&fixture.state, &domain, &query, &fixture.principal().await).await
+                ),
                 StatusCode::BAD_REQUEST,
                 "{description}"
             );
@@ -498,14 +532,24 @@ async fn migration_starts_reports_progress_and_selects_the_target() {
             batch_size: 1,
         };
 
-        let started = start_migration(&fixture.state, &domain, fixture.admin_id, &request)
-            .await
-            .unwrap();
+        let started = start_migration(
+            &fixture.state,
+            &domain,
+            &fixture.principal().await,
+            &request,
+        )
+        .await
+        .unwrap();
         domain.storage.wait_for_migration().await;
 
-        let view = find_migration(fixture.state.database(), domain.entry, started.operation_id)
-            .await
-            .unwrap();
+        let view = find_migration(
+            &fixture.state,
+            domain.entry,
+            started.operation_id,
+            &fixture.principal().await,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             (
                 view.domain,
@@ -523,7 +567,9 @@ async fn migration_starts_reports_progress_and_selects_the_target() {
             ),
             "{name}"
         );
-        let status = status(&fixture.state, &domain).await.unwrap();
+        let status = status(&fixture.state, &domain, &fixture.principal().await)
+            .await
+            .unwrap();
         assert_eq!(
             (
                 status.active_target_id,
@@ -542,7 +588,15 @@ async fn migration_starts_reports_progress_and_selects_the_target() {
         // The migration is invisible under every other domain.
         let other = DOMAINS.iter().find(|entry| entry.name != name).unwrap();
         assert_eq!(
-            status_of(find_migration(fixture.state.database(), other, started.operation_id).await),
+            status_of(
+                find_migration(
+                    &fixture.state,
+                    other,
+                    started.operation_id,
+                    &fixture.principal().await
+                )
+                .await
+            ),
             StatusCode::NOT_FOUND,
             "{name}"
         );
@@ -576,7 +630,13 @@ async fn migration_rejects_unknown_and_active_targets() {
             let description = format!("{name}: {request:?}");
             assert_eq!(
                 status_of(
-                    start_migration(&fixture.state, &domain, fixture.admin_id, &request).await
+                    start_migration(
+                        &fixture.state,
+                        &domain,
+                        &fixture.principal().await,
+                        &request
+                    )
+                    .await
                 ),
                 StatusCode::BAD_REQUEST,
                 "{description}"
@@ -585,3 +645,5 @@ async fn migration_rejects_unknown_and_active_targets() {
     }
     fixture.close().await;
 }
+use crate::entity::{namespace, organization, repository};
+use std::collections::HashMap;

@@ -6,23 +6,13 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use chrono::Utc;
-use russh::keys::ssh_key::{HashAlg, PublicKey};
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait, sea_query::Expr,
-};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use super::{
-    ApiError, IdentityState, Pagination, SCOPE_READ, SCOPE_SSH_KEYS, SCOPE_WRITE, hash_secret,
-    random_secret, validate_name, validate_slug,
-};
-use crate::entity::{
-    api_token, audit_event, namespace, organization, organization_member, repository_deploy_key,
-    ssh_key as ssh_key_entity, user,
-};
+use super::{ApiError, IdentityState, Pagination, SCOPE_READ, SCOPE_SSH_KEYS, SCOPE_WRITE};
+#[cfg(test)]
+use crate::entity::organization;
 
 #[derive(Serialize, ToSchema)]
 pub struct SshKeyResponse {
@@ -50,13 +40,16 @@ pub async fn list_ssh_keys(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<Vec<SshKeyResponse>>, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_READ).await?;
-    let rows = ssh_key_entity::Entity::find()
-        .filter(ssh_key_entity::Column::UserId.eq(actor.user.id))
-        .order_by_asc(ssh_key_entity::Column::CreatedAt)
-        .all(state.database())
+    let actor = state
+        .authenticate_principal(&headers, &jar, SCOPE_READ)
         .await?;
-    Ok(Json(rows.into_iter().map(ssh_key_response).collect()))
+    Ok(Json(
+        domain::list_ssh_keys(&state.account_service(), &actor)
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    ))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -83,53 +76,24 @@ pub async fn create_ssh_key(
     jar: CookieJar,
     Json(request): Json<CreateSshKeyRequest>,
 ) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_SSH_KEYS).await?;
-    let name = validate_name(&request.name, "SSH key name")?;
-    let key = PublicKey::from_openssh(request.public_key.trim())
-        .map_err(|_| ApiError::bad_request("The SSH public key is not valid OpenSSH format."))?;
-    let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
-    if ssh_key_entity::Entity::find()
-        .filter(ssh_key_entity::Column::Fingerprint.eq(&fingerprint))
-        .one(state.database())
-        .await?
-        .is_some()
-    {
-        return Err(ApiError::conflict("That SSH key is already registered."));
-    }
-    // One fingerprint maps to one SSH identity, so a deploy key cannot also
-    // be a user key.
-    if repository_deploy_key::Entity::find()
-        .filter(repository_deploy_key::Column::Fingerprint.eq(&fingerprint))
-        .one(state.database())
-        .await?
-        .is_some()
-    {
-        return Err(ApiError::conflict(
-            "That SSH key is already registered as a repository deploy key.",
-        ));
-    }
-    let transaction = state.database().begin().await?;
-    let row = ssh_key_entity::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        user_id: Set(actor.user.id),
-        name: Set(name),
-        fingerprint: Set(fingerprint),
-        public_key: Set(key.to_openssh().map_err(ApiError::internal)?),
-        created_at: Set(Utc::now()),
-        last_used_at: Set(None),
-    }
-    .insert(&transaction)
-    .await?;
-    state
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "ssh_key.create",
-            Some(row.id.to_string()),
-        )
+    let actor = state
+        .authenticate_principal(&headers, &jar, SCOPE_SSH_KEYS)
         .await?;
-    transaction.commit().await?;
-    Ok((StatusCode::CREATED, Json(ssh_key_response(row))))
+    Ok((
+        StatusCode::CREATED,
+        Json::<SshKeyResponse>(
+            domain::create_ssh_key(
+                &state.account_service(),
+                &actor,
+                CreateSshKeyRequestDomain {
+                    name: request.name,
+                    public_key: request.public_key,
+                },
+            )
+            .await?
+            .into(),
+        ),
+    ))
 }
 
 #[utoipa::path(
@@ -152,37 +116,11 @@ pub async fn delete_ssh_key(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<StatusCode, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_SSH_KEYS).await?;
-    let transaction = state.database().begin().await?;
-    let result = ssh_key_entity::Entity::delete_many()
-        .filter(ssh_key_entity::Column::Id.eq(id))
-        .filter(ssh_key_entity::Column::UserId.eq(actor.user.id))
-        .exec(&transaction)
+    let actor = state
+        .authenticate_principal(&headers, &jar, SCOPE_SSH_KEYS)
         .await?;
-    if result.rows_affected == 0 {
-        return Err(ApiError::not_found());
-    }
-    state
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "ssh_key.delete",
-            Some(id.to_string()),
-        )
-        .await?;
-    transaction.commit().await?;
+    domain::delete_ssh_key(&state.account_service(), &actor, id).await?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-fn ssh_key_response(row: ssh_key_entity::Model) -> SshKeyResponse {
-    SshKeyResponse {
-        id: row.id,
-        name: row.name,
-        fingerprint: row.fingerprint,
-        public_key: row.public_key,
-        created_at: row.created_at,
-        last_used_at: row.last_used_at,
-    }
 }
 
 #[derive(Serialize, ToSchema)]
@@ -212,19 +150,16 @@ pub async fn list_tokens(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<Vec<TokenResponse>>, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_READ).await?;
-    if actor.via_api_token {
-        return Err(ApiError::forbidden(
-            "Manage API tokens from a browser session.",
-        ));
-    }
-    let rows = api_token::Entity::find()
-        .filter(api_token::Column::UserId.eq(actor.user.id))
-        .filter(api_token::Column::RevokedAt.is_null())
-        .order_by_asc(api_token::Column::CreatedAt)
-        .all(state.database())
+    let actor = state
+        .authenticate_principal(&headers, &jar, SCOPE_READ)
         .await?;
-    Ok(Json(rows.into_iter().map(token_response).collect()))
+    Ok(Json(
+        domain::list_tokens(&state.account_service(), &actor)
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    ))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -258,53 +193,22 @@ pub async fn create_token(
     jar: CookieJar,
     Json(request): Json<CreateTokenRequest>,
 ) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
-    if actor.via_api_token {
-        return Err(ApiError::forbidden(
-            "Create API tokens from a browser session.",
-        ));
-    }
-    let name = validate_name(&request.name, "Token name")?;
-    let scopes = parse_scopes(&request.scopes)?;
-    let expires_at = match request.expires_in_days {
-        None => None,
-        Some(days) if (1..=3650).contains(&days) => Some(Utc::now() + chrono::Duration::days(days)),
-        Some(_) => {
-            return Err(ApiError::bad_request(
-                "Token lifetime must be between 1 day and 10 years.",
-            ));
-        }
-    };
-    let raw_token = format!("gtd_{}", random_secret(32));
-    let transaction = state.database().begin().await?;
-    let row = api_token::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        user_id: Set(actor.user.id),
-        name: Set(name),
-        token_hash: Set(hash_secret(&raw_token)),
-        scopes: Set(scopes),
-        expires_at: Set(expires_at),
-        created_at: Set(Utc::now()),
-        last_used_at: Set(None),
-        revoked_at: Set(None),
-    }
-    .insert(&transaction)
-    .await?;
-    state
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "api_token.create",
-            Some(row.id.to_string()),
-        )
+    let actor = state
+        .authenticate_principal(&headers, &jar, SCOPE_WRITE)
         .await?;
-    transaction.commit().await?;
+    let result = domain::create_token(
+        &state.account_service(),
+        &actor,
+        CreateTokenRequestDomain {
+            name: request.name,
+            scopes: request.scopes,
+            expires_in_days: request.expires_in_days,
+        },
+    )
+    .await?;
     Ok((
         StatusCode::CREATED,
-        Json(CreatedTokenResponse {
-            token: raw_token,
-            details: token_response(row),
-        }),
+        Json::<CreatedTokenResponse>(result.into()),
     ))
 }
 
@@ -328,77 +232,11 @@ pub async fn revoke_token(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<StatusCode, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
-    if actor.via_api_token {
-        return Err(ApiError::forbidden(
-            "Revoke API tokens from a browser session.",
-        ));
-    }
-    let stored = api_token::Entity::find_by_id(id)
-        .filter(api_token::Column::UserId.eq(actor.user.id))
-        .filter(api_token::Column::RevokedAt.is_null())
-        .one(state.database())
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    let transaction = state.database().begin().await?;
-    let mut active: api_token::ActiveModel = stored.into();
-    active.revoked_at = Set(Some(Utc::now()));
-    active.update(&transaction).await?;
-    state
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "api_token.revoke",
-            Some(id.to_string()),
-        )
+    let actor = state
+        .authenticate_principal(&headers, &jar, SCOPE_WRITE)
         .await?;
-    transaction.commit().await?;
+    domain::revoke_token(&state.account_service(), &actor, id).await?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-fn parse_scopes(requested: &[String]) -> Result<i32, ApiError> {
-    if requested.is_empty() {
-        return Err(ApiError::bad_request("Select at least one token scope."));
-    }
-    let mut scopes = 0;
-    for scope in requested {
-        scopes |= match scope.as_str() {
-            "read" => SCOPE_READ,
-            "write" => SCOPE_WRITE,
-            "ssh_keys" => SCOPE_SSH_KEYS,
-            _ => {
-                return Err(ApiError::bad_request(format!(
-                    "Unknown token scope: {scope}."
-                )));
-            }
-        };
-    }
-    Ok(scopes)
-}
-
-fn scope_names(scopes: i32) -> Vec<&'static str> {
-    let mut names = Vec::with_capacity(3);
-    if scopes & SCOPE_READ != 0 {
-        names.push("read");
-    }
-    if scopes & SCOPE_WRITE != 0 {
-        names.push("write");
-    }
-    if scopes & SCOPE_SSH_KEYS != 0 {
-        names.push("ssh_keys");
-    }
-    names
-}
-
-fn token_response(row: api_token::Model) -> TokenResponse {
-    TokenResponse {
-        id: row.id,
-        name: row.name,
-        scopes: scope_names(row.scopes),
-        expires_at: row.expires_at,
-        created_at: row.created_at,
-        last_used_at: row.last_used_at,
-    }
 }
 
 #[derive(Serialize, ToSchema)]
@@ -426,14 +264,11 @@ pub async fn get_namespace(
     State(state): State<IdentityState>,
     Path(slug): Path<String>,
 ) -> Result<Json<NamespaceResponse>, ApiError> {
-    let namespace = namespace::Entity::find_by_id(slug)
-        .one(state.database())
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    Ok(Json(NamespaceResponse {
-        slug: namespace.slug,
-        kind: namespace.kind,
-    }))
+    Ok(Json(
+        domain::get_namespace(&state.account_service(), slug)
+            .await?
+            .into(),
+    ))
 }
 
 #[derive(Serialize, ToSchema)]
@@ -461,28 +296,16 @@ pub async fn list_organizations(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<Vec<OrganizationResponse>>, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_READ).await?;
-    let memberships = organization_member::Entity::find()
-        .filter(organization_member::Column::UserId.eq(actor.user.id))
-        .all(state.database())
+    let actor = state
+        .authenticate_principal(&headers, &jar, SCOPE_READ)
         .await?;
-    let mut response = Vec::with_capacity(memberships.len());
-    for membership in memberships {
-        if let Some(organization) = organization::Entity::find_by_id(membership.organization_id)
-            .one(state.database())
+    Ok(Json(
+        domain::list_organizations(&state.account_service(), &actor)
             .await?
-        {
-            response.push(OrganizationResponse {
-                id: organization.id,
-                slug: organization.slug,
-                display_name: organization.display_name,
-                avatar_updated_at: organization.avatar_updated_at,
-                role: membership.role,
-            });
-        }
-    }
-    response.sort_by(|left, right| left.slug.cmp(&right.slug));
-    Ok(Json(response))
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    ))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -509,65 +332,23 @@ pub async fn create_organization(
     jar: CookieJar,
     Json(request): Json<CreateOrganizationRequest>,
 ) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
-    let slug = validate_slug(&request.slug, "Organization name")?;
-    let display_name = validate_name(&request.display_name, "Display name")?;
-    if namespace::Entity::find_by_id(&slug)
-        .one(state.database())
-        .await?
-        .is_some()
-    {
-        return Err(ApiError::conflict(
-            "That organization name is already in use.",
-        ));
-    }
-    let transaction = state.database().begin().await?;
-    let now = Utc::now();
-    let organization = organization::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        slug: Set(slug.clone()),
-        display_name: Set(display_name),
-        avatar_updated_at: Set(None),
-        created_at: Set(now),
-        updated_at: Set(now),
-    }
-    .insert(&transaction)
-    .await?;
-    namespace::ActiveModel {
-        slug: Set(slug.clone()),
-        kind: Set("organization".to_owned()),
-        user_id: Set(None),
-        organization_id: Set(Some(organization.id)),
-        created_at: Set(now),
-    }
-    .insert(&transaction)
-    .await?;
-    organization_member::ActiveModel {
-        organization_id: Set(organization.id),
-        user_id: Set(actor.user.id),
-        role: Set("owner".to_owned()),
-        created_at: Set(now),
-    }
-    .insert(&transaction)
-    .await?;
-    state
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "organization.create",
-            Some(slug),
-        )
+    let actor = state
+        .authenticate_principal(&headers, &jar, SCOPE_WRITE)
         .await?;
-    transaction.commit().await?;
     Ok((
         StatusCode::CREATED,
-        Json(OrganizationResponse {
-            id: organization.id,
-            slug: organization.slug,
-            display_name: organization.display_name,
-            avatar_updated_at: organization.avatar_updated_at,
-            role: "owner".to_owned(),
-        }),
+        Json::<OrganizationResponse>(
+            domain::create_organization(
+                &state.account_service(),
+                &actor,
+                CreateOrganizationRequestDomain {
+                    slug: request.slug,
+                    display_name: request.display_name,
+                },
+            )
+            .await?
+            .into(),
+        ),
     ))
 }
 
@@ -575,51 +356,6 @@ pub async fn create_organization(
 pub struct UpdateOrganizationRequest {
     slug: String,
     display_name: String,
-}
-
-async fn update_organization_profile(
-    transaction: &DatabaseTransaction,
-    organization: organization::Model,
-    current_slug: &str,
-    next_slug: String,
-    display_name: String,
-) -> Result<organization::Model, sea_orm::DbErr> {
-    if next_slug != current_slug {
-        let current_namespace = namespace::Entity::find_by_id(current_slug)
-            .one(transaction)
-            .await?
-            .ok_or_else(|| {
-                sea_orm::DbErr::RecordNotFound(format!("namespace {current_slug} does not exist"))
-            })?;
-        namespace::Entity::update_many()
-            .col_expr(
-                namespace::Column::OrganizationId,
-                Expr::value(Option::<Uuid>::None),
-            )
-            .filter(namespace::Column::Slug.eq(current_slug))
-            .exec(transaction)
-            .await?;
-        namespace::ActiveModel {
-            slug: Set(next_slug.clone()),
-            kind: Set(current_namespace.kind),
-            user_id: Set(current_namespace.user_id),
-            organization_id: Set(current_namespace.organization_id),
-            created_at: Set(current_namespace.created_at),
-        }
-        .insert(transaction)
-        .await?;
-
-        super::auth::move_namespace_resources(transaction, current_slug, &next_slug).await?;
-        namespace::Entity::delete_by_id(current_slug)
-            .exec(transaction)
-            .await?;
-    }
-
-    let mut active: organization::ActiveModel = organization.into();
-    active.slug = Set(next_slug);
-    active.display_name = Set(display_name);
-    active.updated_at = Set(Utc::now());
-    active.update(transaction).await
 }
 
 #[utoipa::path(
@@ -644,38 +380,22 @@ pub async fn update_organization(
     jar: CookieJar,
     Json(request): Json<UpdateOrganizationRequest>,
 ) -> Result<Json<OrganizationResponse>, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
-    let organization = owned_organization(&state, &slug, actor.user.id).await?;
-    let next_slug = validate_slug(&request.slug, "Organization slug")?;
-    let display_name = validate_name(&request.display_name, "Display name")?;
-    if next_slug != slug
-        && namespace::Entity::find_by_id(&next_slug)
-            .one(state.database())
-            .await?
-            .is_some()
-    {
-        return Err(ApiError::bad_request("That namespace is already in use."));
-    }
-    let transaction = state.database().begin().await?;
-    let organization =
-        update_organization_profile(&transaction, organization, &slug, next_slug, display_name)
-            .await?;
-    state
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "organization.update",
-            Some(format!("{slug} -> {}", organization.slug)),
-        )
+    let actor = state
+        .authenticate_principal(&headers, &jar, SCOPE_WRITE)
         .await?;
-    transaction.commit().await?;
-    Ok(Json(OrganizationResponse {
-        id: organization.id,
-        slug: organization.slug,
-        display_name: organization.display_name,
-        avatar_updated_at: organization.avatar_updated_at,
-        role: "owner".to_owned(),
-    }))
+    Ok(Json(
+        domain::update_organization(
+            &state.account_service(),
+            &actor,
+            slug,
+            UpdateOrganizationRequestDomain {
+                slug: request.slug,
+                display_name: request.display_name,
+            },
+        )
+        .await?
+        .into(),
+    ))
 }
 
 /// Organization owners and instance administrators may delete an organization
@@ -700,27 +420,10 @@ pub async fn delete_organization(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<StatusCode, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
-    let organization = if actor.user.is_admin {
-        organization::Entity::find()
-            .filter(organization::Column::Slug.eq(&slug))
-            .one(state.database())
-            .await?
-            .ok_or_else(ApiError::not_found)?
-    } else {
-        owned_organization(&state, &slug, actor.user.id).await?
-    };
-    let transaction = state.database().begin().await?;
-    super::users::delete_organization_on(&transaction, &organization).await?;
-    state
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "organization.delete",
-            Some(slug),
-        )
+    let actor = state
+        .authenticate_principal(&headers, &jar, SCOPE_WRITE)
         .await?;
-    transaction.commit().await?;
+    domain::delete_organization(&state.account_service(), &actor, slug).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -751,27 +454,16 @@ pub async fn list_members(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<Vec<MemberResponse>>, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_READ).await?;
-    let organization = accessible_organization(&state, &slug, actor.user.id).await?;
-    let memberships = organization_member::Entity::find()
-        .filter(organization_member::Column::OrganizationId.eq(organization.id))
-        .order_by_asc(organization_member::Column::CreatedAt)
-        .all(state.database())
+    let actor = state
+        .authenticate_principal(&headers, &jar, SCOPE_READ)
         .await?;
-    let mut response = Vec::with_capacity(memberships.len());
-    for membership in memberships {
-        if let Some(account) = user::Entity::find_by_id(membership.user_id)
-            .one(state.database())
+    Ok(Json(
+        domain::list_members(&state.account_service(), &actor, slug)
             .await?
-        {
-            response.push(MemberResponse {
-                username: account.username,
-                role: membership.role,
-                created_at: membership.created_at,
-            });
-        }
-    }
-    Ok(Json(response))
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    ))
 }
 
 #[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
@@ -810,53 +502,21 @@ pub async fn list_member_suggestions(
     jar: CookieJar,
     Query(query): Query<MemberSuggestionsQuery>,
 ) -> Result<Json<Vec<MemberSuggestionResponse>>, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_READ).await?;
-    let organization = owned_organization(&state, &slug, actor.user.id).await?;
-    let needle = query.q.trim().to_ascii_lowercase();
-    if needle.len() > 39
-        || !needle
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-    {
-        return Err(ApiError::bad_request("The username search is invalid."));
-    }
-    Ok(Json(
-        member_suggestions(state.database(), organization.id, &needle).await?,
-    ))
-}
-
-async fn member_suggestions(
-    database: &DatabaseConnection,
-    organization_id: Uuid,
-    needle: &str,
-) -> Result<Vec<MemberSuggestionResponse>, sea_orm::DbErr> {
-    let member_ids = organization_member::Entity::find()
-        .select_only()
-        .column(organization_member::Column::UserId)
-        .filter(organization_member::Column::OrganizationId.eq(organization_id))
-        .into_tuple::<Uuid>()
-        .all(database)
+    let actor = state
+        .authenticate_principal(&headers, &jar, SCOPE_READ)
         .await?;
-    let mut users = user::Entity::find()
-        .filter(user::Column::DisabledAt.is_null())
-        .order_by_asc(user::Column::Username)
-        .limit(8);
-    if !needle.is_empty() {
-        users = users.filter(user::Column::Username.contains(needle));
-    }
-    if !member_ids.is_empty() {
-        users = users.filter(user::Column::Id.is_not_in(member_ids));
-    }
-    Ok(users
-        .all(database)
+    Ok(Json(
+        domain::list_member_suggestions(
+            &state.account_service(),
+            &actor,
+            slug,
+            MemberSuggestionsQueryDomain { q: query.q },
+        )
         .await?
         .into_iter()
-        .map(|account| MemberSuggestionResponse {
-            id: account.id,
-            username: account.username,
-            avatar_updated_at: account.avatar_updated_at,
-        })
-        .collect())
+        .map(Into::into)
+        .collect(),
+    ))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -887,54 +547,24 @@ pub async fn add_member(
     jar: CookieJar,
     Json(request): Json<AddMemberRequest>,
 ) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
-    let organization = owned_organization(&state, &slug, actor.user.id).await?;
-    if request.role != "owner" && request.role != "member" {
-        return Err(ApiError::bad_request(
-            "Organization role must be owner or member.",
-        ));
-    }
-    let username = validate_slug(&request.username, "Username")?;
-    let account = user::Entity::find()
-        .filter(user::Column::Username.eq(&username))
-        .filter(user::Column::DisabledAt.is_null())
-        .one(state.database())
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    if organization_member::Entity::find_by_id((organization.id, account.id))
-        .one(state.database())
-        .await?
-        .is_some()
-    {
-        return Err(ApiError::conflict(
-            "That user is already an organization member.",
-        ));
-    }
-    let transaction = state.database().begin().await?;
-    let membership = organization_member::ActiveModel {
-        organization_id: Set(organization.id),
-        user_id: Set(account.id),
-        role: Set(request.role),
-        created_at: Set(Utc::now()),
-    }
-    .insert(&transaction)
-    .await?;
-    state
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "organization.member.add",
-            Some(format!("{}/{}", organization.slug, username)),
-        )
+    let actor = state
+        .authenticate_principal(&headers, &jar, SCOPE_WRITE)
         .await?;
-    transaction.commit().await?;
     Ok((
         StatusCode::CREATED,
-        Json(MemberResponse {
-            username,
-            role: membership.role,
-            created_at: membership.created_at,
-        }),
+        Json::<MemberResponse>(
+            domain::add_member(
+                &state.account_service(),
+                &actor,
+                slug,
+                AddMemberRequestDomain {
+                    username: request.username,
+                    role: request.role,
+                },
+            )
+            .await?
+            .into(),
+        ),
     ))
 }
 
@@ -959,62 +589,11 @@ pub async fn remove_member(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<StatusCode, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
-    let organization = owned_organization(&state, &slug, actor.user.id).await?;
-    let account = user::Entity::find()
-        .filter(user::Column::Username.eq(&username))
-        .one(state.database())
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    let transaction = state.database().begin().await?;
-    let membership = organization_member::Entity::find_by_id((organization.id, account.id))
-        .one(&transaction)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    if membership.role == "owner" {
-        let owner_count = organization_member::Entity::find()
-            .filter(organization_member::Column::OrganizationId.eq(organization.id))
-            .filter(organization_member::Column::Role.eq("owner"))
-            .count(&transaction)
-            .await?;
-        if owner_count <= 1 {
-            return Err(ApiError::conflict(
-                "An organization must keep at least one owner.",
-            ));
-        }
-    }
-    organization_member::Entity::delete_by_id((organization.id, account.id))
-        .exec(&transaction)
+    let actor = state
+        .authenticate_principal(&headers, &jar, SCOPE_WRITE)
         .await?;
-    state
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "organization.member.remove",
-            Some(format!("{}/{}", organization.slug, username)),
-        )
-        .await?;
-    transaction.commit().await?;
+    domain::remove_member(&state.account_service(), &actor, slug, username).await?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-async fn accessible_organization(
-    state: &IdentityState,
-    slug: &str,
-    user_id: Uuid,
-) -> Result<organization::Model, ApiError> {
-    Ok(
-        gitadel_identity::permissions::accessible_organization(state.database(), slug, user_id)
-            .await?,
-    )
-}
-
-pub(super) async fn owned_organization(
-    state: &IdentityState,
-    slug: &str,
-    user_id: Uuid,
-) -> Result<organization::Model, ApiError> {
-    Ok(gitadel_identity::permissions::owned_organization(state.database(), slug, user_id).await?)
 }
 
 #[derive(Serialize, ToSchema)]
@@ -1059,17 +638,14 @@ pub async fn list_audit(
     Query(pagination): Query<Pagination>,
     Query(cursor): Query<AuditCursor>,
 ) -> Result<Json<Vec<AuditEventResponse>>, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_READ).await?;
-    if !actor.user.is_admin {
-        return Err(ApiError::forbidden(
-            "Only an administrator can read the audit history.",
-        ));
-    }
-    let limit = pagination.limit.unwrap_or(100).clamp(1, 500);
-    let rows = audit_page(
-        state.database(),
-        limit,
-        cursor.offset.unwrap_or(0),
+    let actor = state
+        .authenticate_principal(&headers, &jar, SCOPE_READ)
+        .await?;
+    let rows = gitadel_instance::service::list_audit(
+        &state.instance_service(),
+        &actor,
+        pagination.limit,
+        cursor.offset,
         cursor.before,
     )
     .await?;
@@ -1087,20 +663,110 @@ pub async fn list_audit(
     ))
 }
 
-async fn audit_page(
-    database: &DatabaseConnection,
-    limit: u64,
-    offset: u64,
-    before: Option<i64>,
-) -> Result<Vec<(audit_event::Model, Option<user::Model>)>, sea_orm::DbErr> {
-    let mut query = audit_event::Entity::find()
-        .find_also_related(user::Entity)
-        .order_by_desc(audit_event::Column::Id);
-    if let Some(before) = before {
-        query = query.filter(audit_event::Column::Id.lt(before));
+#[cfg(test)]
+use gitadel_instance::service::audit_page;
+
+use gitadel_identity::resources as domain;
+impl From<domain::SshKeyResponse> for SshKeyResponse {
+    fn from(value: domain::SshKeyResponse) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            fingerprint: value.fingerprint,
+            public_key: value.public_key,
+            created_at: value.created_at,
+            last_used_at: value.last_used_at,
+        }
     }
-    query.limit(limit).offset(offset).all(database).await
 }
+use domain::CreateSshKeyRequest as CreateSshKeyRequestDomain;
+
+impl From<domain::TokenResponse> for TokenResponse {
+    fn from(value: domain::TokenResponse) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            scopes: value.scopes,
+            expires_at: value.expires_at,
+            created_at: value.created_at,
+            last_used_at: value.last_used_at,
+        }
+    }
+}
+use domain::CreateTokenRequest as CreateTokenRequestDomain;
+
+impl From<domain::CreatedTokenResponse> for CreatedTokenResponse {
+    fn from(value: domain::CreatedTokenResponse) -> Self {
+        Self {
+            token: value.token,
+            details: value.details.into(),
+        }
+    }
+}
+impl From<domain::NamespaceResponse> for NamespaceResponse {
+    fn from(value: domain::NamespaceResponse) -> Self {
+        Self {
+            slug: value.slug,
+            kind: value.kind,
+        }
+    }
+}
+impl From<domain::OrganizationResponse> for OrganizationResponse {
+    fn from(value: domain::OrganizationResponse) -> Self {
+        Self {
+            id: value.id,
+            slug: value.slug,
+            display_name: value.display_name,
+            avatar_updated_at: value.avatar_updated_at,
+            role: value.role,
+        }
+    }
+}
+use domain::CreateOrganizationRequest as CreateOrganizationRequestDomain;
+
+use domain::UpdateOrganizationRequest as UpdateOrganizationRequestDomain;
+
+impl From<domain::MemberResponse> for MemberResponse {
+    fn from(value: domain::MemberResponse) -> Self {
+        Self {
+            username: value.username,
+            role: value.role,
+            created_at: value.created_at,
+        }
+    }
+}
+use domain::MemberSuggestionsQuery as MemberSuggestionsQueryDomain;
+
+impl From<domain::MemberSuggestionResponse> for MemberSuggestionResponse {
+    fn from(value: domain::MemberSuggestionResponse) -> Self {
+        Self {
+            id: value.id,
+            username: value.username,
+            avatar_updated_at: value.avatar_updated_at,
+        }
+    }
+}
+use domain::AddMemberRequest as AddMemberRequestDomain;
+
+#[cfg(test)]
+use domain::{member_suggestions, update_organization_profile};
+
+#[cfg(test)]
+use crate::entity::audit_event;
+#[cfg(test)]
+use crate::entity::namespace;
+#[cfg(test)]
+use crate::entity::organization_member;
+#[cfg(test)]
+use crate::entity::user;
+#[cfg(test)]
+use sea_orm::ActiveModelTrait;
+#[cfg(test)]
+use sea_orm::EntityTrait;
+#[cfg(test)]
+use sea_orm::Set;
+#[cfg(test)]
+use sea_orm::TransactionTrait;
 
 #[cfg(test)]
 mod tests {

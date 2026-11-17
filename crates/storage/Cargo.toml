@@ -10,6 +10,8 @@ description = "Gitadel blob stores, LFS storage, and registry persistence."
 path = "src/lib.rs"
 
 [dependencies]
+gitadel-identity.workspace = true
+url.workspace = true
 gitadel-config.workspace = true
 gitadel-core.workspace = true
 gitadel-db.workspace = true

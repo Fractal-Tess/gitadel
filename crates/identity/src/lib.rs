@@ -4,9 +4,7 @@
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration as ChronoDuration, Utc};
-use gitadel_db::entity::{
-    api_token, audit_event, namespace, oauth_access_token, session, ssh_key, user,
-};
+use gitadel_db::entity::{api_token, oauth_access_token, session, ssh_key, user};
 use rand::RngExt as _;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
@@ -22,9 +20,68 @@ pub use error::IdentityError;
 pub mod email;
 pub mod permissions;
 
+pub mod accounts;
+pub mod auth;
+pub mod avatar;
+pub mod commit_emails;
+pub mod images;
+pub mod mirror_identities;
+pub mod notifications;
+pub mod oauth;
+pub mod principal;
+pub mod resources;
+pub mod runtime;
+#[cfg(test)]
+mod service_tests;
+pub mod sso;
 #[cfg(test)]
 mod tests;
 pub mod two_factor;
+pub mod users;
+pub use principal::{CredentialSource, Principal};
+
+/// Account workflows with explicit persistence and audit dependencies.
+pub struct AccountService<'a> {
+    database: &'a DatabaseConnection,
+    audit: gitadel_core::audit::AuditContext,
+}
+
+impl<'a> AccountService<'a> {
+    pub fn new(database: &'a DatabaseConnection, audit: gitadel_core::audit::AuditContext) -> Self {
+        Self { database, audit }
+    }
+
+    pub fn database(&self) -> &DatabaseConnection {
+        self.database
+    }
+
+    /// Reload authority on the writer; callers cannot manufacture administrator access.
+    pub async fn require_actor(
+        &self,
+        actor: &Principal,
+        admin: bool,
+        required_scope: i32,
+    ) -> Result<AuthenticatedUser, IdentityError> {
+        let actor = actor.authorize(self.database, required_scope).await?;
+        if admin && !actor.user.is_admin {
+            return Err(IdentityError::forbidden(
+                "Administrator access is required.",
+            ));
+        }
+        Ok(actor)
+    }
+
+    pub async fn audit_on<C: ConnectionTrait>(
+        &self,
+        connection: &C,
+        actor: Option<Uuid>,
+        action: impl Into<String>,
+        target: Option<String>,
+    ) -> Result<(), IdentityError> {
+        gitadel_db::audit::record(connection, actor, action, target, self.audit).await?;
+        Ok(())
+    }
+}
 
 /// General API read access.
 pub const SCOPE_READ: i32 = 1;
@@ -56,12 +113,34 @@ impl<'a> IdentityService<'a> {
     pub fn new(database: &'a DatabaseConnection) -> Self {
         Self { database }
     }
+    pub async fn authenticate_session_principal(
+        &self,
+        raw: &str,
+    ) -> Result<Principal, IdentityError> {
+        let actor = self.authenticate_session(raw).await?;
+        Ok(Principal {
+            actor,
+            credential: principal::Credential::Browser {
+                hash: hash_secret(raw),
+            },
+        })
+    }
     /// Authenticate a personal API token or OAuth access token with required scopes.
     pub async fn authenticate_token(
         &self,
         token: &str,
         required_scope: i32,
     ) -> Result<AuthenticatedUser, IdentityError> {
+        Ok(self
+            .authenticate_token_principal(token, required_scope)
+            .await?
+            .actor)
+    }
+    pub async fn authenticate_token_principal(
+        &self,
+        token: &str,
+        required_scope: i32,
+    ) -> Result<Principal, IdentityError> {
         let token_hash = hash_secret(token);
         let now = Utc::now();
         if let Some(stored) = api_token::Entity::find()
@@ -85,6 +164,10 @@ impl<'a> IdentityService<'a> {
                 .enabled_user(stored.user_id)
                 .await?
                 .ok_or_else(IdentityError::unauthorized)?;
+            let credential = principal::Credential::Personal {
+                id: stored.id,
+                scopes: stored.scopes,
+            };
             if stored
                 .last_used_at
                 .is_none_or(|last_used_at| now - last_used_at > ChronoDuration::minutes(5))
@@ -93,9 +176,12 @@ impl<'a> IdentityService<'a> {
                 active.last_used_at = Set(Some(now));
                 active.update(self.database).await?;
             }
-            return Ok(AuthenticatedUser {
-                user: account,
-                via_api_token: true,
+            return Ok(Principal {
+                actor: AuthenticatedUser {
+                    user: account,
+                    via_api_token: true,
+                },
+                credential,
             });
         }
 
@@ -114,6 +200,10 @@ impl<'a> IdentityService<'a> {
             .enabled_user(stored.user_id)
             .await?
             .ok_or_else(IdentityError::unauthorized)?;
+        let credential = principal::Credential::OAuth {
+            hash: stored.token_hash.clone(),
+            scopes: stored.scopes,
+        };
         if stored
             .last_used_at
             .is_none_or(|last_used_at| now - last_used_at > ChronoDuration::minutes(5))
@@ -122,9 +212,12 @@ impl<'a> IdentityService<'a> {
             active.last_used_at = Set(Some(now));
             active.update(self.database).await?;
         }
-        Ok(AuthenticatedUser {
-            user: account,
-            via_api_token: true,
+        Ok(Principal {
+            actor: AuthenticatedUser {
+                user: account,
+                via_api_token: true,
+            },
+            credential,
         })
     }
 
@@ -296,39 +389,16 @@ pub async fn bootstrap_admin(
         ));
     }
     let now = Utc::now();
-    let account = user::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        username: Set(username.clone()),
-        password_hash: Set(password_hash),
-        is_admin: Set(true),
-        default_repository_visibility: Set("private".to_owned()),
-        theme_preference: Set("system".to_owned()),
-        motion_preference: Set("system".to_owned()),
-        disabled_at: Set(None),
-        avatar_updated_at: Set(None),
-        created_at: Set(now),
-        updated_at: Set(now),
-    }
-    .insert(&transaction)
-    .await?;
-    namespace::ActiveModel {
-        slug: Set(username.clone()),
-        kind: Set("user".to_owned()),
-        user_id: Set(Some(account.id)),
-        organization_id: Set(None),
-        created_at: Set(now),
-    }
-    .insert(&transaction)
-    .await?;
-    audit_event::ActiveModel {
-        id: sea_orm::ActiveValue::NotSet,
-        actor_user_id: Set(Some(account.id)),
-        action: Set("admin.bootstrap".to_owned()),
-        target: Set(Some(username)),
-        remote_address: Set(None),
-        created_at: Set(now),
-    }
-    .insert(&transaction)
+    let account =
+        crate::accounts::insert_account_on(&transaction, &username, password_hash, true, now)
+            .await?;
+    gitadel_db::audit::record(
+        &transaction,
+        Some(account.id),
+        "admin.bootstrap",
+        Some(username),
+        gitadel_core::audit::AuditContext::default(),
+    )
     .await?;
     transaction.commit().await?;
     Ok(account)

@@ -411,3 +411,4 @@ async fn oauth_tokens_keep_distinct_scopes_and_reject_expiry() {
         Err(IdentityError::Unauthorized)
     ));
 }
+use gitadel_db::entity::{audit_event, namespace};

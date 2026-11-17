@@ -9,6 +9,8 @@ license.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+gitadel-identity.workspace = true
+url.workspace = true
 gitadel-config.workspace = true
 gitadel-core.workspace = true
 gitadel-db.workspace = true
@@ -33,4 +35,5 @@ rust-s3.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
+gitadel-db = { workspace = true, features = ["test-support"] }
 url.workspace = true

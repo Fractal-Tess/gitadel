@@ -13,30 +13,21 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use chrono::{DateTime, Utc};
 use futures_util::stream;
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait,
-};
+#[cfg(test)]
+use sea_orm::{ActiveModelTrait, EntityTrait};
 use serde::{Deserialize, Serialize};
 use tokio_util::io::ReaderStream;
 use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    archive::{self, MaintenanceAction},
-    backup_provider::{
-        self, BackupProvider, BackupProviderConfig, BackupProviderKind, BackupProviderSource,
-        FilesystemSettings, RUNTIME_S3_PROVIDER_ID,
-    },
-    blob_store::targets::{self, MeasuredUsage, StorageTargetConfiguration, StorageTargetView},
-    config::S3Settings,
-    entity::{audit_event, instance, instance_asset},
+    archive::{self},
+    backup_provider::BackupProviderKind,
+    blob_store::targets::{MeasuredUsage, StorageTargetView},
+    entity::instance,
 };
 
 pub const MAX_FAVICON_BYTES: usize = 512 * 1024;
-const MIN_FAVICON_EDGE: u32 = 16;
-const MAX_FAVICON_EDGE: u32 = 1024;
-const PNG_SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 const DEFAULT_LIGHT_FAVICON: &[u8] =
     include_bytes!("../../../../frontend/static/favicon-light.png");
 const DEFAULT_DARK_FAVICON: &[u8] = include_bytes!("../../../../frontend/static/favicon-dark.png");
@@ -98,27 +89,6 @@ pub struct UpdateIntegritySettingsRequest {
     schedule: String,
 }
 
-async fn integrity_settings_response(
-    state: &IdentityState,
-) -> Result<IntegritySettingsResponse, ApiError> {
-    let settings = instance::Entity::find_by_id(1)
-        .one(state.database())
-        .await?
-        .ok_or_else(|| ApiError::internal("instance settings row is missing"))?;
-    let last_check = audit_event::Entity::find()
-        .filter(audit_event::Column::Action.eq("repository.integrity.check"))
-        .order_by_desc(audit_event::Column::Id)
-        .one(state.database())
-        .await?;
-
-    Ok(IntegritySettingsResponse {
-        enabled: settings.integrity_checks_enabled,
-        schedule: settings.integrity_check_schedule,
-        last_checked_at: last_check.as_ref().map(|event| event.created_at),
-        last_result: last_check.and_then(|event| event.target),
-    })
-}
-
 #[utoipa::path(
     get, path = "/admin/integrity",
     operation_id = "get_admin_integrity",
@@ -135,8 +105,12 @@ pub async fn get_integrity_settings(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<IntegritySettingsResponse>, ApiError> {
-    require_admin(&state, &headers, &jar, SCOPE_READ).await?;
-    Ok(Json(integrity_settings_response(&state).await?))
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_READ).await?;
+    Ok(Json(
+        instance_service::get_integrity_settings(&state.instance_service(), &actor)
+            .await?
+            .into(),
+    ))
 }
 
 #[utoipa::path(
@@ -157,47 +131,19 @@ pub async fn update_integrity_settings(
     jar: CookieJar,
     Json(request): Json<UpdateIntegritySettingsRequest>,
 ) -> Result<Json<IntegritySettingsResponse>, ApiError> {
-    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    let schedule = request.schedule.trim();
-    if schedule.is_empty() || schedule.len() > 128 {
-        return Err(ApiError::bad_request(
-            "Schedule must contain between 1 and 128 characters.",
-        ));
-    }
-    crate::schedule::next_occurrence(schedule, Utc::now())
-        .map_err(|error| ApiError::bad_request(format!("Invalid UTC cron schedule: {error}")))?;
-
-    let settings = instance::Entity::find_by_id(1)
-        .one(state.database())
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_WRITE).await?;
+    Ok(Json(
+        instance_service::update_integrity_settings(
+            &state.instance_service(),
+            &actor,
+            instance_service::UpdateIntegritySettingsRequest {
+                enabled: request.enabled,
+                schedule: request.schedule,
+            },
+        )
         .await?
-        .ok_or_else(|| ApiError::internal("instance settings row is missing"))?;
-    let now = Utc::now();
-    let mut active: instance::ActiveModel = settings.into();
-    active.integrity_checks_enabled = Set(request.enabled);
-    active.integrity_check_schedule = Set(schedule.to_owned());
-    active.updated_at = Set(now);
-    active.update(state.database()).await?;
-
-    audit_event::ActiveModel {
-        id: sea_orm::ActiveValue::NotSet,
-        actor_user_id: Set(Some(actor.user.id)),
-        action: Set("instance.integrity.update".to_owned()),
-        target: Set(Some(format!(
-            "{}; {schedule}",
-            if request.enabled {
-                "enabled"
-            } else {
-                "disabled"
-            }
-        ))),
-        remote_address: Set(None),
-        created_at: Set(now),
-    }
-    .insert(state.database())
-    .await?;
-
-    state.notify_integrity_settings_changed();
-    Ok(Json(integrity_settings_response(&state).await?))
+        .into(),
+    ))
 }
 
 #[utoipa::path(
@@ -215,11 +161,11 @@ pub async fn update_integrity_settings(
 pub async fn public_instance_settings(
     State(state): State<IdentityState>,
 ) -> Result<Json<InstanceSettingsResponse>, ApiError> {
-    let settings = instance::Entity::find_by_id(1)
-        .one(state.database())
-        .await?
-        .ok_or_else(|| ApiError::internal("instance settings row is missing"))?;
-    Ok(Json(settings.into()))
+    Ok(Json(
+        instance_service::public_instance_settings(&state.instance_service())
+            .await?
+            .into(),
+    ))
 }
 
 #[utoipa::path(
@@ -238,12 +184,12 @@ pub async fn get_instance_settings(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<InstanceSettingsResponse>, ApiError> {
-    require_admin(&state, &headers, &jar, SCOPE_READ).await?;
-    let settings = instance::Entity::find_by_id(1)
-        .one(state.database())
-        .await?
-        .ok_or_else(|| ApiError::internal("instance settings row is missing"))?;
-    Ok(Json(settings.into()))
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_READ).await?;
+    Ok(Json(
+        instance_service::get_instance_settings(&state.instance_service(), &actor)
+            .await?
+            .into(),
+    ))
 }
 
 #[utoipa::path(
@@ -264,49 +210,19 @@ pub async fn update_instance_settings(
     jar: CookieJar,
     Json(request): Json<UpdateInstanceSettingsRequest>,
 ) -> Result<Json<InstanceSettingsResponse>, ApiError> {
-    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    let site_name = request.site_name.trim();
-    if site_name.is_empty() || site_name.len() > 80 {
-        return Err(ApiError::bad_request(
-            "Site name must contain between 1 and 80 characters.",
-        ));
-    }
-    let site_description = request
-        .site_description
-        .map(|description| description.trim().to_owned())
-        .filter(|description| !description.is_empty());
-    if site_description
-        .as_ref()
-        .is_some_and(|description| description.len() > 280)
-    {
-        return Err(ApiError::bad_request(
-            "Site description cannot exceed 280 characters.",
-        ));
-    }
-
-    let settings = instance::Entity::find_by_id(1)
-        .one(state.database())
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_WRITE).await?;
+    Ok(Json(
+        instance_service::update_instance_settings(
+            &state.instance_service(),
+            &actor,
+            instance_service::UpdateInstanceSettingsRequest {
+                site_name: request.site_name,
+                site_description: request.site_description,
+            },
+        )
         .await?
-        .ok_or_else(|| ApiError::internal("instance settings row is missing"))?;
-    let now = Utc::now();
-    let mut active: instance::ActiveModel = settings.into();
-    active.site_name = Set(site_name.to_owned());
-    active.site_description = Set(site_description);
-    active.updated_at = Set(now);
-    let settings = active.update(state.database()).await?;
-
-    audit_event::ActiveModel {
-        id: sea_orm::ActiveValue::NotSet,
-        actor_user_id: Set(Some(actor.user.id)),
-        action: Set("instance.settings.update".to_owned()),
-        target: Set(None),
-        remote_address: Set(None),
-        created_at: Set(now),
-    }
-    .insert(state.database())
-    .await?;
-
-    Ok(Json(settings.into()))
+        .into(),
+    ))
 }
 
 #[utoipa::path(
@@ -328,10 +244,8 @@ pub async fn public_instance_favicon(
     State(state): State<IdentityState>,
     Path(theme): Path<String>,
 ) -> Result<Response, ApiError> {
-    let (name, fallback) = favicon_asset(FaviconTheme::try_from(theme.as_str())?);
-    let asset = instance_asset::Entity::find_by_id(name)
-        .one(state.database())
-        .await?;
+    let (_name, fallback) = favicon_asset(FaviconTheme::try_from(theme.as_str())?);
+    let asset = instance_service::favicon(state.database(), &theme).await?;
     let (content_type, content) = asset
         .map(|asset| (asset.content_type, asset.content))
         .unwrap_or_else(|| ("image/png".to_owned(), fallback.to_vec()));
@@ -374,56 +288,18 @@ pub async fn update_instance_favicon(
     jar: CookieJar,
     body: Bytes,
 ) -> Result<StatusCode, ApiError> {
-    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    let (name, _) = favicon_asset(FaviconTheme::try_from(theme.as_str())?);
-    let content_type = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    if content_type
-        .split(';')
-        .next()
-        .is_none_or(|value| value.trim() != "image/png")
-    {
-        return Err(ApiError::bad_request("Favicons must be PNG images."));
-    }
-    validate_png(&body)?;
-
-    let now = Utc::now();
-    let transaction = state.database().begin().await?;
-    match instance_asset::Entity::find_by_id(name)
-        .one(&transaction)
-        .await?
-    {
-        Some(asset) => {
-            let mut active: instance_asset::ActiveModel = asset.into();
-            active.content_type = Set("image/png".to_owned());
-            active.content = Set(body.to_vec());
-            active.updated_at = Set(now);
-            active.update(&transaction).await?;
-        }
-        None => {
-            instance_asset::ActiveModel {
-                name: Set(name.to_owned()),
-                content_type: Set("image/png".to_owned()),
-                content: Set(body.to_vec()),
-                updated_at: Set(now),
-            }
-            .insert(&transaction)
-            .await?;
-        }
-    }
-    touch_instance(&transaction, now).await?;
-    state
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "instance.favicon.update",
-            Some(name.to_owned()),
-        )
-        .await?;
-    transaction.commit().await?;
-
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_WRITE).await?;
+    instance_service::update_instance_favicon(
+        &state.instance_service(),
+        &actor,
+        theme,
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default(),
+        &body,
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -447,23 +323,8 @@ pub async fn delete_instance_favicon(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<StatusCode, ApiError> {
-    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    let (name, _) = favicon_asset(FaviconTheme::try_from(theme.as_str())?);
-    let transaction = state.database().begin().await?;
-    instance_asset::Entity::delete_by_id(name)
-        .exec(&transaction)
-        .await?;
-    let now = Utc::now();
-    touch_instance(&transaction, now).await?;
-    state
-        .audit_on(
-            &transaction,
-            Some(actor.user.id),
-            "instance.favicon.delete",
-            Some(name.to_owned()),
-        )
-        .await?;
-    transaction.commit().await?;
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_WRITE).await?;
+    instance_service::delete_instance_favicon(&state.instance_service(), &actor, theme).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -585,56 +446,6 @@ pub struct StorageTargetRequest {
     prefix: Option<String>,
 }
 
-impl StorageTargetRequest {
-    fn configuration(&self) -> Result<StorageTargetConfiguration, ApiError> {
-        match self.kind.as_str() {
-            "filesystem" => Ok(StorageTargetConfiguration::Filesystem {
-                path: self
-                    .path
-                    .clone()
-                    .ok_or_else(|| ApiError::bad_request("A filesystem path is required."))?,
-            }),
-            "s3" => Ok(StorageTargetConfiguration::S3 {
-                s3: S3Settings {
-                    endpoint: self
-                        .endpoint
-                        .clone()
-                        .ok_or_else(|| ApiError::bad_request("An S3 endpoint is required."))?,
-                    bucket: required_storage_value(&self.bucket, "An S3 bucket is required.")?,
-                    access_key: required_storage_value(
-                        &self.access_key,
-                        "An S3 access key is required.",
-                    )?,
-                    secret_key: required_storage_value(
-                        &self.secret_key,
-                        "An S3 secret key is required.",
-                    )?,
-                    region: self
-                        .region
-                        .clone()
-                        .unwrap_or_else(|| "us-east-1".to_owned()),
-                    prefix: self
-                        .prefix
-                        .clone()
-                        .unwrap_or_else(|| "gitadel-lfs".to_owned()),
-                },
-            }),
-            _ => Err(ApiError::bad_request("The storage target kind is invalid.")),
-        }
-    }
-}
-
-fn required_storage_value(
-    value: &Option<String>,
-    message: &'static str,
-) -> Result<String, ApiError> {
-    value
-        .as_ref()
-        .filter(|value| !value.trim().is_empty())
-        .cloned()
-        .ok_or_else(|| ApiError::bad_request(message))
-}
-
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct StorageTargetTestResponse {
     message: &'static str,
@@ -656,13 +467,9 @@ pub async fn list_storage_targets(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<Vec<StorageTargetView>>, ApiError> {
-    require_admin(&state, &headers, &jar, SCOPE_READ).await?;
-    let settings = state.runtime_settings()?;
-    let measured = state.measured_storage().await;
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_READ).await?;
     Ok(Json(
-        targets::list(state.database(), &settings.storage.lfs_root, &measured)
-            .await
-            .map_err(ApiError::internal)?,
+        storage_service::list_storage_targets(&state.storage_service(), &actor).await?,
     ))
 }
 
@@ -690,23 +497,11 @@ pub async fn measure_storage_target(
     jar: CookieJar,
     Path(target_id): Path<Uuid>,
 ) -> Result<Json<MeasuredUsage>, ApiError> {
-    require_admin(&state, &headers, &jar, SCOPE_READ).await?;
-    let configuration = if target_id.is_nil() {
-        let settings = state.runtime_settings()?;
-        StorageTargetConfiguration::Filesystem {
-            path: settings.storage.lfs_root.clone(),
-        }
-    } else {
-        targets::find(state.database(), target_id)
-            .await
-            .map_err(|error| ApiError::bad_request(format!("{error:#}")))?
-            .1
-    };
-    let usage = targets::measure(&configuration)
-        .await
-        .map_err(|error| ApiError::bad_request(format!("Could not measure storage: {error:#}")))?;
-    state.record_measured_storage(target_id, usage).await;
-    Ok(Json(usage))
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_READ).await?;
+    Ok(Json(
+        storage_service::measure_storage_target(&state.storage_service(), &actor, target_id)
+            .await?,
+    ))
 }
 
 #[utoipa::path(
@@ -727,13 +522,26 @@ pub async fn test_storage_target(
     jar: CookieJar,
     Json(request): Json<StorageTargetRequest>,
 ) -> Result<Json<StorageTargetTestResponse>, ApiError> {
-    require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    targets::test_configuration(&request.configuration()?)
-        .await
-        .map_err(|error| ApiError::bad_request(format!("Storage target test failed: {error:#}")))?;
-    Ok(Json(StorageTargetTestResponse {
-        message: "Storage target passed write, stat, read, and delete checks.",
-    }))
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_WRITE).await?;
+    Ok(Json(
+        storage_service::test_storage_target(
+            &state.storage_service(),
+            &actor,
+            storage_service::StorageTargetRequest {
+                name: request.name,
+                kind: request.kind,
+                path: request.path,
+                endpoint: request.endpoint,
+                bucket: request.bucket,
+                access_key: request.access_key,
+                secret_key: request.secret_key,
+                region: request.region,
+                prefix: request.prefix,
+            },
+        )
+        .await?
+        .into(),
+    ))
 }
 
 #[utoipa::path(
@@ -756,16 +564,12 @@ pub async fn test_saved_storage_target(
     jar: CookieJar,
     Path(target_id): Path<Uuid>,
 ) -> Result<Json<StorageTargetTestResponse>, ApiError> {
-    require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    let (_, configuration) = targets::find(state.database(), target_id)
-        .await
-        .map_err(ApiError::internal)?;
-    targets::test_configuration(&configuration)
-        .await
-        .map_err(|error| ApiError::bad_request(format!("Storage target test failed: {error:#}")))?;
-    Ok(Json(StorageTargetTestResponse {
-        message: "Storage target passed write, stat, read, and delete checks.",
-    }))
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_WRITE).await?;
+    Ok(Json(
+        storage_service::test_saved_storage_target(&state.storage_service(), &actor, target_id)
+            .await?
+            .into(),
+    ))
 }
 
 #[utoipa::path(
@@ -786,25 +590,28 @@ pub async fn create_storage_target(
     jar: CookieJar,
     Json(request): Json<StorageTargetRequest>,
 ) -> Result<(StatusCode, Json<StorageTargetView>), ApiError> {
-    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    let name = request
-        .name
-        .clone()
-        .filter(|name| !name.trim().is_empty())
-        .ok_or_else(|| ApiError::bad_request("A storage target name is required."))?;
-    let target = targets::create(state.database(), name, request.configuration()?)
-        .await
-        .map_err(|error| {
-            ApiError::bad_request(format!("Could not create storage target: {error:#}"))
-        })?;
-    state
-        .audit(
-            Some(actor.user.id),
-            "storage.target.create",
-            Some(target.id.to_string()),
-        )
-        .await?;
-    Ok((StatusCode::CREATED, Json(target)))
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_WRITE).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            storage_service::create_storage_target(
+                &state.storage_service(),
+                &actor,
+                storage_service::StorageTargetRequest {
+                    name: request.name,
+                    kind: request.kind,
+                    path: request.path,
+                    endpoint: request.endpoint,
+                    bucket: request.bucket,
+                    access_key: request.access_key,
+                    secret_key: request.secret_key,
+                    region: request.region,
+                    prefix: request.prefix,
+                },
+            )
+            .await?,
+        ),
+    ))
 }
 
 #[utoipa::path(
@@ -827,20 +634,8 @@ pub async fn delete_storage_target(
     jar: CookieJar,
     Path(target_id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    targets::delete(state.database(), target_id)
-        .await
-        .map_err(|error| {
-            ApiError::bad_request(format!("Could not delete storage target: {error:#}"))
-        })?;
-    state.forget_measured_storage(target_id).await;
-    state
-        .audit(
-            Some(actor.user.id),
-            "storage.target.delete",
-            Some(target_id.to_string()),
-        )
-        .await?;
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_WRITE).await?;
+    storage_service::delete_storage_target(&state.storage_service(), &actor, target_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -860,39 +655,12 @@ pub async fn list_backup_providers(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<BackupProvidersResponse>, ApiError> {
-    require_admin(&state, &headers, &jar, SCOPE_READ).await?;
-    let settings = state.runtime_settings()?;
-    let providers = backup_provider::list_with_storage(
-        state.database(),
-        settings.backup.s3.as_ref(),
-        &settings.storage.lfs_root,
-    )
-    .await
-    .map_err(ApiError::internal)?;
-    let schedules = archive::list_backup_schedules(state.database())
-        .await
-        .map_err(ApiError::internal)?;
-    Ok(Json(BackupProvidersResponse {
-        providers: vec![
-            BackupProviderCatalogItem {
-                slug: BackupProviderKind::Filesystem,
-                name: "Filesystem",
-                description: "Write backup archives to a directory on the Gitadel host.",
-            },
-            BackupProviderCatalogItem {
-                slug: BackupProviderKind::S3,
-                name: "S3-compatible storage",
-                description: "Store backups in AWS S3, RustFS, MinIO, or another compatible service.",
-            },
-        ],
-        connections: providers
-            .into_iter()
-            .map(|provider| {
-                let schedule = schedules.get(&provider.id).cloned();
-                backup_provider_response(provider, schedule)
-            })
-            .collect(),
-    }))
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_READ).await?;
+    Ok(Json(
+        backups::list_backup_providers(&state.backup_service(), &actor)
+            .await?
+            .into(),
+    ))
 }
 
 #[utoipa::path(
@@ -913,26 +681,28 @@ pub async fn test_backup_provider(
     jar: CookieJar,
     Json(request): Json<UpdateBackupProviderRequest>,
 ) -> Result<Json<BackupProviderTestResponse>, ApiError> {
-    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    let config = requested_backup_provider_config(&state, &request).await?;
-    archive::test_backup_provider(&config, state.runtime_settings()?)
-        .await
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    let provider = config.kind().as_str();
-    let test_token = state
-        .cache_tested_backup_provider(actor.user.id, config)
-        .await;
-    state
-        .audit(
-            Some(actor.user.id),
-            "backup.provider.test",
-            Some(provider.to_owned()),
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_WRITE).await?;
+    Ok(Json(
+        backups::test_backup_provider(
+            &state.backup_service(),
+            &actor,
+            backups::UpdateBackupProviderRequest {
+                id: request.id,
+                name: request.name,
+                provider: request.provider,
+                path: request.path,
+                endpoint: request.endpoint,
+                bucket: request.bucket,
+                access_key: request.access_key,
+                secret_key: request.secret_key,
+                region: request.region,
+                prefix: request.prefix,
+                test_token: request.test_token,
+            },
         )
-        .await?;
-    Ok(Json(BackupProviderTestResponse {
-        test_token,
-        message: "Backup provider is available and writable.",
-    }))
+        .await?
+        .into(),
+    ))
 }
 
 #[utoipa::path(
@@ -953,36 +723,30 @@ pub async fn create_backup_provider(
     jar: CookieJar,
     Json(request): Json<UpdateBackupProviderRequest>,
 ) -> Result<(StatusCode, Json<BackupProviderResponse>), ApiError> {
-    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    if request.id.is_some() {
-        return Err(ApiError::bad_request(
-            "A new backup provider cannot include an existing provider ID.",
-        ));
-    }
-    let config = requested_backup_provider_config(&state, &request).await?;
-    consume_provider_test(&state, actor.user.id, request.test_token, &config).await?;
-    let now = Utc::now();
-    let provider = BackupProvider {
-        id: Uuid::new_v4(),
-        name: request.name.trim().to_owned(),
-        config,
-        source: BackupProviderSource::Stored,
-        created_at: now,
-        updated_at: now,
-    };
-    backup_provider::save(state.database(), &provider)
-        .await
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    state
-        .audit(
-            Some(actor.user.id),
-            "backup.provider.create",
-            Some(provider.id.to_string()),
-        )
-        .await?;
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_WRITE).await?;
     Ok((
         StatusCode::CREATED,
-        Json(backup_provider_response(provider, None)),
+        Json(
+            backups::create_backup_provider(
+                &state.backup_service(),
+                &actor,
+                backups::UpdateBackupProviderRequest {
+                    id: request.id,
+                    name: request.name,
+                    provider: request.provider,
+                    path: request.path,
+                    endpoint: request.endpoint,
+                    bucket: request.bucket,
+                    access_key: request.access_key,
+                    secret_key: request.secret_key,
+                    region: request.region,
+                    prefix: request.prefix,
+                    test_token: request.test_token,
+                },
+            )
+            .await?
+            .into(),
+        ),
     ))
 }
 
@@ -1008,41 +772,29 @@ pub async fn update_backup_provider(
     Path(provider_id): Path<Uuid>,
     Json(request): Json<UpdateBackupProviderRequest>,
 ) -> Result<Json<BackupProviderResponse>, ApiError> {
-    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    if request.id != Some(provider_id) {
-        return Err(ApiError::bad_request(
-            "The backup provider ID does not match the requested resource.",
-        ));
-    }
-    let mut existing = required_backup_provider(&state, provider_id).await?;
-    if existing.source == BackupProviderSource::StorageTarget {
-        return Err(ApiError::bad_request(
-            "Storage targets are configured on the Storage page.",
-        ));
-    }
-    let config = requested_backup_provider_config(&state, &request).await?;
-    consume_provider_test(&state, actor.user.id, request.test_token, &config).await?;
-    if existing.id == RUNTIME_S3_PROVIDER_ID {
-        existing.id = Uuid::new_v4();
-        existing.created_at = Utc::now();
-    }
-    existing.name = request.name.trim().to_owned();
-    existing.config = config;
-    existing.updated_at = Utc::now();
-    backup_provider::save(state.database(), &existing)
-        .await
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    state
-        .audit(
-            Some(actor.user.id),
-            "backup.provider.update",
-            Some(existing.id.to_string()),
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_WRITE).await?;
+    Ok(Json(
+        backups::update_backup_provider(
+            &state.backup_service(),
+            &actor,
+            provider_id,
+            backups::UpdateBackupProviderRequest {
+                id: request.id,
+                name: request.name,
+                provider: request.provider,
+                path: request.path,
+                endpoint: request.endpoint,
+                bucket: request.bucket,
+                access_key: request.access_key,
+                secret_key: request.secret_key,
+                region: request.region,
+                prefix: request.prefix,
+                test_token: request.test_token,
+            },
         )
-        .await?;
-    let schedule = archive::load_backup_schedule(state.database(), existing.id)
-        .await
-        .map_err(ApiError::internal)?;
-    Ok(Json(backup_provider_response(existing, schedule)))
+        .await?
+        .into(),
+    ))
 }
 
 #[utoipa::path(
@@ -1065,33 +817,8 @@ pub async fn delete_backup_provider(
     jar: CookieJar,
     Path(provider_id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    let provider = required_backup_provider(&state, provider_id).await?;
-    match provider.source {
-        BackupProviderSource::Stored => {
-            if !backup_provider::delete(state.database(), provider_id)
-                .await
-                .map_err(ApiError::internal)?
-            {
-                return Err(ApiError::not_found());
-            }
-        }
-        BackupProviderSource::StorageTarget => {
-            backup_provider::exclude_storage_target(state.database(), provider_id)
-                .await
-                .map_err(ApiError::internal)?;
-        }
-        BackupProviderSource::RuntimeConfig => {
-            return Err(ApiError::not_found());
-        }
-    }
-    state
-        .audit(
-            Some(actor.user.id),
-            "backup.provider.delete",
-            Some(provider_id.to_string()),
-        )
-        .await?;
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_WRITE).await?;
+    backups::delete_backup_provider(&state.backup_service(), &actor, provider_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1117,45 +844,19 @@ pub async fn update_backup_schedule(
     Path(provider_id): Path<Uuid>,
     Json(request): Json<UpdateBackupScheduleRequest>,
 ) -> Result<Json<BackupProviderResponse>, ApiError> {
-    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    let mut provider = required_backup_provider(&state, provider_id).await?;
-    match provider.source {
-        BackupProviderSource::RuntimeConfig => {
-            provider.id = Uuid::new_v4();
-            provider.created_at = Utc::now();
-            provider.updated_at = provider.created_at;
-            provider.source = BackupProviderSource::Stored;
-            backup_provider::save(state.database(), &provider)
-                .await
-                .map_err(ApiError::internal)?;
-        }
-        BackupProviderSource::StorageTarget => {
-            let mut persisted = provider.clone();
-            persisted.source = BackupProviderSource::Stored;
-            backup_provider::save(state.database(), &persisted)
-                .await
-                .map_err(ApiError::internal)?;
-        }
-        BackupProviderSource::Stored => {}
-    }
-    archive::validate_backup_schedule(request.schedule.as_deref())
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    let schedule =
-        archive::save_backup_schedule(state.database(), provider.id, request.schedule.as_deref())
-            .await
-            .map_err(ApiError::internal)?;
-    state
-        .audit(
-            Some(actor.user.id),
-            "backup.schedule.update",
-            Some(
-                schedule
-                    .as_ref()
-                    .map_or_else(|| "disabled".to_owned(), |value| value.schedule.clone()),
-            ),
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_WRITE).await?;
+    Ok(Json(
+        backups::update_backup_schedule(
+            &state.backup_service(),
+            &actor,
+            provider_id,
+            backups::UpdateBackupScheduleRequest {
+                schedule: request.schedule,
+            },
         )
-        .await?;
-    Ok(Json(backup_provider_response(provider, schedule)))
+        .await?
+        .into(),
+    ))
 }
 
 #[utoipa::path(
@@ -1178,12 +879,10 @@ pub async fn list_backups(
     jar: CookieJar,
     Path(provider_id): Path<Uuid>,
 ) -> Result<Json<Vec<archive::BackupObject>>, ApiError> {
-    require_admin(&state, &headers, &jar, SCOPE_READ).await?;
-    let provider = required_backup_provider(&state, provider_id).await?;
-    let backups = archive::list_backups(&provider.config, state.runtime_settings()?)
-        .await
-        .map_err(ApiError::internal)?;
-    Ok(Json(backups))
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_READ).await?;
+    Ok(Json(
+        backups::list_backups(&state.backup_service(), &actor, provider_id).await?,
+    ))
 }
 
 #[utoipa::path(
@@ -1208,28 +907,17 @@ pub async fn download_backup(
     Path(provider_id): Path<Uuid>,
     Query(request): Query<BackupObjectRequest>,
 ) -> Result<Response, ApiError> {
-    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    let provider = required_backup_provider(&state, provider_id).await?;
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_WRITE).await?;
     let key = request.key;
-    let (body, size) = match &provider.config {
-        BackupProviderConfig::Filesystem(filesystem) => {
-            let (file, size) =
-                archive::open_filesystem_backup(state.runtime_settings()?, filesystem, &key)
-                    .await
-                    .map_err(ApiError::internal)?;
-            (Body::from_stream(ReaderStream::new(file)), Some(size))
-        }
-        BackupProviderConfig::S3(s3) => {
-            let download = archive::stream_s3_backup(s3, &key)
-                .await
-                .map_err(ApiError::internal)?;
-            (Body::from_stream(download.stream), download.size)
-        }
-    };
-    state
-        .audit(Some(actor.user.id), "backup.download", Some(key.clone()))
-        .await?;
-
+    let (body, size) =
+        match backups::download_backup(&state.backup_service(), &actor, provider_id, &key).await? {
+            backups::BackupDownload::File(file, size) => {
+                (Body::from_stream(ReaderStream::new(file)), Some(size))
+            }
+            backups::BackupDownload::S3(download) => {
+                (Body::from_stream(download.stream), download.size)
+            }
+        };
     let filename = download_filename(&key);
     let mut response = Response::new(body);
     response.headers_mut().insert(
@@ -1272,14 +960,14 @@ pub async fn delete_backup(
     Path(provider_id): Path<Uuid>,
     Query(request): Query<BackupObjectRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    let provider = required_backup_provider(&state, provider_id).await?;
-    archive::delete_backup(&provider.config, state.runtime_settings()?, &request.key)
-        .await
-        .map_err(ApiError::internal)?;
-    state
-        .audit(Some(actor.user.id), "backup.delete", Some(request.key))
-        .await?;
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_WRITE).await?;
+    backups::delete_backup(
+        &state.backup_service(),
+        &actor,
+        provider_id,
+        backups::BackupObjectRequest { key: request.key },
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1303,7 +991,7 @@ pub async fn backup_progress(
     jar: CookieJar,
     Path(_operation_id): Path<Uuid>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
+    require_admin_principal(&state, &headers, &jar, SCOPE_WRITE).await?;
     let events = stream::once(async {
         Ok(Event::default()
             .comment("Maintenance is starting.")
@@ -1334,31 +1022,19 @@ pub async fn create_backup(
     Path(provider_id): Path<Uuid>,
     Json(request): Json<CreateBackupRequest>,
 ) -> Result<(StatusCode, Json<BackupScheduledResponse>), ApiError> {
-    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    let provider = required_backup_provider(&state, provider_id).await?;
-    let name = archive::validate_backup_name(request.name.as_deref())
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    let key =
-        archive::new_backup_key(&provider.config, name.as_deref()).map_err(ApiError::internal)?;
-    let operation_id = Uuid::new_v4();
-    state
-        .audit(Some(actor.user.id), "backup.create", Some(key.clone()))
-        .await?;
-    state
-        .schedule_maintenance(MaintenanceAction::Create {
-            operation_id,
-            key: key.clone(),
-            provider,
-            name,
-        })
-        .await?;
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_WRITE).await?;
     Ok((
         StatusCode::ACCEPTED,
-        Json(BackupScheduledResponse {
-            operation_id,
-            key,
-            message: "Gitadel is restarting to create the backup.",
-        }),
+        Json(
+            backups::create_backup(
+                &state.backup_service(),
+                &actor,
+                provider_id,
+                backups::CreateBackupRequest { name: request.name },
+            )
+            .await?
+            .into(),
+        ),
     ))
 }
 
@@ -1384,37 +1060,17 @@ pub async fn preflight_restore(
     Path(provider_id): Path<Uuid>,
     Json(request): Json<RestorePreflightRequest>,
 ) -> Result<Json<RestorePreflightResponse>, ApiError> {
-    let key = request.key;
-    require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    let mut provider = required_backup_provider(&state, provider_id).await?;
-    if provider.id == RUNTIME_S3_PROVIDER_ID {
-        provider.id = Uuid::new_v4();
-        provider.created_at = Utc::now();
-        provider.updated_at = provider.created_at;
-    }
-    let runtime = state.runtime_settings()?;
-    let (path, inspection) = archive::download_and_inspect_backup(runtime, &provider.config, &key)
-        .await
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    let available_free_space =
-        archive::restore_available_space(runtime).map_err(ApiError::internal)?;
-    let required_free_space = inspection.uncompressed_size.saturating_mul(2);
-    if available_free_space < required_free_space {
-        let _ = std::fs::remove_file(path);
-        return Err(ApiError::bad_request(format!(
-            "Restore needs at least {required_free_space} bytes free; {available_free_space} bytes are available."
-        )));
-    }
-    let token = state
-        .cache_validated_backup(key.clone(), path, provider)
-        .await;
-    Ok(Json(RestorePreflightResponse {
-        token,
-        key,
-        inspection,
-        required_free_space,
-        available_free_space,
-    }))
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_WRITE).await?;
+    Ok(Json(
+        backups::preflight_restore(
+            &state.backup_service(),
+            &actor,
+            provider_id,
+            backups::RestorePreflightRequest { key: request.key },
+        )
+        .await?
+        .into(),
+    ))
 }
 
 #[utoipa::path(
@@ -1439,199 +1095,24 @@ pub async fn restore_backup(
     Path(_provider_id): Path<Uuid>,
     Json(request): Json<RestoreBackupRequest>,
 ) -> Result<(StatusCode, Json<BackupScheduledResponse>), ApiError> {
-    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
-    if actor.via_api_token {
-        return Err(ApiError::forbidden(
-            "Restore requires an interactive administrator session.",
-        ));
-    }
-    if !super::verify_password(request.password, actor.user.password_hash.clone()).await? {
-        return Err(ApiError::forbidden("Password confirmation failed."));
-    }
-    let backup = state
-        .take_validated_backup(request.token)
-        .await
-        .ok_or_else(|| ApiError::bad_request("The validated backup expired. Validate it again."))?;
-    let operation_id = Uuid::new_v4();
-    let safety_key = if request.create_safety_backup {
-        Some(
-            archive::new_backup_key(&backup.provider.config, Some("pre-restore-safety"))
-                .map_err(ApiError::internal)?,
-        )
-    } else {
-        None
-    };
-    state
-        .audit(
-            Some(actor.user.id),
-            "backup.restore",
-            Some(backup.key.clone()),
-        )
-        .await?;
-    if let Err(error) = state
-        .schedule_maintenance(MaintenanceAction::Restore {
-            operation_id,
-            archive: backup.path.clone(),
-            key: backup.key.clone(),
-            provider: backup.provider,
-            safety_key,
-        })
-        .await
-    {
-        let _ = std::fs::remove_file(backup.path);
-        return Err(error);
-    }
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_WRITE).await?;
     Ok((
         StatusCode::ACCEPTED,
-        Json(BackupScheduledResponse {
-            key: backup.key,
-            operation_id,
-            message: "Gitadel is restarting to restore the selected backup.",
-        }),
+        Json(
+            backups::restore_backup(
+                &state.backup_service(),
+                &actor,
+                _provider_id,
+                backups::RestoreBackupRequest {
+                    token: request.token,
+                    password: request.password,
+                    create_safety_backup: request.create_safety_backup,
+                },
+            )
+            .await?
+            .into(),
+        ),
     ))
-}
-
-async fn required_backup_provider(
-    state: &IdentityState,
-    provider_id: Uuid,
-) -> Result<BackupProvider, ApiError> {
-    let settings = state.runtime_settings()?;
-    backup_provider::load_with_storage(
-        state.database(),
-        settings.backup.s3.as_ref(),
-        &settings.storage.lfs_root,
-        provider_id,
-    )
-    .await
-    .map_err(ApiError::internal)?
-    .ok_or_else(ApiError::not_found)
-}
-
-async fn requested_backup_provider_config(
-    state: &IdentityState,
-    request: &UpdateBackupProviderRequest,
-) -> Result<BackupProviderConfig, ApiError> {
-    let existing = if let Some(id) = request.id {
-        Some(required_backup_provider(state, id).await?)
-    } else {
-        None
-    };
-    match request.provider {
-        BackupProviderKind::Filesystem => {
-            let path = required_provider_field(request.path.as_ref(), "Path")?;
-            Ok(BackupProviderConfig::Filesystem(FilesystemSettings {
-                path: PathBuf::from(path),
-            }))
-        }
-        BackupProviderKind::S3 => {
-            let existing_s3 = existing.as_ref().and_then(|provider| {
-                if let BackupProviderConfig::S3(settings) = &provider.config {
-                    Some(settings)
-                } else {
-                    None
-                }
-            });
-            let access_key = request
-                .access_key
-                .as_ref()
-                .filter(|value| !value.is_empty())
-                .cloned()
-                .or_else(|| existing_s3.map(|settings| settings.access_key.clone()))
-                .ok_or_else(|| ApiError::bad_request("Access key is required."))?;
-            let secret_key = request
-                .secret_key
-                .as_ref()
-                .filter(|value| !value.is_empty())
-                .cloned()
-                .or_else(|| existing_s3.map(|settings| settings.secret_key.clone()))
-                .ok_or_else(|| ApiError::bad_request("Secret key is required."))?;
-            let endpoint = required_provider_field(request.endpoint.as_ref(), "Endpoint")?;
-            let settings = S3Settings {
-                endpoint: Url::parse(endpoint)
-                    .map_err(|_| ApiError::bad_request("Endpoint must be a valid URL."))?,
-                bucket: required_provider_field(request.bucket.as_ref(), "Bucket")?.to_owned(),
-                access_key,
-                secret_key,
-                region: required_provider_field(request.region.as_ref(), "Region")?.to_owned(),
-                prefix: request.prefix.as_deref().unwrap_or("backups").to_owned(),
-            };
-            crate::config::validate_s3_settings(&settings)
-                .map_err(|error| ApiError::bad_request(error.to_string()))?;
-            Ok(BackupProviderConfig::S3(settings))
-        }
-    }
-}
-
-async fn consume_provider_test(
-    state: &IdentityState,
-    user_id: Uuid,
-    test_token: Option<Uuid>,
-    config: &BackupProviderConfig,
-) -> Result<(), ApiError> {
-    let test_token = test_token
-        .ok_or_else(|| ApiError::bad_request("Test this exact provider before saving."))?;
-    if !state
-        .consume_tested_backup_provider(test_token, user_id, config)
-        .await
-    {
-        return Err(ApiError::bad_request(
-            "The provider test expired or the configuration changed. Test it again before saving.",
-        ));
-    }
-    Ok(())
-}
-
-fn required_provider_field<'a>(
-    value: Option<&'a String>,
-    field: &str,
-) -> Result<&'a str, ApiError> {
-    value
-        .map(String::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| ApiError::bad_request(format!("{field} is required.")))
-}
-
-fn backup_provider_response(
-    provider: BackupProvider,
-    schedule: Option<archive::BackupSchedule>,
-) -> BackupProviderResponse {
-    let (schedule, next_backup_at) = schedule
-        .map(|schedule| (Some(schedule.schedule), Some(schedule.next_backup_at)))
-        .unwrap_or((None, None));
-    let managed_by_config = provider.source == BackupProviderSource::RuntimeConfig;
-    let managed_by_storage = provider.source == BackupProviderSource::StorageTarget;
-    match provider.config {
-        BackupProviderConfig::Filesystem(settings) => BackupProviderResponse {
-            id: provider.id,
-            name: provider.name,
-            provider: BackupProviderKind::Filesystem,
-            managed_by_config,
-            managed_by_storage,
-            path: Some(settings.path.to_string_lossy().into_owned()),
-            endpoint: None,
-            bucket: None,
-            access_key_hint: None,
-            region: None,
-            prefix: None,
-            schedule,
-            next_backup_at,
-        },
-        BackupProviderConfig::S3(settings) => BackupProviderResponse {
-            id: provider.id,
-            name: provider.name,
-            provider: BackupProviderKind::S3,
-            managed_by_config,
-            managed_by_storage,
-            path: None,
-            endpoint: Some(settings.endpoint.to_string()),
-            bucket: Some(settings.bucket),
-            access_key_hint: Some(access_key_hint(&settings.access_key)),
-            region: Some(settings.region),
-            prefix: Some(settings.prefix),
-            schedule,
-            next_backup_at,
-        },
-    }
 }
 
 fn download_filename(key: &str) -> String {
@@ -1653,65 +1134,6 @@ fn download_filename(key: &str) -> String {
     }
 }
 
-fn access_key_hint(access_key: &str) -> String {
-    let suffix = access_key
-        .chars()
-        .rev()
-        .take(4)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect::<String>();
-    format!("ending in {suffix}")
-}
-
-fn validate_png(bytes: &[u8]) -> Result<(), ApiError> {
-    if bytes.len() > MAX_FAVICON_BYTES {
-        return Err(ApiError::bad_request(
-            "Favicon files cannot exceed 512 KiB.",
-        ));
-    }
-    if bytes.len() < 24
-        || !bytes.starts_with(&PNG_SIGNATURE)
-        || bytes.get(12..16) != Some(b"IHDR".as_slice())
-    {
-        return Err(invalid_png());
-    }
-
-    let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
-    let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
-    if width != height || !(MIN_FAVICON_EDGE..=MAX_FAVICON_EDGE).contains(&width) {
-        return Err(ApiError::bad_request(
-            "Favicons must be square and between 16 and 1024 pixels.",
-        ));
-    }
-
-    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    let mut reader = decoder.read_info().map_err(|_| invalid_png())?;
-    let output_size = reader.output_buffer_size().ok_or_else(invalid_png)?;
-    let mut output = vec![0; output_size];
-    reader.next_frame(&mut output).map_err(|_| invalid_png())?;
-    Ok(())
-}
-
-fn invalid_png() -> ApiError {
-    ApiError::bad_request("The uploaded file is not a valid PNG.")
-}
-
-async fn touch_instance<C: ConnectionTrait>(
-    connection: &C,
-    now: chrono::DateTime<Utc>,
-) -> Result<(), ApiError> {
-    let settings = instance::Entity::find_by_id(1)
-        .one(connection)
-        .await?
-        .ok_or_else(|| ApiError::internal("instance settings row is missing"))?;
-    let mut active: instance::ActiveModel = settings.into();
-    active.updated_at = Set(now);
-    active.update(connection).await?;
-    Ok(())
-}
-
 pub(crate) async fn require_admin(
     state: &IdentityState,
     headers: &HeaderMap,
@@ -1725,48 +1147,129 @@ pub(crate) async fn require_admin(
     Ok(actor)
 }
 
-/// How often audit events past `audit.retention_days` are removed.
-const AUDIT_RETENTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
-
 /// Removes audit events older than `retention_days`. A retention of `0`
 /// keeps every event and removes nothing.
-pub(crate) async fn prune_audit_events<C: ConnectionTrait>(
-    connection: &C,
-    retention_days: i64,
-    now: DateTime<Utc>,
-) -> Result<u64, sea_orm::DbErr> {
-    if retention_days <= 0 {
-        return Ok(0);
-    }
-    let cutoff = now - chrono::Duration::days(retention_days);
-    Ok(audit_event::Entity::delete_many()
-        .filter(audit_event::Column::CreatedAt.lt(cutoff))
-        .exec(connection)
-        .await?
-        .rows_affected)
-}
+#[cfg(test)]
+use gitadel_instance::service::prune_audit_events;
 
 /// Hourly audit retention sweep. Returns at once when retention is off, so
 /// an instance that keeps everything never runs the query.
 pub(crate) async fn serve_audit_retention(state: IdentityState) {
-    let retention_days = state
-        .runtime_settings()
-        .map(|settings| settings.audit.retention_days)
-        .unwrap_or(0);
-    if retention_days <= 0 {
-        return;
-    }
-    let mut interval = tokio::time::interval(AUDIT_RETENTION_INTERVAL);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        interval.tick().await;
-        match prune_audit_events(state.database(), retention_days, Utc::now()).await {
-            Ok(0) => {}
-            Ok(removed) => tracing::info!(removed, retention_days, "removed expired audit events"),
-            Err(error) => tracing::warn!(%error, "could not remove expired audit events"),
+    gitadel_instance::service::serve_audit_retention(
+        state.database().clone(),
+        state
+            .runtime_settings()
+            .map(|s| s.audit.retention_days)
+            .unwrap_or(0),
+    )
+    .await
+}
+
+use gitadel_backups::service as backups;
+impl From<backups::BackupProviderCatalogItem> for BackupProviderCatalogItem {
+    fn from(value: backups::BackupProviderCatalogItem) -> Self {
+        Self {
+            slug: value.slug,
+            name: value.name,
+            description: value.description,
         }
     }
 }
+impl From<backups::BackupProvidersResponse> for BackupProvidersResponse {
+    fn from(value: backups::BackupProvidersResponse) -> Self {
+        Self {
+            providers: value.providers.into_iter().map(Into::into).collect(),
+            connections: value.connections.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+impl From<backups::BackupProviderResponse> for BackupProviderResponse {
+    fn from(value: backups::BackupProviderResponse) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            provider: value.provider,
+            managed_by_config: value.managed_by_config,
+            managed_by_storage: value.managed_by_storage,
+            path: value.path,
+            endpoint: value.endpoint,
+            bucket: value.bucket,
+            access_key_hint: value.access_key_hint,
+            region: value.region,
+            prefix: value.prefix,
+            schedule: value.schedule,
+            next_backup_at: value.next_backup_at,
+        }
+    }
+}
+impl From<backups::BackupProviderTestResponse> for BackupProviderTestResponse {
+    fn from(value: backups::BackupProviderTestResponse) -> Self {
+        Self {
+            test_token: value.test_token,
+            message: value.message,
+        }
+    }
+}
+impl From<backups::BackupScheduledResponse> for BackupScheduledResponse {
+    fn from(value: backups::BackupScheduledResponse) -> Self {
+        Self {
+            key: value.key,
+            operation_id: value.operation_id,
+            message: value.message,
+        }
+    }
+}
+impl From<backups::RestorePreflightResponse> for RestorePreflightResponse {
+    fn from(value: backups::RestorePreflightResponse) -> Self {
+        Self {
+            token: value.token,
+            key: value.key,
+            inspection: value.inspection,
+            required_free_space: value.required_free_space,
+            available_free_space: value.available_free_space,
+        }
+    }
+}
+
+use gitadel_instance::service as instance_service;
+impl From<instance_service::IntegritySettingsResponse> for IntegritySettingsResponse {
+    fn from(v: instance_service::IntegritySettingsResponse) -> Self {
+        Self {
+            enabled: v.enabled,
+            schedule: v.schedule,
+            last_checked_at: v.last_checked_at,
+            last_result: v.last_result,
+        }
+    }
+}
+
+use gitadel_storage::service as storage_service;
+impl From<storage_service::StorageTargetTestResponse> for StorageTargetTestResponse {
+    fn from(value: storage_service::StorageTargetTestResponse) -> Self {
+        Self {
+            message: value.message,
+        }
+    }
+}
+
+pub(crate) async fn require_admin_principal(
+    state: &IdentityState,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+    scope: i32,
+) -> Result<gitadel_identity::Principal, ApiError> {
+    let principal = state.authenticate_principal(headers, jar, scope).await?;
+    principal.authorize(state.database(), scope).await?;
+    if !principal.user.is_admin {
+        return Err(ApiError::forbidden("Administrator access is required."));
+    }
+    Ok(principal)
+}
+
+#[cfg(test)]
+use crate::entity::audit_event;
+#[cfg(test)]
+use sea_orm::Set;
 
 #[cfg(test)]
 mod tests {

@@ -10,7 +10,16 @@ description = "Instance settings, branding and administration services"
 path = "src/lib.rs"
 
 [dependencies]
+chrono.workspace = true
+sea-orm.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+png.workspace = true
+tracing.workspace = true
 gitadel-config.workspace = true
 gitadel-core.workspace = true
 gitadel-db.workspace = true
 gitadel-identity.workspace = true
+
+[dev-dependencies]
+gitadel-db = { workspace = true, features = ["test-support"] }

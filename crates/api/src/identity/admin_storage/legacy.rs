@@ -19,7 +19,7 @@ use super::{
     Domain, MigrationRequest, MigrationStarted, RepositoryUsagePage, RepositoryUsageQuery,
     RepositoryUsageRow, entry, migration_events, repositories, start_migration, status,
 };
-use crate::identity::{ApiError, IdentityState, SCOPE_READ, SCOPE_WRITE, require_admin};
+use crate::identity::{ApiError, IdentityState, SCOPE_READ, SCOPE_WRITE, require_admin_principal};
 use crate::registry::store::RegistryUsage;
 
 const LFS: &str = "lfs";
@@ -48,8 +48,8 @@ pub async fn lfs_status(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<LfsStatus>, ApiError> {
-    require_admin(&state, &headers, &jar, SCOPE_READ).await?;
-    let status = status(&state, &Domain::find(&state, LFS).await?).await?;
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_READ).await?;
+    let status = status(&state, &Domain::find(&state, LFS).await?, &actor).await?;
     Ok(Json(LfsStatus {
         object_count: status.usage.usage.object_count,
         total_bytes: status.usage.usage.total_bytes,
@@ -77,9 +77,9 @@ pub async fn lfs_repositories(
     jar: CookieJar,
     Query(query): Query<RepositoryUsageQuery>,
 ) -> Result<Json<RepositoryUsagePage>, ApiError> {
-    require_admin(&state, &headers, &jar, SCOPE_READ).await?;
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_READ).await?;
     let domain = Domain::find(&state, LFS).await?;
-    Ok(Json(repositories(&state, &domain, &query).await?))
+    Ok(Json(repositories(&state, &domain, &query, &actor).await?))
 }
 
 /// Deprecated alias of `POST /admin/storage/domains/lfs/migrate`.
@@ -125,8 +125,8 @@ pub async fn lfs_progress(
     jar: CookieJar,
     Path(operation_id): Path<Uuid>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    require_admin(&state, &headers, &jar, SCOPE_READ).await?;
-    migration_events(&state, entry(LFS)?, operation_id).await
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_READ).await?;
+    migration_events(&state, entry(LFS)?, operation_id, actor).await
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -179,8 +179,8 @@ pub async fn registry_status(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<RegistryStatus>, ApiError> {
-    require_admin(&state, &headers, &jar, SCOPE_READ).await?;
-    let status = status(&state, &Domain::find(&state, REGISTRY).await?).await?;
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_READ).await?;
+    let status = status(&state, &Domain::find(&state, REGISTRY).await?, &actor).await?;
     Ok(Json(RegistryStatus {
         active_target_id: status.active_target_id,
         repository_count: status.usage.repository_count,
@@ -209,9 +209,9 @@ pub async fn registry_repositories(
     jar: CookieJar,
     Query(query): Query<RepositoryUsageQuery>,
 ) -> Result<Json<RepositoryUsagePage<RegistryRepositoryUsageRow>>, ApiError> {
-    require_admin(&state, &headers, &jar, SCOPE_READ).await?;
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_READ).await?;
     let domain = Domain::find(&state, REGISTRY).await?;
-    let page = repositories(&state, &domain, &query).await?;
+    let page = repositories(&state, &domain, &query, &actor).await?;
     let rows = page
         .repositories
         .into_iter()
@@ -275,8 +275,8 @@ pub async fn registry_events(
     jar: CookieJar,
     Path(operation_id): Path<Uuid>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    require_admin(&state, &headers, &jar, SCOPE_READ).await?;
-    migration_events(&state, entry(REGISTRY)?, operation_id).await
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_READ).await?;
+    migration_events(&state, entry(REGISTRY)?, operation_id, actor).await
 }
 
 async fn migrate(
@@ -286,9 +286,9 @@ async fn migrate(
     domain: &str,
     request: MigrationRequest,
 ) -> Result<(StatusCode, Json<MigrationStarted>), ApiError> {
-    let actor = require_admin(&state, &headers, &jar, SCOPE_WRITE).await?;
+    let actor = require_admin_principal(&state, &headers, &jar, SCOPE_WRITE).await?;
     let domain = Domain::find(&state, domain).await?;
-    let started = start_migration(&state, &domain, actor.user.id, &request).await?;
+    let started = start_migration(&state, &domain, &actor, &request).await?;
     Ok((StatusCode::ACCEPTED, Json(started)))
 }
 

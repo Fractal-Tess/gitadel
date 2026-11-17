@@ -18,7 +18,7 @@ pub(crate) mod test_support;
 pub(crate) mod two_factor;
 pub(crate) mod users;
 
-pub(crate) use admin::{require_admin, serve_audit_retention};
+pub(crate) use admin::{require_admin, require_admin_principal, serve_audit_retention};
 pub(crate) use email::verified_mailbox;
 pub(crate) use integrations::{
     authorize_namespace, open_api_key as open_integration_api_key,
@@ -30,16 +30,8 @@ pub(crate) use mirror_identities::{
 #[cfg(test)]
 pub(crate) use notifications::NotificationPreferences;
 pub(crate) use notifications::{NotificationKind, preferences as notification_preferences};
-use std::{
-    collections::{HashMap, VecDeque},
-    future::Future,
-    net::IpAddr,
-    path::PathBuf,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{future::Future, net::IpAddr, sync::Arc};
 
-use argon2::{Argon2, PasswordHasher};
 use axum::{
     Json, Router,
     extract::DefaultBodyLimit,
@@ -48,27 +40,22 @@ use axum::{
     routing::{get, post},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
-use chrono::{Duration as ChronoDuration, Utc};
-use sea_orm::{
-    ActiveModelTrait, ConnectionTrait, DatabaseConnection, EntityTrait, PaginatorTrait, Set,
-};
+#[cfg(test)]
+use chrono::Duration as ChronoDuration;
+use chrono::Utc;
+use sea_orm::{ConnectionTrait, DatabaseConnection};
 use serde::{Deserialize, Serialize};
 use time::Duration as TimeDuration;
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{mpsc, watch};
 use url::Url;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use webauthn_rs::{
-    Webauthn, WebauthnBuilder,
-    prelude::{DiscoverableAuthentication, PasskeyRegistration},
-};
 
 use crate::{
     archive::MaintenanceAction,
-    backup_provider::{BackupProvider, BackupProviderConfig},
-    blob_store::{DomainStorage, targets::MeasuredUsage},
+    blob_store::DomainStorage,
     config::{AuthSettings, Settings},
-    entity::{audit_event, user},
+    entity::user,
     secrets::SecretCipher,
 };
 
@@ -77,171 +64,23 @@ pub use gitadel_identity::{
     AuthenticatedUser, SCOPE_READ, SCOPE_REPOSITORY_READ, SCOPE_SSH_KEYS, SCOPE_WRITE, hash_secret,
     random_secret,
 };
-const VALIDATED_BACKUP_LIFETIME: Duration = Duration::from_secs(30 * 60);
-const TESTED_BACKUP_PROVIDER_LIFETIME: Duration = Duration::from_secs(10 * 60);
-const CHALLENGE_LIFETIME: Duration = Duration::from_secs(5 * 60);
-const AUTH_CHALLENGE_CAPACITY: usize = 1_024;
-const AUTH_CHALLENGE_SOURCE_CAPACITY: usize = 16;
-const AUTH_RATE_LIMIT_CAPACITY: usize = 4_096;
-const AUTH_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
-/// How many attempts an account tolerates per window across every source, as
-/// a multiple of its per-source limit. Distributed guessing is still slowed,
-/// while one source failing on purpose cannot lock the account's owner out.
-const ACCOUNT_RATE_LIMIT_GLOBAL_FACTOR: usize = 5;
-
-/// Sliding-window attempt counters keyed by source and account.
-#[derive(Default)]
-struct AuthRateLimiter {
-    buckets: HashMap<String, VecDeque<Instant>>,
-}
-
-impl AuthRateLimiter {
-    /// Records an attempt under `key` unless `limit` attempts already landed
-    /// inside the window. A full table evicts its quietest bucket instead of
-    /// refusing new keys, so a flood of fresh source addresses cannot lock
-    /// out everyone whose bucket does not exist yet.
-    fn try_acquire(&mut self, key: String, limit: usize, now: Instant) -> bool {
-        self.buckets.retain(|_, attempts| {
-            attempts.retain(|attempt| now.duration_since(*attempt) < AUTH_RATE_LIMIT_WINDOW);
-            !attempts.is_empty()
-        });
-        if !self.buckets.contains_key(&key) && self.buckets.len() >= AUTH_RATE_LIMIT_CAPACITY {
-            let quietest = self
-                .buckets
-                .iter()
-                .min_by_key(|(_, attempts)| attempts.back().copied())
-                .map(|(key, _)| key.clone());
-            if let Some(quietest) = quietest {
-                self.buckets.remove(&quietest);
-            }
-        }
-        let attempts = self.buckets.entry(key).or_default();
-        if attempts.len() >= limit {
-            return false;
-        }
-        attempts.push_back(now);
-        true
-    }
-}
-
-/// The rate-limit bucket of a source address. IPv6 is bucketed by /64: a
-/// single subscriber usually holds a whole /64 and can rotate through it.
-fn source_bucket(address: Option<IpAddr>) -> String {
-    match address {
-        Some(IpAddr::V4(address)) => address.to_string(),
-        Some(IpAddr::V6(address)) => {
-            let prefix = u128::from(address) & !((1u128 << 64) - 1);
-            format!("{}/64", std::net::Ipv6Addr::from(prefix))
-        }
-        None => "unknown".to_owned(),
-    }
-}
-
-#[cfg(test)]
-mod rate_limit_tests {
-    use super::*;
-
-    #[test]
-    fn a_full_limiter_evicts_its_quietest_bucket_instead_of_refusing() {
-        let mut limiter = AuthRateLimiter::default();
-        let start = Instant::now();
-        for index in 0..AUTH_RATE_LIMIT_CAPACITY {
-            let at = start + Duration::from_millis(index as u64);
-            assert!(limiter.try_acquire(format!("source:{index}"), 1, at));
-        }
-        let later = start + Duration::from_millis(AUTH_RATE_LIMIT_CAPACITY as u64);
-        assert!(
-            limiter.try_acquire("source:newcomer".to_owned(), 1, later),
-            "a new key is admitted when the table is full"
-        );
-        assert!(limiter.buckets.len() <= AUTH_RATE_LIMIT_CAPACITY);
-        assert!(
-            !limiter.buckets.contains_key("source:0"),
-            "the bucket with the oldest attempt made room"
-        );
-        assert!(limiter.buckets.contains_key("source:1"));
-    }
-
-    #[test]
-    fn attempts_outside_the_window_no_longer_count() {
-        let mut limiter = AuthRateLimiter::default();
-        let start = Instant::now();
-        assert!(limiter.try_acquire("k".to_owned(), 1, start));
-        assert!(!limiter.try_acquire("k".to_owned(), 1, start));
-        assert!(limiter.try_acquire("k".to_owned(), 1, start + AUTH_RATE_LIMIT_WINDOW));
-    }
-
-    #[test]
-    fn ipv6_sources_share_a_bucket_per_64() {
-        let same = |a: &str| source_bucket(Some(a.parse().unwrap()));
-        assert_eq!(same("2001:db8:1:2::1"), same("2001:db8:1:2:ffff::9"));
-        assert_ne!(same("2001:db8:1:2::1"), same("2001:db8:1:3::1"));
-        assert_eq!(same("2001:db8:1:2::1"), "2001:db8:1:2::/64");
-        assert_eq!(same("203.0.113.7"), "203.0.113.7");
-        assert_eq!(source_bucket(None), "unknown");
-    }
-}
 tokio::task_local! {
     static REMOTE_ADDRESS: Option<IpAddr>;
 }
 
 #[derive(Clone)]
 pub struct IdentityState {
+    pub storage_runtime: Arc<gitadel_storage::service::StorageRuntime>,
+    pub backup_runtime: Arc<gitadel_backups::service::BackupRuntime>,
+    pub auth_runtime: Arc<gitadel_identity::runtime::AuthRuntime>,
     database: DatabaseConnection,
     /// Read-only pool for hot read paths; the writer itself until
     /// [`Self::with_read_database`] supplies one.
     read_database: DatabaseConnection,
-    settings: AuthSettings,
-    public_url: Url,
     /// Absent when the public URL is an IP address, which WebAuthn rejects.
-    webauthn: Option<Webauthn>,
-    registration_challenges: Arc<Mutex<HashMap<String, RegistrationChallenge>>>,
-    authentication_challenges: Arc<Mutex<HashMap<String, AuthenticationChallenge>>>,
-    authorization_requests: Arc<Mutex<HashMap<String, oauth::AuthorizationRequest>>>,
-    oidc_authorizations: Arc<sso::OidcAuthorizations>,
-    auth_rate_limits: Arc<Mutex<AuthRateLimiter>>,
-    pending_logins: Arc<Mutex<HashMap<String, two_factor::PendingLogin>>>,
     /// One-time first-run setup token, printed to the log while no account exists.
-    setup_token: Arc<Mutex<Option<String>>>,
     runtime_settings: Option<Arc<Settings>>,
-    maintenance_sender: Option<mpsc::Sender<MaintenanceAction>>,
-    maintenance_pending: Arc<Mutex<bool>>,
-    lfs_storage: Arc<tokio::sync::RwLock<Option<Arc<DomainStorage>>>>,
-    registry_storage: Arc<tokio::sync::RwLock<Option<Arc<DomainStorage>>>>,
-    validated_backups: Arc<Mutex<HashMap<Uuid, ValidatedBackup>>>,
-    tested_backup_providers: Arc<Mutex<HashMap<Uuid, TestedBackupProvider>>>,
-    measured_storage: Arc<Mutex<HashMap<Uuid, MeasuredUsage>>>,
     integrity_settings_version: watch::Sender<u64>,
-    dummy_password_hash: Arc<String>,
-    mailer: crate::mail::Mailer,
-    /// Seals stored credentials; derived from the SSH host key in production.
-    secret_cipher: Arc<SecretCipher>,
-}
-
-pub(crate) struct ValidatedBackup {
-    pub key: String,
-    pub path: PathBuf,
-    pub provider: BackupProvider,
-    validated_at: Instant,
-}
-
-struct TestedBackupProvider {
-    user_id: Uuid,
-    config: BackupProviderConfig,
-    tested_at: Instant,
-}
-
-pub struct RegistrationChallenge {
-    pub user_id: Uuid,
-    pub name: String,
-    pub state: PasskeyRegistration,
-    pub created_at: Instant,
-}
-
-pub struct AuthenticationChallenge {
-    pub state: DiscoverableAuthentication,
-    pub created_at: Instant,
-    pub remote_address: Option<IpAddr>,
 }
 
 #[derive(Debug)]
@@ -339,6 +178,17 @@ impl From<gitadel_identity::IdentityError> for ApiError {
         match error {
             IdentityError::BadRequest(message) => Self::bad_request(message),
             IdentityError::Unauthorized => Self::unauthorized(),
+            IdentityError::InvalidCredentials => Self {
+                status: StatusCode::UNAUTHORIZED,
+                code: "invalid_credentials",
+                message: "The username or credential was not accepted.".to_owned(),
+            },
+            IdentityError::InvalidTwoFactorCode => Self {
+                status: StatusCode::UNAUTHORIZED,
+                code: "invalid_two_factor_code",
+                message: "The authentication code was not accepted.".to_owned(),
+            },
+            IdentityError::RateLimited(message) => Self::too_many_requests(message),
             IdentityError::NotFound => Self::not_found(),
             IdentityError::Forbidden(message) => Self::forbidden(message),
             IdentityError::Conflict(message) => Self::conflict(message),
@@ -394,7 +244,73 @@ pub fn remote_address() -> Option<IpAddr> {
     REMOTE_ADDRESS.try_with(|address| *address).ok().flatten()
 }
 
+impl std::ops::Deref for IdentityState {
+    type Target = gitadel_identity::runtime::AuthRuntime;
+    fn deref(&self) -> &Self::Target {
+        &self.auth_runtime
+    }
+}
 impl IdentityState {
+    /// Assemble HTTP state from server-owned service handles without starting workers.
+    #[allow(
+        dead_code,
+        reason = "supplied-handle constructor for parent server integration"
+    )]
+    pub fn from_services(
+        database: DatabaseConnection,
+        auth_runtime: Arc<gitadel_identity::runtime::AuthRuntime>,
+        backup_runtime: Arc<gitadel_backups::service::BackupRuntime>,
+        storage_runtime: Arc<gitadel_storage::service::StorageRuntime>,
+        integrity_settings_version: watch::Sender<u64>,
+        runtime_settings: Option<Arc<Settings>>,
+    ) -> Self {
+        Self {
+            read_database: database.clone(),
+            database,
+            auth_runtime,
+            backup_runtime,
+            storage_runtime,
+            integrity_settings_version,
+            runtime_settings,
+        }
+    }
+
+    pub fn instance_service(&self) -> gitadel_instance::service::InstanceService<'_> {
+        gitadel_instance::service::InstanceService::new(
+            self.database(),
+            gitadel_core::audit::AuditContext {
+                remote_address: remote_address(),
+            },
+            &self.integrity_settings_version,
+        )
+    }
+    pub fn backup_service(&self) -> gitadel_backups::service::BackupService<'_> {
+        self.backup_runtime
+            .service(gitadel_core::audit::AuditContext {
+                remote_address: remote_address(),
+            })
+    }
+    pub fn storage_service(&self) -> gitadel_storage::service::StorageService<'_> {
+        self.storage_runtime
+            .service(gitadel_core::audit::AuditContext {
+                remote_address: remote_address(),
+            })
+    }
+    pub fn auth_service(&self) -> gitadel_identity::runtime::AuthService<'_> {
+        self.auth_runtime
+            .service(gitadel_core::audit::AuditContext {
+                remote_address: remote_address(),
+            })
+    }
+
+    pub fn account_service(&self) -> gitadel_identity::AccountService<'_> {
+        gitadel_identity::AccountService::new(
+            self.database(),
+            gitadel_core::audit::AuditContext {
+                remote_address: remote_address(),
+            },
+        )
+    }
     #[cfg(test)]
     pub fn new(
         database: DatabaseConnection,
@@ -450,36 +366,6 @@ impl IdentityState {
         runtime_settings: Option<Arc<Settings>>,
         maintenance_sender: Option<mpsc::Sender<MaintenanceAction>>,
     ) -> Result<Self, anyhow::Error> {
-        if public_url.path() != "/"
-            || public_url.query().is_some()
-            || public_url.fragment().is_some()
-            || !public_url.username().is_empty()
-            || public_url.password().is_some()
-        {
-            return Err(anyhow::anyhow!(
-                "public URL must be an origin without a path, query, fragment, or credentials"
-            ));
-        }
-        let webauthn = match public_url.host() {
-            Some(url::Host::Domain(rp_id)) => Some(
-                WebauthnBuilder::new(rp_id, &public_url)?
-                    .rp_name("Gitadel")
-                    .build()?,
-            ),
-            Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) => {
-                tracing::warn!(
-                    %public_url,
-                    "passkeys are disabled because the public URL is an IP address; use a hostname to enable them"
-                );
-                None
-            }
-            None => return Err(anyhow::anyhow!("public URL must contain a host")),
-        };
-
-        let dummy_password_hash = Argon2::default()
-            .hash_password(b"gitadel-invalid-login")
-            .map_err(|error| anyhow::anyhow!("could not prepare password verification: {error}"))?
-            .to_string();
         let mailer = match runtime_settings
             .as_deref()
             .and_then(|settings| settings.smtp.as_ref())
@@ -496,31 +382,32 @@ impl IdentityState {
             // Only tests build a state without runtime settings.
             None => SecretCipher::from_material(b"gitadel test secret cipher")?,
         };
-        Ok(Self {
-            read_database: database.clone(),
-            database,
+        let auth_runtime = Arc::new(gitadel_identity::runtime::AuthRuntime::new(
+            database.clone(),
             settings,
             public_url,
-            webauthn,
-            registration_challenges: Arc::new(Mutex::new(HashMap::new())),
-            authentication_challenges: Arc::new(Mutex::new(HashMap::new())),
-            authorization_requests: Arc::new(Mutex::new(HashMap::new())),
-            oidc_authorizations: Arc::new(Mutex::new(HashMap::new())),
-            auth_rate_limits: Arc::new(Mutex::new(AuthRateLimiter::default())),
-            pending_logins: Arc::new(Mutex::new(HashMap::new())),
-            setup_token: Arc::new(Mutex::new(None)),
-            runtime_settings,
-            maintenance_sender,
-            maintenance_pending: Arc::new(Mutex::new(false)),
-            lfs_storage: Arc::new(tokio::sync::RwLock::new(None)),
-            registry_storage: Arc::new(tokio::sync::RwLock::new(None)),
-            validated_backups: Arc::new(Mutex::new(HashMap::new())),
-            tested_backup_providers: Arc::new(Mutex::new(HashMap::new())),
-            measured_storage: Arc::new(Mutex::new(HashMap::new())),
-            integrity_settings_version: watch::channel(0).0,
-            dummy_password_hash: Arc::new(dummy_password_hash),
             mailer,
-            secret_cipher: Arc::new(secret_cipher),
+            Arc::new(secret_cipher),
+        )?);
+        let backup_runtime = Arc::new(gitadel_backups::service::BackupRuntime::new(
+            database.clone(),
+            runtime_settings.clone(),
+            maintenance_sender,
+        ));
+        let storage_runtime = Arc::new(gitadel_storage::service::StorageRuntime::new(
+            database.clone(),
+            runtime_settings.clone(),
+            None,
+            None,
+        ));
+        Ok(Self {
+            storage_runtime,
+            backup_runtime,
+            auth_runtime,
+            read_database: database.clone(),
+            database,
+            runtime_settings,
+            integrity_settings_version: watch::channel(0).0,
         })
     }
 
@@ -553,7 +440,7 @@ impl IdentityState {
 
     #[cfg(test)]
     pub(crate) fn with_mailer(mut self, mailer: crate::mail::Mailer) -> Self {
-        self.mailer = mailer;
+        Arc::make_mut(&mut self.auth_runtime).mailer = mailer;
         self
     }
     pub(crate) async fn initialize_lfs_storage(
@@ -561,7 +448,7 @@ impl IdentityState {
         settings: &crate::config::StorageSettings,
     ) -> Result<(), anyhow::Error> {
         let manager = crate::storage::start(&self.database, settings).await?;
-        *self.lfs_storage.write().await = Some(manager);
+        *self.storage_runtime.lfs_storage.write().await = Some(manager);
         Ok(())
     }
 
@@ -570,25 +457,20 @@ impl IdentityState {
         settings: &crate::config::StorageSettings,
     ) -> Result<(), anyhow::Error> {
         let manager = crate::registry::storage::start(&self.database, settings).await?;
-        *self.registry_storage.write().await = Some(manager);
+        *self.storage_runtime.registry_storage.write().await = Some(manager);
         Ok(())
     }
 
     pub(crate) async fn registry_storage(&self) -> Option<Arc<DomainStorage>> {
-        self.registry_storage.read().await.clone()
+        self.storage_runtime.registry_storage().await
     }
 
     pub(crate) async fn lfs_storage(&self) -> Option<Arc<DomainStorage>> {
-        self.lfs_storage.read().await.clone()
+        self.storage_runtime.lfs_storage().await
     }
 
     pub(crate) fn subscribe_integrity_settings(&self) -> watch::Receiver<u64> {
         self.integrity_settings_version.subscribe()
-    }
-
-    pub(crate) fn notify_integrity_settings_changed(&self) {
-        self.integrity_settings_version
-            .send_modify(|version| *version = version.wrapping_add(1));
     }
 
     pub fn public_url(&self) -> &Url {
@@ -598,41 +480,7 @@ impl IdentityState {
     /// Issues a first-run setup link when the instance has no accounts yet.
     /// The token lives only in memory, so every restart prints a fresh link.
     pub(crate) async fn prepare_setup_link(&self) -> Result<Option<Url>, ApiError> {
-        if user::Entity::find().count(&self.database).await? != 0 {
-            return Ok(None);
-        }
-        let token = random_secret(32);
-        let mut link = self
-            .public_url
-            .join("register")
-            .map_err(ApiError::internal)?;
-        link.query_pairs_mut().append_pair("setup", &token);
-        *self.setup_token.lock().await = Some(token);
-        Ok(Some(link))
-    }
-
-    pub(crate) async fn setup_token_matches(&self, candidate: &str) -> bool {
-        use subtle::ConstantTimeEq as _;
-        self.setup_token
-            .lock()
-            .await
-            .as_deref()
-            .is_some_and(|expected| {
-                bool::from(
-                    hash_secret(expected)
-                        .as_bytes()
-                        .ct_eq(hash_secret(candidate).as_bytes()),
-                )
-            })
-    }
-
-    /// Retires the setup link once the first administrator exists.
-    pub(crate) async fn clear_setup_token(&self) {
-        *self.setup_token.lock().await = None;
-    }
-
-    fn oidc_authorizations(&self) -> &sso::OidcAuthorizations {
-        &self.oidc_authorizations
+        Ok(self.auth_service().prepare_setup_link().await?)
     }
 
     pub fn runtime_settings(&self) -> Result<&Settings, ApiError> {
@@ -641,228 +489,42 @@ impl IdentityState {
             .ok_or_else(|| ApiError::internal("runtime settings are unavailable"))
     }
 
-    pub async fn cache_validated_backup(
-        &self,
-        key: String,
-        path: PathBuf,
-        provider: BackupProvider,
-    ) -> Uuid {
-        let mut backups = self.validated_backups.lock().await;
-        backups.retain(|_, backup| {
-            if backup.validated_at.elapsed() <= VALIDATED_BACKUP_LIFETIME {
-                true
-            } else {
-                let _ = std::fs::remove_file(&backup.path);
-                false
-            }
-        });
-        let token = Uuid::new_v4();
-        backups.insert(
-            token,
-            ValidatedBackup {
-                key,
-                path,
-                provider,
-                validated_at: Instant::now(),
-            },
-        );
-        token
-    }
-
-    pub async fn take_validated_backup(&self, token: Uuid) -> Option<ValidatedBackup> {
-        let backup = self.validated_backups.lock().await.remove(&token)?;
-        if backup.validated_at.elapsed() > VALIDATED_BACKUP_LIFETIME {
-            let _ = std::fs::remove_file(backup.path);
-            return None;
-        }
-        Some(backup)
-    }
-
-    pub async fn cache_tested_backup_provider(
-        &self,
-        user_id: Uuid,
-        config: BackupProviderConfig,
-    ) -> Uuid {
-        let mut tested = self.tested_backup_providers.lock().await;
-        tested.retain(|_, proof| proof.tested_at.elapsed() <= TESTED_BACKUP_PROVIDER_LIFETIME);
-        let token = Uuid::new_v4();
-        tested.insert(
-            token,
-            TestedBackupProvider {
-                user_id,
-                config,
-                tested_at: Instant::now(),
-            },
-        );
-        token
-    }
-
-    pub async fn consume_tested_backup_provider(
-        &self,
-        token: Uuid,
-        user_id: Uuid,
-        config: &BackupProviderConfig,
-    ) -> bool {
-        let Some(proof) = self.tested_backup_providers.lock().await.remove(&token) else {
-            return false;
-        };
-        proof.tested_at.elapsed() <= TESTED_BACKUP_PROVIDER_LIFETIME
-            && proof.user_id == user_id
-            && proof.config == *config
-    }
-
-    /// Scanning a target costs a full listing, so the result is kept until an
-    /// administrator asks for a fresh one. It is deliberately not persisted: a
-    /// figure that survives a restart would outlive the state it described.
-    pub(crate) async fn record_measured_storage(&self, target_id: Uuid, usage: MeasuredUsage) {
-        self.measured_storage.lock().await.insert(target_id, usage);
-    }
-
-    pub(crate) async fn measured_storage(&self) -> HashMap<Uuid, MeasuredUsage> {
-        self.measured_storage.lock().await.clone()
-    }
-
-    pub(crate) async fn forget_measured_storage(&self, target_id: Uuid) {
-        self.measured_storage.lock().await.remove(&target_id);
-    }
-
     pub async fn schedule_maintenance(&self, action: MaintenanceAction) -> Result<(), ApiError> {
-        let sender = self
-            .maintenance_sender
-            .clone()
-            .ok_or_else(|| ApiError::internal("maintenance operations are unavailable"))?;
-        let mut pending = self.maintenance_pending.lock().await;
-        if *pending {
-            return Err(ApiError::conflict(
-                "Another backup or restore operation is already starting.",
-            ));
-        }
-        *pending = true;
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(750)).await;
-            if sender.send(action).await.is_err() {
-                tracing::error!("could not schedule maintenance operation");
-            }
-        });
-        Ok(())
+        Ok(self.backup_service().schedule_maintenance(action).await?)
     }
 
-    pub fn webauthn(&self) -> Result<&Webauthn, ApiError> {
-        self.webauthn.as_ref().ok_or_else(|| {
-            ApiError::bad_request(
-                "Passkeys need a public URL with a hostname rather than an IP address.",
-            )
-        })
-    }
-
-    pub fn passkeys_available(&self) -> bool {
-        self.webauthn.is_some()
-    }
-
+    #[cfg(test)]
     pub fn session_lifetime(&self) -> ChronoDuration {
-        ChronoDuration::hours(self.settings.session_lifetime_hours)
+        self.auth_service().session_lifetime()
     }
 
-    pub fn invitation_lifetime(&self) -> ChronoDuration {
-        ChronoDuration::hours(self.settings.invitation_lifetime_hours)
-    }
-    pub fn dummy_password_hash(&self) -> String {
-        self.dummy_password_hash.as_ref().clone()
-    }
-
-    pub async fn enforce_auth_rate_limit(
+    pub async fn authenticate_principal(
         &self,
-        bucket: &str,
-        limit: usize,
-    ) -> Result<(), ApiError> {
-        let source = source_bucket(remote_address());
-        self.enforce_rate_limit(format!("source:{source}:{bucket}"), limit)
-            .await
-    }
-
-    /// `limit` attempts per window for `account` from one source, and
-    /// [`ACCOUNT_RATE_LIMIT_GLOBAL_FACTOR`] times that across all sources,
-    /// so failing on purpose from elsewhere cannot lock the owner out.
-    pub async fn enforce_account_auth_rate_limit(
-        &self,
-        account: &str,
-        limit: usize,
-    ) -> Result<(), ApiError> {
-        let source = source_bucket(remote_address());
-        self.enforce_rate_limit(format!("account:{account}:{source}"), limit)
-            .await?;
-        self.enforce_rate_limit(
-            format!("account:{account}"),
-            limit.saturating_mul(ACCOUNT_RATE_LIMIT_GLOBAL_FACTOR),
-        )
-        .await
-    }
-
-    async fn enforce_rate_limit(&self, key: String, limit: usize) -> Result<(), ApiError> {
-        let mut limiter = self.auth_rate_limits.lock().await;
-        if limiter.try_acquire(key, limit, Instant::now()) {
-            Ok(())
-        } else {
-            Err(ApiError::too_many_requests(
-                "Too many authentication attempts. Try again later.",
-            ))
+        headers: &HeaderMap,
+        jar: &CookieJar,
+        required_scope: i32,
+    ) -> Result<gitadel_identity::Principal, ApiError> {
+        if let Some(authorization) = headers.get(header::AUTHORIZATION) {
+            let authorization = authorization
+                .to_str()
+                .map_err(|_| ApiError::unauthorized())?;
+            let token = authorization
+                .strip_prefix("Bearer ")
+                .or_else(|| authorization.strip_prefix("token "))
+                .ok_or_else(ApiError::unauthorized)?;
+            return Ok(gitadel_identity::IdentityService::new(self.database())
+                .authenticate_token_principal(token, required_scope)
+                .await?);
         }
-    }
 
-    pub async fn registration_challenges(
-        &self,
-    ) -> tokio::sync::MutexGuard<'_, HashMap<String, RegistrationChallenge>> {
-        let mut challenges = self.registration_challenges.lock().await;
-        challenges.retain(|_, challenge| challenge.created_at.elapsed() < CHALLENGE_LIFETIME);
-        challenges
+        let raw_token = jar
+            .get(SESSION_COOKIE)
+            .map(Cookie::value)
+            .ok_or_else(ApiError::unauthorized)?;
+        Ok(gitadel_identity::IdentityService::new(&self.database)
+            .authenticate_session_principal(raw_token)
+            .await?)
     }
-
-    pub async fn authentication_challenges(
-        &self,
-    ) -> tokio::sync::MutexGuard<'_, HashMap<String, AuthenticationChallenge>> {
-        let mut challenges = self.authentication_challenges.lock().await;
-        challenges.retain(|_, challenge| challenge.created_at.elapsed() < CHALLENGE_LIFETIME);
-        challenges
-    }
-
-    pub async fn insert_authentication_challenge(
-        &self,
-        id: String,
-        state: DiscoverableAuthentication,
-    ) -> Result<(), ApiError> {
-        let source = remote_address();
-        let mut challenges = self.authentication_challenges.lock().await;
-        challenges.retain(|_, challenge| challenge.created_at.elapsed() < CHALLENGE_LIFETIME);
-        if challenges.len() >= AUTH_CHALLENGE_CAPACITY
-            || challenges
-                .values()
-                .filter(|challenge| challenge.remote_address == source)
-                .count()
-                >= AUTH_CHALLENGE_SOURCE_CAPACITY
-        {
-            return Err(ApiError::too_many_requests(
-                "Too many authentication attempts. Try again later.",
-            ));
-        }
-        challenges.insert(
-            id,
-            AuthenticationChallenge {
-                state,
-                created_at: Instant::now(),
-                remote_address: source,
-            },
-        );
-        Ok(())
-    }
-
-    async fn authorization_requests(
-        &self,
-    ) -> tokio::sync::MutexGuard<'_, HashMap<String, oauth::AuthorizationRequest>> {
-        let mut requests = self.authorization_requests.lock().await;
-        requests.retain(|_, request| request.created_at.elapsed() < CHALLENGE_LIFETIME);
-        requests
-    }
-
     pub async fn authenticate(
         &self,
         headers: &HeaderMap,
@@ -945,6 +607,7 @@ impl IdentityState {
             .await?)
     }
 
+    #[cfg(test)]
     pub async fn create_session_on<C: ConnectionTrait>(
         &self,
         connection: &C,
@@ -954,14 +617,18 @@ impl IdentityState {
             gitadel_identity::create_session_on(connection, user_id, self.session_lifetime())
                 .await?;
 
-        let cookie = Cookie::build((SESSION_COOKIE, raw_token.clone()))
+        let cookie = self.session_cookie(raw_token.clone());
+        Ok((raw_token, cookie))
+    }
+
+    pub fn session_cookie(&self, raw_token: String) -> Cookie<'static> {
+        Cookie::build((SESSION_COOKIE, raw_token))
             .path("/")
             .http_only(true)
             .same_site(SameSite::Lax)
             .secure(self.public_url.scheme() == "https")
             .max_age(TimeDuration::hours(self.settings.session_lifetime_hours))
-            .build();
-        Ok((raw_token, cookie))
+            .build()
     }
 
     pub async fn delete_session(&self, jar: &CookieJar) -> Result<Cookie<'static>, ApiError> {
@@ -988,17 +655,16 @@ impl IdentityState {
         action: impl Into<String>,
         target: Option<String>,
     ) -> Result<(), ApiError> {
-        audit_event::ActiveModel {
-            id: sea_orm::ActiveValue::NotSet,
-            actor_user_id: Set(actor_user_id),
-            action: Set(action.into()),
-            target: Set(target),
-            remote_address: Set(remote_address().map(|address| address.to_string())),
-            created_at: Set(Utc::now()),
-        }
-        .insert(connection)
-        .await?;
-        Ok(())
+        Ok(gitadel_db::audit::record(
+            connection,
+            actor_user_id,
+            action,
+            target,
+            gitadel_core::audit::AuditContext {
+                remote_address: remote_address(),
+            },
+        )
+        .await?)
     }
 }
 
@@ -1363,15 +1029,6 @@ pub fn oauth_router() -> Router<IdentityState> {
         .route("/login/oauth/access_token", post(oauth::access_token))
 }
 
-pub async fn hash_password(password: String) -> Result<String, ApiError> {
-    Ok(gitadel_identity::hash_password(password).await?)
-}
-pub async fn verify_password(password: String, encoded: String) -> Result<bool, ApiError> {
-    Ok(gitadel_identity::verify_password(password, encoded).await?)
-}
-pub fn validate_password(password: &str) -> Result<(), ApiError> {
-    Ok(gitadel_identity::validate_password(password)?)
-}
 pub fn validate_slug(value: &str, label: &str) -> Result<String, ApiError> {
     Ok(gitadel_identity::validate_slug(value, label)?)
 }

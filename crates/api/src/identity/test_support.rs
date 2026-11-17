@@ -10,20 +10,12 @@ use axum::{
     http::{Method, Request, Response, StatusCode, header},
 };
 use chrono::Utc;
-use sea_orm::{
-    ActiveModelTrait, ConnectOptions, ConnectionTrait as _, Database, DatabaseConnection, Set,
-};
-use sea_orm_migration::MigratorTrait;
+use sea_orm::DatabaseConnection;
 use serde_json::Value;
 use tower::ServiceExt as _;
-use uuid::Uuid;
 
 use super::{IdentityState, SESSION_COOKIE};
-use crate::{
-    config::AuthSettings,
-    entity::{namespace, user},
-    migration::Migrator,
-};
+use crate::{config::AuthSettings, entity::user};
 
 /// The password every harness user signs in with.
 pub(crate) const PASSWORD: &str = "correct horse battery staple";
@@ -46,14 +38,7 @@ pub(crate) struct Harness {
 
 impl Harness {
     pub(crate) async fn new() -> Self {
-        let mut options = ConnectOptions::new("sqlite::memory:");
-        options.max_connections(1).sqlx_logging(false);
-        let database = Database::connect(options).await.unwrap();
-        database
-            .execute_unprepared("PRAGMA foreign_keys = ON")
-            .await
-            .unwrap();
-        Migrator::up(&database, None).await.unwrap();
+        let database = gitadel_db::test_support::database().await;
         let state = IdentityState::new(
             database.clone(),
             AuthSettings {
@@ -73,34 +58,15 @@ impl Harness {
 
     /// A user with a personal namespace who signs in with [`PASSWORD`].
     pub(crate) async fn user(&self, username: &str) -> user::Model {
-        let now = Utc::now();
-        let account = user::ActiveModel {
-            id: Set(Uuid::new_v4()),
-            username: Set(username.to_owned()),
-            password_hash: Set(password_hash()),
-            is_admin: Set(false),
-            default_repository_visibility: Set("private".to_owned()),
-            theme_preference: Set("system".to_owned()),
-            motion_preference: Set("system".to_owned()),
-            disabled_at: Set(None),
-            avatar_updated_at: Set(None),
-            created_at: Set(now),
-            updated_at: Set(now),
-        }
-        .insert(&self.database)
+        gitadel_identity::accounts::insert_account_on(
+            &self.database,
+            username,
+            password_hash(),
+            false,
+            Utc::now(),
+        )
         .await
-        .unwrap();
-        namespace::ActiveModel {
-            slug: Set(username.to_owned()),
-            kind: Set("user".to_owned()),
-            user_id: Set(Some(account.id)),
-            organization_id: Set(None),
-            created_at: Set(now),
-        }
-        .insert(&self.database)
-        .await
-        .unwrap();
-        account
+        .unwrap()
     }
 
     /// A browser session for `account`, as a `Cookie` header value.

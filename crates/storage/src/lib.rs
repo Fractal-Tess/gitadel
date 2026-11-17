@@ -13,3 +13,6 @@ use gitadel_db::{self as database, entity};
 
 #[cfg(test)]
 use gitadel_db::test_support;
+pub mod domains;
+pub mod overview;
+pub mod service;

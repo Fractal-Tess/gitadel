@@ -2,22 +2,15 @@
 
 use axum::{Json, extract::State, http::HeaderMap};
 use axum_extra::extract::cookie::CookieJar;
-use chrono::Utc;
-use sea_orm::{ConnectionTrait, EntityTrait, Set, sea_query::OnConflict};
+use sea_orm::ConnectionTrait;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::{ApiError, IdentityState, SCOPE_READ, SCOPE_WRITE};
-use crate::entity::user_notification_preferences;
 
 /// Which notification a message belongs to.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum NotificationKind {
-    Issues,
-    IssueComments,
-    ActionFailures,
-}
+pub use gitadel_identity::notifications::NotificationKind;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 pub struct NotificationPreferences {
@@ -50,16 +43,7 @@ pub(crate) async fn preferences<C: ConnectionTrait>(
     connection: &C,
     user_id: Uuid,
 ) -> Result<NotificationPreferences, ApiError> {
-    Ok(user_notification_preferences::Entity::find_by_id(user_id)
-        .one(connection)
-        .await?
-        .map_or_else(NotificationPreferences::default, |row| {
-            NotificationPreferences {
-                issues: row.issues,
-                issue_comments: row.issue_comments,
-                action_failures: row.action_failures,
-            }
-        }))
+    Ok(domain::preferences(connection, user_id).await?.into())
 }
 
 #[derive(Serialize, ToSchema)]
@@ -85,7 +69,9 @@ pub async fn get_notifications(
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<NotificationSettingsResponse>, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_READ).await?;
+    let actor = state
+        .authenticate_principal(&headers, &jar, SCOPE_READ)
+        .await?;
     Ok(Json(NotificationSettingsResponse {
         email_enabled: state.mailer().is_enabled(),
         preferences: preferences(state.database(), actor.user.id).await?,
@@ -110,28 +96,32 @@ pub async fn update_notifications(
     jar: CookieJar,
     Json(request): Json<NotificationPreferences>,
 ) -> Result<Json<NotificationSettingsResponse>, ApiError> {
-    let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
-    user_notification_preferences::Entity::insert(user_notification_preferences::ActiveModel {
-        user_id: Set(actor.user.id),
-        issues: Set(request.issues),
-        issue_comments: Set(request.issue_comments),
-        action_failures: Set(request.action_failures),
-        updated_at: Set(Utc::now()),
-    })
-    .on_conflict(
-        OnConflict::column(user_notification_preferences::Column::UserId)
-            .update_columns([
-                user_notification_preferences::Column::Issues,
-                user_notification_preferences::Column::IssueComments,
-                user_notification_preferences::Column::ActionFailures,
-                user_notification_preferences::Column::UpdatedAt,
-            ])
-            .to_owned(),
-    )
-    .exec(state.database())
-    .await?;
+    let actor = state
+        .authenticate_principal(&headers, &jar, SCOPE_WRITE)
+        .await?;
+    let preferences = domain::update(&state.account_service(), &actor, request.into()).await?;
     Ok(Json(NotificationSettingsResponse {
         email_enabled: state.mailer().is_enabled(),
-        preferences: preferences(state.database(), actor.user.id).await?,
+        preferences: preferences.into(),
     }))
+}
+
+use gitadel_identity::notifications as domain;
+impl From<domain::NotificationPreferences> for NotificationPreferences {
+    fn from(v: domain::NotificationPreferences) -> Self {
+        Self {
+            issues: v.issues,
+            issue_comments: v.issue_comments,
+            action_failures: v.action_failures,
+        }
+    }
+}
+impl From<NotificationPreferences> for domain::NotificationPreferences {
+    fn from(v: NotificationPreferences) -> Self {
+        Self {
+            issues: v.issues,
+            issue_comments: v.issue_comments,
+            action_failures: v.action_failures,
+        }
+    }
 }

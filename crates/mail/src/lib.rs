@@ -54,6 +54,18 @@ struct Inner {
     summary: SmtpSummary,
 }
 
+/// Delivery work returned to the application's task supervisor.
+pub struct MailWorker {
+    transport: AsyncSmtpTransport<Tokio1Executor>,
+    receiver: mpsc::Receiver<Message>,
+}
+
+impl MailWorker {
+    pub async fn run(self) {
+        deliver_queue(self.transport, self.receiver).await;
+    }
+}
+
 impl Mailer {
     pub fn disabled() -> Self {
         Self::default()
@@ -64,6 +76,13 @@ impl Mailer {
     /// Must be called within a Tokio runtime. No connection is made here, so
     /// an unreachable relay does not prevent startup.
     pub fn start(settings: &SmtpSettings) -> Result<Self> {
+        let (mailer, worker) = Self::build(settings)?;
+        tokio::spawn(worker.run());
+        Ok(mailer)
+    }
+
+    /// Construct delivery handles without starting a background task.
+    pub fn build(settings: &SmtpSettings) -> Result<(Self, MailWorker)> {
         let from = settings
             .from
             .parse::<Mailbox>()
@@ -89,21 +108,27 @@ impl Mailer {
         }
         let transport = builder.build();
         let (queue, receiver) = mpsc::channel(QUEUE_CAPACITY);
-        tokio::spawn(deliver_queue(transport.clone(), receiver));
-        Ok(Self {
-            inner: Some(Arc::new(Inner {
-                transport,
-                from: from.clone(),
-                queue,
-                summary: SmtpSummary {
-                    host: settings.host.clone(),
-                    port,
-                    tls: settings.tls.as_str(),
-                    from: from.to_string(),
-                    username: settings.username.clone(),
-                },
-            })),
-        })
+        let worker = MailWorker {
+            transport: transport.clone(),
+            receiver,
+        };
+        Ok((
+            Self {
+                inner: Some(Arc::new(Inner {
+                    transport,
+                    from: from.clone(),
+                    queue,
+                    summary: SmtpSummary {
+                        host: settings.host.clone(),
+                        port,
+                        tls: settings.tls.as_str(),
+                        from: from.to_string(),
+                        username: settings.username.clone(),
+                    },
+                })),
+            },
+            worker,
+        ))
     }
 
     pub fn is_enabled(&self) -> bool {
