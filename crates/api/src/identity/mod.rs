@@ -18,7 +18,7 @@ pub(crate) mod test_support;
 pub(crate) mod two_factor;
 pub(crate) mod users;
 
-pub(crate) use admin::{require_admin, require_admin_principal, serve_audit_retention};
+pub(crate) use admin::{require_admin, require_admin_principal};
 pub(crate) use email::verified_mailbox;
 pub(crate) use integrations::{
     authorize_namespace, open_api_key as open_integration_api_key,
@@ -46,23 +46,22 @@ use chrono::Utc;
 use sea_orm::{ConnectionTrait, DatabaseConnection};
 use serde::{Deserialize, Serialize};
 use time::Duration as TimeDuration;
-use tokio::sync::{mpsc, watch};
+#[cfg(test)]
+use tokio::sync::mpsc;
+use tokio::sync::watch;
 use url::Url;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::{
-    archive::MaintenanceAction,
-    blob_store::DomainStorage,
-    config::{AuthSettings, Settings},
-    entity::user,
-    secrets::SecretCipher,
-};
+#[cfg(test)]
+use crate::{archive::MaintenanceAction, config::AuthSettings};
+use crate::{blob_store::DomainStorage, config::Settings, entity::user, secrets::SecretCipher};
 
 pub(crate) const SESSION_COOKIE: &str = "gitadel_session";
+#[cfg(test)]
+pub use gitadel_identity::random_secret;
 pub use gitadel_identity::{
     AuthenticatedUser, SCOPE_READ, SCOPE_REPOSITORY_READ, SCOPE_SSH_KEYS, SCOPE_WRITE, hash_secret,
-    random_secret,
 };
 tokio::task_local! {
     static REMOTE_ADDRESS: Option<IpAddr>;
@@ -252,10 +251,6 @@ impl std::ops::Deref for IdentityState {
 }
 impl IdentityState {
     /// Assemble HTTP state from server-owned service handles without starting workers.
-    #[allow(
-        dead_code,
-        reason = "supplied-handle constructor for parent server integration"
-    )]
     pub fn from_services(
         database: DatabaseConnection,
         auth_runtime: Arc<gitadel_identity::runtime::AuthRuntime>,
@@ -320,6 +315,7 @@ impl IdentityState {
         Self::build(database, settings, public_url, None, None)
     }
 
+    #[cfg(test)]
     pub fn new_with_runtime(
         database: DatabaseConnection,
         settings: Settings,
@@ -337,28 +333,7 @@ impl IdentityState {
         Ok(state)
     }
 
-    /// Seals credentials that older versions stored as plain text. The pass
-    /// is idempotent and logs what it changed; the server runs it before it
-    /// starts serving so no request ever reads a plain-text value.
-    pub(crate) async fn seal_stored_secrets(&self) -> Result<(), anyhow::Error> {
-        let report = crate::secrets::seal_stored_secrets(&self.database, &self.secret_cipher)
-            .await
-            .map_err(|error| error.context("could not seal stored secrets"))?;
-        if report.total() == 0 {
-            tracing::debug!("all stored secrets are sealed");
-        } else {
-            tracing::info!(
-                dokploy_api_keys = report.dokploy_api_keys,
-                mirror_identity_secrets = report.mirror_identity_secrets,
-                webhook_secrets = report.webhook_secrets,
-                oidc_client_secrets = report.oidc_client_secrets,
-                totp_secrets = report.totp_secrets,
-                "sealed stored secrets that were kept as plain text"
-            );
-        }
-        Ok(())
-    }
-
+    #[cfg(test)]
     fn build(
         database: DatabaseConnection,
         settings: AuthSettings,
@@ -427,7 +402,7 @@ impl IdentityState {
     }
 
     /// Route hot read paths through `read_database`, a pool opened by
-    /// [`crate::database::connect_reader`].
+    /// [`gitadel_db::connect_reader`].
     pub fn with_read_database(mut self, read_database: DatabaseConnection) -> Self {
         self.read_database = read_database;
         self
@@ -443,6 +418,7 @@ impl IdentityState {
         Arc::make_mut(&mut self.auth_runtime).mailer = mailer;
         self
     }
+    #[cfg(test)]
     pub(crate) async fn initialize_lfs_storage(
         &self,
         settings: &crate::config::StorageSettings,
@@ -452,6 +428,7 @@ impl IdentityState {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) async fn initialize_registry_storage(
         &self,
         settings: &crate::config::StorageSettings,
@@ -477,20 +454,10 @@ impl IdentityState {
         &self.public_url
     }
 
-    /// Issues a first-run setup link when the instance has no accounts yet.
-    /// The token lives only in memory, so every restart prints a fresh link.
-    pub(crate) async fn prepare_setup_link(&self) -> Result<Option<Url>, ApiError> {
-        Ok(self.auth_service().prepare_setup_link().await?)
-    }
-
     pub fn runtime_settings(&self) -> Result<&Settings, ApiError> {
         self.runtime_settings
             .as_deref()
             .ok_or_else(|| ApiError::internal("runtime settings are unavailable"))
-    }
-
-    pub async fn schedule_maintenance(&self, action: MaintenanceAction) -> Result<(), ApiError> {
-        Ok(self.backup_service().schedule_maintenance(action).await?)
     }
 
     #[cfg(test)]

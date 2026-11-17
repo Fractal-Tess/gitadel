@@ -1,11 +1,11 @@
 use std::{
     borrow::Cow,
     convert::Infallible,
-    net::{IpAddr, SocketAddr, TcpListener as StdTcpListener},
+    net::{IpAddr, SocketAddr},
     sync::Arc,
 };
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use axum::{
     Json, Router,
     body::{Body, Bytes},
@@ -20,24 +20,18 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_util::stream;
-use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tokio::{
-    sync::{mpsc, watch},
-    time::Duration,
-};
-use tokio_util::sync::CancellationToken;
+use tokio::{sync::watch, time::Duration};
 use tower::ServiceExt;
 use tower_http::{
     compression::{CompressionLayer, DefaultPredicate, Predicate},
     trace::TraceLayer,
 };
-use tracing::info;
 
 use crate::{
-    actions::{self, ActionsState},
-    archive::{self, MaintenanceAction, MaintenanceProgress, MaintenanceProgressReporter},
+    actions::ActionsState,
+    archive::MaintenanceProgress,
     config::{IpNetwork, Settings},
     identity::{self, IdentityState},
     repository::{self, GitHttpState, RepositoryState},
@@ -270,7 +264,6 @@ impl Predicate for Compressible {
 /// How long shutdown waits for open HTTP connections to drain, and then for
 /// background tasks to finish, before giving up on them. Without a bound a
 /// single stalled connection holds the process until the supervisor kills it.
-const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(30);
 
 /// The origin of the configured public URL, e.g. `https://git.example.com`.
 #[derive(Clone)]
@@ -357,7 +350,7 @@ async fn reject_cross_site_cookie_requests(
 }
 
 /// Build the HTTP and protocol adapters from already constructed handles.
-pub(crate) fn http_router(
+pub fn http_router(
     settings: &Settings,
     identity_state: &IdentityState,
     repository_state: &RepositoryState,
@@ -404,279 +397,6 @@ pub(crate) fn http_router(
         ))
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CompletedService {
-    Http,
-    Ssh,
-    MirrorScheduler,
-    BackupScheduler,
-    ActionsScheduler,
-    IntegrityScheduler,
-}
-
-fn completed_service(
-    result: std::result::Result<Result<()>, tokio::task::JoinError>,
-    service: CompletedService,
-) -> (Result<ServerExit>, Option<CompletedService>) {
-    let context = match service {
-        CompletedService::Http => "HTTP server task failed",
-        CompletedService::Ssh => "SSH server task failed",
-        CompletedService::MirrorScheduler => "mirror scheduler task failed",
-        CompletedService::BackupScheduler => "backup scheduler task failed",
-        CompletedService::ActionsScheduler => "Actions scheduler task failed",
-        CompletedService::IntegrityScheduler => "integrity scheduler task failed",
-    };
-    (
-        result
-            .context(context)
-            .and_then(|result| result)
-            .map(|()| ServerExit::Shutdown),
-        Some(service),
-    )
-}
-
-fn abort_services(
-    completed: Option<CompletedService>,
-    workers: &[(CompletedService, tokio::task::AbortHandle)],
-    cancel_actions: impl FnOnce(),
-) {
-    for (service, task) in workers {
-        if *service != CompletedService::ActionsScheduler && completed != Some(*service) {
-            task.abort();
-        }
-    }
-    if completed != Some(CompletedService::ActionsScheduler) {
-        cancel_actions();
-        if let Some((_, task)) = workers
-            .iter()
-            .find(|(service, _)| *service == CompletedService::ActionsScheduler)
-        {
-            task.abort();
-        }
-    }
-}
-
-pub enum ServerExit {
-    Shutdown,
-    Maintenance(Box<MaintenanceAction>),
-}
-
-pub async fn serve(
-    settings: Settings,
-    database: DatabaseConnection,
-    read_database: DatabaseConnection,
-) -> Result<ServerExit> {
-    let http_bind = settings.server.bind;
-    let listener = StdTcpListener::bind(http_bind)
-        .with_context(|| format!("could not bind web listener to {http_bind}"))?;
-    listener
-        .set_nonblocking(true)
-        .context("could not configure web listener as non-blocking")?;
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let tls = if let Some(tls) = &settings.server.tls {
-        Some(
-            axum_server::tls_rustls::RustlsConfig::from_pem_file(
-                &tls.certificate,
-                &tls.private_key,
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "could not load TLS certificate {} and private key {}",
-                    tls.certificate.display(),
-                    tls.private_key.display()
-                )
-            })?,
-        )
-    } else {
-        None
-    };
-
-    let (maintenance_sender, mut maintenance_receiver) = mpsc::channel(1);
-    let identity_state =
-        IdentityState::new_with_runtime(database, settings.clone(), maintenance_sender)
-            .context("could not initialize authentication")?
-            .with_read_database(read_database);
-    identity_state.seal_stored_secrets().await?;
-    identity_state
-        .initialize_lfs_storage(&settings.storage)
-        .await
-        .context("could not initialize LFS storage")?;
-    identity_state
-        .initialize_registry_storage(&settings.storage)
-        .await
-        .context("could not initialize registry storage")?;
-    if let Some(link) = identity_state
-        .prepare_setup_link()
-        .await
-        .context("could not prepare the first-run setup link")?
-    {
-        tracing::warn!(
-            "No administrator exists yet. Open this one-time link to create one: {link}"
-        );
-    }
-    let ssh_port = settings.ssh.bind.port();
-    let repository_state = RepositoryState::new(
-        identity_state.clone(),
-        settings.storage.clone(),
-        settings.server.public_url.clone(),
-        ssh_port,
-    )
-    .await
-    .context("could not initialize repository storage")?;
-    repository::recover_imports(&repository_state)
-        .await
-        .context("could not recover interrupted repository imports")?;
-    repository::purge_soft_deleted_repositories(&repository_state)
-        .await
-        .context("could not remove previously deleted repositories")?;
-    let host_key = repository::load_ssh_host_key(&settings.ssh.host_key)?;
-    let secret_cipher = actions::secrets::SecretCipher::from_host_key(&host_key)
-        .context("could not derive the Actions secret key")?;
-    let actions_state = ActionsState::new(
-        repository_state.clone(),
-        settings.actions.clone(),
-        secret_cipher,
-    );
-    actions::bootstrap_system_runner(&actions_state)
-        .await
-        .context("could not prepare the configured system runner")?;
-    let app = http_router(
-        &settings,
-        &identity_state,
-        &repository_state,
-        &actions_state,
-    );
-
-    info!(
-        address = %http_bind,
-        protocol = if tls.is_some() { "https" } else { "http" },
-        "Gitadel web server listening"
-    );
-    let shutdown = CancellationToken::new();
-    let http_shutdown = shutdown.clone();
-    let http_handle = axum_server::Handle::new();
-    let graceful_handle = http_handle.clone();
-    let mut http = tokio::spawn(async move {
-        let shutdown_task = tokio::spawn(async move {
-            tokio::select! {
-                () = shutdown_signal() => {}
-                () = http_shutdown.cancelled() => {}
-            }
-            graceful_handle.graceful_shutdown(Some(SHUTDOWN_DEADLINE));
-        });
-        let result = if let Some(tls) = tls {
-            axum_server::from_tcp_rustls(listener, tls)
-                .context("could not configure HTTPS listener")?
-                .handle(http_handle)
-                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-                .await
-        } else {
-            axum_server::from_tcp(listener)
-                .context("could not configure HTTP listener")?
-                .handle(http_handle)
-                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-                .await
-        };
-        shutdown_task.abort();
-        result.context("web server stopped unexpectedly")
-    });
-    let mut mirror_scheduler =
-        tokio::spawn(repository::serve_mirror_scheduler(repository_state.clone()));
-    let mut integrity_scheduler = tokio::spawn(repository::serve_integrity_scheduler(
-        repository_state.clone(),
-    ));
-    // Only logs, never fails: it is stopped with the rest rather than joined.
-    let audit_retention = tokio::spawn(identity::serve_audit_retention(identity_state.clone()));
-    let mut backup_scheduler = tokio::spawn(archive::serve_backup_scheduler(identity_state));
-    let mut actions_scheduler =
-        tokio::spawn(actions::serve_actions_scheduler(actions_state.clone()));
-    let mut ssh = tokio::spawn(repository::serve_ssh(
-        settings.ssh,
-        repository_state.clone(),
-        actions_state.clone(),
-    ));
-    let workers = [
-        (CompletedService::Http, http.abort_handle()),
-        (CompletedService::Ssh, ssh.abort_handle()),
-        (
-            CompletedService::MirrorScheduler,
-            mirror_scheduler.abort_handle(),
-        ),
-        (
-            CompletedService::BackupScheduler,
-            backup_scheduler.abort_handle(),
-        ),
-        (
-            CompletedService::IntegrityScheduler,
-            integrity_scheduler.abort_handle(),
-        ),
-        (
-            CompletedService::ActionsScheduler,
-            actions_scheduler.abort_handle(),
-        ),
-    ];
-    let (outcome, completed) = tokio::select! {
-        result = &mut http => completed_service(result, CompletedService::Http),
-        result = &mut ssh => completed_service(result, CompletedService::Ssh),
-        result = &mut mirror_scheduler => completed_service(result, CompletedService::MirrorScheduler),
-        result = &mut backup_scheduler => completed_service(result, CompletedService::BackupScheduler),
-        result = &mut actions_scheduler => completed_service(result, CompletedService::ActionsScheduler),
-        result = &mut integrity_scheduler => completed_service(result, CompletedService::IntegrityScheduler),
-        Some(action) = maintenance_receiver.recv() => {
-            shutdown.cancel();
-            abort_services(Some(CompletedService::Http), &workers, || actions_state.cancel());
-            let http_completed =
-                tokio::time::timeout(Duration::from_secs(5), &mut http).await.is_ok();
-            if !http_completed {
-                http.abort();
-            }
-            (
-                Ok(ServerExit::Maintenance(Box::new(action))),
-                http_completed.then_some(CompletedService::Http),
-            )
-        }
-    };
-    if !matches!(&outcome, Ok(ServerExit::Maintenance(_))) {
-        abort_services(completed, &workers, || actions_state.cancel());
-    }
-    audit_retention.abort();
-    let _ = audit_retention.await;
-    for (service, task) in [
-        (CompletedService::Http, http),
-        (CompletedService::Ssh, ssh),
-        (CompletedService::MirrorScheduler, mirror_scheduler),
-        (CompletedService::BackupScheduler, backup_scheduler),
-        (CompletedService::ActionsScheduler, actions_scheduler),
-        (CompletedService::IntegrityScheduler, integrity_scheduler),
-    ] {
-        if completed != Some(service) {
-            let _ = task.await;
-        }
-    }
-    repository_state.close_tasks();
-    if matches!(&outcome, Ok(ServerExit::Maintenance(_))) {
-        // Maintenance rewrites the data the tasks work on, so it must not
-        // start while any of them is still running.
-        repository_state.wait_for_tasks().await;
-    } else if tokio::time::timeout(SHUTDOWN_DEADLINE, repository_state.wait_for_tasks())
-        .await
-        .is_err()
-    {
-        tracing::warn!(
-            deadline_seconds = SHUTDOWN_DEADLINE.as_secs(),
-            "background tasks did not finish before the shutdown deadline"
-        );
-    }
-    if matches!(&outcome, Ok(ServerExit::Maintenance(_))) {
-        repository_state
-            .registry_storage()
-            .wait_for_migration()
-            .await;
-    }
-    outcome
-}
-
 #[derive(Clone)]
 struct MaintenanceStatusState {
     operation_id: uuid::Uuid,
@@ -684,7 +404,7 @@ struct MaintenanceStatusState {
 }
 
 /// Render maintenance progress without owning the maintenance operation.
-pub(crate) fn maintenance_router(
+pub fn maintenance_router(
     operation_id: uuid::Uuid,
     receiver: watch::Receiver<MaintenanceProgress>,
 ) -> Router {
@@ -701,72 +421,6 @@ pub(crate) fn maintenance_router(
             operation_id,
             receiver,
         })
-}
-
-pub async fn perform_maintenance(settings: &Settings, action: MaintenanceAction) -> Result<()> {
-    let reporter = MaintenanceProgressReporter::new(&action);
-    let operation_id = action.operation_id();
-    let status_server = match StdTcpListener::bind(settings.server.bind) {
-        Ok(listener) => {
-            listener
-                .set_nonblocking(true)
-                .context("could not configure maintenance listener as non-blocking")?;
-            let tls = if let Some(tls) = &settings.server.tls {
-                Some(
-                    axum_server::tls_rustls::RustlsConfig::from_pem_file(
-                        &tls.certificate,
-                        &tls.private_key,
-                    )
-                    .await
-                    .context("could not load TLS configuration for maintenance status")?,
-                )
-            } else {
-                None
-            };
-            let app = maintenance_router(operation_id, reporter.subscribe());
-            let handle = axum_server::Handle::new();
-            let server_handle = handle.clone();
-            let task = tokio::spawn(async move {
-                if let Some(tls) = tls {
-                    axum_server::from_tcp_rustls(listener, tls)
-                        .context("could not configure maintenance HTTPS listener")?
-                        .handle(server_handle)
-                        .serve(app.into_make_service())
-                        .await
-                        .context("maintenance HTTPS listener stopped")
-                } else {
-                    axum_server::from_tcp(listener)
-                        .context("could not configure maintenance HTTP listener")?
-                        .handle(server_handle)
-                        .serve(app.into_make_service())
-                        .await
-                        .context("maintenance HTTP listener stopped")
-                }
-            });
-            Some((handle, task))
-        }
-        Err(error) => {
-            tracing::warn!(%error, "could not start maintenance progress server");
-            None
-        }
-    };
-
-    let result = archive::perform_maintenance(action, settings, &reporter).await;
-    match &result {
-        Ok(()) => reporter.complete(),
-        Err(error) => reporter.fail(error),
-    }
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    if let Some((handle, mut status_server)) = status_server {
-        handle.graceful_shutdown(Some(Duration::from_secs(2)));
-        if tokio::time::timeout(Duration::from_secs(2), &mut status_server)
-            .await
-            .is_err()
-        {
-            status_server.abort();
-        }
-    }
-    result
 }
 
 async fn maintenance_progress(
@@ -903,36 +557,6 @@ fn frontend_content_security_policy(data: &[u8]) -> Option<HeaderValue> {
         "default-src 'self'; script-src 'self' {hashes}; style-src 'self' 'unsafe-inline'; img-src {IMAGE_SOURCES}; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
     );
     HeaderValue::from_str(&policy).ok()
-}
-
-async fn shutdown_signal() {
-    let interrupt = async {
-        if let Err(error) = tokio::signal::ctrl_c().await {
-            tracing::warn!(%error, "could not install Ctrl-C handler");
-            std::future::pending::<()>().await;
-        }
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
-            }
-            Err(error) => {
-                tracing::warn!(%error, "could not install SIGTERM handler");
-                std::future::pending::<()>().await;
-            }
-        }
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        () = interrupt => {},
-        () = terminate => {},
-    }
 }
 
 #[cfg(test)]
@@ -1228,40 +852,5 @@ mod tests {
                 .all(|source| source != "https:" && source != "*")
         );
         assert!(IMAGE_SOURCES.contains("https://img.shields.io"));
-    }
-    #[tokio::test]
-    async fn maintenance_keeps_http_alive_while_background_workers_stop() {
-        let (release, wait) = tokio::sync::oneshot::channel::<()>();
-        let http = tokio::spawn(async move {
-            wait.await.unwrap();
-            Ok(())
-        });
-        let mut tasks = vec![(CompletedService::Http, http)];
-        for service in [
-            CompletedService::Ssh,
-            CompletedService::MirrorScheduler,
-            CompletedService::BackupScheduler,
-            CompletedService::IntegrityScheduler,
-            CompletedService::ActionsScheduler,
-        ] {
-            tasks.push((service, tokio::spawn(std::future::pending::<Result<()>>())));
-        }
-        let workers: Vec<_> = tasks
-            .iter()
-            .map(|(service, task)| (*service, task.abort_handle()))
-            .collect();
-        let mut actions_cancelled = false;
-        abort_services(Some(CompletedService::Http), &workers, || {
-            actions_cancelled = true
-        });
-        assert!(actions_cancelled);
-        release.send(()).unwrap();
-        for (service, task) in tasks {
-            if service == CompletedService::Http {
-                assert!(task.await.unwrap().is_ok());
-            } else {
-                assert!(task.await.unwrap_err().is_cancelled());
-            }
-        }
     }
 }

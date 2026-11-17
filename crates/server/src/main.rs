@@ -2,6 +2,8 @@
 
 use std::io::Read;
 
+mod runtime;
+
 use gitadel_config as config;
 use gitadel_db as database;
 use gitadel_storage::lfs as storage;
@@ -80,7 +82,7 @@ async fn run(cli: Cli) -> Result<()> {
             .context("could not read the administrator password from standard input")?;
         let password = password.trim_end_matches(['\r', '\n']).to_owned();
         let database = database::connect_and_migrate(&settings.database).await?;
-        let account = gitadel_api::bootstrap_admin(&database, username, password)
+        let account = gitadel_identity::bootstrap_admin(&database, username, password)
             .await
             .context("could not create the first administrator")?;
         database.close().await?;
@@ -92,7 +94,7 @@ async fn run(cli: Cli) -> Result<()> {
         let database = database::connect_and_migrate(&settings.database).await?;
         let read_database = database::connect_reader(&settings.database, &database).await?;
         let exit =
-            gitadel_api::serve(settings.clone(), database.clone(), read_database.clone()).await?;
+            runtime::serve(settings.clone(), database.clone(), read_database.clone()).await?;
         read_database
             .close()
             .await
@@ -102,9 +104,9 @@ async fn run(cli: Cli) -> Result<()> {
             .await
             .context("could not close database for maintenance")?;
         match exit {
-            gitadel_api::ServerExit::Shutdown => return Ok(()),
-            gitadel_api::ServerExit::Maintenance(action) => {
-                if let Err(error) = gitadel_api::perform_maintenance(&settings, *action).await {
+            runtime::ServerExit::Shutdown => return Ok(()),
+            runtime::ServerExit::Maintenance(action) => {
+                if let Err(error) = runtime::perform_maintenance(&settings, *action).await {
                     tracing::error!(%error, "maintenance operation failed");
                 }
             }

@@ -1152,19 +1152,6 @@ pub(crate) async fn require_admin(
 #[cfg(test)]
 use gitadel_instance::service::prune_audit_events;
 
-/// Hourly audit retention sweep. Returns at once when retention is off, so
-/// an instance that keeps everything never runs the query.
-pub(crate) async fn serve_audit_retention(state: IdentityState) {
-    gitadel_instance::service::serve_audit_retention(
-        state.database().clone(),
-        state
-            .runtime_settings()
-            .map(|s| s.audit.retention_days)
-            .unwrap_or(0),
-    )
-    .await
-}
-
 use gitadel_backups::service as backups;
 impl From<backups::BackupProviderCatalogItem> for BackupProviderCatalogItem {
     fn from(value: backups::BackupProviderCatalogItem) -> Self {

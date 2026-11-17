@@ -1,7 +1,7 @@
 mod auth;
 mod error;
 mod http;
-pub(crate) use gitadel_storage::registry::{storage, store, usage};
+pub(crate) use gitadel_storage::registry::{storage, store};
 
 #[cfg(test)]
 pub(crate) mod test_support;
