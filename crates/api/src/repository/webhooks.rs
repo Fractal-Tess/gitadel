@@ -1027,6 +1027,15 @@ pub(super) fn webhook_client() -> Result<reqwest::Client, reqwest::Error> {
         .build()
 }
 
+fn outbox(state: &RepositoryState) -> &gitadel_repositories::webhook_outbox::WebhookOutbox {
+    &state.webhook_outbox
+}
+#[cfg(test)]
+use gitadel_repositories::webhook_outbox::{
+    WEBHOOK_MAX_ATTEMPTS, is_retryable, next_due_delivery, record_attempt,
+    recover_stale_deliveries, retry_delay,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1394,12 +1403,3 @@ mod tests {
         );
     }
 }
-
-fn outbox(state: &RepositoryState) -> &gitadel_repositories::webhook_outbox::WebhookOutbox {
-    &state.webhook_outbox
-}
-#[cfg(test)]
-use gitadel_repositories::webhook_outbox::{
-    WEBHOOK_MAX_ATTEMPTS, is_retryable, next_due_delivery, record_attempt,
-    recover_stale_deliveries, retry_delay,
-};

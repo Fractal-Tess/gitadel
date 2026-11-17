@@ -224,6 +224,29 @@ async fn dispatch(
     .await?;
     Ok((StatusCode::CREATED, Json(run.into())))
 }
+impl From<gitadel_actions::service_dispatch::WorkflowResponse> for WorkflowResponse {
+    fn from(value: gitadel_actions::service_dispatch::WorkflowResponse) -> Self {
+        Self {
+            path: value.path,
+            name: value.name,
+            dispatchable: value.dispatchable,
+            inputs: value.inputs.into_iter().map(Into::into).collect(),
+            error: value.error,
+        }
+    }
+}
+
+impl From<gitadel_actions::service_dispatch::WorkflowsResponse> for WorkflowsResponse {
+    fn from(value: gitadel_actions::service_dispatch::WorkflowsResponse) -> Self {
+        Self {
+            reference: value.reference,
+            commit: value.commit,
+            can_dispatch: value.can_dispatch,
+            workflows: value.workflows.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,29 +317,6 @@ mod tests {
             "", "main~1", "main^", "a..b", "HEAD@{1}", "-x", "a b", "x:y",
         ] {
             assert!(!valid_reference(invalid), "{invalid}");
-        }
-    }
-}
-
-impl From<gitadel_actions::service_dispatch::WorkflowResponse> for WorkflowResponse {
-    fn from(value: gitadel_actions::service_dispatch::WorkflowResponse) -> Self {
-        Self {
-            path: value.path,
-            name: value.name,
-            dispatchable: value.dispatchable,
-            inputs: value.inputs.into_iter().map(Into::into).collect(),
-            error: value.error,
-        }
-    }
-}
-
-impl From<gitadel_actions::service_dispatch::WorkflowsResponse> for WorkflowsResponse {
-    fn from(value: gitadel_actions::service_dispatch::WorkflowsResponse) -> Self {
-        Self {
-            reference: value.reference,
-            commit: value.commit,
-            can_dispatch: value.can_dispatch,
-            workflows: value.workflows.into_iter().map(Into::into).collect(),
         }
     }
 }

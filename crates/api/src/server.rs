@@ -261,10 +261,6 @@ impl Predicate for Compressible {
     }
 }
 
-/// How long shutdown waits for open HTTP connections to drain, and then for
-/// background tasks to finish, before giving up on them. Without a bound a
-/// single stalled connection holds the process until the supervisor kills it.
-
 /// The origin of the configured public URL, e.g. `https://git.example.com`.
 #[derive(Clone)]
 struct PublicOrigin(std::sync::Arc<str>);

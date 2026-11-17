@@ -14,6 +14,7 @@ use tokio::{sync::mpsc, time::Duration};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::info;
 
+/// Bound the wait for open HTTP connections and ordinary background tasks.
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(30);
 
 pub async fn perform_maintenance(settings: &Settings, action: MaintenanceAction) -> Result<()> {

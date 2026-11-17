@@ -976,217 +976,6 @@ fn ascii_download_name(value: &str) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use axum::{
-        extract::{Path as AxumPath, Query, State},
-        http::HeaderMap,
-        response::IntoResponse as _,
-    };
-    use axum_extra::extract::cookie::CookieJar;
-    use chrono::{Duration, Utc};
-    use sea_orm::{ActiveModelTrait, Set};
-    use serde_json::Value;
-    use uuid::Uuid;
-
-    use super::{ListIssuesQuery, list_issues};
-    use crate::{
-        entity::{issue_comment, issue_label, issue_label_assignment, repository_issue},
-        repository::resources::test_support::{TestInstance, instance},
-    };
-
-    async fn insert_issue(
-        instance: &TestInstance,
-        repository_id: Uuid,
-        number: i64,
-        title: &str,
-        state: &str,
-    ) -> repository_issue::Model {
-        // Higher numbers are more recently updated, so lists lead with them.
-        let now = Utc::now() + Duration::seconds(number);
-        repository_issue::ActiveModel {
-            id: Set(Uuid::new_v4()),
-            repository_id: Set(repository_id),
-            number: Set(number),
-            author_user_id: Set(instance.owner.id),
-            title: Set(title.to_owned()),
-            body: Set(format!("Body of **{title}**")),
-            state: Set(state.to_owned()),
-            assignee_user_id: Set(None),
-            created_at: Set(now),
-            updated_at: Set(now),
-            closed_at: Set(None),
-            external_source: Set(None),
-            external_id: Set(None),
-            external_url: Set(None),
-            external_author: Set(None),
-            external_author_url: Set(None),
-            external_updated_at: Set(None),
-        }
-        .insert(&instance.database)
-        .await
-        .unwrap()
-    }
-
-    /// The `X-Total-Count` header and the JSON array a list request returns.
-    async fn list(
-        instance: &TestInstance,
-        state: Option<&str>,
-        q: Option<&str>,
-        page: Option<u64>,
-        per_page: Option<u64>,
-    ) -> (String, Vec<Value>) {
-        let response = list_issues(
-            State(instance.state.clone()),
-            AxumPath(("alice".to_owned(), "project".to_owned())),
-            Query(ListIssuesQuery {
-                state: state.map(str::to_owned),
-                q: q.map(str::to_owned),
-                page,
-                per_page,
-            }),
-            HeaderMap::new(),
-            CookieJar::new(),
-        )
-        .await
-        .unwrap()
-        .into_response();
-        let total = response.headers()["x-total-count"]
-            .to_str()
-            .unwrap()
-            .to_owned();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        (total, serde_json::from_slice(&body).unwrap())
-    }
-
-    fn numbers(issues: &[Value]) -> Vec<i64> {
-        issues
-            .iter()
-            .map(|issue| issue["number"].as_i64().unwrap())
-            .collect()
-    }
-
-    #[tokio::test]
-    async fn issue_list_pages_and_reports_the_total() {
-        let instance = instance().await;
-        let repository = instance.repository("project").await;
-        for number in 1..=5 {
-            let state = if number == 2 { "closed" } else { "open" };
-            let title = if number % 2 == 1 { "odd crash" } else { "even" };
-            insert_issue(&instance, repository.id, number, title, state).await;
-        }
-
-        // The body stays a bare array, and defaults return everything here.
-        let (total, issues) = list(&instance, None, None, None, None).await;
-        assert_eq!(total, "5");
-        assert_eq!(numbers(&issues), [5, 4, 3, 2, 1]);
-
-        let (total, issues) = list(&instance, None, None, Some(1), Some(2)).await;
-        assert_eq!(total, "5");
-        assert_eq!(numbers(&issues), [5, 4]);
-        let (_, issues) = list(&instance, None, None, Some(3), Some(2)).await;
-        assert_eq!(numbers(&issues), [1]);
-        let (total, issues) = list(&instance, None, None, Some(4), Some(2)).await;
-        assert_eq!(total, "5");
-        assert!(issues.is_empty());
-
-        // Filters narrow the total as well as the page.
-        let (total, issues) = list(&instance, Some("open"), None, Some(2), Some(3)).await;
-        assert_eq!(total, "4");
-        assert_eq!(numbers(&issues), [1]);
-        let (total, issues) = list(&instance, None, Some("crash"), Some(1), Some(2)).await;
-        assert_eq!(total, "3");
-        assert_eq!(numbers(&issues), [5, 3]);
-        let (total, issues) = list(&instance, Some("closed"), Some("crash"), None, None).await;
-        assert_eq!(total, "0");
-        assert!(issues.is_empty());
-    }
-
-    #[tokio::test]
-    async fn issue_list_batches_users_labels_and_comment_counts() {
-        let instance = instance().await;
-        let repository = instance.repository("project").await;
-        let plain = insert_issue(&instance, repository.id, 1, "plain", "open").await;
-        let busy = insert_issue(&instance, repository.id, 2, "busy", "open").await;
-        let mut assigned: repository_issue::ActiveModel = busy.clone().into();
-        assigned.assignee_user_id = Set(Some(instance.owner.id));
-        assigned.update(&instance.database).await.unwrap();
-        for name in ["zeta", "alpha"] {
-            let label = issue_label::ActiveModel {
-                id: Set(Uuid::new_v4()),
-                repository_id: Set(repository.id),
-                name: Set(name.to_owned()),
-                color: Set("ff0000".to_owned()),
-                description: Set(String::new()),
-                external_source: Set(None),
-                external_instance_url: Set(None),
-                external_id: Set(None),
-                external_url: Set(None),
-                external_updated_at: Set(None),
-                created_at: Set(Utc::now()),
-            }
-            .insert(&instance.database)
-            .await
-            .unwrap();
-            issue_label_assignment::ActiveModel {
-                issue_id: Set(busy.id),
-                label_id: Set(label.id),
-            }
-            .insert(&instance.database)
-            .await
-            .unwrap();
-        }
-        for (issue, comments) in [(&busy, 3), (&plain, 0)] {
-            for _ in 0..comments {
-                issue_comment::ActiveModel {
-                    id: Set(Uuid::new_v4()),
-                    issue_id: Set(issue.id),
-                    author_user_id: Set(instance.owner.id),
-                    body: Set("comment".to_owned()),
-                    created_at: Set(Utc::now()),
-                    updated_at: Set(Utc::now()),
-                    external_source: Set(None),
-                    external_id: Set(None),
-                    external_url: Set(None),
-                    external_author: Set(None),
-                    external_author_url: Set(None),
-                    external_updated_at: Set(None),
-                }
-                .insert(&instance.database)
-                .await
-                .unwrap();
-            }
-        }
-
-        let (_, issues) = list(&instance, None, None, None, None).await;
-        let [busy, plain] = issues.as_slice() else {
-            panic!("expected two issues, got {issues:?}");
-        };
-        assert_eq!(busy["number"], 2);
-        assert_eq!(busy["author"]["username"], "alice");
-        assert_eq!(busy["assignee"]["username"], "alice");
-        assert_eq!(busy["comment_count"], 3);
-        let labels = busy["labels"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|label| label["name"].as_str().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(labels, ["alpha", "zeta"]);
-        assert_eq!(
-            busy["rendered_body"],
-            "<p>Body of <strong>busy</strong></p>\n"
-        );
-
-        assert_eq!(plain["number"], 1);
-        assert_eq!(plain["assignee"], Value::Null);
-        assert_eq!(plain["comment_count"], 0);
-        assert_eq!(plain["labels"], Value::Array(Vec::new()));
-    }
-}
-
 fn service(state: &RepositoryState) -> gitadel_repositories::issues::IssueService<'_> {
     gitadel_repositories::issues::IssueService::new(
         state.identity().database(),
@@ -1463,5 +1252,216 @@ impl From<gitadel_repositories::issues::IssueError> for ApiError {
                 ApiError::too_many_requests(message)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{
+        extract::{Path as AxumPath, Query, State},
+        http::HeaderMap,
+        response::IntoResponse as _,
+    };
+    use axum_extra::extract::cookie::CookieJar;
+    use chrono::{Duration, Utc};
+    use sea_orm::{ActiveModelTrait, Set};
+    use serde_json::Value;
+    use uuid::Uuid;
+
+    use super::{ListIssuesQuery, list_issues};
+    use crate::{
+        entity::{issue_comment, issue_label, issue_label_assignment, repository_issue},
+        repository::resources::test_support::{TestInstance, instance},
+    };
+
+    async fn insert_issue(
+        instance: &TestInstance,
+        repository_id: Uuid,
+        number: i64,
+        title: &str,
+        state: &str,
+    ) -> repository_issue::Model {
+        // Higher numbers are more recently updated, so lists lead with them.
+        let now = Utc::now() + Duration::seconds(number);
+        repository_issue::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            repository_id: Set(repository_id),
+            number: Set(number),
+            author_user_id: Set(instance.owner.id),
+            title: Set(title.to_owned()),
+            body: Set(format!("Body of **{title}**")),
+            state: Set(state.to_owned()),
+            assignee_user_id: Set(None),
+            created_at: Set(now),
+            updated_at: Set(now),
+            closed_at: Set(None),
+            external_source: Set(None),
+            external_id: Set(None),
+            external_url: Set(None),
+            external_author: Set(None),
+            external_author_url: Set(None),
+            external_updated_at: Set(None),
+        }
+        .insert(&instance.database)
+        .await
+        .unwrap()
+    }
+
+    /// The `X-Total-Count` header and the JSON array a list request returns.
+    async fn list(
+        instance: &TestInstance,
+        state: Option<&str>,
+        q: Option<&str>,
+        page: Option<u64>,
+        per_page: Option<u64>,
+    ) -> (String, Vec<Value>) {
+        let response = list_issues(
+            State(instance.state.clone()),
+            AxumPath(("alice".to_owned(), "project".to_owned())),
+            Query(ListIssuesQuery {
+                state: state.map(str::to_owned),
+                q: q.map(str::to_owned),
+                page,
+                per_page,
+            }),
+            HeaderMap::new(),
+            CookieJar::new(),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        let total = response.headers()["x-total-count"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (total, serde_json::from_slice(&body).unwrap())
+    }
+
+    fn numbers(issues: &[Value]) -> Vec<i64> {
+        issues
+            .iter()
+            .map(|issue| issue["number"].as_i64().unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn issue_list_pages_and_reports_the_total() {
+        let instance = instance().await;
+        let repository = instance.repository("project").await;
+        for number in 1..=5 {
+            let state = if number == 2 { "closed" } else { "open" };
+            let title = if number % 2 == 1 { "odd crash" } else { "even" };
+            insert_issue(&instance, repository.id, number, title, state).await;
+        }
+
+        // The body stays a bare array, and defaults return everything here.
+        let (total, issues) = list(&instance, None, None, None, None).await;
+        assert_eq!(total, "5");
+        assert_eq!(numbers(&issues), [5, 4, 3, 2, 1]);
+
+        let (total, issues) = list(&instance, None, None, Some(1), Some(2)).await;
+        assert_eq!(total, "5");
+        assert_eq!(numbers(&issues), [5, 4]);
+        let (_, issues) = list(&instance, None, None, Some(3), Some(2)).await;
+        assert_eq!(numbers(&issues), [1]);
+        let (total, issues) = list(&instance, None, None, Some(4), Some(2)).await;
+        assert_eq!(total, "5");
+        assert!(issues.is_empty());
+
+        // Filters narrow the total as well as the page.
+        let (total, issues) = list(&instance, Some("open"), None, Some(2), Some(3)).await;
+        assert_eq!(total, "4");
+        assert_eq!(numbers(&issues), [1]);
+        let (total, issues) = list(&instance, None, Some("crash"), Some(1), Some(2)).await;
+        assert_eq!(total, "3");
+        assert_eq!(numbers(&issues), [5, 3]);
+        let (total, issues) = list(&instance, Some("closed"), Some("crash"), None, None).await;
+        assert_eq!(total, "0");
+        assert!(issues.is_empty());
+    }
+
+    #[tokio::test]
+    async fn issue_list_batches_users_labels_and_comment_counts() {
+        let instance = instance().await;
+        let repository = instance.repository("project").await;
+        let plain = insert_issue(&instance, repository.id, 1, "plain", "open").await;
+        let busy = insert_issue(&instance, repository.id, 2, "busy", "open").await;
+        let mut assigned: repository_issue::ActiveModel = busy.clone().into();
+        assigned.assignee_user_id = Set(Some(instance.owner.id));
+        assigned.update(&instance.database).await.unwrap();
+        for name in ["zeta", "alpha"] {
+            let label = issue_label::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                repository_id: Set(repository.id),
+                name: Set(name.to_owned()),
+                color: Set("ff0000".to_owned()),
+                description: Set(String::new()),
+                external_source: Set(None),
+                external_instance_url: Set(None),
+                external_id: Set(None),
+                external_url: Set(None),
+                external_updated_at: Set(None),
+                created_at: Set(Utc::now()),
+            }
+            .insert(&instance.database)
+            .await
+            .unwrap();
+            issue_label_assignment::ActiveModel {
+                issue_id: Set(busy.id),
+                label_id: Set(label.id),
+            }
+            .insert(&instance.database)
+            .await
+            .unwrap();
+        }
+        for (issue, comments) in [(&busy, 3), (&plain, 0)] {
+            for _ in 0..comments {
+                issue_comment::ActiveModel {
+                    id: Set(Uuid::new_v4()),
+                    issue_id: Set(issue.id),
+                    author_user_id: Set(instance.owner.id),
+                    body: Set("comment".to_owned()),
+                    created_at: Set(Utc::now()),
+                    updated_at: Set(Utc::now()),
+                    external_source: Set(None),
+                    external_id: Set(None),
+                    external_url: Set(None),
+                    external_author: Set(None),
+                    external_author_url: Set(None),
+                    external_updated_at: Set(None),
+                }
+                .insert(&instance.database)
+                .await
+                .unwrap();
+            }
+        }
+
+        let (_, issues) = list(&instance, None, None, None, None).await;
+        let [busy, plain] = issues.as_slice() else {
+            panic!("expected two issues, got {issues:?}");
+        };
+        assert_eq!(busy["number"], 2);
+        assert_eq!(busy["author"]["username"], "alice");
+        assert_eq!(busy["assignee"]["username"], "alice");
+        assert_eq!(busy["comment_count"], 3);
+        let labels = busy["labels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|label| label["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["alpha", "zeta"]);
+        assert_eq!(
+            busy["rendered_body"],
+            "<p>Body of <strong>busy</strong></p>\n"
+        );
+
+        assert_eq!(plain["number"], 1);
+        assert_eq!(plain["assignee"], Value::Null);
+        assert_eq!(plain["comment_count"], 0);
+        assert_eq!(plain["labels"], Value::Array(Vec::new()));
     }
 }
