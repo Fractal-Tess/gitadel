@@ -2465,6 +2465,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "gitadel-actions"
+version = "0.24.0"
+dependencies = [
+ "base64 0.23.1",
+ "chrono",
+ "cron",
+ "gitadel-config",
+ "gitadel-db",
+ "globset",
+ "hex",
+ "quick-xml 0.42.0",
+ "rand 0.10.3",
+ "sea-orm",
+ "sea-orm-migration",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "subtle",
+ "tokio",
+ "tracing",
+ "uuid",
+ "yaml_serde",
+]
+
+[[package]]
 name = "gitadel-api"
 version = "0.24.0"
 dependencies = [
@@ -2485,6 +2510,7 @@ dependencies = [
  "cron",
  "fs2",
  "futures-util",
+ "gitadel-actions",
  "gitadel-backups",
  "gitadel-config",
  "gitadel-core",
@@ -2567,17 +2593,13 @@ name = "gitadel-backups"
 version = "0.24.0"
 dependencies = [
  "anyhow",
- "async-trait",
- "bytes",
  "chrono",
  "fs2",
- "futures-util",
  "gitadel-config",
  "gitadel-core",
  "gitadel-db",
  "gitadel-storage",
  "hex",
- "libc",
  "rust-s3",
  "sea-orm",
  "semver",
@@ -2586,7 +2608,6 @@ dependencies = [
  "sha2 0.11.0",
  "tar",
  "tokio",
- "tokio-util",
  "toml 1.1.6+spec-1.1.0",
  "tracing",
  "url",

@@ -14,6 +14,6 @@ clap.workspace = true
 config.workspace = true
 lettre.workspace = true
 serde.workspace = true
-url.workspace = true
+url = { workspace = true, features = ["serde"] }
 uuid.workspace = true
 utoipa.workspace = true

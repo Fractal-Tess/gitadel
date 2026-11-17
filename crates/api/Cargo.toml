@@ -23,6 +23,7 @@ gitadel-mail.workspace = true
 gitadel-storage.workspace = true
 gitadel-backups.workspace = true
 gitadel-integrations.workspace = true
+gitadel-actions.workspace = true
 aes-gcm.workspace = true
 ammonia.workspace = true
 anyhow.workspace = true
