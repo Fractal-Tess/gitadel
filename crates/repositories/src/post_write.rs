@@ -213,117 +213,6 @@ fn subscribes(hook: &repository_webhook::Model, event: &str) -> bool {
 fn user_payload(actor: &user::Model) -> Value {
     json!({"id":actor.id,"login":actor.username,"type":"User"})
 }
-#[cfg(test)]
-mod direct_boundaries {
-    use super::*;
-    use gitadel_db::{entity::repository_webhook_delivery, test_support};
-    use gitadel_secrets::SecretCipher;
-    use sea_orm::{ActiveModelTrait, Set};
-    use std::{process::Command, sync::Mutex};
-    use tokio_util::task::TaskTracker;
-
-    #[derive(Default)]
-    struct Effects(Mutex<Vec<String>>);
-    #[async_trait]
-    impl PostWriteEffects for Effects {
-        async fn deployments_enabled(&self, _: Uuid) -> Result<bool, IdentityError> {
-            Ok(true)
-        }
-        async fn actions(
-            &self,
-            _: &repository::Model,
-            _: Uuid,
-            change: &PreparedRef,
-        ) -> Result<(), String> {
-            assert!(change.deleted());
-            self.0.lock().unwrap().push("actions".to_owned());
-            Err("planner unavailable".to_owned())
-        }
-        fn deploy(&self, _: &repository::Model, change: &PreparedRef) {
-            assert_eq!(change.payload["deleted"], true);
-            self.0.lock().unwrap().push("deploy".to_owned());
-        }
-    }
-
-    #[tokio::test]
-    async fn committed_deletion_delivers_without_a_transport_and_survives_actions_failure() {
-        let database = test_support::database().await;
-        let owner = test_support::owner(&database, "owner").await;
-        let repository = test_support::repository(&database, &owner, "project").await;
-        let root = std::env::temp_dir().join(format!("gitadel-post-write-{}", Uuid::new_v4()));
-        let content = RepositoryContent::new(root.clone());
-        let path = content.repository_path(&repository);
-        assert!(
-            Command::new("git")
-                .args(["init", "--bare", "--quiet"])
-                .arg(&path)
-                .status()
-                .unwrap()
-                .success()
-        );
-        let now = Utc::now();
-        let hook = repository_webhook::ActiveModel {
-            id: Set(Uuid::new_v4()),
-            repository_id: Set(repository.id),
-            url: Set("http://127.0.0.1:9/hook".to_owned()),
-            secret: Set(None),
-            active: Set(true),
-            created_at: Set(now),
-            updated_at: Set(now),
-            last_delivery_at: Set(None),
-            last_response_status: Set(None),
-            last_response_message: Set(None),
-            events: Set("push,delete".to_owned()),
-        }
-        .insert(&database)
-        .await
-        .unwrap();
-        let tracker = TaskTracker::new();
-        let outbox = WebhookOutbox::new(
-            database.clone(),
-            SecretCipher::from_material(b"post-write-test").unwrap(),
-            tracker.clone(),
-        );
-        let service = PostWriteService::new(database.clone(), content, outbox);
-        let effects = Effects::default();
-        let prepared = service
-            .prepare(
-                &repository,
-                owner.id,
-                BTreeMap::from([("refs/heads/main".to_owned(), "1".repeat(40))]),
-                &PushPresentation {
-                    public_url: Url::parse("https://gitadel.test").unwrap(),
-                    http_clone_url: "https://gitadel.test/owner/project.git".to_owned(),
-                    ssh_clone_url: "git@gitadel.test:owner/project.git".to_owned(),
-                },
-                &effects,
-            )
-            .await
-            .unwrap();
-        // Committed effects finish without a response, stream or HTTP status.
-        service.deliver(prepared, &effects).await.unwrap();
-        tracker.close();
-        tracker.wait().await;
-        assert_eq!(*effects.0.lock().unwrap(), ["actions", "deploy"]);
-        let deliveries = repository_webhook_delivery::Entity::find()
-            .filter(repository_webhook_delivery::Column::WebhookId.eq(hook.id))
-            .all(&database)
-            .await
-            .unwrap();
-        assert_eq!(deliveries.len(), 2);
-        assert!(deliveries.iter().any(|delivery| delivery.event == "delete"));
-        let push = deliveries
-            .iter()
-            .find(|delivery| delivery.event == "push")
-            .unwrap();
-        let payload: Value = serde_json::from_str(&push.payload).unwrap();
-        assert_eq!(payload["before"], "1".repeat(40));
-        assert_eq!(payload["after"], "0".repeat(40));
-        assert_eq!(payload["repository"]["full_name"], "owner/project");
-        std::fs::remove_dir_all(root).unwrap();
-    }
-}
-
 pub async fn snapshot_refs(path: &Path) -> Result<RefSnapshot, IdentityError> {
     let path = path.to_owned();
     read_git(path, |repository| {
@@ -560,4 +449,115 @@ async fn commit_entries(path: &Path, before: &str, after: &str, zero: &str) -> V
         tracing::warn!(%error, "listing pushed commits failed");
         Vec::new()
     })
+}
+
+#[cfg(test)]
+mod direct_boundaries {
+    use super::*;
+    use gitadel_db::{entity::repository_webhook_delivery, test_support};
+    use gitadel_secrets::SecretCipher;
+    use sea_orm::{ActiveModelTrait, Set};
+    use std::{process::Command, sync::Mutex};
+    use tokio_util::task::TaskTracker;
+
+    #[derive(Default)]
+    struct Effects(Mutex<Vec<String>>);
+    #[async_trait]
+    impl PostWriteEffects for Effects {
+        async fn deployments_enabled(&self, _: Uuid) -> Result<bool, IdentityError> {
+            Ok(true)
+        }
+        async fn actions(
+            &self,
+            _: &repository::Model,
+            _: Uuid,
+            change: &PreparedRef,
+        ) -> Result<(), String> {
+            assert!(change.deleted());
+            self.0.lock().unwrap().push("actions".to_owned());
+            Err("planner unavailable".to_owned())
+        }
+        fn deploy(&self, _: &repository::Model, change: &PreparedRef) {
+            assert_eq!(change.payload["deleted"], true);
+            self.0.lock().unwrap().push("deploy".to_owned());
+        }
+    }
+
+    #[tokio::test]
+    async fn committed_deletion_delivers_without_a_transport_and_survives_actions_failure() {
+        let database = test_support::database().await;
+        let owner = test_support::owner(&database, "owner").await;
+        let repository = test_support::repository(&database, &owner, "project").await;
+        let root = std::env::temp_dir().join(format!("gitadel-post-write-{}", Uuid::new_v4()));
+        let content = RepositoryContent::new(root.clone());
+        let path = content.repository_path(&repository);
+        assert!(
+            Command::new("git")
+                .args(["init", "--bare", "--quiet"])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let now = Utc::now();
+        let hook = repository_webhook::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            repository_id: Set(repository.id),
+            url: Set("http://127.0.0.1:9/hook".to_owned()),
+            secret: Set(None),
+            active: Set(true),
+            created_at: Set(now),
+            updated_at: Set(now),
+            last_delivery_at: Set(None),
+            last_response_status: Set(None),
+            last_response_message: Set(None),
+            events: Set("push,delete".to_owned()),
+        }
+        .insert(&database)
+        .await
+        .unwrap();
+        let tracker = TaskTracker::new();
+        let outbox = WebhookOutbox::new(
+            database.clone(),
+            SecretCipher::from_material(b"post-write-test").unwrap(),
+            tracker.clone(),
+        );
+        let service = PostWriteService::new(database.clone(), content, outbox);
+        let effects = Effects::default();
+        let prepared = service
+            .prepare(
+                &repository,
+                owner.id,
+                BTreeMap::from([("refs/heads/main".to_owned(), "1".repeat(40))]),
+                &PushPresentation {
+                    public_url: Url::parse("https://gitadel.test").unwrap(),
+                    http_clone_url: "https://gitadel.test/owner/project.git".to_owned(),
+                    ssh_clone_url: "git@gitadel.test:owner/project.git".to_owned(),
+                },
+                &effects,
+            )
+            .await
+            .unwrap();
+        // Committed effects finish without a response, stream or HTTP status.
+        service.deliver(prepared, &effects).await.unwrap();
+        tracker.close();
+        tracker.wait().await;
+        assert_eq!(*effects.0.lock().unwrap(), ["actions", "deploy"]);
+        let deliveries = repository_webhook_delivery::Entity::find()
+            .filter(repository_webhook_delivery::Column::WebhookId.eq(hook.id))
+            .all(&database)
+            .await
+            .unwrap();
+        assert_eq!(deliveries.len(), 2);
+        assert!(deliveries.iter().any(|delivery| delivery.event == "delete"));
+        let push = deliveries
+            .iter()
+            .find(|delivery| delivery.event == "push")
+            .unwrap();
+        let payload: Value = serde_json::from_str(&push.payload).unwrap();
+        assert_eq!(payload["before"], "1".repeat(40));
+        assert_eq!(payload["after"], "0".repeat(40));
+        assert_eq!(payload["repository"]["full_name"], "owner/project");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

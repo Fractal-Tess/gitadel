@@ -1502,7 +1502,7 @@ mod quota_tests {
         )
         .expect_err("reject attachment count above quota");
 
-        assert_eq!(matches!(error, IssueError::Quota(_)), true);
+        assert!(matches!(error, IssueError::Quota(_)));
     }
 }
 
