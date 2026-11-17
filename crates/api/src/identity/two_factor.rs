@@ -316,7 +316,14 @@ async fn reauthenticate<C: ConnectionTrait>(
         .enforce_account_auth_rate_limit(&format!("two-factor:{}", account.id), 8)
         .await?;
     if let Some(code) = request.code.filter(|code| !code.trim().is_empty()) {
-        if verify_confirmed_totp(connection, state.secret_cipher(), account.id, &code).await? {
+        if gitadel_identity::two_factor::verify_confirmed_totp(
+            connection,
+            state.secret_cipher(),
+            account.id,
+            &code,
+        )
+        .await?
+        {
             return Ok(());
         }
         return Err(invalid_code());

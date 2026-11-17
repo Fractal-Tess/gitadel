@@ -2515,8 +2515,10 @@ dependencies = [
  "gitadel-config",
  "gitadel-core",
  "gitadel-db",
+ "gitadel-identity",
  "gitadel-integrations",
  "gitadel-mail",
+ "gitadel-repositories",
  "gitadel-secrets",
  "gitadel-storage",
  "globset",
@@ -2672,6 +2674,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "gitadel-identity"
+version = "0.24.0"
+dependencies = [
+ "argon2",
+ "base64 0.23.1",
+ "chrono",
+ "gitadel-db",
+ "gitadel-secrets",
+ "hmac 0.13.0",
+ "rand 0.10.3",
+ "sea-orm",
+ "sha1",
+ "sha2 0.11.0",
+ "subtle",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "gitadel-integrations"
 version = "0.24.0"
 dependencies = [
@@ -2700,6 +2721,41 @@ dependencies = [
  "tokio",
  "tracing",
  "utoipa",
+]
+
+[[package]]
+name = "gitadel-repositories"
+version = "0.24.0"
+dependencies = [
+ "ammonia",
+ "anyhow",
+ "bytes",
+ "chrono",
+ "comrak",
+ "futures-util",
+ "gitadel-core",
+ "gitadel-storage",
+ "hmac 0.13.0",
+ "reqwest 0.13.5",
+ "russh",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sley",
+ "sley-archive",
+ "sley-config",
+ "sley-core",
+ "sley-fsck",
+ "sley-odb",
+ "sley-protocol",
+ "sley-refs",
+ "sley-remote",
+ "sley-transport",
+ "tokei",
+ "tokio",
+ "tokio-util",
+ "url",
+ "uuid",
 ]
 
 [[package]]

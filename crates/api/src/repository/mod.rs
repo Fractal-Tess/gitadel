@@ -55,9 +55,6 @@ pub(crate) use integrity::serve_integrity_scheduler;
 pub(crate) use mirror_scheduler::serve_mirror_scheduler;
 pub(crate) use resources::purge_soft_deleted_repositories;
 pub(crate) use statuses::statuses_for_commits;
-pub(crate) fn outbound_http_client() -> Result<reqwest::Client, reqwest::Error> {
-    webhooks::webhook_client()
-}
 
 fn service_error(error: gitadel_repositories::Error) -> ApiError {
     match error {

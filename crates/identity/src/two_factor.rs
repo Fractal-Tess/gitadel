@@ -76,7 +76,8 @@ pub async fn verify_second_factor<C: ConnectionTrait>(
     Ok((consumed.rows_affected == 1).then_some(SecondFactor::RecoveryCode))
 }
 
-async fn verify_confirmed_totp<C: ConnectionTrait>(
+/// Consume a current TOTP from a confirmed enrollment for reauthentication.
+pub async fn verify_confirmed_totp<C: ConnectionTrait>(
     connection: &C,
     cipher: &SecretCipher,
     user_id: Uuid,

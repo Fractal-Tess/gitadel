@@ -29,6 +29,12 @@ responses in `api`. Domain crates must not depend on `api` or `server`.
 Keep issues, releases and webhooks with repository services for now rather
 than creating a separate crate for every feature.
 
+The current extraction moves the main credential, workflow, Git, storage,
+integration and backup operations into these libraries. API still contains
+diff/blame operations, repository cache orchestration, account administration,
+and passkey/OAuth and enrollment orchestration. These are remaining boundaries
+to refine; the workspace layout alone does not imply complete separation.
+
 Split oversized state objects where they cross those boundaries. Pass the
 database, storage handles and configuration a service actually needs. Use a
 narrow interface only where a real dependency cycle requires one; do not

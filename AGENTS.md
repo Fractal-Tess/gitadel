@@ -18,6 +18,8 @@ The root manifest is a virtual workspace. All Rust crates live under `crates/`:
 | `backups` | `gitadel-backups` | Backup archives, providers, restore, and schedule persistence |
 | `integrations` | `gitadel-integrations` | External provider clients and deployment operations |
 | `actions` | `gitadel-actions` | Workflow planning, runner operations, and run persistence |
+| `identity` | `gitadel-identity` | Authentication, account credentials, sessions, and permissions |
+| `repositories` | `gitadel-repositories` | Git transport, imports, content, editing, and archive services |
 | `api` | `gitadel-api` | HTTP handlers, protocol integration, and service orchestration |
 | `server` | `gitadel` | Server executable `gitadel` |
 | `cli` | `gitadel-cli` | Remote client executable `gtd` |
