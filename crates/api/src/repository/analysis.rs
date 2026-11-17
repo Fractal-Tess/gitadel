@@ -13,14 +13,14 @@ use axum::{
     http::HeaderMap,
 };
 use axum_extra::extract::cookie::CookieJar;
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{Duration, NaiveDate, Utc};
+use gitadel_repositories::analysis::{authored_on, commit_authorship};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use sley::{
     ObjectId, ReachableCommitOptions, ReferenceTarget, Repository as GitRepository, StreamControl,
 };
-use tokei::{Config as TokeiConfig, LanguageType};
 use tokio::{
     sync::{Mutex, OwnedMutexGuard},
     task::JoinSet,
@@ -34,7 +34,6 @@ use super::{
         signature_response,
     },
     resources,
-    signature::{SshCommitSignature, verify_ssh_commit_signature},
 };
 use crate::{
     entity::{repository, repository_cache_entry},
@@ -181,23 +180,6 @@ pub(super) struct AuthorActivity {
     pub(super) email: String,
     pub(super) signer: Option<String>,
     pub(super) count: usize,
-}
-
-/// The lowercased author address of a commit, and the fingerprint of the SSH
-/// key that validly signed it.
-fn commit_authorship(
-    git: &GitRepository,
-    oid: &ObjectId,
-    signature: Option<&sley::Signature>,
-) -> sley::Result<(String, Option<String>)> {
-    let email = signature
-        .map(|signature| String::from_utf8_lossy(signature.email.as_bytes()).to_ascii_lowercase())
-        .unwrap_or_default();
-    let signer = match verify_ssh_commit_signature(&git.read_object(oid)?.body) {
-        SshCommitSignature::Valid(fingerprint) => Some(fingerprint),
-        SshCommitSignature::Unsigned | SshCommitSignature::Invalid => None,
-    };
-    Ok((email, signer))
 }
 
 pub(super) async fn repository_overview_item(
@@ -622,46 +604,20 @@ fn walk_overview(
     default_reference: Option<&str>,
     since: NaiveDate,
 ) -> sley::Result<GitOverview> {
-    let mut roots = Vec::with_capacity(tips.tips.len());
-    let mut default_index = None;
-    for (name, target) in &tips.tips {
-        let commit_oid = git.peel_to_commit_oid(*target)?;
-        if default_reference == Some(name.as_str()) {
-            default_index = Some(roots.len());
-        }
-        roots.push(commit_oid);
-    }
-    let head = default_index.map(|index: usize| roots[index].to_hex());
-    let mut authors = BTreeMap::<(NaiveDate, String, Option<String>), usize>::new();
-    if !roots.is_empty() {
-        git.rev_graph().stream_reachable_commits(
-            roots,
-            ReachableCommitOptions::new(),
-            |metadata| {
-                let commit = git.read_commit(&metadata.oid)?;
-                let signature = commit.author_signature();
-                if let Some(date) = signature.as_ref().and_then(authored_on)
-                    && date >= since
-                {
-                    let (email, signer) =
-                        commit_authorship(git, &metadata.oid, signature.as_ref())?;
-                    *authors.entry((date, email, signer)).or_default() += 1;
-                }
-                Ok(StreamControl::Continue)
-            },
-        )?;
-    }
+    let overview =
+        gitadel_repositories::analysis::walk_overview(git, &tips.tips, default_reference, since)?;
     Ok(GitOverview {
         branch_count: tips.branch_count,
-        head,
+        head: overview.head,
         activity: BTreeMap::new(),
-        authors: authors
+        authors: overview
+            .authors
             .into_iter()
-            .map(|((date, email, signer), count)| AuthorActivity {
-                date,
-                email,
-                signer,
-                count,
+            .map(|author| AuthorActivity {
+                date: author.date,
+                email: author.email,
+                signer: author.signer,
+                count: author.count,
             })
             .collect(),
         since,
@@ -728,16 +684,6 @@ async fn repository_overview(
         .await?;
     prune_stale_history_caches(state, repository.id, &tips).await?;
     Ok(overview.window(start_date, end_date))
-}
-
-/// The calendar day a commit was authored on, in the author's own time zone,
-/// which is the day the activity graph counts it under.
-fn authored_on(signature: &sley::Signature) -> Option<NaiveDate> {
-    let timestamp = DateTime::<Utc>::from_timestamp(signature.time.seconds, 0)?;
-    Some(
-        (timestamp + Duration::minutes(i64::from(signature.time.timezone_offset_minutes)))
-            .date_naive(),
-    )
 }
 
 /// A commit listed under one day of a namespace's activity graph.
@@ -964,61 +910,18 @@ fn compute_stats(
     repository: &GitRepository,
     root: ObjectId,
 ) -> sley::Result<Vec<LanguageStatResponse>> {
-    let mut totals = BTreeMap::<String, LanguageStatResponse>::new();
-    let config = TokeiConfig::default();
-    collect_tree_stats(repository, root, "", &config, &mut totals)?;
-    let mut response = totals.into_values().collect::<Vec<_>>();
-    response.sort_unstable_by(|left, right| {
-        right
-            .code
-            .cmp(&left.code)
-            .then_with(|| left.language.cmp(&right.language))
-    });
-    Ok(response)
-}
-
-fn collect_tree_stats(
-    repository: &GitRepository,
-    tree_oid: ObjectId,
-    prefix: &str,
-    config: &TokeiConfig,
-    totals: &mut BTreeMap<String, LanguageStatResponse>,
-) -> sley::Result<()> {
-    for entry in repository.read_tree(&tree_oid)?.entries {
-        let name = String::from_utf8_lossy(entry.name.as_bytes());
-        let path = if prefix.is_empty() {
-            name.into_owned()
-        } else {
-            format!("{prefix}/{name}")
-        };
-        if entry.is_tree() {
-            collect_tree_stats(repository, entry.oid, &path, config, totals)?;
-            continue;
-        }
-        if entry.is_gitlink() {
-            continue;
-        }
-        let Some(language) = LanguageType::from_path(&path, config) else {
-            continue;
-        };
-        let content = repository.blobs().read(entry.oid)?;
-        let stats = language.parse_from_slice(&content, config).summarise();
-        let language_name = language.to_string();
-        let total = totals
-            .entry(language_name.clone())
-            .or_insert_with(|| LanguageStatResponse {
-                language: language_name,
-                files: 0,
-                code: 0,
-                comments: 0,
-                blanks: 0,
-            });
-        total.files += 1;
-        total.code += stats.code;
-        total.comments += stats.comments;
-        total.blanks += stats.blanks;
-    }
-    Ok(())
+    gitadel_repositories::analysis::compute_stats(repository, root).map(|stats| {
+        stats
+            .into_iter()
+            .map(|stat| LanguageStatResponse {
+                language: stat.language,
+                files: stat.files,
+                code: stat.code,
+                comments: stat.comments,
+                blanks: stat.blanks,
+            })
+            .collect()
+    })
 }
 
 const fn default_repository_activity_days() -> u16 {

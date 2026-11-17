@@ -59,6 +59,14 @@ pub(crate) fn outbound_http_client() -> Result<reqwest::Client, reqwest::Error> 
     webhooks::webhook_client()
 }
 
+fn service_error(error: gitadel_repositories::Error) -> ApiError {
+    match error {
+        gitadel_repositories::Error::InvalidInput(message) => ApiError::bad_request(message),
+        gitadel_repositories::Error::Conflict(message) => ApiError::conflict(message),
+        gitadel_repositories::Error::Internal(message) => ApiError::internal(message),
+    }
+}
+
 pub(crate) async fn recover_imports(state: &RepositoryState) -> Result<(), ApiError> {
     imports::recover_interrupted(state).await
 }

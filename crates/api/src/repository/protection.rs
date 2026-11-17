@@ -58,15 +58,7 @@ impl RuleKind {
     }
 }
 
-/// The result of checking one ref update against the protection rules.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum RefCheck {
-    Allowed,
-    Rejected(String),
-    /// The update is allowed only if the new commit descends from the old
-    /// one. Ancestry needs the incoming objects, so the caller resolves it.
-    RequiresFastForward(String),
-}
+pub(crate) use gitadel_repositories::git_service::RefCheck;
 
 #[derive(Clone, Debug)]
 struct GuardRule {
@@ -170,6 +162,12 @@ impl RefGuard {
             actor,
             actor_is_admin,
         }
+    }
+}
+
+impl gitadel_repositories::git_service::RefPolicy for RefGuard {
+    fn check(&self, name: &str, old_is_null: bool, new_is_null: bool) -> RefCheck {
+        RefGuard::check(self, name, old_is_null, new_is_null)
     }
 }
 

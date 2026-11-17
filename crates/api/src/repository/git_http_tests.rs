@@ -27,6 +27,97 @@ const OWNER_TOKEN: &str = "alice-token";
 const READER_TOKEN: &str = "bob-token";
 const DATE: &str = "2024-01-01T00:00:00Z";
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_import_and_mirror_fetch_through_http_and_copy_verified_lfs() {
+    use super::native_remote::{self, NativeAuthentication};
+    use sha2::{Digest as _, Sha256};
+    use tokio::io::AsyncReadExt as _;
+
+    let (mut server, source) = server().await;
+    let content = b"native import LFS content";
+    let oid = hex::encode(Sha256::digest(content));
+    let pointer = format!(
+        "version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {}\n",
+        content.len()
+    );
+    source.commit_file("large.bin", pointer.as_bytes(), DATE);
+    let source_key = server
+        .instance
+        .state
+        .lfs_object_key(&server.project, &oid)
+        .unwrap();
+    server
+        .instance
+        .state
+        .lfs_store()
+        .put_verified(
+            &source_key,
+            oid.parse().unwrap(),
+            Box::pin(std::io::Cursor::new(content.to_vec())),
+        )
+        .await
+        .unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    server.instance.state.public_url =
+        std::sync::Arc::new(url::Url::parse(&format!("http://127.0.0.1:{port}")).unwrap());
+    let router = git_http_router().with_state(http::git_http_state(&server.instance));
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let listening = Listening { port, task };
+    let remote = format!("http://127.0.0.1:{port}/alice/project.git");
+    let destination = server.instance.root.join("native-copy");
+    let initialized = native_remote::initialize(
+        &server.instance.state,
+        &destination,
+        &remote,
+        NativeAuthentication::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(initialized.object_format, "sha1");
+    assert_eq!(initialized.default_branch.as_deref(), Some("main"));
+    let storage_key = Uuid::new_v4();
+    native_remote::fetch_lfs(
+        &server.instance.state,
+        storage_key,
+        &destination,
+        &remote,
+        NativeAuthentication::default(),
+    )
+    .await
+    .unwrap();
+    let key = crate::blob_store::lfs_object_key(storage_key, &oid).unwrap();
+    let mut downloaded = Vec::new();
+    server
+        .instance
+        .state
+        .lfs_store()
+        .read(&key)
+        .await
+        .unwrap()
+        .read_to_end(&mut downloaded)
+        .await
+        .unwrap();
+    assert_eq!(downloaded, content);
+
+    let next = source.commit_file("next.txt", b"mirrored", DATE);
+    native_remote::synchronize(
+        &server.instance.state,
+        &destination,
+        &remote,
+        NativeAuthentication::default(),
+    )
+    .await
+    .unwrap();
+    let copied = sley::Repository::open_exact_bare(&destination).unwrap();
+    assert_eq!(copied.rev_parse("refs/heads/main").unwrap().to_hex(), next);
+    drop(listening);
+    server.settle().await;
+}
+
 struct Server {
     instance: TestInstance,
     /// A public repository with an empty bare directory behind it.
