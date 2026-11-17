@@ -301,6 +301,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn externally_owned_worker_delivers_queued_mail_and_stops_when_senders_close() {
+        let (port, server) = fake_smtp_server().await;
+        let (mailer, worker) = Mailer::build(&SmtpSettings {
+            host: "127.0.0.1".into(),
+            port: Some(port),
+            tls: SmtpTls::None,
+            username: None,
+            password: None,
+            password_file: None,
+            from: "Gitadel <gitadel@example.com>".into(),
+        })
+        .unwrap();
+        assert!(mailer.enqueue(Email {
+            to: "alice@example.com".parse().unwrap(),
+            subject: "Owned delivery worker".into(),
+            body: "Queued before startup.".into(),
+        }));
+        drop(mailer);
+        tokio::time::timeout(Duration::from_secs(10), worker.run())
+            .await
+            .unwrap();
+        let data = tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(data.contains("Subject: Owned delivery worker"));
+        assert!(data.contains("Queued before startup."));
+    }
+
+    #[tokio::test]
     async fn messages_are_delivered_over_smtp() {
         let (port, server) = fake_smtp_server().await;
         let mailer = test_mailer(port);
