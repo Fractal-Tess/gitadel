@@ -1,9 +1,4 @@
-use std::{
-    collections::HashSet,
-    io::ErrorKind,
-    path::PathBuf,
-    sync::{LazyLock, Mutex},
-};
+use std::{io::ErrorKind, path::PathBuf};
 
 use super::{
     ActionsState,
@@ -25,48 +20,14 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
 use futures_util::TryStreamExt as _;
-use quick_xml::{Reader, events::Event};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, Set,
     sea_query::{Expr, ExprTrait as _},
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tokio::{
-    fs,
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-};
+use tokio::{fs, io::AsyncWriteExt as _};
 use uuid::Uuid;
-
-const MAX_BLOCK_ID: usize = 256;
-static FINALIZING_ARTIFACTS: LazyLock<Mutex<HashSet<i64>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
-
-struct FinalizationGuard {
-    artifact_id: i64,
-}
-
-impl FinalizationGuard {
-    fn acquire(artifact_id: i64) -> Result<Self, ApiError> {
-        let mut finalizing = FINALIZING_ARTIFACTS
-            .lock()
-            .map_err(|_| ApiError::internal("artifact finalization lock is poisoned"))?;
-        if !finalizing.insert(artifact_id) {
-            return Err(ApiError::conflict(
-                "Artifact finalization is already in progress.",
-            ));
-        }
-        Ok(Self { artifact_id })
-    }
-}
-
-impl Drop for FinalizationGuard {
-    fn drop(&mut self) {
-        if let Ok(mut finalizing) = FINALIZING_ARTIFACTS.lock() {
-            finalizing.remove(&self.artifact_id);
-        }
-    }
-}
 
 #[derive(Deserialize)]
 struct SignedQuery {
@@ -112,16 +73,20 @@ fn database(state: &ActionsState) -> &sea_orm::DatabaseConnection {
     state.repository().identity().database()
 }
 fn artifact_path(state: &ActionsState, row: &action_artifact::Model) -> PathBuf {
-    state
-        .repository()
-        .actions_artifact_root()
-        .join(&row.storage_key)
+    gitadel_actions::artifacts::artifact_path(state.repository().actions_artifact_root(), row)
 }
 fn blocks_dir(state: &ActionsState, row: &action_artifact::Model) -> PathBuf {
-    state
-        .repository()
-        .actions_artifact_root()
-        .join(format!(".blocks-{}", row.storage_key))
+    gitadel_actions::artifacts::blocks_dir(state.repository().actions_artifact_root(), row)
+}
+
+fn artifact_error(error: gitadel_actions::artifacts::ArtifactError) -> ApiError {
+    use gitadel_actions::artifacts::ArtifactError;
+    match error {
+        ArtifactError::Invalid(message) => ApiError::bad_request(message),
+        ArtifactError::Conflict(message) => ApiError::conflict(message),
+        ArtifactError::Internal(message) => ApiError::internal(message),
+        ArtifactError::Database(error) => error.into(),
+    }
 }
 
 async fn job(state: &ActionsState, headers: &HeaderMap) -> Result<AuthenticatedJob, ApiError> {
@@ -300,123 +265,19 @@ async fn finalize(
             artifact_id: row.id,
         }));
     }
-    let _finalization = FinalizationGuard::acquire(row.id)?;
-    let expected_size = u64::try_from(request.size)
-        .map_err(|_| ApiError::bad_request("Artifact size is invalid."))?;
-    let max_artifact = u64::try_from(state.settings().max_artifact_bytes)
-        .map_err(|_| ApiError::internal("invalid artifact size setting"))?;
-    if expected_size > max_artifact {
-        return Err(ApiError::bad_request(
-            "Artifacts exceed the configured size limit.",
-        ));
-    }
-    let expected_hash = request
-        .hash
-        .as_ref()
-        .and_then(|value| value.value.strip_prefix("sha256:"))
-        .map(str::to_ascii_lowercase)
-        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .ok_or_else(|| ApiError::bad_request("Artifact SHA-256 is required."))?;
-    let source = blocks_dir(&state, &row);
-    let destination = artifact_path(&state, &row);
-    fs::create_dir_all(state.repository().actions_artifact_root())
-        .await
-        .map_err(ApiError::internal)?;
-    let temporary = state.repository().actions_artifact_root().join(format!(
-        ".{}.{}.finalizing",
-        row.storage_key,
-        Uuid::new_v4()
-    ));
-    let mut output = fs::File::create(&temporary)
-        .await
-        .map_err(ApiError::internal)?;
-    let mut hasher = Sha256::new();
-    let mut total = 0u64;
-    let metadata: serde_json::Value =
-        serde_json::from_str(&row.metadata_json).unwrap_or_else(|_| serde_json::json!({}));
-    let ordered_ids: Vec<String> = metadata
-        .get("order")
-        .and_then(|value| value.as_array())
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(|value| value.as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default();
-    let block_paths = if ordered_ids.is_empty() {
-        let mut entries = fs::read_dir(&source).await.map_err(ApiError::internal)?;
-        let mut paths = Vec::new();
-        while let Some(entry) = entries.next_entry().await.map_err(ApiError::internal)? {
-            if !entry.file_name().to_string_lossy().starts_with('.') {
-                paths.push(entry.path());
-            }
-            if paths.len() > state.settings().max_artifact_blocks {
-                let _ = fs::remove_file(&temporary).await;
-                return Err(ApiError::bad_request(
-                    "Artifact has too many uploaded blocks.",
-                ));
-            }
-        }
-        paths.sort();
-        paths
-    } else {
-        ordered_ids
-            .iter()
-            .map(|id| source.join(hex::encode(Sha256::digest(id.as_bytes()))))
-            .collect()
-    };
-    for path in block_paths {
-        let mut input = fs::File::open(path).await.map_err(|_| {
-            ApiError::bad_request("Artifact block list references a missing block.")
-        })?;
-        loop {
-            let mut buf = [0u8; 64 * 1024];
-            let n = input.read(&mut buf).await.map_err(ApiError::internal)?;
-            if n == 0 {
-                break;
-            }
-            total = total
-                .checked_add(n as u64)
-                .ok_or_else(|| ApiError::bad_request("Artifact size overflow."))?;
-            if total > max_artifact {
-                let _ = fs::remove_file(&temporary).await;
-                return Err(ApiError::bad_request(
-                    "Artifacts exceed the configured size limit.",
-                ));
-            }
-            hasher.update(&buf[..n]);
-            output
-                .write_all(&buf[..n])
-                .await
-                .map_err(ApiError::internal)?;
-        }
-    }
-    output.flush().await.map_err(ApiError::internal)?;
-    drop(output);
-    let actual = hex::encode(hasher.finalize());
-    if total != expected_size || actual != expected_hash {
-        let _ = fs::remove_file(&temporary).await;
-        return Err(ApiError::bad_request(
-            "Artifact size or SHA-256 does not match.",
-        ));
-    }
-    fs::rename(&temporary, &destination)
-        .await
-        .map_err(ApiError::internal)?;
-    let now = Utc::now();
-    let mut active: action_artifact::ActiveModel = row.clone().into();
-    active.status = Set("finalized".to_owned());
-    active.size_bytes =
-        Set(i64::try_from(total).map_err(|_| ApiError::bad_request("Artifact size is invalid."))?);
-    active.sha256 = Set(Some(actual));
-    active.finalized_at = Set(Some(now));
-    active.updated_at = Set(now);
-    active.update(database(&state)).await?;
-    let _ = fs::remove_dir_all(source).await;
+    let artifact_id = gitadel_actions::artifacts::finalize(
+        database(&state),
+        state.repository().actions_artifact_root(),
+        state.settings(),
+        &row,
+        request.size,
+        request.hash.as_ref().map(|hash| hash.value.as_str()),
+    )
+    .await
+    .map_err(artifact_error)?;
     Ok(axum::Json(artifact::FinalizeArtifactResponse {
         ok: true,
-        artifact_id: row.id,
+        artifact_id,
     }))
 }
 
@@ -749,14 +610,7 @@ async fn upload(
 }
 
 fn validate_block_id(value: &str) -> Result<(), ApiError> {
-    if value.is_empty()
-        || value.len() > MAX_BLOCK_ID
-        || value.contains(['/', '\\'])
-        || value.chars().any(char::is_control)
-    {
-        return Err(ApiError::bad_request("Block identifier is invalid."));
-    }
-    Ok(())
+    gitadel_actions::artifacts::validate_block_id(value).map_err(ApiError::bad_request)
 }
 
 async fn read_limited(body: Body, limit: usize) -> Result<Vec<u8>, ApiError> {
@@ -776,46 +630,7 @@ async fn read_limited(body: Body, limit: usize) -> Result<Vec<u8>, ApiError> {
 }
 
 fn parse_block_list(bytes: &[u8], max_blocks: usize) -> Result<Vec<String>, ApiError> {
-    let mut reader = Reader::from_reader(bytes);
-    reader.config_mut().trim_text(true);
-    let mut buffer = Vec::new();
-    let mut order = Vec::new();
-    let mut seen = HashSet::new();
-    loop {
-        match reader
-            .read_event_into(&mut buffer)
-            .map_err(|_| ApiError::bad_request("Malformed artifact block list."))?
-        {
-            Event::Start(event) if event.name().as_ref() == "Latest" => {
-                let value = match reader
-                    .read_event_into(&mut buffer)
-                    .map_err(|_| ApiError::bad_request("Malformed artifact block list."))?
-                {
-                    Event::Text(text) => text.xml10_content().into_owned(),
-                    _ => return Err(ApiError::bad_request("Malformed artifact block list.")),
-                };
-                validate_block_id(&value)?;
-                if !seen.insert(value.clone()) {
-                    return Err(ApiError::bad_request(
-                        "Artifact block list contains a duplicate block.",
-                    ));
-                }
-                order.push(value);
-                if order.len() > max_blocks {
-                    return Err(ApiError::bad_request(
-                        "Artifact block list has too many blocks.",
-                    ));
-                }
-            }
-            Event::Eof => break,
-            _ => {}
-        }
-        buffer.clear();
-    }
-    if order.is_empty() {
-        return Err(ApiError::bad_request("Artifact block list is empty."));
-    }
-    Ok(order)
+    gitadel_actions::artifacts::parse_block_list(bytes, max_blocks).map_err(ApiError::bad_request)
 }
 
 async fn download(
@@ -864,71 +679,12 @@ pub(crate) fn set_download_headers(response: &mut Response, row: &action_artifac
 }
 
 pub(crate) async fn cleanup(state: &ActionsState) -> Result<(), sea_orm::DbErr> {
-    let now = Utc::now();
-    let stale_pending = now
-        - Duration::seconds(std::cmp::Ord::max(
-            state.settings().artifact_grant_lifetime_seconds,
-            60,
-        ));
-    let rows = action_artifact::Entity::find()
-        .filter(
-            Condition::any()
-                .add(action_artifact::Column::DeletedAt.is_not_null())
-                .add(action_artifact::Column::ExpiresAt.lte(now))
-                .add(
-                    Condition::all()
-                        .add(action_artifact::Column::Status.eq("pending"))
-                        .add(action_artifact::Column::UpdatedAt.lte(stale_pending)),
-                ),
-        )
-        .all(database(state))
-        .await?;
-    for row in rows {
-        let mut disk_cleanup_failed = false;
-        let path = artifact_path(state, &row);
-        if let Err(error) = fs::remove_file(path).await
-            && error.kind() != ErrorKind::NotFound
-        {
-            tracing::warn!(artifact_id = row.id, %error, "could not remove Actions artifact");
-            disk_cleanup_failed = true;
-        }
-        let staging_prefix = format!(".{}.", row.storage_key);
-        if let Ok(mut entries) = fs::read_dir(state.repository().actions_artifact_root()).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if name.starts_with(&staging_prefix)
-                    && name.ends_with(".finalizing")
-                    && let Err(error) = fs::remove_file(entry.path()).await
-                    && error.kind() != ErrorKind::NotFound
-                {
-                    tracing::warn!(
-                        artifact_id = row.id,
-                        %error,
-                        "could not remove staged Actions artifact"
-                    );
-                    disk_cleanup_failed = true;
-                }
-            }
-        }
-        if let Err(error) = fs::remove_dir_all(blocks_dir(state, &row)).await
-            && error.kind() != ErrorKind::NotFound
-        {
-            tracing::warn!(artifact_id = row.id, %error, "could not remove Actions artifact blocks");
-            disk_cleanup_failed = true;
-        }
-        if disk_cleanup_failed {
-            continue;
-        }
-        action_artifact::Entity::delete_by_id(row.id)
-            .exec(database(state))
-            .await?;
-    }
-    action_artifact_grant::Entity::delete_many()
-        .filter(action_artifact_grant::Column::ExpiresAt.lte(now))
-        .exec(database(state))
-        .await?;
-    Ok(())
+    gitadel_actions::artifacts::cleanup(
+        database(state),
+        state.repository().actions_artifact_root(),
+        state.settings().artifact_grant_lifetime_seconds,
+    )
+    .await
 }
 
 #[cfg(test)]

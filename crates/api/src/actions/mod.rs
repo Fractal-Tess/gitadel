@@ -26,7 +26,7 @@ use crate::{
     repository::RepositoryState,
 };
 
-pub(crate) const REQUIRED_RUNNER_VERSION: &str = "13.0.0";
+pub(crate) use gitadel_actions::REQUIRED_RUNNER_VERSION;
 
 #[derive(Clone)]
 pub(crate) struct ActionsState {
