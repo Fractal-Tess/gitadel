@@ -24,6 +24,21 @@ const MAX_AVATAR_BYTES: usize = 4 * 1024 * 1024;
 const AVATAR_EDGE: u32 = 512;
 const PNG_SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 
+#[utoipa::path(
+    get, path = "/users/{user_id}/avatar",
+    operation_id = "get_users_user_id_avatar",
+    summary = "Download a user's avatar",
+    tag = "Account",
+    params(
+        ("user_id" = Uuid, Path),
+    ),
+    security(),
+    responses(
+        (status = 200, description = "Success", body = crate::openapi::Binary, content_type = "image/png"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn public_avatar(
     State(state): State<IdentityState>,
     Path(user_id): Path<Uuid>,
@@ -36,6 +51,21 @@ pub async fn public_avatar(
     Ok(avatar_response(avatar.content))
 }
 
+#[utoipa::path(
+    get, path = "/organizations/{slug}/avatar",
+    operation_id = "get_organizations_slug_avatar",
+    summary = "Download an organization's avatar",
+    tag = "Organizations",
+    params(
+        ("slug" = String, Path),
+    ),
+    security(),
+    responses(
+        (status = 200, description = "Success", body = crate::openapi::Binary, content_type = "image/png"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn public_organization_avatar(
     State(state): State<IdentityState>,
     Path(slug): Path<String>,
@@ -73,6 +103,18 @@ pub struct UpdateAvatarRequest {
     image_base64: String,
 }
 
+#[utoipa::path(
+    put, path = "/me/avatar",
+    operation_id = "put_me_avatar",
+    summary = "Upload an avatar",
+    tag = "Account",
+
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_avatar(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -118,6 +160,21 @@ pub async fn update_avatar(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    put, path = "/organizations/{slug}/avatar",
+    operation_id = "put_organizations_slug_avatar",
+    summary = "Upload an organization avatar",
+    tag = "Organizations",
+
+    params(
+        ("slug" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_organization_avatar(
     State(state): State<IdentityState>,
     Path(slug): Path<String>,
@@ -167,6 +224,20 @@ pub async fn update_organization_avatar(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    delete, path = "/organizations/{slug}/avatar",
+    operation_id = "delete_organizations_slug_avatar",
+    summary = "Remove an organization avatar",
+    tag = "Organizations",
+    params(
+        ("slug" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_organization_avatar(
     State(state): State<IdentityState>,
     Path(slug): Path<String>,
@@ -196,6 +267,17 @@ pub async fn delete_organization_avatar(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    delete, path = "/me/avatar",
+    operation_id = "delete_me_avatar",
+    summary = "Remove the avatar",
+    tag = "Account",
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_avatar(
     State(state): State<IdentityState>,
     headers: HeaderMap,

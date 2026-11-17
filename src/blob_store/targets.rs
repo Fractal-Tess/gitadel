@@ -25,11 +25,16 @@ use super::{
     manager::{self, active_target_id},
 };
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum StorageTargetConfiguration {
-    Filesystem { path: PathBuf },
-    S3 { s3: S3Settings },
+    Filesystem {
+        #[schema(value_type = String)]
+        path: PathBuf,
+    },
+    S3 {
+        s3: S3Settings,
+    },
 }
 
 impl StorageTargetConfiguration {
@@ -70,11 +75,12 @@ impl StorageTargetConfiguration {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct StorageTargetView {
     pub id: Uuid,
     pub name: String,
     pub kind: String,
+    #[schema(value_type = StorageTargetConfiguration)]
     pub configuration: serde_json::Value,
     pub active: bool,
     pub registry_active: bool,
@@ -86,13 +92,13 @@ pub struct StorageTargetView {
 /// What the underlying volume holds, for targets that sit on one. Object stores
 /// publish no capacity, so S3 targets leave this empty rather than inventing a
 /// ceiling.
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize, utoipa::ToSchema)]
 pub struct StorageTargetCapacity {
     pub total_bytes: u64,
     pub available_bytes: u64,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Serialize, utoipa::ToSchema)]
 pub struct StorageTargetUsage {
     pub lfs_object_count: u64,
     pub lfs_bytes: u64,
@@ -101,7 +107,7 @@ pub struct StorageTargetUsage {
     pub measured: Option<MeasuredUsage>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize, utoipa::ToSchema)]
 pub struct MeasuredUsage {
     pub object_count: u64,
     pub total_bytes: u64,

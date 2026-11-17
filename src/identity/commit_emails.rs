@@ -254,6 +254,17 @@ async fn identity_response<C: ConnectionTrait>(
     })
 }
 
+#[utoipa::path(
+    get, path = "/me/commit-identity",
+    operation_id = "get_me_commit_identity",
+    summary = "Get the commit identity",
+    tag = "Account",
+    responses(
+        (status = 200, description = "Success", body = CommitIdentityResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn get_identity(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -275,6 +286,18 @@ pub struct UpdateIdentityRequest {
 /// Sets the name and address browser commits are authored with. The address
 /// must be one of the user's verified commit addresses or their account
 /// address.
+#[utoipa::path(
+    put, path = "/me/commit-identity",
+    operation_id = "put_me_commit_identity",
+    summary = "Update the commit identity",
+    tag = "Account",
+
+    responses(
+        (status = 200, description = "Success", body = CommitIdentityResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_identity(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -364,6 +387,18 @@ async fn verified_by_another<C: ConnectionTrait>(
 /// claim stays pending until the emailed link is opened; otherwise it counts
 /// at once. An address another account has verified is refused, so nobody
 /// can count someone else's commits as their own.
+#[utoipa::path(
+    post, path = "/me/commit-emails",
+    operation_id = "post_me_commit_emails",
+    summary = "Add a commit email address",
+    tag = "Account",
+
+    responses(
+        (status = 201, description = "Success", body = CommitIdentityResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn add_email(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -461,6 +496,20 @@ pub async fn add_email(
 }
 
 /// Sends a fresh verification link for a pending address.
+#[utoipa::path(
+    post, path = "/me/commit-emails/{email}/verification",
+    operation_id = "post_me_commit_emails_email_verification",
+    summary = "Resend a commit email verification",
+    tag = "Account",
+    params(
+        ("email" = String, Path),
+    ),
+    responses(
+        (status = 202, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn resend_verification(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -595,6 +644,20 @@ async fn remove_claim<C: ConnectionTrait>(
     Ok(())
 }
 
+#[utoipa::path(
+    delete, path = "/me/commit-emails/{email}",
+    operation_id = "delete_me_commit_emails_email",
+    summary = "Remove a commit email address",
+    tag = "Account",
+    params(
+        ("email" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = CommitIdentityResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn remove_email(
     State(state): State<IdentityState>,
     headers: HeaderMap,

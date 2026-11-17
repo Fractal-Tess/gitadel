@@ -20,7 +20,7 @@ jobs:
   frontend:
     name: Frontend
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -31,6 +31,16 @@ jobs:
 
       - name: Install dependencies
         run: bun install --cwd frontend --frozen-lockfile
+
+      - name: Prepare offline contract exporter
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential cmake fonts-dejavu-core git-lfs libdav1d-dev libssl-dev perl pkg-config
+          cargo fetch --locked
+
+      - name: Check registered REST contract and generated SDK drift
+        run: bash scripts/api-contract.sh check
 
       - name: Type check
         run: bun run --cwd frontend check
@@ -46,6 +56,7 @@ jobs:
         with:
           name: frontend-build
           path: frontend/build
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
 

@@ -8,9 +8,16 @@ import {
   NETWORK_ERROR,
   errorMessage,
   onUnauthenticated,
-  requestEmpty,
-  requestJson,
+  apiQuery,
+  requestEmpty as contractRequestEmpty,
+  requestJson as contractRequestJson,
 } from "../src/lib/api/transport.js";
+import { historySchema } from '../src/lib/api/repositories.js';
+
+// These fixtures deliberately use invented endpoints to isolate HTTP/error
+// handling. Production callers and contract.typecheck.ts retain the strict API.
+const requestJson = contractRequestJson as <T>(path: string, schema: z.ZodType<T>, init?: RequestInit) => Promise<T>;
+const requestEmpty = contractRequestEmpty as (path: string, init?: RequestInit) => Promise<void>;
 
 const originalFetch = globalThis.fetch;
 const originalConsoleError = console.error;
@@ -40,6 +47,26 @@ afterEach(() => {
 });
 
 describe("request error mapping", () => {
+  test("serializes the typed query once and preserves cancellation and credentials", async () => {
+    const controller = new AbortController();
+    let seenPath: unknown;
+    let seenInit: RequestInit | undefined;
+    globalThis.fetch = (async (path, init) => {
+      seenPath = path;
+      seenInit = init;
+      return new Response(JSON.stringify({ commits: [], page: 2, per_page: 30, has_next: false }), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+    const result = await contractRequestJson('/api/v1/repositories/owner/repo/history', historySchema, {
+      signal: controller.signal,
+      query: apiQuery({ rev: 'feature/a+b', path: 'docs/a b.md', page: 2, per_page: 30 }),
+    });
+    assert.equal(seenPath, '/api/v1/repositories/owner/repo/history?rev=feature%2Fa%2Bb&path=docs%2Fa+b.md&page=2&per_page=30');
+    assert.equal(seenInit?.signal, controller.signal);
+    assert.equal(seenInit?.credentials, 'same-origin');
+    assert.equal(result.page, 2);
+  });
   test("returns the validated body of a successful response", async () => {
     respondWith({ id: "a" });
     assert.deepEqual(await requestJson("/api/v1/thing", schema), { id: "a" });

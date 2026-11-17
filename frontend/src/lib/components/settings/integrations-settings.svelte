@@ -95,11 +95,11 @@
   });
 
   function integrationPath(slug: string, id: string) {
-    return `/api/v1/namespaces/${encodeURIComponent(slug)}/integrations/${encodeURIComponent(id)}`;
+    return `/api/v1/namespaces/${encodeURIComponent(slug)}/integrations/${encodeURIComponent(id)}` as const;
   }
 
   function sourcePath(card: Card) {
-    return `${integrationPath(card.target.slug, card.integration.id)}/source`;
+    return `${integrationPath(card.target.slug, card.integration.id)}/source` as const;
   }
   async function load() {
     const scope = app.authorizationScope;
@@ -209,7 +209,7 @@
         integrationSourceConnectionSchema,
         {
           method: "POST",
-          body: jsonBody({ action: "bind", source_id: sourceId }),
+          body: jsonBody({ action: "bind" as const, source_id: sourceId }),
         },
       );
       updateSourceSummary(card, sourceConnection);
@@ -234,7 +234,7 @@
         integrationSourceConnectionSchema,
         {
           method: "POST",
-          body: jsonBody({ action: "create", name }),
+          body: jsonBody({ action: "create" as const, name }),
         },
       );
       updateSourceSummary(card, sourceConnection);

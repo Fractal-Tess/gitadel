@@ -10,6 +10,7 @@
     protectionRuleSchema,
     type ProtectionRule,
     type ProtectionRuleInput,
+    type ProtectionRuleUpdate,
   } from "$lib/api/repository-security.js";
   import {
     errorMessage,
@@ -91,7 +92,7 @@
     );
   }
 
-  async function createRule(input: ProtectionRuleInput) {
+  async function createRule(input: ProtectionRuleInput & Pick<ProtectionRule, "kind" | "pattern">) {
     creating = true;
     try {
       const rule = await requestJson(endpoint, protectionRuleSchema, {
@@ -127,7 +128,7 @@
     }
   }
 
-  async function updateRule(rule: ProtectionRule, change: ProtectionRuleInput) {
+  async function updateRule(rule: ProtectionRule, change: ProtectionRuleUpdate) {
     pendingId = rule.id;
     try {
       const updated = await requestJson(
@@ -392,7 +393,7 @@
   rule: ProtectionRule,
   label: string,
   checked: boolean,
-  change: (value: boolean) => ProtectionRuleInput,
+  change: (value: boolean) => ProtectionRuleUpdate,
 )}
   <label class="flex items-center justify-between gap-3">
     {label}

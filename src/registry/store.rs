@@ -152,7 +152,7 @@ pub(crate) struct ImageMetadata {
     pub references: Vec<ImageReferenceMetadata>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Serialize, utoipa::ToSchema)]
 pub(crate) struct RegistryUsage {
     pub object_count: u64,
     pub total_bytes: u64,

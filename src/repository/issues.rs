@@ -130,7 +130,8 @@ pub struct IssueCommentResponse {
     can_edit: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListIssuesQuery {
     state: Option<String>,
     q: Option<String>,
@@ -165,7 +166,8 @@ pub struct CommentRequest {
     body: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct UploadAttachmentQuery {
     name: String,
 }
@@ -190,13 +192,30 @@ pub struct UpdateLabelRequest {
     description: Option<String>,
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/issues",
+    operation_id = "get_repositories_namespace_name_issues",
+    summary = "List the repository's issues",
+    tag = "Issues",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ListIssuesQuery,
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = Vec<crate::repository::issues::IssueResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_issues(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
     Query(query): Query<ListIssuesQuery>,
     headers: HeaderMap,
     jar: CookieJar,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let (repository, viewer_id, can_write) =
         issue_context(&state, &headers, &jar, &namespace, &name).await?;
     let window = PageWindow::new(query.page, query.per_page);
@@ -235,6 +254,23 @@ pub async fn list_issues(
     ))
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/issues/{number}",
+    operation_id = "get_repositories_namespace_name_issues_number",
+    summary = "Get an issue",
+    tag = "Issues",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("number" = i64, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = IssueResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn get_issue(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, number)): AxumPath<(String, String, i64)>,
@@ -249,13 +285,29 @@ pub async fn get_issue(
     ))
 }
 
+#[utoipa::path(
+    post, path = "/repositories/{namespace}/{name}/issues",
+    operation_id = "post_repositories_namespace_name_issues",
+    summary = "Create an issue",
+    tag = "Issues",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 201, description = "Success", body = crate::repository::issues::IssueResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_issue(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(request): Json<CreateIssueRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let (actor, repository) = state
         .authenticated_repository(
             &headers,
@@ -355,6 +407,23 @@ pub async fn create_issue(
     ))
 }
 
+#[utoipa::path(
+    patch, path = "/repositories/{namespace}/{name}/issues/{number}",
+    operation_id = "patch_repositories_namespace_name_issues_number",
+    summary = "Update an issue",
+    tag = "Issues",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("number" = i64, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = IssueResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_issue(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, number)): AxumPath<(String, String, i64)>,
@@ -452,6 +521,22 @@ pub async fn update_issue(
     ))
 }
 
+#[utoipa::path(
+    delete, path = "/repositories/{namespace}/{name}/issues/{number}",
+    operation_id = "delete_repositories_namespace_name_issues_number",
+    summary = "Delete an issue",
+    tag = "Issues",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("number" = i64, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_issue(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, number)): AxumPath<(String, String, i64)>,
@@ -502,6 +587,23 @@ pub async fn delete_issue(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/issues/{number}/comments",
+    operation_id = "get_repositories_namespace_name_issues_number_comments",
+    summary = "List an issue's comments",
+    tag = "Issues",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("number" = i64, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = Vec<IssueCommentResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_comments(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, number)): AxumPath<(String, String, i64)>,
@@ -521,13 +623,30 @@ pub async fn list_comments(
     ))
 }
 
+#[utoipa::path(
+    post, path = "/repositories/{namespace}/{name}/issues/{number}/comments",
+    operation_id = "post_repositories_namespace_name_issues_number_comments",
+    summary = "Comment on an issue",
+    tag = "Issues",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("number" = i64, Path),
+    ),
+    responses(
+        (status = 201, description = "Success", body = crate::repository::issues::IssueCommentResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_comment(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, number)): AxumPath<(String, String, i64)>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(request): Json<CommentRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let (actor, repository) = state
         .authenticated_repository(
             &headers,
@@ -593,6 +712,24 @@ pub async fn create_comment(
     ))
 }
 
+#[utoipa::path(
+    patch, path = "/repositories/{namespace}/{name}/issues/{number}/comments/{id}",
+    operation_id = "patch_repositories_namespace_name_issues_number_comments_id",
+    summary = "Edit an issue comment",
+    tag = "Issues",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("number" = i64, Path),
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = IssueCommentResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_comment(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, number, id)): AxumPath<(String, String, i64, Uuid)>,
@@ -643,6 +780,23 @@ pub async fn update_comment(
     ))
 }
 
+#[utoipa::path(
+    delete, path = "/repositories/{namespace}/{name}/issues/{number}/comments/{id}",
+    operation_id = "delete_repositories_namespace_name_issues_number_comments_id",
+    summary = "Delete an issue comment",
+    tag = "Issues",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("number" = i64, Path),
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_comment(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, number, id)): AxumPath<(String, String, i64, Uuid)>,
@@ -686,6 +840,22 @@ pub async fn delete_comment(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/issue-labels",
+    operation_id = "get_repositories_namespace_name_issue_labels",
+    summary = "List the repository's issue labels",
+    tag = "Issues",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = Vec<IssueLabelResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_labels(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -701,13 +871,29 @@ pub async fn list_labels(
     Ok(Json(labels.into_iter().map(label_response).collect()))
 }
 
+#[utoipa::path(
+    post, path = "/repositories/{namespace}/{name}/issue-labels",
+    operation_id = "post_repositories_namespace_name_issue_labels",
+    summary = "Create an issue label",
+    tag = "Issues",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 201, description = "Success", body = crate::repository::issues::IssueLabelResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_label(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(request): Json<CreateLabelRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let (_, repository) = state
         .authenticated_repository(
             &headers,
@@ -736,6 +922,23 @@ pub async fn create_label(
     Ok((StatusCode::CREATED, Json(label_response(label))))
 }
 
+#[utoipa::path(
+    patch, path = "/repositories/{namespace}/{name}/issue-labels/{id}",
+    operation_id = "patch_repositories_namespace_name_issue_labels_id",
+    summary = "Update an issue label",
+    tag = "Issues",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = IssueLabelResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_label(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, id)): AxumPath<(String, String, Uuid)>,
@@ -769,6 +972,22 @@ pub async fn update_label(
     )))
 }
 
+#[utoipa::path(
+    delete, path = "/repositories/{namespace}/{name}/issue-labels/{id}",
+    operation_id = "delete_repositories_namespace_name_issue_labels_id",
+    summary = "Delete an issue label",
+    tag = "Issues",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_label(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, id)): AxumPath<(String, String, Uuid)>,
@@ -792,6 +1011,22 @@ pub async fn delete_label(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/assignable-users",
+    operation_id = "get_repositories_namespace_name_assignable_users",
+    summary = "List users who can be assigned to issues",
+    tag = "Collaborators",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = Vec<IssueUserResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_assignable_users(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -842,6 +1077,23 @@ pub async fn list_assignable_users(
     Ok(Json(users))
 }
 
+#[utoipa::path(
+    post, path = "/repositories/{namespace}/{name}/markdown-preview",
+    operation_id = "post_repositories_namespace_name_markdown_preview",
+    summary = "Render Markdown as HTML",
+    tag = "Repository content",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = RenderedMarkdownResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn preview_markdown(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -855,6 +1107,23 @@ pub async fn preview_markdown(
     }))
 }
 
+#[utoipa::path(
+    put, path = "/repositories/{namespace}/{name}/issue-attachments",
+    operation_id = "put_repositories_namespace_name_issue_attachments",
+    summary = "Upload an issue attachment",
+    tag = "Issues",
+    request_body(content = crate::openapi::Binary, content_type = "application/octet-stream"),
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        UploadAttachmentQuery,
+    ),
+    responses(
+        (status = 201, description = "Success", body = crate::repository::issues::IssueAttachmentResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn upload_attachment(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -862,7 +1131,7 @@ pub async fn upload_attachment(
     headers: HeaderMap,
     jar: CookieJar,
     body: Body,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let (actor, repository) = state
         .authenticated_repository(
             &headers,
@@ -1049,6 +1318,23 @@ fn ensure_attachment_quota(
     Ok(())
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/issue-attachments/{attachment_id}",
+    operation_id = "get_repositories_namespace_name_issue_attachments_attachment_id",
+    summary = "Download an issue attachment",
+    tag = "Issues",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("attachment_id" = Uuid, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = crate::openapi::Binary, content_type = "application/octet-stream"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn download_attachment(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, attachment_id)): AxumPath<(String, String, Uuid)>,
@@ -1116,6 +1402,22 @@ pub async fn download_attachment(
     Ok(response)
 }
 
+#[utoipa::path(
+    delete, path = "/repositories/{namespace}/{name}/issue-attachments/{attachment_id}",
+    operation_id = "delete_repositories_namespace_name_issue_attachments_attachment_id",
+    summary = "Delete an issue attachment",
+    tag = "Issues",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("attachment_id" = Uuid, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_attachment(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, attachment_id)): AxumPath<(String, String, Uuid)>,

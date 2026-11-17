@@ -4,7 +4,7 @@ use axum::{
     Json,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    response::IntoResponse,
 };
 use axum_extra::extract::cookie::CookieJar;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -31,7 +31,7 @@ use crate::entity::{
     repository, repository_alias, repository_import, repository_import_item, session, user,
 };
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct AuthStatusResponse {
     setup_required: bool,
     authenticated: bool,
@@ -42,6 +42,18 @@ pub struct AuthStatusResponse {
     email_enabled: bool,
 }
 
+#[utoipa::path(
+    get, path = "/auth/status",
+    operation_id = "get_auth_status",
+    summary = "Status",
+    tag = "Authentication",
+    security(),
+    responses(
+        (status = 200, description = "Success", body = AuthStatusResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn status(
     State(state): State<IdentityState>,
     jar: CookieJar,
@@ -59,7 +71,7 @@ pub async fn status(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct CredentialsRequest {
     username: String,
     password: String,
@@ -70,17 +82,37 @@ pub struct AuthResponse {
     user: UserResponse,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct TwoFactorChallengeResponse {
     two_factor_required: bool,
     challenge_id: String,
 }
 
+#[derive(serde::Serialize, utoipa::ToSchema)]
+#[serde(untagged)]
+pub enum LoginResponse {
+    Authenticated(AuthResponse),
+    TwoFactor(TwoFactorChallengeResponse),
+}
+
+#[utoipa::path(
+    post, path = "/auth/login",
+    operation_id = "post_auth_login",
+    summary = "Login",
+    tag = "Authentication",
+
+    security(),
+    responses(
+        (status = 200, description = "Success", body = LoginResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn login(
     State(state): State<IdentityState>,
     jar: CookieJar,
     Json(request): Json<CredentialsRequest>,
-) -> Result<Response, ApiError> {
+) -> Result<(CookieJar, Json<LoginResponse>), ApiError> {
     if !super::sso::public_configuration(state.database())
         .await?
         .password_enabled
@@ -111,11 +143,13 @@ pub async fn login(
     // factor; the browser receives a short-lived challenge instead.
     if super::two_factor::is_enabled(state.database(), account.id).await? {
         let challenge_id = state.insert_pending_login(account.id).await?;
-        return Ok(Json(TwoFactorChallengeResponse {
-            two_factor_required: true,
-            challenge_id,
-        })
-        .into_response());
+        return Ok((
+            jar,
+            Json(LoginResponse::TwoFactor(TwoFactorChallengeResponse {
+                two_factor_required: true,
+                challenge_id,
+            })),
+        ));
     }
 
     let transaction = state.database().begin().await?;
@@ -126,24 +160,36 @@ pub async fn login(
     transaction.commit().await?;
     Ok((
         jar.add(cookie),
-        Json(AuthResponse {
+        Json(LoginResponse::Authenticated(AuthResponse {
             user: account.into(),
-        }),
-    )
-        .into_response())
+        })),
+    ))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct TwoFactorLoginRequest {
     challenge_id: String,
     code: String,
 }
 
+#[utoipa::path(
+    post, path = "/auth/login/two-factor",
+    operation_id = "post_auth_login_two_factor",
+    summary = "Finish two factor login",
+    tag = "Authentication",
+
+    security(),
+    responses(
+        (status = 200, description = "Success", body = AuthResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn finish_two_factor_login(
     State(state): State<IdentityState>,
     jar: CookieJar,
     Json(request): Json<TwoFactorLoginRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     state
         .enforce_auth_rate_limit("two-factor-source", 20)
         .await?;
@@ -195,10 +241,21 @@ pub async fn finish_two_factor_login(
     ))
 }
 
+#[utoipa::path(
+    post, path = "/auth/logout",
+    operation_id = "post_auth_logout",
+    summary = "Logout",
+    tag = "Authentication",
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn logout(
     State(state): State<IdentityState>,
     jar: CookieJar,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let actor = state.session_user(&jar).await?;
     let removal = state.delete_session(&jar).await?;
     if let Some(actor) = actor {
@@ -212,6 +269,18 @@ pub struct UpdateUsernameRequest {
     username: String,
 }
 
+#[utoipa::path(
+    put, path = "/me/username",
+    operation_id = "put_me_username",
+    summary = "Change the username",
+    tag = "Account",
+
+    responses(
+        (status = 200, description = "Success", body = AuthResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_username(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -241,6 +310,18 @@ pub struct UpdateRepositoryPreferencesRequest {
     default_repository_visibility: String,
 }
 
+#[utoipa::path(
+    put, path = "/me/repository-preferences",
+    operation_id = "put_me_repository_preferences",
+    summary = "Update repository preferences",
+    tag = "Account",
+
+    responses(
+        (status = 200, description = "Success", body = AuthResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_repository_preferences(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -285,6 +366,18 @@ pub struct UpdateThemePreferenceRequest {
     theme_preference: String,
 }
 
+#[utoipa::path(
+    put, path = "/me/theme-preference",
+    operation_id = "put_me_theme_preference",
+    summary = "Update the theme preference",
+    tag = "Account",
+
+    responses(
+        (status = 200, description = "Success", body = AuthResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_theme_preference(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -332,6 +425,18 @@ pub struct UpdateMotionPreferenceRequest {
 
 /// Whether the interface animates: `system` follows the browser's
 /// reduced-motion setting, `reduce` turns animation off everywhere.
+#[utoipa::path(
+    put, path = "/me/motion-preference",
+    operation_id = "put_me_motion_preference",
+    summary = "Update the motion preference",
+    tag = "Account",
+
+    responses(
+        (status = 200, description = "Success", body = AuthResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_motion_preference(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -375,6 +480,18 @@ pub struct UpdatePasswordRequest {
     new_password: String,
 }
 
+#[utoipa::path(
+    put, path = "/me/password",
+    operation_id = "put_me_password",
+    summary = "Change the password",
+    tag = "Account",
+
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_password(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -534,7 +651,7 @@ async fn rename_user_namespace(
     Ok(active.update(transaction).await?)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct SetupRequest {
     token: String,
     username: String,
@@ -542,11 +659,24 @@ pub struct SetupRequest {
 }
 
 /// Creates the first administrator from the one-time link printed at startup.
+#[utoipa::path(
+    post, path = "/setup",
+    operation_id = "post_setup",
+    summary = "Setup",
+    tag = "Instance",
+
+    security(),
+    responses(
+        (status = 201, description = "Success", body = AuthResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn setup(
     State(state): State<IdentityState>,
     jar: CookieJar,
     Json(request): Json<SetupRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     if !state.setup_token_matches(&request.token).await {
         return Err(ApiError::bad_request(
             "The setup link is invalid or was already used. Restart Gitadel to print a new one.",
@@ -577,18 +707,31 @@ pub async fn setup(
     ))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct InvitationRegistrationRequest {
     token: String,
     username: String,
     password: String,
 }
 
+#[utoipa::path(
+    post, path = "/register",
+    operation_id = "post_register",
+    summary = "Register",
+    tag = "Authentication",
+
+    security(),
+    responses(
+        (status = 201, description = "Success", body = AuthResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn register(
     State(state): State<IdentityState>,
     jar: CookieJar,
     Json(request): Json<InvitationRegistrationRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let username = validate_slug(&request.username, "Username")?;
     let transaction = state.database().begin().await?;
     let now = Utc::now();
@@ -667,12 +810,24 @@ pub struct InvitationResponse {
     expires_at: chrono::DateTime<Utc>,
 }
 
+#[utoipa::path(
+    post, path = "/invitations",
+    operation_id = "post_invitations",
+    summary = "Create an invitation",
+    tag = "Account",
+
+    responses(
+        (status = 201, description = "Success", body = crate::identity::auth::InvitationResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_invitation(
     State(state): State<IdentityState>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(request): Json<CreateInvitationRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let actor = state
         .authenticate(&headers, &jar, super::SCOPE_WRITE)
         .await?;
@@ -722,6 +877,17 @@ pub struct PasskeyResponse {
     last_used_at: Option<chrono::DateTime<Utc>>,
 }
 
+#[utoipa::path(
+    get, path = "/me/passkeys",
+    operation_id = "get_me_passkeys",
+    summary = "List passkeys",
+    tag = "Account",
+    responses(
+        (status = 200, description = "Success", body = Vec<PasskeyResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_passkeys(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -760,6 +926,18 @@ pub struct PasskeyCreationResponse {
     options: CreationChallengeResponse,
 }
 
+#[utoipa::path(
+    post, path = "/me/passkeys/register/start",
+    operation_id = "post_me_passkeys_register_start",
+    summary = "Start registering a passkey",
+    tag = "Account",
+
+    responses(
+        (status = 200, description = "Success", body = PasskeyCreationResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn start_passkey_registration(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -842,12 +1020,24 @@ pub struct FinishPasskeyRegistrationRequest {
     credential: RegisterPublicKeyCredential,
 }
 
+#[utoipa::path(
+    post, path = "/me/passkeys/register/finish",
+    operation_id = "post_me_passkeys_register_finish",
+    summary = "Finish registering a passkey",
+    tag = "Account",
+
+    responses(
+        (status = 201, description = "Registered"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn finish_passkey_registration(
     State(state): State<IdentityState>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(request): Json<FinishPasskeyRegistrationRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let actor = state
         .authenticate(&headers, &jar, super::SCOPE_WRITE)
         .await?;
@@ -906,6 +1096,20 @@ pub async fn finish_passkey_registration(
     Ok(StatusCode::CREATED)
 }
 
+#[utoipa::path(
+    delete, path = "/me/passkeys/{id}",
+    operation_id = "delete_me_passkeys_id",
+    summary = "Delete a passkey",
+    tag = "Account",
+    params(
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_passkey(
     State(state): State<IdentityState>,
     Path(id): Path<Uuid>,
@@ -939,12 +1143,26 @@ pub async fn delete_passkey(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct PasskeyRequestResponse {
     challenge_id: String,
+    /// WebAuthn request options from webauthn-rs; external browser protocol.
+    #[schema(value_type = Object)]
     options: RequestChallengeResponse,
 }
 
+#[utoipa::path(
+    post, path = "/auth/passkeys/login/start",
+    operation_id = "post_auth_passkeys_login_start",
+    summary = "Start passkey login",
+    tag = "Authentication",
+    security(),
+    responses(
+        (status = 200, description = "Success", body = PasskeyRequestResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn start_passkey_login(
     State(state): State<IdentityState>,
 ) -> Result<Json<PasskeyRequestResponse>, ApiError> {
@@ -973,17 +1191,32 @@ pub async fn start_passkey_login(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct FinishPasskeyLoginRequest {
     challenge_id: String,
+    /// WebAuthn credential from the browser; external browser protocol.
+    #[schema(value_type = Object)]
     credential: PublicKeyCredential,
 }
 
+#[utoipa::path(
+    post, path = "/auth/passkeys/login/finish",
+    operation_id = "post_auth_passkeys_login_finish",
+    summary = "Finish passkey login",
+    tag = "Authentication",
+
+    security(),
+    responses(
+        (status = 200, description = "Success", body = AuthResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn finish_passkey_login(
     State(state): State<IdentityState>,
     jar: CookieJar,
     Json(request): Json<FinishPasskeyLoginRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let challenge = state
         .authentication_challenges()
         .await

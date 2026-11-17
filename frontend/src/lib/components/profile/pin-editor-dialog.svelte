@@ -16,7 +16,7 @@
   import type { PinnedRepositories } from "$lib/api/profile.js";
   import { repositorySchema } from "$lib/api/repositories.js";
   import type { Repository } from "$lib/api/repositories.js";
-  import { errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
+  import { apiQuery, errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
   import {
     searchRepositories,
     serverSearchThreshold,
@@ -117,8 +117,7 @@
     loadError = null;
     loading = true;
     let cancelled = false;
-    const own = new URLSearchParams({ namespace });
-    requestJson(`/api/v1/repositories?${own}`, z.array(repositorySchema)).then(
+    requestJson("/api/v1/repositories", z.array(repositorySchema), { query: apiQuery({ namespace }) }).then(
       (all) => {
         if (cancelled) return;
         repositories = all;

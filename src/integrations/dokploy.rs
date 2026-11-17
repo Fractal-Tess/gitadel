@@ -20,7 +20,7 @@ use super::{
     ProvisionedSource, PushEvent, RemoteResourcesRequest, RemoteSource, RepositoryIdentity,
     SetupOutcome, SetupRemoteRequest, SourceApplication, TestReport,
 };
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Kind {
     Application,
@@ -96,29 +96,32 @@ pub(crate) struct Link {
     pub external_url: String,
 }
 
-#[derive(Serialize)]
-struct Catalog {
+#[derive(Serialize, utoipa::ToSchema)]
+#[schema(as = IntegrationRemoteCatalog)]
+pub(crate) struct Catalog {
     external_url: String,
     projects: Vec<ProjectSummary>,
     servers: Vec<ServerSummary>,
 }
 
-#[derive(Serialize)]
-struct ProjectSummary {
+#[derive(Serialize, utoipa::ToSchema)]
+#[schema(as = IntegrationProject)]
+pub(crate) struct ProjectSummary {
     id: String,
     name: String,
     environments: Vec<EnvironmentSummary>,
 }
 
-#[derive(Serialize)]
-struct EnvironmentSummary {
+#[derive(Serialize, utoipa::ToSchema)]
+#[schema(as = IntegrationEnvironment)]
+pub(crate) struct EnvironmentSummary {
     id: String,
     name: String,
     description: Option<String>,
     resources: Vec<ResourceSummary>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct ResourceSummary {
     kind: Kind,
     id: String,
@@ -127,10 +130,36 @@ struct ResourceSummary {
     server_name: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct ServerSummary {
     id: String,
     name: String,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct CreatedEnvironment {
+    id: String,
+    name: String,
+    description: Option<String>,
+    project_id: String,
+    project_name: String,
+    resources: Vec<ResourceSummary>,
+    existing: bool,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct DeploymentStatus {
+    deployment: Option<DeploymentSummary>,
+    logs_url: String,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+struct DeploymentSummary {
+    status: Option<String>,
+    title: Option<String>,
+    created_at: Option<String>,
+    error: Option<String>,
+    log: Option<String>,
 }
 
 #[derive(Clone)]
@@ -348,7 +377,7 @@ async fn list_resources(
     client: &reqwest::Client,
     base: &str,
     api_key: &str,
-) -> Result<Value, String> {
+) -> Result<Catalog, String> {
     let projects = get_json(client, base, "/api/project.all", api_key).await?;
     let servers = match get_json(client, base, "/api/server.withSSHKey", api_key).await {
         Ok(servers) => servers,
@@ -357,7 +386,7 @@ async fn list_resources(
             Value::Array(Vec::new())
         }
     };
-    serde_json::to_value(catalog_from(base, &projects, &servers)).map_err(|error| error.to_string())
+    Ok(catalog_from(base, &projects, &servers))
 }
 
 fn created_project_summary(created: &Value) -> Result<ProjectSummary, String> {
@@ -388,7 +417,7 @@ async fn create_project(
     base: &str,
     api_key: &str,
     request: &CreateProjectRequest<'_>,
-) -> Result<Value, String> {
+) -> Result<ProjectSummary, String> {
     let name = request.name.trim();
     if name.is_empty() {
         return Err("Project names cannot be empty.".to_owned());
@@ -404,7 +433,7 @@ async fn create_project(
         ),
     )
     .await?;
-    serde_json::to_value(created_project_summary(&created)?).map_err(|error| error.to_string())
+    created_project_summary(&created)
 }
 
 async fn create_environment(
@@ -412,7 +441,7 @@ async fn create_environment(
     base: &str,
     api_key: &str,
     request: &CreateEnvironmentRequest<'_>,
-) -> Result<Value, String> {
+) -> Result<CreatedEnvironment, String> {
     let name = request.name.trim();
     if name.is_empty() {
         return Err("Environment names cannot be empty.".to_owned());
@@ -443,15 +472,15 @@ async fn create_environment(
     {
         let id = value_string(existing, "environmentId")
             .ok_or("Dokploy returned an environment without an id.")?;
-        return Ok(serde_json::json!({
-            "id": id,
-            "name": value_string(existing, "name").unwrap_or_else(|| name.to_owned()),
-            "description": value_string(existing, "description"),
-            "project_id": request.project_id,
-            "project_name": project_name,
-            "resources": [],
-            "existing": true,
-        }));
+        return Ok(CreatedEnvironment {
+            id,
+            name: value_string(existing, "name").unwrap_or_else(|| name.to_owned()),
+            description: value_string(existing, "description"),
+            project_id: request.project_id.clone(),
+            project_name,
+            resources: Vec::new(),
+            existing: true,
+        });
     }
     if name.eq_ignore_ascii_case("production") {
         return Err(format!(
@@ -472,15 +501,15 @@ async fn create_environment(
     .await?;
     let id = value_string(&created, "environmentId")
         .ok_or("Dokploy did not return an environment id.")?;
-    Ok(serde_json::json!({
-        "id": id,
-        "name": value_string(&created, "name").unwrap_or_else(|| name.to_owned()),
-        "description": value_string(&created, "description"),
-        "project_id": request.project_id,
-        "project_name": project_name,
-        "resources": [],
-        "existing": false,
-    }))
+    Ok(CreatedEnvironment {
+        id,
+        name: value_string(&created, "name").unwrap_or_else(|| name.to_owned()),
+        description: value_string(&created, "description"),
+        project_id: request.project_id.clone(),
+        project_name,
+        resources: Vec::new(),
+        existing: false,
+    })
 }
 
 fn source_query_path(endpoint: &str, source_id: &str) -> String {
@@ -1232,13 +1261,8 @@ async fn setup(request: SetupRemoteRequest<'_>) -> Result<SetupOutcome, String> 
                 },
             )
             .await?;
-            let id = value_string(&created, "id")
-                .ok_or("Dokploy did not return the new project's id.")?;
-            steps.push(format!(
-                "Created project {}",
-                value_string(&created, "name").unwrap_or_default()
-            ));
-            (id, true)
+            steps.push(format!("Created project {}", created.name));
+            (created.id, true)
         }
     };
     let undo_project = |error: String, steps: &[String]| {
@@ -1269,22 +1293,12 @@ async fn setup(request: SetupRemoteRequest<'_>) -> Result<SetupOutcome, String> 
         Ok(chosen) => chosen,
         Err(error) => return Err(undo_project(error, &steps).await),
     };
-    let Some(environment_id) = value_string(&chosen, "id") else {
-        return Err(undo_project(
-            "Dokploy did not return an environment id.".to_owned(),
-            &steps,
-        )
-        .await);
-    };
+    let environment_id = chosen.id;
     steps.push(format!(
         "{} environment {} in {}",
-        if chosen["existing"] == true {
-            "Using"
-        } else {
-            "Created"
-        },
-        value_string(&chosen, "name").unwrap_or_default(),
-        value_string(&chosen, "project_name").unwrap_or_default(),
+        if chosen.existing { "Using" } else { "Created" },
+        chosen.name,
+        chosen.project_name,
     ));
 
     let link = match create_resource(
@@ -1359,7 +1373,10 @@ async fn setup(request: SetupRemoteRequest<'_>) -> Result<SetupOutcome, String> 
 /// How much of a failed deployment's log is returned with its status.
 const FAILED_LOG_LINES: usize = 40;
 
-async fn latest_deployment(credential: Credential<'_>, resource: &str) -> Result<Value, String> {
+async fn latest_deployment(
+    credential: Credential<'_>,
+    resource: &str,
+) -> Result<DeploymentStatus, String> {
     let link: Link = serde_json::from_str(resource)
         .map_err(|error| format!("stored Dokploy resource is malformed: {error}"))?;
     let client = client_for(credential.url).await?;
@@ -1400,16 +1417,16 @@ async fn latest_deployment(credential: Credential<'_>, resource: &str) -> Result
         }
         _ => None,
     };
-    Ok(serde_json::json!({
-        "deployment": latest.map(|deployment| serde_json::json!({
-            "status": value_string(deployment, "status"),
-            "title": value_string(deployment, "title"),
-            "created_at": value_string(deployment, "createdAt"),
-            "error": value_string(deployment, "errorMessage"),
-            "log": log,
-        })),
-        "logs_url": format!("{}?tab=deployments", link.external_url),
-    }))
+    Ok(DeploymentStatus {
+        deployment: latest.map(|deployment| DeploymentSummary {
+            status: value_string(deployment, "status"),
+            title: value_string(deployment, "title"),
+            created_at: value_string(deployment, "createdAt"),
+            error: value_string(deployment, "errorMessage"),
+            log,
+        }),
+        logs_url: format!("{}?tab=deployments", link.external_url),
+    })
 }
 
 pub(crate) struct DokployIntegration;
@@ -1483,7 +1500,10 @@ impl Integration for DokployIntegration {
         Ok(())
     }
 
-    async fn remote_resources(&self, request: RemoteResourcesRequest<'_>) -> Result<Value, String> {
+    async fn remote_resources(
+        &self,
+        request: RemoteResourcesRequest<'_>,
+    ) -> Result<Catalog, String> {
         let client = client_for(request.credential.url).await?;
         list_resources(&client, request.credential.url, request.credential.api_key).await
     }
@@ -1491,7 +1511,7 @@ impl Integration for DokployIntegration {
     async fn create_remote_project(
         &self,
         request: CreateProjectRequest<'_>,
-    ) -> Result<Value, String> {
+    ) -> Result<ProjectSummary, String> {
         let client = client_for(request.credential.url).await?;
         create_project(
             &client,
@@ -1505,7 +1525,7 @@ impl Integration for DokployIntegration {
     async fn create_remote_environment(
         &self,
         request: CreateEnvironmentRequest<'_>,
-    ) -> Result<Value, String> {
+    ) -> Result<CreatedEnvironment, String> {
         let client = client_for(request.credential.url).await?;
         create_environment(
             &client,
@@ -1588,7 +1608,7 @@ impl Integration for DokployIntegration {
         &self,
         credential: Credential<'_>,
         resource: &str,
-    ) -> Result<Value, String> {
+    ) -> Result<DeploymentStatus, String> {
         latest_deployment(credential, resource).await
     }
 
@@ -1856,9 +1876,9 @@ mod tests {
             .unwrap();
         server.abort();
 
-        assert_eq!(reused["id"], "environment-1");
-        assert_eq!(reused["existing"], true);
-        assert_eq!(fresh["id"], "environment-2");
+        assert_eq!(reused.id, "environment-1");
+        assert!(reused.existing);
+        assert_eq!(fresh.id, "environment-2");
         assert_eq!(
             *created.lock().unwrap(),
             vec![json!({ "projectId": "project-1", "name": "staging" })]

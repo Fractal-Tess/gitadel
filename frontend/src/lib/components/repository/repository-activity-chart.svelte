@@ -29,9 +29,9 @@
 
   let hovered = $state<number | null>(null);
 
-  function smoothPath(points: ChartPoint[]): string {
+  function smoothPath(points: ChartPoint[]) {
     if (points.length === 0) return "";
-    if (points.length === 1) return `M ${points[0]!.x} ${points[0]!.y}`;
+    if (points.length === 1) return `M ${points[0]!.x} ${points[0]!.y}` as const;
 
     let path = `M ${points[0]!.x} ${points[0]!.y}`;
     for (let index = 0; index < points.length - 1; index += 1) {

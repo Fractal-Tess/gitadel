@@ -24,7 +24,7 @@
     codeSymbolsSchema,
     type Blob,
   } from "$lib/api/repositories.js";
-  import { errorMessage, requestJson } from "$lib/api/transport.js";
+  import { apiQuery, errorMessage, requestJson } from "$lib/api/transport.js";
   import { formatBytes } from "$lib/format.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as DropdownMenu from "$lib/components/ui/dropdown-menu/index.js";
@@ -186,9 +186,9 @@
     blameLoading = true;
     blameError = "";
     requestJson(
-      `${repositoryApi(pageState, "/blame")}?${new URLSearchParams({ rev: blob.commit_oid, path: blob.path })}`,
+      repositoryApi(pageState, "/blame"),
       blameSchema,
-      { signal: controller.signal },
+      { signal: controller.signal, query: apiQuery({ rev: blob.commit_oid, path: blob.path }) },
     )
       .then((value) => {
         if (!controller.signal.aborted) blame = value;
@@ -206,9 +206,9 @@
     const controller = new AbortController();
     outlineError = "";
     requestJson(
-      `${repositoryApi(pageState, "/symbols")}?${new URLSearchParams({ rev: blob.commit_oid, path: blob.path })}`,
+      repositoryApi(pageState, "/symbols"),
       codeSymbolsSchema,
-      { signal: controller.signal },
+      { signal: controller.signal, query: apiQuery({ rev: blob.commit_oid, path: blob.path }) },
     )
       .then((value) => {
         if (!controller.signal.aborted) outline = value;

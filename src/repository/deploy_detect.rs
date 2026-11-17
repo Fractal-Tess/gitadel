@@ -35,15 +35,19 @@ pub(crate) struct BuildSuggestion {
     pub build_path: String,
     /// Dockerfile name relative to `build_path`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub dockerfile: Option<String>,
     /// Compose file relative to the repository root, such as `./compose.yml`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub compose_path: Option<String>,
     /// The port the Dockerfile exposes, or the chosen Compose service's port.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub port: Option<u16>,
     /// The Compose service a domain should route to.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub service: Option<String>,
     /// Every service in a Compose file, with the port it listens on if known.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -57,6 +61,7 @@ pub(crate) struct BuildSuggestion {
 pub(crate) struct ComposeService {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub port: Option<u16>,
 }
 

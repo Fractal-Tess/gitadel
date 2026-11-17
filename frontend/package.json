@@ -6,13 +6,16 @@
   "packageManager": "bun@1.4.2",
   "scripts": {
     "dev": "vite dev",
-    "build": "vite build",
+    "build": "bun scripts/checked-build.ts",
+    "build:assets": "vite build",
+    "api:sdk": "openapi-ts && bun scripts/api-contracts.ts",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "bun test",
     "test:e2e": "playwright test",
     "preview": "vite preview"
   },
   "devDependencies": {
+    "@hey-api/openapi-ts": "0.99.0",
     "@internationalized/date": "^3.12.4",
     "@lucide/svelte": "^1.47.0",
     "@playwright/test": "1.63.0",

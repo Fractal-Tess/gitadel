@@ -7,7 +7,7 @@ import {
   type IconCandidates,
   type Repository,
 } from "$lib/api/repositories.js";
-import {
+import { apiQuery,
   errorMessage,
   jsonBody,
   requestEmpty,
@@ -79,12 +79,11 @@ export class RepositorySettingsState {
       throw caught;
     }
   }
-  async suggestTopics(query: string, init?: RequestInit): Promise<string[]> {
-    const parameters = query ? `?${new URLSearchParams({ q: query })}` : "";
+  async suggestTopics(query: string, init?: Omit<RequestInit, "method" | "body">): Promise<string[]> {
     const { topics } = await requestJson(
-      `/api/v1/topics${parameters}`,
+      "/api/v1/topics",
       topicsSchema,
-      init,
+      { ...init, query: apiQuery({ q: query || undefined }) },
     );
     return topics;
   }
@@ -124,7 +123,7 @@ export class RepositorySettingsState {
       });
     }
   }
-  async loadIconCandidates(init: RequestInit = {}): Promise<void> {
+  async loadIconCandidates(init: Omit<RequestInit, "method" | "body"> = {}): Promise<void> {
     if (this.iconPending || this.iconSelectionPending || !this.isScopeCurrent())
       return;
     const sequence = ++this.#iconRequestSequence;
@@ -302,13 +301,13 @@ export class RepositorySettingsState {
     window.location.assign("/");
   }
   private async lifecycleRequest(
-    path: string,
-    method: string,
-    notice: string,
+    ...[path, method, notice]: ["/archive", "POST" | "DELETE", string] | ["/delete", "POST", string]
   ): Promise<void> {
     this.lifecyclePending = true;
     try {
-      await requestEmpty(repositoryApi(this, path), { method });
+      if (path === "/delete") await requestEmpty(repositoryApi(this, "/delete"), { method: "POST" });
+      else if (method === "POST") await requestEmpty(repositoryApi(this, "/archive"), { method: "POST" });
+      else await requestEmpty(repositoryApi(this, "/archive"), { method: "DELETE" });
       this.invalidatePreload();
       this.invalidateData();
       const repository = this.getRepository();

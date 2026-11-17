@@ -36,10 +36,10 @@ export const systemRunnerScope: ActionRunnerScope = {
   namespace: null,
 };
 
-function runnerBase(scope: ActionRunnerScope): string {
+function runnerBase(scope: ActionRunnerScope) {
   return scope.namespace === null
-    ? "/api/v1/admin/actions"
-    : `/api/v1/namespaces/${encodeURIComponent(scope.namespace)}/actions`;
+    ? "/api/v1/admin/actions" as const
+    : `/api/v1/namespaces/${encodeURIComponent(scope.namespace)}/actions` as const;
 }
 
 export class ActionsSettingsState {

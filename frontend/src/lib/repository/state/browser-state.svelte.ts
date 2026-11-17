@@ -14,7 +14,7 @@ import {
   type Tree,
   treeSchema,
 } from "$lib/api/repositories.js";
-import { errorMessage, requestJson } from "$lib/api/transport.js";
+import { apiQuery, errorMessage, requestJson } from "$lib/api/transport.js";
 import { loadRepositoryHistory } from "$lib/repository/repository-data-cache.js";
 import { takePreloadedRepositoryOverview } from "$lib/repository/repository-preload.js";
 import { escapeHtml, languageLabel } from "$lib/repository/format.js";
@@ -24,7 +24,7 @@ import { repositoryApi } from "./shared.js";
 
 type BrowserCallbacks = {
   setError(message: string): void;
-  loadActionStatuses(oids: string[], init?: RequestInit): void;
+  loadActionStatuses(oids: string[], init?: Omit<RequestInit, "method" | "body">): void;
 };
 const MAX_HIGHLIGHT_CHARACTERS = 200_000;
 
@@ -100,7 +100,7 @@ export class RepositoryBrowserState {
   async loadOverview(
     revision: string,
     repositoryPath: string,
-    init: RequestInit,
+    init: Omit<RequestInit, "method" | "body">,
   ): Promise<boolean> {
     const preloaded = repositoryPath
       ? null
@@ -124,9 +124,9 @@ export class RepositoryBrowserState {
       }
       const [tree] = await Promise.all([
         requestJson(
-          `${repositoryApi(this, "/tree")}?${new URLSearchParams({ rev: revision })}`,
+          repositoryApi(this, "/tree"),
           treeSchema,
-          init,
+          { ...init, query: apiQuery({ rev: revision }) },
         ),
         this.loadStats(revision),
       ]);
@@ -142,9 +142,9 @@ export class RepositoryBrowserState {
         const parentTrees = await Promise.all(
           parentPaths.map((path) =>
             requestJson(
-              `${repositoryApi(this, "/tree")}?${this.query(revision, path)}`,
+              repositoryApi(this, "/tree"),
               treeSchema,
-              init,
+              { ...init, query: apiQuery(this.query(revision, path)) },
             ),
           ),
         );
@@ -158,9 +158,9 @@ export class RepositoryBrowserState {
           this.selectSubmodule(entry);
         } else {
           const blob = await requestJson(
-            `${repositoryApi(this, "/blob")}?${this.query(revision, repositoryPath)}`,
+            repositoryApi(this, "/blob"),
             blobSchema,
-            init,
+            { ...init, query: apiQuery(this.query(revision, repositoryPath)) },
           );
           if (init.signal?.aborted || this.#destroyed || !this.isScopeCurrent())
             return false;
@@ -178,9 +178,9 @@ export class RepositoryBrowserState {
       );
       if (readmeEntry) {
         const readme = await requestJson(
-          `${repositoryApi(this, "/blob")}?${this.query(revision, readmeEntry.path)}`,
+          repositoryApi(this, "/blob"),
           blobSchema,
-          init,
+          { ...init, query: apiQuery(this.query(revision, readmeEntry.path)) },
         );
         if (this.#destroyed || !this.isScopeCurrent()) return false;
         this.readme = readme;
@@ -195,7 +195,7 @@ export class RepositoryBrowserState {
   async loadHistory(
     revision: string,
     page: number,
-    init: RequestInit,
+    init: Omit<RequestInit, "method" | "body">,
     path = "",
   ): Promise<void> {
     const history = await loadRepositoryHistory(
@@ -215,7 +215,7 @@ export class RepositoryBrowserState {
       init,
     );
   }
-  async loadCommit(oid: string, init: RequestInit): Promise<void> {
+  async loadCommit(oid: string, init: Omit<RequestInit, "method" | "body">): Promise<void> {
     const [commit, diff] = await Promise.all([
       requestJson(
         repositoryApi(this, `/commits/${encodeURIComponent(oid)}`),
@@ -249,8 +249,9 @@ export class RepositoryBrowserState {
     this.loadingPaths = loading;
     try {
       const tree = await requestJson(
-        `${repositoryApi(this, "/tree")}?${this.query(revision, path)}`,
+        repositoryApi(this, "/tree"),
         treeSchema,
+        { query: apiQuery(this.query(revision, path)) },
       );
       if (!this.#destroyed && this.isScopeCurrent())
         this.expandedTrees = { ...this.expandedTrees, [path]: tree };
@@ -279,9 +280,9 @@ export class RepositoryBrowserState {
     this.#blobController = controller;
     try {
       const blob = await requestJson(
-        `${repositoryApi(this, "/blob")}?${this.query(revision, path)}`,
+        repositoryApi(this, "/blob"),
         blobSchema,
-        { signal: controller.signal },
+        { signal: controller.signal, query: apiQuery(this.query(revision, path)) },
       );
       if (
         this.#blobController === controller &&
@@ -303,8 +304,9 @@ export class RepositoryBrowserState {
     this.#statsRevision = revision;
     try {
       const stats = await requestJson(
-        `${repositoryApi(this, "/stats")}?${new URLSearchParams({ rev: revision })}`,
+        repositoryApi(this, "/stats"),
         z.array(languageStatSchema),
+        { query: apiQuery({ rev: revision }) },
       );
       if (
         !this.#destroyed &&
@@ -337,9 +339,7 @@ export class RepositoryBrowserState {
       /* escaped source remains visible */
     }
   }
-  private query(revision: string, path = ""): string {
-    const parameters = new URLSearchParams({ rev: revision });
-    if (path) parameters.set("path", path);
-    return parameters.toString();
+  private query(revision: string, path = "") {
+    return { rev: revision, path: path || undefined };
   }
 }

@@ -41,10 +41,10 @@
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
 
   const endpoint = $derived(
-    `/api/v1/repositories/${encodeURIComponent(repository.namespace)}/${encodeURIComponent(repository.name)}/mirror`,
+    `/api/v1/repositories/${encodeURIComponent(repository.namespace)}/${encodeURIComponent(repository.name)}/mirror` as const,
   );
   const identitiesEndpoint = $derived(
-    `/api/v1/namespaces/${encodeURIComponent(repository.namespace)}/mirror-identities`,
+    `/api/v1/namespaces/${encodeURIComponent(repository.namespace)}/mirror-identities` as const,
   );
   const compatibleIdentities = $derived(
     identities.filter((identity) =>

@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { organizationSchema, type Organization } from "$lib/api/organizations.js";
 import { repositoryOverviewSchema, repositorySchema } from "$lib/api/repositories.js";
-import { requestJson } from "$lib/api/transport.js";
+import { apiQuery, requestJson } from "$lib/api/transport.js";
 import {
   authorizationCacheScopeKey,
   type AuthorizationCacheScope,
@@ -84,15 +84,11 @@ function fetchExplore(
   namespace?: string | null,
   q?: string | null,
 ) {
-  const query = new URLSearchParams({
-    page: String(page),
-    per_page: String(perPage),
-  });
-  if (namespace) query.set("namespace", namespace);
-  if (q) query.set("q", q);
+  const query = { page, per_page: perPage, namespace: namespace || undefined, q: q || undefined };
   return requestJson(
-    `/api/v1/repositories/overview?${query}`,
+    "/api/v1/repositories/overview",
     repositoryOverviewSchema,
+    { query: apiQuery(query) },
   );
 }
 
@@ -158,9 +154,8 @@ export function peekExplore(
  * answer changes with every character.
  */
 export function searchRepositories(q: string, namespace?: string | null) {
-  const query = new URLSearchParams({ q });
-  if (namespace) query.set("namespace", namespace);
-  return requestJson(`/api/v1/repositories?${query}`, z.array(repositorySchema));
+  const query = { q, namespace: namespace || undefined };
+  return requestJson("/api/v1/repositories", z.array(repositorySchema), { query: apiQuery(query) });
 }
 
 export function preloadExplore(

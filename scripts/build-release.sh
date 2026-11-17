@@ -2,6 +2,8 @@
 set -eu
 
 bun install --cwd frontend --frozen-lockfile
+# Dependency fetching is explicit; contract generation itself runs offline.
+cargo fetch --locked
 
 # Vite does not empty frontend/build, so a leftover chunk can keep the
 # hydration global of an earlier build while index.html gets a fresh one, and

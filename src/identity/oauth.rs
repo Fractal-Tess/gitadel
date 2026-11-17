@@ -76,6 +76,17 @@ pub struct CreatedOauthApplicationResponse {
     application: OauthApplicationResponse,
 }
 
+#[utoipa::path(
+    get, path = "/me/oauth-applications",
+    operation_id = "get_me_oauth_applications",
+    summary = "List OAuth applications",
+    tag = "Account",
+    responses(
+        (status = 200, description = "Success", body = Vec<OauthApplicationResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_applications(
     State(state): State<IdentityState>,
     headers: axum::http::HeaderMap,
@@ -95,12 +106,24 @@ pub async fn list_applications(
     ))
 }
 
+#[utoipa::path(
+    post, path = "/me/oauth-applications",
+    operation_id = "post_me_oauth_applications",
+    summary = "Create an OAuth application",
+    tag = "Account",
+
+    responses(
+        (status = 201, description = "Success", body = crate::identity::oauth::CreatedOauthApplicationResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_application(
     State(state): State<IdentityState>,
     headers: axum::http::HeaderMap,
     jar: CookieJar,
     Json(request): Json<CreateOauthApplicationRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
     if actor.via_api_token {
         return Err(ApiError::forbidden(
@@ -143,6 +166,20 @@ pub async fn create_application(
     ))
 }
 
+#[utoipa::path(
+    delete, path = "/me/oauth-applications/{id}",
+    operation_id = "delete_me_oauth_applications_id",
+    summary = "Delete an OAuth application",
+    tag = "Account",
+    params(
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_application(
     State(state): State<IdentityState>,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
@@ -189,7 +226,7 @@ pub async fn delete_application(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct AuthorizeQuery {
     client_id: String,
     redirect_uri: String,
@@ -285,7 +322,7 @@ pub async fn authorize(
     Redirect::to(&format!("/oauth/consent?{}", serializer.finish())).into_response()
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct ApproveRequest {
     consent_token: String,
     decision: String,
@@ -372,7 +409,7 @@ pub async fn approve(
     authorization_success_redirect(&request.redirect_uri, &code, request.state.as_deref())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct TokenRequest {
     grant_type: String,
     client_id: String,
@@ -384,7 +421,7 @@ pub struct TokenRequest {
     refresh_token: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct TokenResponse {
     access_token: String,
     token_type: &'static str,
@@ -684,6 +721,17 @@ pub struct AuthorizationResponse {
 
 /// The applications holding unexpired, unrevoked access tokens for the user,
 /// one entry per application.
+#[utoipa::path(
+    get, path = "/me/authorizations",
+    operation_id = "get_me_authorizations",
+    summary = "List authorized OAuth applications",
+    tag = "Account",
+    responses(
+        (status = 200, description = "Success", body = Vec<AuthorizationResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_authorizations(
     State(state): State<IdentityState>,
     headers: axum::http::HeaderMap,
@@ -742,6 +790,20 @@ pub async fn list_authorizations(
 }
 
 /// Revokes every access token the application holds for the user.
+#[utoipa::path(
+    delete, path = "/me/authorizations/{client_id}",
+    operation_id = "delete_me_authorizations_client_id",
+    summary = "Revoke an OAuth application's access",
+    tag = "Account",
+    params(
+        ("client_id" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn revoke_authorization(
     State(state): State<IdentityState>,
     axum::extract::Path(client_id): axum::extract::Path<String>,
@@ -891,7 +953,7 @@ fn authorization_error_redirect(
     Redirect::to(url.as_str()).into_response()
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct OauthErrorResponse<'a> {
     error: &'a str,
     error_description: &'a str,

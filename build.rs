@@ -8,6 +8,14 @@ use std::{
 fn main() {
     build_actions_protocol();
 
+    if env::var_os("CARGO_FEATURE_API_CONTRACT_EXPORT").is_some() {
+        let output =
+            Path::new(&env::var_os("OUT_DIR").expect("OUT_DIR is set")).join("frontend_assets.rs");
+        fs::write(output, "static FRONTEND_ASSETS: &[(&str, &[u8])] = &[];\n")
+            .expect("could not generate empty exporter asset table");
+        return;
+    }
+
     let frontend_build = Path::new("frontend/build");
     println!("cargo:rerun-if-changed={}", frontend_build.display());
 
@@ -18,7 +26,52 @@ fn main() {
             "production frontend assets are missing; run `bun --cwd frontend run build` before `cargo build --release`"
         );
     }
+    if env::var("PROFILE").is_ok_and(|profile| profile == "release") {
+        let checked = fs::read_to_string(frontend_build.join(".api-contract-checked")).expect(
+            "production packaging requires the checked frontend build; run just frontend-build",
+        );
+        assert_eq!(
+            checked.trim(),
+            contract_fingerprint(),
+            "frontend types/contracts are stale; run just frontend-build before packaging"
+        );
+    }
     build_frontend_assets(frontend_build).expect("could not generate frontend asset lookup");
+}
+
+fn contract_fingerprint() -> String {
+    use sha2::{Digest, Sha256};
+    fn collect(path: &Path, files: &mut Vec<std::path::PathBuf>) {
+        if path.is_dir() {
+            for entry in fs::read_dir(path).expect("contract input directory is readable") {
+                collect(
+                    &entry.expect("contract input entry is readable").path(),
+                    files,
+                );
+            }
+        } else {
+            files.push(path.to_owned());
+        }
+    }
+    let inputs = fs::read_to_string("api/inputs.txt").expect("contract input list exists");
+    let mut files = Vec::new();
+    for input in inputs.lines().filter(|s| !s.is_empty()) {
+        println!("cargo:rerun-if-changed={input}");
+        collect(Path::new(input), &mut files);
+    }
+    // Match JavaScript's full relative-path ordering, rather than Path's
+    // component ordering (which differs for `name.rs` and `name/...`).
+    files.sort_by(|left, right| left.as_os_str().cmp(right.as_os_str()));
+    let mut digest = Sha256::new();
+    for file in files {
+        let bytes = fs::read(&file).expect("contract input is readable");
+        digest.update(file.to_str().expect("contract path is UTF-8"));
+        digest.update([0]);
+        digest.update(bytes.len().to_string());
+        digest.update([0]);
+        digest.update(bytes);
+    }
+    format!("{:x}", digest.finalize())
 }
 
 fn build_frontend_assets(root: &Path) -> io::Result<()> {

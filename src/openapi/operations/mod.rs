@@ -1,4 +1,6 @@
-//! Every `/api/v1` operation, one file per tag.
+//! Historical catalog, retained under the workspace deletion rule.
+//! This module is no longer compiled. Live contracts come from the registered
+//! handlers through `src/openapi/typed.rs`; see `API-CONTRACT.md`.
 
 mod account;
 mod actions;

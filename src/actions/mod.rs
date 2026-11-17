@@ -84,15 +84,18 @@ impl ActionsState {
     }
 
     pub(crate) fn api_router(&self) -> Router {
-        api::router()
-            .merge(secrets::router())
-            .merge(dispatch::router())
-            .with_state(self.clone())
+        contract_router().with_state(self.clone()).into()
     }
 
     pub(crate) fn cancel(&self) {
         self.shutdown.cancel();
     }
+}
+
+pub(crate) fn contract_router() -> utoipa_axum::router::OpenApiRouter<ActionsState> {
+    api::router()
+        .merge(secrets::router())
+        .merge(dispatch::router())
 }
 
 pub(crate) async fn bootstrap_system_runner(state: &ActionsState) -> anyhow::Result<()> {

@@ -153,7 +153,7 @@ export const dokployCreatedEnvironmentSchema = dokployEnvironmentSchema.extend({
   project_id: z.string(),
   project_name: z.string(),
   /** True when an environment with that name already existed and was reused. */
-  existing: z.boolean().optional(),
+  existing: z.boolean().default(false),
 });
 
 export const dokployResourceLinkSchema = z.object({
@@ -261,27 +261,27 @@ export type DokployCreatedEnvironment = z.infer<
 export function repositoryIntegrationsPath(
   namespace: string,
   name: string,
-): string {
-  return `/api/v1/repos/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/integrations`;
+): `/api/v1/repos/${string}/${string}/integrations` {
+  return `/api/v1/repos/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/integrations` as const;
 }
 
 export function repositoryIntegrationPath(
   namespace: string,
   name: string,
   id: string,
-): string {
-  return `${repositoryIntegrationsPath(namespace, name)}/${encodeURIComponent(id)}`;
+): `/api/v1/repos/${string}/${string}/integrations/${string}` {
+  return `${repositoryIntegrationsPath(namespace, name)}/${encodeURIComponent(id)}` as const;
 }
 
-export function namespaceIntegrationsPath(namespace: string): string {
-  return `/api/v1/namespaces/${encodeURIComponent(namespace)}/integrations`;
+export function namespaceIntegrationsPath(namespace: string): `/api/v1/namespaces/${string}/integrations` {
+  return `/api/v1/namespaces/${encodeURIComponent(namespace)}/integrations` as const;
 }
 
 export function namespaceIntegrationPath(
   namespace: string,
   id: string,
-): string {
-  return `${namespaceIntegrationsPath(namespace)}/${encodeURIComponent(id)}`;
+): `/api/v1/namespaces/${string}/integrations/${string}` {
+  return `${namespaceIntegrationsPath(namespace)}/${encodeURIComponent(id)}` as const;
 }
 
 // Repository integrations
@@ -351,7 +351,7 @@ export function deployRepositoryIntegration(
   return requestJson(
     `${repositoryIntegrationPath(namespace, name, id)}/deploy`,
     integrationDeployResultSchema,
-    { method: "POST", body: jsonBody({}) },
+    { method: "POST" },
   );
 }
 
@@ -581,7 +581,7 @@ export function bindIntegrationSource(
   return requestJson(
     `${namespaceIntegrationPath(namespace, id)}/source`,
     integrationSourceConnectionSchema,
-    { method: "POST", body: jsonBody({ action: "bind", source_id: sourceId }) },
+    { method: "POST", body: jsonBody({ action: "bind" as const, source_id: sourceId }) },
   );
 }
 
@@ -593,7 +593,7 @@ export function createIntegrationSource(
   return requestJson(
     `${namespaceIntegrationPath(namespace, id)}/source`,
     integrationSourceConnectionSchema,
-    { method: "POST", body: jsonBody({ action: "create", name }) },
+    { method: "POST", body: jsonBody({ action: "create" as const, name }) },
   );
 }
 
@@ -781,7 +781,7 @@ export function catalogWithProject(
  */
 export function catalogWithEnvironment(
   catalog: DokployRemoteCatalog,
-  created: DokployCreatedEnvironment,
+  created: Omit<DokployCreatedEnvironment, "existing"> & Partial<Pick<DokployCreatedEnvironment, "existing">>,
   createdProject: DokployProject | null,
 ): DokployRemoteCatalog {
   const projects = createdProject

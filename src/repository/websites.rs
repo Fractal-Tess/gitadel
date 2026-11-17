@@ -26,6 +26,22 @@ pub struct UpdateWebsites {
     pub websites: Vec<Website>,
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/websites",
+    operation_id = "get_repositories_namespace_name_websites",
+    summary = "List hosted website links",
+    tag = "Repositories",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = Vec<Website>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list(
     State(state): State<RepositoryState>,
     Path((namespace, name)): Path<(String, String)>,
@@ -45,6 +61,22 @@ pub async fn list(
     ))
 }
 
+#[utoipa::path(
+    put, path = "/repositories/{namespace}/{name}/websites",
+    operation_id = "put_repositories_namespace_name_websites",
+    summary = "Replace hosted websites in display order; requires repository management",
+    tag = "Repositories",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = Vec<Website>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update(
     State(state): State<RepositoryState>,
     Path((namespace, name)): Path<(String, String)>,

@@ -1,12 +1,13 @@
+use crate::openapi::ContractRouterExt;
+
 use std::collections::BTreeMap;
 
 use axum::{
-    Json, Router,
+    Json,
     body::Body,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
 };
 use axum_extra::extract::cookie::CookieJar;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -28,71 +29,49 @@ use super::{ActionsState, REQUIRED_RUNNER_VERSION, artifacts, rerun, runners, ru
 
 const MAX_LOG_QUERY_ROWS: u64 = 64;
 
-pub(crate) fn router() -> Router<ActionsState> {
-    Router::new()
-        .route(
-            "/repositories/{namespace}/{name}/actions/runs",
-            get(list_runs),
-        )
-        .route(
-            "/repositories/{namespace}/{name}/actions/statuses",
-            get(statuses),
-        )
-        .route(
-            "/repositories/{namespace}/{name}/actions/runs/{run_id}",
-            get(run_detail),
-        )
-        .route(
-            "/repositories/{namespace}/{name}/actions/runs/{run_id}/cancel",
-            post(cancel_run),
-        )
-        .route(
-            "/repositories/{namespace}/{name}/actions/runs/{run_id}/rerun",
-            post(rerun_run),
-        )
-        .route(
-            "/repositories/{namespace}/{name}/actions/runs/{run_id}/jobs/{job_id}/logs",
-            get(job_logs),
-        )
-        .route(
-            "/repositories/{namespace}/{name}/actions/runs/{run_id}/artifacts",
-            get(list_run_artifacts),
-        )
-        .route(
-            "/repositories/{namespace}/{name}/actions/runs/{run_id}/artifacts/{artifact_id}",
-            get(download_run_artifact),
-        )
-        .route(
-            "/namespaces/{namespace}/actions/runners",
-            get(list_namespace_runners),
-        )
-        .route(
-            "/namespaces/{namespace}/actions/runner-registration-tokens",
-            post(issue_namespace_registration),
-        )
-        .route(
-            "/namespaces/{namespace}/actions/runners/{runner_id}",
-            delete(remove_namespace_runner),
-        )
-        .route("/admin/actions/runners", get(list_system_runners))
-        .route(
-            "/admin/actions/runner-registration-tokens",
-            post(issue_system_registration),
-        )
-        .route(
-            "/admin/actions/runners/{runner_id}",
-            delete(remove_system_runner),
-        )
+pub(crate) fn router() -> utoipa_axum::router::OpenApiRouter<ActionsState> {
+    utoipa_axum::router::OpenApiRouter::new()
+        .api_routes(crate::openapi::routes!(crate::actions::api::list_runs))
+        .api_routes(crate::openapi::routes!(crate::actions::api::statuses))
+        .api_routes(crate::openapi::routes!(crate::actions::api::run_detail))
+        .api_routes(crate::openapi::routes!(crate::actions::api::cancel_run))
+        .api_routes(crate::openapi::routes!(crate::actions::api::rerun_run))
+        .api_routes(crate::openapi::routes!(crate::actions::api::job_logs))
+        .api_routes(crate::openapi::routes!(
+            crate::actions::api::list_run_artifacts
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::actions::api::download_run_artifact
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::actions::api::list_namespace_runners
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::actions::api::issue_namespace_registration
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::actions::api::remove_namespace_runner
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::actions::api::list_system_runners
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::actions::api::issue_system_registration
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::actions::api::remove_system_runner
+        ))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct RunsQuery {
     page: Option<usize>,
     per_page: Option<usize>,
     commit: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(crate) struct RunSummary {
     id: Uuid,
     number: i64,
@@ -135,7 +114,7 @@ impl From<action_run::Model> for RunSummary {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct RunListResponse {
     runs: Vec<RunSummary>,
     page: usize,
@@ -143,6 +122,23 @@ struct RunListResponse {
     has_more: bool,
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/actions/runs",
+    operation_id = "get_repositories_namespace_name_actions_runs",
+    summary = "List runs",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        RunsQuery,
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = RunListResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn list_runs(
     State(state): State<ActionsState>,
     Path((namespace, name)): Path<(String, String)>,
@@ -179,7 +175,7 @@ async fn list_runs(
     }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct JobResponse {
     id: i64,
     key: String,
@@ -197,7 +193,7 @@ struct JobResponse {
     completed_at: Option<chrono::DateTime<Utc>>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct RunDetailResponse {
     run: RunSummary,
     jobs: Vec<JobResponse>,
@@ -207,6 +203,23 @@ struct RunDetailResponse {
     diagnostic: Option<String>,
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/actions/runs/{run_id}",
+    operation_id = "get_repositories_namespace_name_actions_runs_run_id",
+    summary = "Run detail",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("run_id" = Uuid, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = RunDetailResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn run_detail(
     State(state): State<ActionsState>,
     Path((namespace, name, run_id)): Path<(String, String, Uuid)>,
@@ -263,6 +276,22 @@ fn job_response(job: action_job::Model) -> JobResponse {
     }
 }
 
+#[utoipa::path(
+    post, path = "/repositories/{namespace}/{name}/actions/runs/{run_id}/cancel",
+    operation_id = "post_repositories_namespace_name_actions_runs_run_id_cancel",
+    summary = "Cancel run",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("run_id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = RunSummary, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn cancel_run(
     State(state): State<ActionsState>,
     Path((namespace, name, run_id)): Path<(String, String, Uuid)>,
@@ -303,12 +332,29 @@ async fn cancel_run(
     Ok(Json(run.into()))
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, utoipa::ToSchema)]
 struct RerunRequest {
     #[serde(default)]
     failed_only: bool,
 }
 
+#[utoipa::path(
+    post, path = "/repositories/{namespace}/{name}/actions/runs/{run_id}/rerun",
+    operation_id = "post_repositories_namespace_name_actions_runs_run_id_rerun",
+    summary = "Rerun run",
+    tag = "Actions",
+    request_body = Option<RerunRequest>,
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("run_id" = Uuid, Path),
+    ),
+    responses(
+        (status = 201, description = "Success", body = RunSummary, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn rerun_run(
     State(state): State<ActionsState>,
     Path((namespace, name, run_id)): Path<(String, String, Uuid)>,
@@ -364,17 +410,37 @@ async fn rerun_run(
     Ok((StatusCode::CREATED, Json(run.into())))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct LogsQuery {
     cursor: Option<String>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct LogsResponse {
     text: String,
     next_cursor: Option<String>,
     complete: bool,
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/actions/runs/{run_id}/jobs/{job_id}/logs",
+    operation_id = "get_repositories_namespace_name_actions_runs_run_id_jobs_job_id_logs",
+    summary = "Job logs",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("run_id" = Uuid, Path),
+        ("job_id" = i64, Path),
+        LogsQuery,
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = LogsResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn job_logs(
     State(state): State<ActionsState>,
     Path((namespace, name, run_id, job_id)): Path<(String, String, Uuid, i64)>,
@@ -445,7 +511,8 @@ async fn job_logs(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct StatusesQuery {
     #[serde(default)]
     oids: String,
@@ -465,7 +532,7 @@ fn parse_status_oids(raw: &str) -> Result<Vec<&str>, ApiError> {
     }
     Ok(oids)
 }
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct CommitStatus {
     oid: String,
     status: String,
@@ -479,7 +546,7 @@ struct CommitStatus {
     contexts: Vec<ExternalCommitStatus>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct ExternalCommitStatus {
     context: String,
     state: String,
@@ -487,11 +554,28 @@ struct ExternalCommitStatus {
     target_url: Option<String>,
     updated_at: chrono::DateTime<Utc>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct StatusesResponse {
     statuses: Vec<CommitStatus>,
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/actions/statuses",
+    operation_id = "get_repositories_namespace_name_actions_statuses",
+    summary = "Statuses",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        StatusesQuery,
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = StatusesResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn statuses(
     State(state): State<ActionsState>,
     Path((namespace, name)): Path<(String, String)>,
@@ -568,7 +652,7 @@ async fn statuses(
     Ok(Json(StatusesResponse { statuses }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct RunnerResponse {
     id: i64,
     name: String,
@@ -578,7 +662,7 @@ struct RunnerResponse {
     last_seen_at: Option<chrono::DateTime<Utc>>,
     incompatibility: Option<String>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct RunnersResponse {
     runners: Vec<RunnerResponse>,
 }
@@ -622,6 +706,20 @@ async fn authorize_runner_scope(
     }
 }
 
+#[utoipa::path(
+    get, path = "/namespaces/{namespace}/actions/runners",
+    operation_id = "get_namespaces_namespace_actions_runners",
+    summary = "List namespace runners",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = RunnersResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn list_namespace_runners(
     State(state): State<ActionsState>,
     Path(namespace): Path<String>,
@@ -631,6 +729,17 @@ async fn list_namespace_runners(
     list_runners_for_scope(state, RunnerScope::Namespace(namespace), headers, jar).await
 }
 
+#[utoipa::path(
+    get, path = "/admin/actions/runners",
+    operation_id = "get_admin_actions_runners",
+    summary = "List system runners",
+    tag = "Actions",
+    responses(
+        (status = 200, description = "Success", body = RunnersResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn list_system_runners(
     State(state): State<ActionsState>,
     headers: HeaderMap,
@@ -679,12 +788,12 @@ fn runner_response(state: &ActionsState, runner: action_runner::Model) -> Runner
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct RegistrationRequest {
     name: String,
     labels: Vec<String>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct RegistrationResponse {
     token: String,
     expires_at: chrono::DateTime<Utc>,
@@ -694,6 +803,20 @@ struct RegistrationResponse {
     labels: Vec<String>,
 }
 
+#[utoipa::path(
+    post, path = "/namespaces/{namespace}/actions/runner-registration-tokens",
+    operation_id = "post_namespaces_namespace_actions_runner_registration_tokens",
+    summary = "Issue namespace registration",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = RegistrationResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn issue_namespace_registration(
     State(state): State<ActionsState>,
     Path(namespace): Path<String>,
@@ -711,6 +834,17 @@ async fn issue_namespace_registration(
     .await
 }
 
+#[utoipa::path(
+    post, path = "/admin/actions/runner-registration-tokens",
+    operation_id = "post_admin_actions_runner_registration_tokens",
+    summary = "Issue system registration",
+    tag = "Actions",
+    responses(
+        (status = 200, description = "Success", body = RegistrationResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn issue_system_registration(
     State(state): State<ActionsState>,
     headers: HeaderMap,
@@ -762,6 +896,21 @@ async fn issue_registration_for_scope(
     }))
 }
 
+#[utoipa::path(
+    delete, path = "/namespaces/{namespace}/actions/runners/{runner_id}",
+    operation_id = "delete_namespaces_namespace_actions_runners_runner_id",
+    summary = "Remove namespace runner",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+        ("runner_id" = i64, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = RunnerResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn remove_namespace_runner(
     State(state): State<ActionsState>,
     Path((namespace, runner_id)): Path<(String, i64)>,
@@ -778,6 +927,20 @@ async fn remove_namespace_runner(
     .await
 }
 
+#[utoipa::path(
+    delete, path = "/admin/actions/runners/{runner_id}",
+    operation_id = "delete_admin_actions_runners_runner_id",
+    summary = "Remove system runner",
+    tag = "Actions",
+    params(
+        ("runner_id" = i64, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = RunnerResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn remove_system_runner(
     State(state): State<ActionsState>,
     Path(runner_id): Path<i64>,
@@ -850,7 +1013,7 @@ async fn owned_run(
         .ok_or_else(ApiError::not_found)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct ArtifactListItem {
     download_url: String,
     id: i64,
@@ -862,11 +1025,28 @@ struct ArtifactListItem {
     expires_at: chrono::DateTime<Utc>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct ArtifactListResponse {
     artifacts: Vec<ArtifactListItem>,
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/actions/runs/{run_id}/artifacts",
+    operation_id = "get_repositories_namespace_name_actions_runs_run_id_artifacts",
+    summary = "List run artifacts",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("run_id" = Uuid, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = ArtifactListResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn list_run_artifacts(
     State(state): State<ActionsState>,
     Path((namespace, name, run_id)): Path<(String, String, Uuid)>,
@@ -915,6 +1095,24 @@ async fn list_run_artifacts(
     Ok(Json(ArtifactListResponse { artifacts }))
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/actions/runs/{run_id}/artifacts/{artifact_id}",
+    operation_id = "get_repositories_namespace_name_actions_runs_run_id_artifacts_artifact_id",
+    summary = "Download run artifact",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("run_id" = Uuid, Path),
+        ("artifact_id" = i64, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = crate::openapi::Binary, content_type = "application/octet-stream"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn download_run_artifact(
     State(state): State<ActionsState>,
     Path((namespace, name, run_id, artifact_id)): Path<(String, String, Uuid, i64)>,

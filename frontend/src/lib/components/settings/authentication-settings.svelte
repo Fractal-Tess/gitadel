@@ -126,20 +126,17 @@
   async function saveProvider(): Promise<void> {
     working = true;
     try {
-      const path = editing
-        ? `/api/v1/admin/authentication/providers/${editing.id}`
-        : "/api/v1/admin/authentication/providers";
-      const saved = await requestJson(path, adminOidcProviderSchema, {
-        method: editing ? "PUT" : "POST",
-        body: jsonBody({
+      const body = jsonBody({
           name: providerName,
           issuer_url: issuerUrl,
           client_id: clientId,
           client_secret: clientSecret || null,
           enabled: providerEnabled,
           auto_provision: autoProvision,
-        }),
-      });
+        });
+      const saved = editing
+        ? await requestJson(`/api/v1/admin/authentication/providers/${editing.id}`, adminOidcProviderSchema, { method: "PUT", body })
+        : await requestJson("/api/v1/admin/authentication/providers", adminOidcProviderSchema, { method: "POST", body });
       providers = editing
         ? providers.map((provider) =>
             provider.id === saved.id ? saved : provider,

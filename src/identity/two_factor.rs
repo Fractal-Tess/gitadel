@@ -220,6 +220,17 @@ pub struct TwoFactorStatusResponse {
     recovery_codes_remaining: u64,
 }
 
+#[utoipa::path(
+    get, path = "/me/two-factor",
+    operation_id = "get_me_two_factor",
+    summary = "Get two-factor authentication status",
+    tag = "Account",
+    responses(
+        (status = 200, description = "Success", body = TwoFactorStatusResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn status(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -249,6 +260,17 @@ pub struct EnrollmentResponse {
     qr_svg: String,
 }
 
+#[utoipa::path(
+    post, path = "/me/two-factor/enroll",
+    operation_id = "post_me_two_factor_enroll",
+    summary = "Start two-factor enrollment",
+    tag = "Account",
+    responses(
+        (status = 200, description = "Success", body = EnrollmentResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn start_enrollment(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -310,6 +332,18 @@ pub struct RecoveryCodesResponse {
     recovery_codes: Vec<String>,
 }
 
+#[utoipa::path(
+    post, path = "/me/two-factor/confirm",
+    operation_id = "post_me_two_factor_confirm",
+    summary = "Confirm two-factor enrollment",
+    tag = "Account",
+
+    responses(
+        (status = 201, description = "Success", body = RecoveryCodesResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn confirm_enrollment(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -385,6 +419,18 @@ async fn reauthenticate<C: ConnectionTrait>(
     ))
 }
 
+#[utoipa::path(
+    post, path = "/me/two-factor/recovery-codes",
+    operation_id = "post_me_two_factor_recovery_codes",
+    summary = "Regenerate recovery codes",
+    tag = "Account",
+
+    responses(
+        (status = 200, description = "Success", body = RecoveryCodesResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn regenerate_recovery_codes(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -413,6 +459,18 @@ pub async fn regenerate_recovery_codes(
     Ok(Json(RecoveryCodesResponse { recovery_codes }))
 }
 
+#[utoipa::path(
+    post, path = "/me/two-factor/disable",
+    operation_id = "post_me_two_factor_disable",
+    summary = "Disable two-factor authentication",
+    tag = "Account",
+
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn disable(
     State(state): State<IdentityState>,
     headers: HeaderMap,

@@ -222,6 +222,21 @@ pub struct UpdateWebhookRequest {
     config: Option<UpdateWebhookConfigRequest>,
 }
 
+#[utoipa::path(
+    get, path = "/repos/{namespace}/{name}/hooks",
+    operation_id = "get_repos_namespace_name_hooks",
+    summary = "List the repository's webhooks",
+    tag = "Webhooks",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = Vec<WebhookResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_webhooks(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -251,6 +266,22 @@ pub async fn list_webhooks(
     ))
 }
 
+#[utoipa::path(
+    get, path = "/repos/{namespace}/{name}/hooks/{id}",
+    operation_id = "get_repos_namespace_name_hooks_id",
+    summary = "Get a webhook",
+    tag = "Webhooks",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = WebhookResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn get_webhook(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, id)): AxumPath<(String, String, Uuid)>,
@@ -271,13 +302,29 @@ pub async fn get_webhook(
     Ok(Json(WebhookResponse::new(hook, &state, &repository)))
 }
 
+#[utoipa::path(
+    post, path = "/repos/{namespace}/{name}/hooks",
+    operation_id = "post_repos_namespace_name_hooks",
+    summary = "Create a webhook",
+    tag = "Webhooks",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 201, description = "Success", body = crate::repository::webhooks::WebhookResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_webhook(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(request): Json<CreateWebhookRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let (actor, repository) = state
         .authenticated_repository(
             &headers,
@@ -331,6 +378,23 @@ pub async fn create_webhook(
     ))
 }
 
+#[utoipa::path(
+    patch, path = "/repos/{namespace}/{name}/hooks/{id}",
+    operation_id = "patch_repos_namespace_name_hooks_id",
+    summary = "Update a webhook",
+    tag = "Webhooks",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = WebhookResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_webhook(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, id)): AxumPath<(String, String, Uuid)>,
@@ -380,6 +444,22 @@ pub async fn update_webhook(
     Ok(Json(WebhookResponse::new(hook, &state, &repository)))
 }
 
+#[utoipa::path(
+    delete, path = "/repos/{namespace}/{name}/hooks/{id}",
+    operation_id = "delete_repos_namespace_name_hooks_id",
+    summary = "Delete a webhook",
+    tag = "Webhooks",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_webhook(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, id)): AxumPath<(String, String, Uuid)>,
@@ -414,6 +494,22 @@ pub async fn delete_webhook(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get, path = "/repos/{namespace}/{name}/hooks/{id}/deliveries",
+    operation_id = "get_repos_namespace_name_hooks_id_deliveries",
+    summary = "List a webhook's recent deliveries",
+    tag = "Webhooks",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = Vec<WebhookDeliveryResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_webhook_deliveries(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, id)): AxumPath<(String, String, Uuid)>,
@@ -445,6 +541,23 @@ pub async fn list_webhook_deliveries(
     ))
 }
 
+#[utoipa::path(
+    get, path = "/repos/{namespace}/{name}/hooks/{id}/deliveries/{delivery_id}",
+    operation_id = "get_repos_namespace_name_hooks_id_deliveries_delivery_id",
+    summary = "Get a webhook delivery",
+    tag = "Webhooks",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = Uuid, Path),
+        ("delivery_id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = WebhookDeliveryResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn get_webhook_delivery(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, id, delivery_id)): AxumPath<(String, String, Uuid, Uuid)>,
@@ -466,6 +579,23 @@ pub async fn get_webhook_delivery(
     Ok(Json(WebhookDeliveryResponse::new(delivery)))
 }
 
+#[utoipa::path(
+    post, path = "/repos/{namespace}/{name}/hooks/{id}/deliveries/{delivery_id}/attempts",
+    operation_id = "post_repos_namespace_name_hooks_id_deliveries_delivery_id_attempts",
+    summary = "Redeliver a webhook delivery",
+    tag = "Webhooks",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = Uuid, Path),
+        ("delivery_id" = Uuid, Path),
+    ),
+    responses(
+        (status = 202, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn redeliver_webhook_delivery(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, id, delivery_id)): AxumPath<(String, String, Uuid, Uuid)>,
@@ -509,6 +639,22 @@ async fn find_delivery(
         .ok_or_else(ApiError::not_found)
 }
 
+#[utoipa::path(
+    post, path = "/repos/{namespace}/{name}/hooks/{id}/pings",
+    operation_id = "post_repos_namespace_name_hooks_id_pings",
+    summary = "Ping a webhook",
+    tag = "Webhooks",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn ping_webhook(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, id)): AxumPath<(String, String, Uuid)>,

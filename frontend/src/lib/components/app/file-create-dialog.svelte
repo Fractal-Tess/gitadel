@@ -67,7 +67,7 @@
     if (!current) return;
     loading = true;
     try {
-      const api = `/api/v1/repositories/${encodeURIComponent(current.namespace)}/${encodeURIComponent(current.name)}`;
+      const api = `/api/v1/repositories/${encodeURIComponent(current.namespace)}/${encodeURIComponent(current.name)}` as const;
       const [detail, refs] = await Promise.all([
         requestJson(api, repositorySchema),
         requestJson(`${api}/refs`, refsSchema),

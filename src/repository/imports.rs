@@ -78,14 +78,14 @@ impl ForgeProvider {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct DiscoverRequest {
     provider: String,
     namespace: String,
     identity_id: Uuid,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, utoipa::ToSchema)]
 pub struct RemoteRepositoryResponse {
     id: String,
     name: String,
@@ -99,7 +99,7 @@ pub struct RemoteRepositoryResponse {
     default_branch: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct DiscoveryResponse {
     provider: String,
     instance_url: String,
@@ -107,14 +107,14 @@ pub struct DiscoveryResponse {
     repositories: Vec<RemoteRepositoryResponse>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct CreateImportRequest {
     provider: String,
     identity_id: Uuid,
     target_namespace: String,
     repositories: Vec<ImportSelection>,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct CreateDirectImportRequest {
     remote_url: String,
     identity_id: Uuid,
@@ -123,14 +123,14 @@ pub struct CreateDirectImportRequest {
     visibility: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct ImportSelection {
     source_id: String,
     target_namespace: Option<String>,
     target_name: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct ImportItemResponse {
     id: Uuid,
     source_id: String,
@@ -145,7 +145,7 @@ pub struct ImportItemResponse {
     last_error: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct ImportResponse {
     id: Uuid,
     provider: String,
@@ -164,6 +164,18 @@ struct Discovery {
     repositories: Vec<RemoteRepositoryResponse>,
 }
 
+#[utoipa::path(
+    post, path = "/repository-imports/discover",
+    operation_id = "post_repository_imports_discover",
+    summary = "Discover",
+    tag = "Imports",
+
+    responses(
+        (status = 200, description = "Success", body = DiscoveryResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn discover(
     State(state): State<RepositoryState>,
     headers: HeaderMap,
@@ -187,6 +199,18 @@ pub async fn discover(
     }))
 }
 
+#[utoipa::path(
+    post, path = "/repository-imports",
+    operation_id = "post_repository_imports",
+    summary = "Create import",
+    tag = "Imports",
+
+    responses(
+        (status = 202, description = "Success", body = ImportResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_import(
     State(state): State<RepositoryState>,
     headers: HeaderMap,
@@ -327,6 +351,18 @@ pub async fn create_import(
     Ok((StatusCode::ACCEPTED, Json(import_response(import, items))))
 }
 
+#[utoipa::path(
+    post, path = "/repository-imports/direct",
+    operation_id = "post_repository_imports_direct",
+    summary = "Create direct import",
+    tag = "Imports",
+
+    responses(
+        (status = 202, description = "Success", body = ImportResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_direct_import(
     State(state): State<RepositoryState>,
     headers: HeaderMap,
@@ -415,6 +451,20 @@ pub async fn create_direct_import(
     ))
 }
 
+#[utoipa::path(
+    get, path = "/repository-imports/{id}",
+    operation_id = "get_repository_imports_id",
+    summary = "Get import",
+    tag = "Imports",
+    params(
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = ImportResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn get_import(
     State(state): State<RepositoryState>,
     AxumPath(id): AxumPath<Uuid>,
@@ -438,6 +488,20 @@ pub async fn get_import(
     Ok(Json(import_response(import, items)))
 }
 
+#[utoipa::path(
+    post, path = "/repository-imports/{id}/retry",
+    operation_id = "post_repository_imports_id_retry",
+    summary = "Retry import",
+    tag = "Imports",
+    params(
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 202, description = "Success", body = ImportResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn retry_import(
     State(state): State<RepositoryState>,
     AxumPath(id): AxumPath<Uuid>,
@@ -547,6 +611,20 @@ pub async fn retry_import(
     ))
 }
 
+#[utoipa::path(
+    delete, path = "/repository-imports/{id}",
+    operation_id = "delete_repository_imports_id",
+    summary = "Cancel import",
+    tag = "Imports",
+    params(
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn cancel_import(
     State(state): State<RepositoryState>,
     AxumPath(id): AxumPath<Uuid>,

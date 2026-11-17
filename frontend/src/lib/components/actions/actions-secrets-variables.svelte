@@ -16,6 +16,7 @@
   import {
     ActionsSecretsVariablesState,
     type ActionValueKind,
+    type ActionsBase,
   } from "$lib/settings/actions/secrets-variables-state.svelte.js";
 
   let {
@@ -23,7 +24,7 @@
     description,
   }: {
     /** Actions API prefix of the scope, without a trailing slash. */
-    base: string;
+    base: ActionsBase;
     /** Explains which workflows receive these values. */
     description: string;
   } = $props();

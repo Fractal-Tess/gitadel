@@ -1,4 +1,8 @@
 import { z } from "zod";
+import type { ContractArgs, ContractMethod, ContractPath, ContractSchema, JsonBody, ApiQuery, ApiSchema } from './contract.js';
+import type { ErrorEnvelope } from './generated/types.gen.js';
+
+type TransportInit = RequestInit & { query?: unknown };
 
 export class ApiFailure extends Error {
   constructor(
@@ -13,12 +17,13 @@ export class ApiFailure extends Error {
 /** `ApiFailure.code` of a request that never reached the server. */
 export const NETWORK_ERROR = "network_error";
 
-const errorSchema = z.object({
+const errorShape = z.object({
   error: z.object({
     code: z.string(),
     message: z.string(),
   }),
 });
+const errorSchema: ApiSchema<ErrorEnvelope, typeof errorShape> = errorShape;
 
 let unauthenticatedHandler: (() => void) | null = null;
 
@@ -43,7 +48,15 @@ function isAbort(caught: unknown): boolean {
   return caught instanceof DOMException && caught.name === "AbortError";
 }
 
-async function send(path: string, init: RequestInit): Promise<Response> {
+async function send(path: string, init: TransportInit): Promise<Response> {
+  const { query, ...httpInit } = init;
+  const parameters = new URLSearchParams();
+  if (query !== undefined && (query === null || typeof query !== 'object')) throw new TypeError('API query must be an object');
+  for (const [name, value] of Object.entries(query ?? {})) {
+    if (value === undefined || value === null) continue;
+    for (const item of Array.isArray(value) ? value : [value]) parameters.append(name, String(item));
+  }
+  const requestPath = parameters.size ? `${path}${path.includes('?') ? '&' : '?'}${parameters}` : path;
   const headers = new Headers(init.headers);
   headers.set("accept", "application/json");
   if (init.body !== undefined && !headers.has("content-type")) {
@@ -51,8 +64,8 @@ async function send(path: string, init: RequestInit): Promise<Response> {
   }
   let response: Response;
   try {
-    response = await fetch(path, {
-      ...init,
+    response = await fetch(requestPath, {
+      ...httpInit,
       headers,
       credentials: "same-origin",
     });
@@ -81,10 +94,15 @@ async function send(path: string, init: RequestInit): Promise<Response> {
   );
 }
 
+export function requestJson<const Url extends string, S extends z.ZodType, const M extends ContractMethod = 'GET'>(
+  path: Url,
+  schema: ContractSchema<NoInfer<Url>, NoInfer<M>, S>,
+  ...options: ContractArgs<NoInfer<Url>, M>
+): Promise<z.output<S>>;
 export async function requestJson<T>(
   path: string,
   schema: z.ZodType<T>,
-  init: RequestInit = {},
+  init: TransportInit = {},
 ): Promise<T> {
   const response = await send(path, init);
   const payload: unknown = await response.json().catch(() => null);
@@ -109,15 +127,24 @@ export async function requestJson<T>(
   return parsed.data;
 }
 
+export function requestEmpty<const Url extends string, const M extends ContractMethod = 'GET'>(
+  path: ContractPath<Url, M>,
+  ...options: ContractArgs<NoInfer<Url>, M>
+): Promise<void>;
 export async function requestEmpty(
   path: string,
-  init: RequestInit = {},
+  init: TransportInit = {},
 ): Promise<void> {
   await send(path, init);
 }
 
-export function jsonBody(value: unknown): string {
-  return JSON.stringify(value);
+export function jsonBody<T>(value: T): JsonBody<T> {
+  return JSON.stringify(value) as JsonBody<T>;
+}
+
+/** Keeps query keys as well as values tied to the generated operation DTO. */
+export function apiQuery<T extends object>(value: T): ApiQuery<T> {
+  return value as ApiQuery<T>;
 }
 
 /** The text to show a person for anything a request can throw. */

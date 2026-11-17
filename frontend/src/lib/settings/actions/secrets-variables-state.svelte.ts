@@ -25,6 +25,8 @@ function byName<T extends { name: string }>(left: T, right: T): number {
  * Secrets and variables of one Actions scope. `base` is the scope's Actions
  * API prefix, for example `/api/v1/namespaces/team/actions`.
  */
+export type ActionsBase = `/api/v1/namespaces/${string}/actions` | `/api/v1/repositories/${string}/${string}/actions`;
+
 export class ActionsSecretsVariablesState {
   secrets = $state.raw<ActionSecret[]>([]);
   variables = $state.raw<ActionVariable[]>([]);
@@ -32,12 +34,14 @@ export class ActionsSecretsVariablesState {
   loadError = $state<string | null>(null);
   pending = $state(false);
 
-  constructor(private readonly base: string) {}
+  constructor(private readonly base: ActionsBase) {}
 
+  #path<const K extends ActionValueKind>(kind: K): `${ActionsBase}/${K}`;
+  #path<const K extends ActionValueKind>(kind: K, name: string): `${ActionsBase}/${K}/${string}`;
   #path(kind: ActionValueKind, name?: string): string {
     return name === undefined
-      ? `${this.base}/${kind}`
-      : `${this.base}/${kind}/${encodeURIComponent(name.trim().toUpperCase())}`;
+      ? `${this.base}/${kind}` as const
+      : `${this.base}/${kind}/${encodeURIComponent(name.trim().toUpperCase())}` as const;
   }
 
   async load(): Promise<void> {
@@ -65,7 +69,7 @@ export class ActionsSecretsVariablesState {
     if (this.pending) return false;
     this.pending = true;
     try {
-      const init = { method: "PUT", body: jsonBody({ value }) };
+      const init = { method: "PUT" as const, body: jsonBody({ value }) };
       if (kind === "secrets") {
         const saved = await requestJson(
           this.#path(kind, name),

@@ -16,6 +16,13 @@ move the root server solely to adopt those example paths.
 
 ## Development loop
 
+REST changes must keep the handler-derived contract and generated frontend
+bindings in sync. Register REST handlers through the existing `api_routes`
+and `crate::openapi::routes!` helpers, use concrete JSON DTOs, then run
+`just api-generate` and `just api-check`. The frontend build runs real type
+checking before bundling; production Rust packaging requires its matching
+fingerprint. See [API-CONTRACT.md](API-CONTRACT.md) for coverage and limits.
+
 Enter the Nix dev shell, then run:
 
 ```bash

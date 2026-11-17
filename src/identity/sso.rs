@@ -55,13 +55,13 @@ pub(super) struct OidcAuthorization {
 
 pub(super) type OidcAuthorizations = Mutex<HashMap<String, OidcAuthorization>>;
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, utoipa::ToSchema)]
 pub struct PublicOidcProvider {
     id: Uuid,
     name: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct AuthenticationConfiguration {
     pub(super) password_enabled: bool,
     pub(super) passkey_enabled: bool,
@@ -92,18 +92,35 @@ pub async fn public_configuration(
     })
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct StartQuery {
     #[serde(default, rename = "returnTo")]
     return_to: Option<String>,
 }
 
+#[utoipa::path(
+    get, path = "/auth/oidc/{provider_id}/start",
+    operation_id = "get_auth_oidc_provider_id_start",
+    summary = "Start",
+    tag = "Authentication",
+    params(
+        ("provider_id" = Uuid, Path),
+        StartQuery,
+    ),
+    security(),
+    responses(
+        (status = 307, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn start(
     State(state): State<IdentityState>,
     Path(provider_id): Path<Uuid>,
     jar: CookieJar,
     Query(query): Query<StartQuery>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     state.enforce_auth_rate_limit("oidc-start", 30).await?;
     let provider = enabled_provider(state.database(), provider_id).await?;
     let client = oidc_client(&state, &provider).await?;
@@ -158,7 +175,8 @@ pub async fn start(
     Ok((jar.add(cookie), Redirect::to(authorization_url.as_str())))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct CallbackQuery {
     code: Option<String>,
     state: Option<String>,
@@ -166,6 +184,22 @@ pub struct CallbackQuery {
     error_description: Option<String>,
 }
 
+#[utoipa::path(
+    get, path = "/auth/oidc/{provider_id}/callback",
+    operation_id = "get_auth_oidc_provider_id_callback",
+    summary = "Callback",
+    tag = "Authentication",
+    params(
+        ("provider_id" = Uuid, Path),
+        CallbackQuery,
+    ),
+    security(),
+    responses(
+        (status = 303, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn callback(
     State(state): State<IdentityState>,
     Path(provider_id): Path<Uuid>,
@@ -513,7 +547,7 @@ async fn username_taken(
         .is_some())
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct AdminOidcProvider {
     id: Uuid,
     name: String,
@@ -550,6 +584,17 @@ fn admin_provider(
     })
 }
 
+#[utoipa::path(
+    get, path = "/admin/authentication",
+    operation_id = "get_admin_authentication",
+    summary = "Admin configuration",
+    tag = "Administration",
+    responses(
+        (status = 200, description = "Success", body = AuthenticationConfiguration, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn admin_configuration(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -559,12 +604,24 @@ pub async fn admin_configuration(
     Ok(Json(public_configuration(state.database()).await?))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct UpdateAuthenticationConfiguration {
     password_enabled: bool,
     passkey_enabled: bool,
 }
 
+#[utoipa::path(
+    put, path = "/admin/authentication",
+    operation_id = "put_admin_authentication",
+    summary = "Update configuration",
+    tag = "Administration",
+
+    responses(
+        (status = 200, description = "Success", body = AuthenticationConfiguration, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_configuration(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -647,6 +704,17 @@ async fn ensure_admin_login_available<C: ConnectionTrait>(
     ))
 }
 
+#[utoipa::path(
+    get, path = "/admin/authentication/providers",
+    operation_id = "get_admin_authentication_providers",
+    summary = "List providers",
+    tag = "Administration",
+    responses(
+        (status = 200, description = "Success", body = Vec<AdminOidcProvider>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_providers(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -662,7 +730,7 @@ pub async fn list_providers(
     ))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct SaveProviderRequest {
     name: String,
     issuer_url: String,
@@ -672,6 +740,18 @@ pub struct SaveProviderRequest {
     auto_provision: bool,
 }
 
+#[utoipa::path(
+    post, path = "/admin/authentication/providers",
+    operation_id = "post_admin_authentication_providers",
+    summary = "Create provider",
+    tag = "Administration",
+
+    responses(
+        (status = 201, description = "Success", body = AdminOidcProvider, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_provider(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -707,6 +787,21 @@ pub async fn create_provider(
     Ok((StatusCode::CREATED, Json(admin_provider(&state, provider)?)))
 }
 
+#[utoipa::path(
+    put, path = "/admin/authentication/providers/{provider_id}",
+    operation_id = "put_admin_authentication_providers_provider_id",
+    summary = "Update provider",
+    tag = "Administration",
+
+    params(
+        ("provider_id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = AdminOidcProvider, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_provider(
     State(state): State<IdentityState>,
     Path(provider_id): Path<Uuid>,
@@ -764,6 +859,20 @@ pub async fn update_provider(
     Ok(Json(admin_provider(&state, provider)?))
 }
 
+#[utoipa::path(
+    delete, path = "/admin/authentication/providers/{provider_id}",
+    operation_id = "delete_admin_authentication_providers_provider_id",
+    summary = "Delete provider",
+    tag = "Administration",
+    params(
+        ("provider_id" = Uuid, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_provider(
     State(state): State<IdentityState>,
     Path(provider_id): Path<Uuid>,

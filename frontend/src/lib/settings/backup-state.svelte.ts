@@ -15,7 +15,7 @@ import {
   type BackupSnapshot,
   type RestorePreflight,
 } from "$lib/api/backups.js";
-import {
+import { apiQuery,
   ApiFailure,
   errorMessage,
   jsonBody,
@@ -58,8 +58,8 @@ type Operation =
   | "validating"
   | "startingRestore";
 
-export function backupProviderPath(id: string): string {
-  return `/api/v1/admin/backup/providers/${encodeURIComponent(id)}`;
+export function backupProviderPath(id: string): `/api/v1/admin/backup/providers/${string}` {
+  return `/api/v1/admin/backup/providers/${encodeURIComponent(id)}` as const;
 }
 
 export function backupFileName(key: string): string {
@@ -281,7 +281,7 @@ export class BackupState {
 
   async #fetchSnapshots(
     providerId = this.selectedProviderId,
-    init: RequestInit = {},
+    init: Omit<RequestInit, "method" | "body"> = {},
   ): Promise<BackupSnapshot[]> {
     if (!providerId) return [];
     return requestJson(
@@ -340,16 +340,10 @@ export class BackupState {
   };
 
   saveProvider = async (value: BackupProviderEditorValue): Promise<void> => {
-    const saved = await requestJson(
-      value.id
-        ? backupProviderPath(value.id)
-        : "/api/v1/admin/backup/providers",
-      backupProviderSchema,
-      {
-        method: value.id ? "PUT" : "POST",
-        body: jsonBody(providerPayload(value)),
-      },
-    );
+    const body = jsonBody(providerPayload(value));
+    const saved = value.id
+      ? await requestJson(backupProviderPath(value.id), backupProviderSchema, { method: "PUT", body })
+      : await requestJson("/api/v1/admin/backup/providers", backupProviderSchema, { method: "POST", body });
     clearBackupSettingsCache();
     this.providers = value.id
       ? this.providers.map((provider) =>
@@ -555,8 +549,8 @@ export class BackupState {
     if (!snapshot || !provider) return;
     await this.#run("deleting", async () => {
       await requestEmpty(
-        `${backupProviderPath(provider.id)}/backups/object?key=${encodeURIComponent(snapshot.key)}`,
-        { method: "DELETE" },
+        `${backupProviderPath(provider.id)}/backups/object`,
+        { method: "DELETE", query: apiQuery({ key: snapshot.key }) },
       );
       clearBackupSettingsCache();
       this.snapshots = this.snapshots.filter(

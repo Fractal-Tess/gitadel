@@ -1,11 +1,12 @@
 import { z } from "zod";
+import type { GetAdminStorageDomainsDomainRepositoriesData } from './generated/types.gen.js';
 
 export const storageTargetKindSchema = z.enum(["filesystem", "s3"]);
 export type StorageTargetKind = z.infer<typeof storageTargetKindSchema>;
 
 const filesystemConfigurationSchema = z.object({
   kind: z.literal("filesystem"),
-  path: z.string().optional(),
+  path: z.string(),
 });
 
 const s3ConfigurationSchema = z.object({
@@ -191,15 +192,30 @@ export type StorageUsageFilters = {
 };
 
 /** API path of a storage domain, optionally followed by more segments. */
-export function storageDomainPath(domain: string, ...segments: string[]) {
+type PathSegments<S extends readonly string[]> = S extends readonly [infer H extends string, ...infer T extends string[]] ? `/${H}${PathSegments<T>}` : '';
+export function storageDomainPath<const S extends readonly string[]>(domain: string, ...segments: S): `/api/v1/admin/storage/domains/${string}${PathSegments<S>}` {
   return ["/api/v1/admin/storage/domains", domain, ...segments]
     .map((segment, index) =>
       index === 0 ? segment : encodeURIComponent(segment),
     )
-    .join("/");
+    .join("/") as `/api/v1/admin/storage/domains/${string}${PathSegments<S>}`;
 }
 
 /** The repository usage page request for `filters`. */
+export function storageDomainRepositoriesQuery(
+  filters: StorageUsageFilters, offset: number, limit = 10,
+): NonNullable<GetAdminStorageDomainsDomainRepositoriesData['query']> {
+  return {
+    limit, offset, sort: filters.sort,
+    search: filters.search.trim() || undefined,
+    owner: filters.owner.trim() || undefined,
+    owner_type: filters.ownerType.trim() || undefined,
+    min_bytes: filters.minBytes.trim() ? Number(filters.minBytes) : undefined,
+    max_bytes: filters.maxBytes.trim() ? Number(filters.maxBytes) : undefined,
+  };
+}
+
+/** Native HTTP URL for downloads and callers that do not parse JSON. */
 export function storageDomainRepositoriesPath(
   domain: string,
   filters: StorageUsageFilters,
@@ -221,5 +237,5 @@ export function storageDomainRepositoriesPath(
   for (const [name, value] of optional) {
     if (value.trim()) parameters.set(name, value.trim());
   }
-  return `${storageDomainPath(domain, "repositories")}?${parameters}`;
+  return `${storageDomainPath(domain, "repositories")}?${parameters}` as const;
 }

@@ -222,7 +222,7 @@ export function repositoryIconUrl(
   return updatedAt
     ? `/api/v1/repositories/${encodeURIComponent(namespace)}/${encodeURIComponent(
         name,
-      )}/icon?v=${encodeURIComponent(updatedAt)}`
+      )}/icon?v=${encodeURIComponent(updatedAt)}` as const
     : null;
 }
 
@@ -233,11 +233,11 @@ export function repositoryImageUrl(
   name: string,
   commitOid: string,
   path: string,
-): string {
+) {
   const parameters = new URLSearchParams({ rev: commitOid, path });
   return `/api/v1/repositories/${encodeURIComponent(namespace)}/${encodeURIComponent(
     name,
-  )}/image?${parameters}`;
+  )}/image?${parameters}` as const;
 }
 
 export type ImageMetadata = z.infer<typeof imageMetadataSchema>;

@@ -338,6 +338,21 @@ pub struct UpdateProtectionRuleRequest {
     allowed_users: Option<Vec<String>>,
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/protection-rules",
+    operation_id = "get_repositories_namespace_name_protection_rules",
+    summary = "List the repository's protection rules",
+    tag = "Branch protection",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = Vec<ProtectionRuleResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_rules(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -364,13 +379,29 @@ pub async fn list_rules(
     rule_responses(database, rules).await.map(Json)
 }
 
+#[utoipa::path(
+    post, path = "/repositories/{namespace}/{name}/protection-rules",
+    operation_id = "post_repositories_namespace_name_protection_rules",
+    summary = "Create a protection rule",
+    tag = "Branch protection",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 201, description = "Success", body = crate::repository::protection::ProtectionRuleResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_rule(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(request): Json<CreateProtectionRuleRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let (actor, repository) = state
         .authenticated_repository(
             &headers,
@@ -437,6 +468,23 @@ pub async fn create_rule(
     Ok((StatusCode::CREATED, Json(response)))
 }
 
+#[utoipa::path(
+    patch, path = "/repositories/{namespace}/{name}/protection-rules/{id}",
+    operation_id = "patch_repositories_namespace_name_protection_rules_id",
+    summary = "Update a protection rule",
+    tag = "Branch protection",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = ProtectionRuleResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_rule(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, id)): AxumPath<(String, String, Uuid)>,
@@ -521,6 +569,22 @@ pub async fn update_rule(
         .ok_or_else(|| ApiError::internal("updated protection rule vanished"))
 }
 
+#[utoipa::path(
+    delete, path = "/repositories/{namespace}/{name}/protection-rules/{id}",
+    operation_id = "delete_repositories_namespace_name_protection_rules_id",
+    summary = "Delete a protection rule",
+    tag = "Branch protection",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_rule(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, id)): AxumPath<(String, String, Uuid)>,

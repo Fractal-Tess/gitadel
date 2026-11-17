@@ -9,7 +9,7 @@
     memberSuggestionSchema,
     type MemberSuggestion,
   } from "$lib/api/organizations.js";
-  import { errorMessage, requestJson } from "$lib/api/transport.js";
+  import { apiQuery, errorMessage, requestJson } from "$lib/api/transport.js";
   import * as Avatar from "$lib/components/ui/avatar/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Command from "$lib/components/ui/command/index.js";
@@ -81,9 +81,9 @@
     searchError = null;
     try {
       suggestions = await requestJson(
-        `/api/v1/organizations/${encodeURIComponent(slug)}/member-suggestions?q=${encodeURIComponent(search)}`,
+        `/api/v1/organizations/${encodeURIComponent(slug)}/member-suggestions`,
         memberSuggestionSchema.array(),
-        { signal: controller.signal },
+        { signal: controller.signal, query: apiQuery({ q: search }) },
       );
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === "AbortError")

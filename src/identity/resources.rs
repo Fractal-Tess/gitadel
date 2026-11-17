@@ -34,6 +34,17 @@ pub struct SshKeyResponse {
     last_used_at: Option<chrono::DateTime<Utc>>,
 }
 
+#[utoipa::path(
+    get, path = "/me/ssh-keys",
+    operation_id = "get_me_ssh_keys",
+    summary = "List SSH keys",
+    tag = "Account",
+    responses(
+        (status = 200, description = "Success", body = Vec<SshKeyResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_ssh_keys(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -54,12 +65,24 @@ pub struct CreateSshKeyRequest {
     public_key: String,
 }
 
+#[utoipa::path(
+    post, path = "/me/ssh-keys",
+    operation_id = "post_me_ssh_keys",
+    summary = "Add an SSH key",
+    tag = "Account",
+
+    responses(
+        (status = 201, description = "Success", body = crate::identity::resources::SshKeyResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_ssh_key(
     State(state): State<IdentityState>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(request): Json<CreateSshKeyRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let actor = state.authenticate(&headers, &jar, SCOPE_SSH_KEYS).await?;
     let name = validate_name(&request.name, "SSH key name")?;
     let key = PublicKey::from_openssh(request.public_key.trim())
@@ -109,6 +132,20 @@ pub async fn create_ssh_key(
     Ok((StatusCode::CREATED, Json(ssh_key_response(row))))
 }
 
+#[utoipa::path(
+    delete, path = "/me/ssh-keys/{id}",
+    operation_id = "delete_me_ssh_keys_id",
+    summary = "Delete an SSH key",
+    tag = "Account",
+    params(
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_ssh_key(
     State(state): State<IdentityState>,
     Path(id): Path<Uuid>,
@@ -159,6 +196,17 @@ pub struct TokenResponse {
     last_used_at: Option<chrono::DateTime<Utc>>,
 }
 
+#[utoipa::path(
+    get, path = "/me/tokens",
+    operation_id = "get_me_tokens",
+    summary = "List API tokens",
+    tag = "Account",
+    responses(
+        (status = 200, description = "Success", body = Vec<TokenResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_tokens(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -192,12 +240,24 @@ pub struct CreatedTokenResponse {
     details: TokenResponse,
 }
 
+#[utoipa::path(
+    post, path = "/me/tokens",
+    operation_id = "post_me_tokens",
+    summary = "Create an API token",
+    tag = "Account",
+
+    responses(
+        (status = 201, description = "Success", body = crate::identity::resources::CreatedTokenResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_token(
     State(state): State<IdentityState>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(request): Json<CreateTokenRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
     if actor.via_api_token {
         return Err(ApiError::forbidden(
@@ -248,6 +308,20 @@ pub async fn create_token(
     ))
 }
 
+#[utoipa::path(
+    delete, path = "/me/tokens/{id}",
+    operation_id = "delete_me_tokens_id",
+    summary = "Revoke an API token",
+    tag = "Account",
+    params(
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn revoke_token(
     State(state): State<IdentityState>,
     Path(id): Path<Uuid>,
@@ -333,6 +407,21 @@ pub struct NamespaceResponse {
     kind: String,
 }
 
+#[utoipa::path(
+    get, path = "/namespaces/{slug}",
+    operation_id = "get_namespaces_slug",
+    summary = "Get whether a namespace is a user or an organization",
+    tag = "Namespaces",
+    params(
+        ("slug" = String, Path),
+    ),
+    security(),
+    responses(
+        (status = 200, description = "Success", body = NamespaceResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn get_namespace(
     State(state): State<IdentityState>,
     Path(slug): Path<String>,
@@ -356,6 +445,17 @@ pub struct OrganizationResponse {
     role: String,
 }
 
+#[utoipa::path(
+    get, path = "/organizations",
+    operation_id = "get_organizations",
+    summary = "List the organizations you belong to",
+    tag = "Organizations",
+    responses(
+        (status = 200, description = "Success", body = Vec<OrganizationResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_organizations(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -391,12 +491,24 @@ pub struct CreateOrganizationRequest {
     display_name: String,
 }
 
+#[utoipa::path(
+    post, path = "/organizations",
+    operation_id = "post_organizations",
+    summary = "Create an organization",
+    tag = "Organizations",
+
+    responses(
+        (status = 201, description = "Success", body = crate::identity::resources::OrganizationResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_organization(
     State(state): State<IdentityState>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(request): Json<CreateOrganizationRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
     let slug = validate_slug(&request.slug, "Organization name")?;
     let display_name = validate_name(&request.display_name, "Display name")?;
@@ -510,6 +622,21 @@ async fn update_organization_profile(
     active.update(transaction).await
 }
 
+#[utoipa::path(
+    put, path = "/organizations/{slug}",
+    operation_id = "put_organizations_slug",
+    summary = "Rename or update an organization",
+    tag = "Organizations",
+
+    params(
+        ("slug" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = OrganizationResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_organization(
     State(state): State<IdentityState>,
     Path(slug): Path<String>,
@@ -553,6 +680,20 @@ pub async fn update_organization(
 
 /// Organization owners and instance administrators may delete an organization
 /// once it owns no repositories.
+#[utoipa::path(
+    delete, path = "/organizations/{slug}",
+    operation_id = "delete_organizations_slug",
+    summary = "Delete an empty organization",
+    tag = "Organizations",
+    params(
+        ("slug" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_organization(
     State(state): State<IdentityState>,
     Path(slug): Path<String>,
@@ -590,6 +731,20 @@ pub struct MemberResponse {
     created_at: chrono::DateTime<Utc>,
 }
 
+#[utoipa::path(
+    get, path = "/organizations/{slug}/members",
+    operation_id = "get_organizations_slug_members",
+    summary = "List an organization's members",
+    tag = "Organizations",
+    params(
+        ("slug" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = Vec<MemberResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_members(
     State(state): State<IdentityState>,
     Path(slug): Path<String>,
@@ -619,7 +774,8 @@ pub async fn list_members(
     Ok(Json(response))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct MemberSuggestionsQuery {
     #[serde(default)]
     q: String,
@@ -632,6 +788,21 @@ pub struct MemberSuggestionResponse {
     avatar_updated_at: Option<chrono::DateTime<Utc>>,
 }
 
+#[utoipa::path(
+    get, path = "/organizations/{slug}/member-suggestions",
+    operation_id = "get_organizations_slug_member_suggestions",
+    summary = "Suggest users to add as members",
+    tag = "Organizations",
+    params(
+        ("slug" = String, Path),
+        MemberSuggestionsQuery,
+    ),
+    responses(
+        (status = 200, description = "Success", body = Vec<MemberSuggestionResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_member_suggestions(
     State(state): State<IdentityState>,
     Path(slug): Path<String>,
@@ -694,13 +865,28 @@ pub struct AddMemberRequest {
     role: String,
 }
 
+#[utoipa::path(
+    post, path = "/organizations/{slug}/members",
+    operation_id = "post_organizations_slug_members",
+    summary = "Add a member to an organization",
+    tag = "Organizations",
+
+    params(
+        ("slug" = String, Path),
+    ),
+    responses(
+        (status = 201, description = "Success", body = crate::identity::resources::MemberResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn add_member(
     State(state): State<IdentityState>,
     Path(slug): Path<String>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(request): Json<AddMemberRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let actor = state.authenticate(&headers, &jar, SCOPE_WRITE).await?;
     let organization = owned_organization(&state, &slug, actor.user.id).await?;
     if request.role != "owner" && request.role != "member" {
@@ -752,6 +938,21 @@ pub async fn add_member(
     ))
 }
 
+#[utoipa::path(
+    delete, path = "/organizations/{slug}/members/{username}",
+    operation_id = "delete_organizations_slug_members_username",
+    summary = "Remove a member from an organization",
+    tag = "Organizations",
+    params(
+        ("slug" = String, Path),
+        ("username" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn remove_member(
     State(state): State<IdentityState>,
     Path((slug, username)): Path<(String, String)>,
@@ -846,12 +1047,27 @@ pub struct AuditEventResponse {
 ///
 /// `before` is the stable way to page: pass the `id` of the last event of the
 /// previous page. `offset` skips rows instead and shifts as events arrive.
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct AuditCursor {
     offset: Option<u64>,
     before: Option<i64>,
 }
 
+#[utoipa::path(
+    get, path = "/audit",
+    operation_id = "get_audit",
+    summary = "List the instance audit history",
+    tag = "Account",
+    params(
+        Pagination,
+    ),
+    responses(
+        (status = 200, description = "Success", body = Vec<AuditEventResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_audit(
     State(state): State<IdentityState>,
     headers: HeaderMap,

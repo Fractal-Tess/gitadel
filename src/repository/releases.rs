@@ -96,13 +96,15 @@ pub struct UpdateReleaseRequest {
     prerelease: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListReleasesQuery {
     page: Option<u64>,
     per_page: Option<u64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct UploadAssetQuery {
     name: String,
 }
@@ -164,6 +166,17 @@ pub struct ForgejoUserResponse {
     username: String,
 }
 
+#[utoipa::path(
+    get, path = "/user",
+    operation_id = "get_user",
+    summary = "Get the current user, Forgejo-compatible",
+    tag = "Account",
+    responses(
+        (status = 200, description = "Success", body = ForgejoUserResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn forgejo_current_user(
     State(state): State<RepositoryState>,
     headers: HeaderMap,
@@ -196,13 +209,30 @@ pub async fn forgejo_current_user(
     }))
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/releases",
+    operation_id = "get_repositories_namespace_name_releases",
+    summary = "List the repository's releases",
+    tag = "Releases",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ListReleasesQuery,
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = Vec<crate::repository::releases::ReleaseResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_releases(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
     Query(query): Query<ListReleasesQuery>,
     headers: HeaderMap,
     jar: CookieJar,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let repository = readable_repository(&state, &headers, &jar, &namespace, &name).await?;
     let window = PageWindow::new(query.page, query.per_page);
     let select = repository_release::Entity::find()
@@ -224,6 +254,23 @@ pub async fn list_releases(
     ))
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/releases/{id}",
+    operation_id = "get_repositories_namespace_name_releases_id",
+    summary = "Get a release",
+    tag = "Releases",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = Uuid, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = ReleaseResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn get_release(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, id)): AxumPath<(String, String, Uuid)>,
@@ -238,13 +285,29 @@ pub async fn get_release(
     ))
 }
 
+#[utoipa::path(
+    post, path = "/repositories/{namespace}/{name}/releases",
+    operation_id = "post_repositories_namespace_name_releases",
+    summary = "Create a release",
+    tag = "Releases",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 201, description = "Success", body = crate::repository::releases::ReleaseResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_release(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(request): Json<CreateReleaseRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let (repository, actor_id) =
         writable_release_repository(&state, &headers, &jar, &namespace, &name).await?;
     let target_revision = validate_target_revision(&request.target_revision)?;
@@ -300,6 +363,22 @@ pub async fn create_release(
     ))
 }
 
+#[utoipa::path(
+    get, path = "/repos/{namespace}/{name}/git/refs/tags/{tag}",
+    operation_id = "get_repos_namespace_name_git_refs_tags_tag",
+    summary = "Get a tag's commit (Forgejo compatible)",
+    tag = "Gitea compatibility",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("tag" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = ForgejoTagResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn forgejo_get_tag(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, tag)): AxumPath<(String, String, String)>,
@@ -315,6 +394,22 @@ pub async fn forgejo_get_tag(
     }))
 }
 
+#[utoipa::path(
+    post, path = "/repos/{namespace}/{name}/releases",
+    operation_id = "post_repos_namespace_name_releases",
+    summary = "Create a release (Forgejo compatible)",
+    tag = "Releases",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 201, description = "Success", body = ForgejoReleaseResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn forgejo_create_release(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -380,6 +475,22 @@ pub async fn forgejo_create_release(
     ))
 }
 
+#[utoipa::path(
+    get, path = "/repos/{namespace}/{name}/releases/tags/{tag}",
+    operation_id = "get_repos_namespace_name_releases_tags_tag",
+    summary = "Get the release for a tag (Forgejo compatible)",
+    tag = "Releases",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("tag" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = ForgejoReleaseResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn forgejo_get_release_by_tag(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, tag)): AxumPath<(String, String, String)>,
@@ -400,6 +511,23 @@ pub async fn forgejo_get_release_by_tag(
     ))
 }
 
+#[utoipa::path(
+    patch, path = "/repos/{namespace}/{name}/releases/{id}",
+    operation_id = "patch_repos_namespace_name_releases_id",
+    summary = "Update a release (Forgejo compatible)",
+    tag = "Releases",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = i64, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = ForgejoReleaseResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn forgejo_update_release(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, id)): AxumPath<(String, String, i64)>,
@@ -416,13 +544,36 @@ pub async fn forgejo_update_release(
     ))
 }
 
+#[derive(utoipa::ToSchema)]
+#[expect(dead_code, reason = "native multipart field parsed by the handler")]
+struct ForgejoAssetUpload {
+    attachment: crate::openapi::Binary,
+}
+
+#[utoipa::path(
+    post, path = "/repos/{namespace}/{name}/releases/{id}/assets",
+    operation_id = "post_repos_namespace_name_releases_id_assets",
+    summary = "Upload a release asset (Forgejo compatible)",
+    tag = "Releases",
+    request_body(content = ForgejoAssetUpload, content_type = "multipart/form-data"),
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = i64, Path),
+    ),
+    responses(
+        (status = 201, description = "Success", body = crate::repository::releases::ForgejoReleaseAssetResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn forgejo_upload_asset(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, id)): AxumPath<(String, String, i64)>,
     headers: HeaderMap,
     jar: CookieJar,
     mut multipart: Multipart,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let (repository, actor_id) =
         writable_release_repository(&state, &headers, &jar, &namespace, &name).await?;
     let field = multipart
@@ -458,6 +609,23 @@ pub async fn forgejo_upload_asset(
     ))
 }
 
+#[utoipa::path(
+    patch, path = "/repositories/{namespace}/{name}/releases/{id}",
+    operation_id = "patch_repositories_namespace_name_releases_id",
+    summary = "Update a release",
+    tag = "Releases",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = ReleaseResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_release(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, id)): AxumPath<(String, String, Uuid)>,
@@ -516,6 +684,22 @@ pub async fn update_release(
     ))
 }
 
+#[utoipa::path(
+    delete, path = "/repositories/{namespace}/{name}/releases/{id}",
+    operation_id = "delete_repositories_namespace_name_releases_id",
+    summary = "Delete a release",
+    tag = "Releases",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_release(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, id)): AxumPath<(String, String, Uuid)>,
@@ -564,6 +748,24 @@ pub async fn delete_release(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    put, path = "/repositories/{namespace}/{name}/releases/{id}/assets",
+    operation_id = "put_repositories_namespace_name_releases_id_assets",
+    summary = "Upload a release asset",
+    tag = "Releases",
+    request_body(content = crate::openapi::Binary, content_type = "application/octet-stream"),
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = Uuid, Path),
+        UploadAssetQuery,
+    ),
+    responses(
+        (status = 201, description = "Success", body = crate::repository::releases::ReleaseAssetResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn upload_asset(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, id)): AxumPath<(String, String, Uuid)>,
@@ -571,7 +773,7 @@ pub async fn upload_asset(
     headers: HeaderMap,
     jar: CookieJar,
     body: Body,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let (repository, actor_id) =
         writable_release_repository(&state, &headers, &jar, &namespace, &name).await?;
     let content_type = headers
@@ -708,6 +910,24 @@ async fn store_release_asset(
     Ok(asset)
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/releases/{release_id}/assets/{asset_id}",
+    operation_id = "get_repositories_namespace_name_releases_release_id_assets_asset_id",
+    summary = "Download a release asset",
+    tag = "Releases",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("release_id" = Uuid, Path),
+        ("asset_id" = Uuid, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = crate::openapi::Binary, content_type = "application/octet-stream"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn download_asset(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, release_id, asset_id)): AxumPath<(String, String, Uuid, Uuid)>,
@@ -764,6 +984,23 @@ pub async fn download_asset(
     Ok(response)
 }
 
+#[utoipa::path(
+    delete, path = "/repositories/{namespace}/{name}/releases/{release_id}/assets/{asset_id}",
+    operation_id = "delete_repositories_namespace_name_releases_release_id_assets_asset_id",
+    summary = "Delete a release asset",
+    tag = "Releases",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("release_id" = Uuid, Path),
+        ("asset_id" = Uuid, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_asset(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, release_id, asset_id)): AxumPath<(String, String, Uuid, Uuid)>,

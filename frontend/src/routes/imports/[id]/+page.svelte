@@ -103,7 +103,7 @@
       const next = await requestJson(
         `/api/v1/repository-imports/${encodeURIComponent(id)}/retry`,
         repositoryImportSchema,
-        { method: "POST", body: jsonBody({ token }) },
+        { method: "POST" },
       );
       token = "";
       if (sequence !== loadSequence) return;

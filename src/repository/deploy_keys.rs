@@ -192,6 +192,21 @@ fn default_read_only() -> bool {
     true
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/deploy-keys",
+    operation_id = "get_repositories_namespace_name_deploy_keys",
+    summary = "List the repository's deploy keys",
+    tag = "Collaborators",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = Vec<DeployKeyResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_deploy_keys(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -216,13 +231,29 @@ pub async fn list_deploy_keys(
     Ok(Json(keys.into_iter().map(Into::into).collect()))
 }
 
+#[utoipa::path(
+    post, path = "/repositories/{namespace}/{name}/deploy-keys",
+    operation_id = "post_repositories_namespace_name_deploy_keys",
+    summary = "Add a deploy key",
+    tag = "Collaborators",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 201, description = "Success", body = crate::repository::deploy_keys::DeployKeyResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_deploy_key(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(request): Json<CreateDeployKeyRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let (actor, repository) = state
         .authenticated_repository(
             &headers,
@@ -279,6 +310,22 @@ pub async fn create_deploy_key(
     Ok((StatusCode::CREATED, Json(DeployKeyResponse::from(row))))
 }
 
+#[utoipa::path(
+    delete, path = "/repositories/{namespace}/{name}/deploy-keys/{id}",
+    operation_id = "delete_repositories_namespace_name_deploy_keys_id",
+    summary = "Delete a deploy key",
+    tag = "Collaborators",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_deploy_key(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, id)): AxumPath<(String, String, Uuid)>,

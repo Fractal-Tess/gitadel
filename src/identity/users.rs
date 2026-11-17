@@ -31,7 +31,7 @@ use crate::entity::{
     repository_issue, repository_release, session, user, user_totp,
 };
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct AdminUserResponse {
     id: Uuid,
     username: String,
@@ -56,13 +56,14 @@ impl AdminUserResponse {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct AdminUserPage {
     users: Vec<AdminUserResponse>,
     total: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct UserListQuery {
     #[serde(default)]
     q: String,
@@ -70,6 +71,20 @@ pub struct UserListQuery {
     offset: Option<u64>,
 }
 
+#[utoipa::path(
+    get, path = "/admin/users",
+    operation_id = "get_admin_users",
+    summary = "List users",
+    tag = "Administration",
+    params(
+        UserListQuery,
+    ),
+    responses(
+        (status = 200, description = "Success", body = AdminUserPage, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_users(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -226,6 +241,20 @@ async fn disable_account<C: ConnectionTrait>(
     Ok(active.update(connection).await?)
 }
 
+#[utoipa::path(
+    post, path = "/admin/users/{username}/disable",
+    operation_id = "post_admin_users_username_disable",
+    summary = "Disable user",
+    tag = "Administration",
+    params(
+        ("username" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = AdminUserResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn disable_user(
     State(state): State<IdentityState>,
     Path(username): Path<String>,
@@ -249,6 +278,20 @@ pub async fn disable_user(
     Ok(Json(AdminUserResponse::new(account, two_factor)))
 }
 
+#[utoipa::path(
+    post, path = "/admin/users/{username}/enable",
+    operation_id = "post_admin_users_username_enable",
+    summary = "Enable user",
+    tag = "Administration",
+    params(
+        ("username" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = AdminUserResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn enable_user(
     State(state): State<IdentityState>,
     Path(username): Path<String>,
@@ -393,6 +436,20 @@ async fn sole_owned_organizations<C: ConnectionTrait>(
     Ok(slugs)
 }
 
+#[utoipa::path(
+    delete, path = "/admin/users/{username}",
+    operation_id = "delete_admin_users_username",
+    summary = "Delete user",
+    tag = "Administration",
+    params(
+        ("username" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_user(
     State(state): State<IdentityState>,
     Path(username): Path<String>,
@@ -417,6 +474,20 @@ pub async fn delete_user(
 
 /// Lets an administrator recover an account whose authenticator and recovery
 /// codes are both lost. The user can enroll again after signing in.
+#[utoipa::path(
+    delete, path = "/admin/users/{username}/two-factor",
+    operation_id = "delete_admin_users_username_two_factor",
+    summary = "Reset two factor",
+    tag = "Administration",
+    params(
+        ("username" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn reset_two_factor(
     State(state): State<IdentityState>,
     Path(username): Path<String>,
@@ -453,6 +524,17 @@ pub struct PendingInvitationResponse {
     expires_at: chrono::DateTime<Utc>,
 }
 
+#[utoipa::path(
+    get, path = "/invitations",
+    operation_id = "get_invitations",
+    summary = "List pending invitations",
+    tag = "Account",
+    responses(
+        (status = 200, description = "Success", body = Vec<PendingInvitationResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_invitations(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -499,6 +581,20 @@ async fn pending_invitations<C: ConnectionTrait>(
         .collect())
 }
 
+#[utoipa::path(
+    delete, path = "/invitations/{id}",
+    operation_id = "delete_invitations_id",
+    summary = "Revoke an invitation",
+    tag = "Account",
+    params(
+        ("id" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn revoke_invitation(
     State(state): State<IdentityState>,
     Path(id): Path<String>,

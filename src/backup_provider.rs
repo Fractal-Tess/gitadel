@@ -14,7 +14,7 @@ use crate::{
 
 pub const RUNTIME_S3_PROVIDER_ID: Uuid = Uuid::nil();
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BackupProviderKind {
     Filesystem,
@@ -30,12 +30,13 @@ impl BackupProviderKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct FilesystemSettings {
+    #[schema(value_type = String)]
     pub path: PathBuf,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BackupProviderConfig {
     Filesystem(FilesystemSettings),

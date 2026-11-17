@@ -122,8 +122,8 @@
     void app.refreshOrganizations().catch(() => undefined);
   });
 
-  function identitiesPath(target: string): string {
-    return `/api/v1/namespaces/${encodeURIComponent(target)}/mirror-identities`;
+  function identitiesPath(target: string) {
+    return `/api/v1/namespaces/${encodeURIComponent(target)}/mirror-identities` as const;
   }
 
   function suggestedRepositoryName(url: string): string {

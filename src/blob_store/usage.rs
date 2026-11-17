@@ -21,7 +21,7 @@ use super::DomainStorage;
 use crate::config::StorageSettings;
 
 /// How a usage detail is measured, so clients can format it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageUnit {
     Count,
@@ -30,7 +30,7 @@ pub enum UsageUnit {
 
 /// A domain-specific counter reported beside object count and bytes, such as
 /// the registry's tag count.
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize, utoipa::ToSchema)]
 pub struct UsageDetail {
     pub key: &'static str,
     pub label: &'static str,
@@ -41,7 +41,7 @@ pub struct UsageDetail {
 
 /// Stored data one repository owns in one domain. `total_bytes` counts
 /// persisted objects; temporary data belongs in `details`.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct RepositoryUsage {
     pub object_count: u64,
     pub total_bytes: u64,

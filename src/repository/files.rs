@@ -48,6 +48,22 @@ pub(super) enum FileWrite {
     Update,
 }
 
+#[utoipa::path(
+    post, path = "/repositories/{namespace}/{name}/files",
+    operation_id = "post_repositories_namespace_name_files",
+    summary = "Commit a new file",
+    tag = "Repository content",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = CreateFileResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_file(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -69,6 +85,22 @@ pub async fn create_file(
 
 /// Replaces an existing file's contents on a branch with a new commit, as an
 /// edit made in the browser.
+#[utoipa::path(
+    put, path = "/repositories/{namespace}/{name}/files",
+    operation_id = "put_repositories_namespace_name_files",
+    summary = "Commit a change to an existing file",
+    tag = "Repository content",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = CreateFileResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_file(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,

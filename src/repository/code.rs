@@ -19,7 +19,8 @@ use std::{
 };
 use utoipa::ToSchema;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct CodeQuery {
     pub rev: Option<String>,
     pub path: String,
@@ -104,6 +105,23 @@ fn line_range(query: &CodeQuery, count: usize) -> Result<(usize, usize), ApiErro
     Ok((start, end))
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/snippet",
+    operation_id = "get_repositories_namespace_name_snippet",
+    summary = "Read a commit-pinned line range and its permanent link",
+    tag = "Repository content",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        CodeQuery,
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = SnippetResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn snippet(
     State(state): State<RepositoryState>,
     Path((namespace, name)): Path<(String, String)>,
@@ -199,6 +217,23 @@ fn outline(text: &str) -> Vec<CodeSymbol> {
         .take(2000)
         .collect()
 }
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/symbols",
+    operation_id = "get_repositories_namespace_name_symbols",
+    summary = "List declarations in a text file",
+    tag = "Repository content",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        CodeQuery,
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = SymbolsResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn symbols(
     State(state): State<RepositoryState>,
     Path((namespace, name)): Path<(String, String)>,
@@ -234,6 +269,23 @@ pub struct BlameResponse {
     pub lines: Vec<BlameLine>,
     pub commits: HashMap<String, BlameCommit>,
 }
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/blame",
+    operation_id = "get_repositories_namespace_name_blame",
+    summary = "Attribute file lines to commits, following renames",
+    tag = "Repository content",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        CodeQuery,
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = BlameResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn blame(
     State(state): State<RepositoryState>,
     Path((namespace, name)): Path<(String, String)>,

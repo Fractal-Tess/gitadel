@@ -35,11 +35,28 @@ pub struct ReplaceTopicsRequest {
     topics: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct SuggestTopicsQuery {
     q: Option<String>,
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/topics",
+    operation_id = "get_repositories_namespace_name_topics",
+    summary = "List the repository's topics",
+    tag = "Repositories",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = TopicsResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_topics(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -60,6 +77,22 @@ pub async fn list_topics(
     }))
 }
 
+#[utoipa::path(
+    put, path = "/repositories/{namespace}/{name}/topics",
+    operation_id = "put_repositories_namespace_name_topics",
+    summary = "Replace the repository's topics",
+    tag = "Repositories",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = TopicsResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn replace_topics(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -159,6 +192,21 @@ pub async fn replace_topics(
 
 /// Suggests topic names the caller can already see: every public repository plus
 /// the ones they have access to, so private topic names never leak.
+#[utoipa::path(
+    get, path = "/topics",
+    operation_id = "get_topics",
+    summary = "Suggest topics",
+    tag = "Instance",
+    params(
+        SuggestTopicsQuery,
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = TopicsResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn suggest_topics(
     State(state): State<RepositoryState>,
     Query(query): Query<SuggestTopicsQuery>,

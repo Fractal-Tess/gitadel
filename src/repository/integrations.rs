@@ -58,8 +58,10 @@ pub struct RepositoryIntegrationResponse {
     configured: bool,
     enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     resource: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     config: Option<Value>,
 }
 
@@ -278,6 +280,21 @@ async fn integration_row(
         .await?)
 }
 
+#[utoipa::path(
+    get, path = "/repos/{namespace}/{name}/integrations",
+    operation_id = "get_repos_namespace_name_integrations",
+    summary = "List the repository's integrations and the connections it could use",
+    tag = "Deployments",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = RepositoryIntegrationsResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_integrations(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -313,6 +330,22 @@ pub async fn list_integrations(
     Ok(Json(catalog(&credentials, &sources, rows)))
 }
 
+#[utoipa::path(
+    post, path = "/repos/{namespace}/{name}/integrations",
+    operation_id = "post_repos_namespace_name_integrations",
+    summary = "Add an integration through a ready connection",
+    tag = "Deployments",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = RepositoryIntegrationResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_integration(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -373,6 +406,22 @@ pub async fn create_integration(
     Ok(Json(response(provider, &credential, row)))
 }
 
+#[utoipa::path(
+    get, path = "/repos/{namespace}/{name}/integrations/{id}",
+    operation_id = "get_repos_namespace_name_integrations_id",
+    summary = "Get an integration",
+    tag = "Deployments",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = uuid::Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = RepositoryIntegrationResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn get_integration(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, id)): AxumPath<(String, String, uuid::Uuid)>,
@@ -399,6 +448,22 @@ pub async fn get_integration(
     Ok(Json(response(provider, &credential, row)))
 }
 
+#[utoipa::path(
+    delete, path = "/repos/{namespace}/{name}/integrations/{id}",
+    operation_id = "delete_repos_namespace_name_integrations_id",
+    summary = "Remove an integration; the remote resource stays",
+    tag = "Deployments",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = uuid::Uuid, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_integration(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, id)): AxumPath<(String, String, uuid::Uuid)>,
@@ -440,6 +505,23 @@ pub async fn delete_integration(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    put, path = "/repos/{namespace}/{name}/integrations/{id}",
+    operation_id = "put_repos_namespace_name_integrations_id",
+    summary = "Rename an integration, toggle deploy on push, or unlink its resource",
+    tag = "Deployments",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = uuid::Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = RepositoryIntegrationResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_integration(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, id)): AxumPath<(String, String, uuid::Uuid)>,
@@ -533,12 +615,28 @@ pub async fn update_integration(
 }
 
 /// Every deployable resource on the remote, for the configure page's picker.
+#[utoipa::path(
+    get, path = "/repos/{namespace}/{name}/integrations/{id}/resources",
+    operation_id = "get_repos_namespace_name_integrations_id_resources",
+    summary = "List the remote projects, environments, resources, and servers",
+    tag = "Deployments",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = uuid::Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = crate::integrations::Catalog, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_remote_resources(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, integration_id)): AxumPath<(String, String, uuid::Uuid)>,
     headers: HeaderMap,
     jar: CookieJar,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<crate::integrations::Catalog>, ApiError> {
     let (_, repository_row) = state
         .authenticated_repository(
             &headers,
@@ -617,7 +715,7 @@ fn compose_path(value: Option<String>) -> String {
     value.unwrap_or_else(|| "./docker-compose.yml".to_owned())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct StoredResource {
     kind: String,
     id: String,
@@ -637,10 +735,44 @@ fn enablement_request<'a>(
         enabled,
     })
 }
-#[derive(Deserialize)]
-pub struct RemoteMutationRequest {
-    #[serde(flatten)]
+/// Preserve the existing auth-first field validation and 400 error envelope,
+/// while deriving the request contract from the same DTO decoded by the handler.
+pub struct RemoteMutationRequest<T> {
     body: Value,
+    marker: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<'de, T> Deserialize<'de> for RemoteMutationRequest<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let body = Value::deserialize(deserializer)?;
+        Ok(Self {
+            body,
+            marker: std::marker::PhantomData,
+        })
+    }
+}
+impl<T: serde::de::DeserializeOwned> RemoteMutationRequest<T> {
+    fn decode(self) -> Result<T, ApiError> {
+        serde_json::from_value(self.body)
+            .map_err(|error| ApiError::bad_request(format!("Invalid request: {error}")))
+    }
+}
+// Utoipa 6's generic extractor expansion uses ComposeSchema. Keep this
+// version-specific adapter here; both schema and deferred decoding use T.
+impl<T: ToSchema> utoipa::__dev::ComposeSchema for RemoteMutationRequest<T> {
+    fn compose(
+        _: Vec<utoipa::openapi::RefOr<utoipa::openapi::Schema>>,
+    ) -> utoipa::openapi::RefOr<utoipa::openapi::Schema> {
+        T::schema()
+    }
+}
+impl<T: ToSchema> ToSchema for RemoteMutationRequest<T> {
+    fn name() -> std::borrow::Cow<'static, str> {
+        T::name()
+    }
+    fn schemas(schemas: &mut Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::Schema>)>) {
+        T::schemas(schemas);
+    }
 }
 
 #[expect(
@@ -718,13 +850,30 @@ async fn store_remote_link(
 }
 
 /// Create a Dokploy project and its default production environment.
+#[utoipa::path(
+    post, path = "/repos/{namespace}/{name}/integrations/{id}/projects",
+    operation_id = "post_repos_namespace_name_integrations_id_projects",
+    summary = "Create a remote project",
+    tag = "Deployments",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = uuid::Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = crate::integrations::ProjectSummary, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_remote_project(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, integration_id)): AxumPath<(String, String, uuid::Uuid)>,
     headers: HeaderMap,
     jar: CookieJar,
-    Json(request): Json<RemoteMutationRequest>,
-) -> Result<Json<Value>, ApiError> {
+    Json(request): Json<RemoteMutationRequest<ProjectMutation>>,
+) -> Result<Json<crate::integrations::ProjectSummary>, ApiError> {
     let (actor, repository_row) = state
         .authenticated_repository(
             &headers,
@@ -741,8 +890,7 @@ pub async fn create_remote_project(
     if !provider.repository_setup {
         return Err(ApiError::not_found());
     }
-    let body: ProjectMutation = serde_json::from_value(request.body)
-        .map_err(|error| ApiError::bad_request(format!("Invalid request: {error}")))?;
+    let body = request.decode()?;
     let project = provider
         .integration
         .create_remote_project(CreateProjectRequest {
@@ -767,13 +915,30 @@ pub async fn create_remote_project(
 }
 
 /// Create a Dokploy environment inside an existing project.
+#[utoipa::path(
+    post, path = "/repos/{namespace}/{name}/integrations/{id}/environments",
+    operation_id = "post_repos_namespace_name_integrations_id_environments",
+    summary = "Create a remote environment, or select one that exists",
+    tag = "Deployments",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = uuid::Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = crate::integrations::CreatedEnvironment, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_remote_environment(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, integration_id)): AxumPath<(String, String, uuid::Uuid)>,
     headers: HeaderMap,
     jar: CookieJar,
-    Json(request): Json<RemoteMutationRequest>,
-) -> Result<Json<Value>, ApiError> {
+    Json(request): Json<RemoteMutationRequest<EnvironmentMutation>>,
+) -> Result<Json<crate::integrations::CreatedEnvironment>, ApiError> {
     let (actor, repository_row) = state
         .authenticated_repository(
             &headers,
@@ -790,8 +955,7 @@ pub async fn create_remote_environment(
     if !provider.repository_setup {
         return Err(ApiError::not_found());
     }
-    let body: EnvironmentMutation = serde_json::from_value(request.body)
-        .map_err(|error| ApiError::bad_request(format!("Invalid request: {error}")))?;
+    let body = request.decode()?;
     let environment = provider
         .integration
         .create_remote_environment(CreateEnvironmentRequest {
@@ -818,12 +982,29 @@ pub async fn create_remote_environment(
 
 /// Link an existing remote resource, configuring its Gitadel source when it is
 /// currently unconfigured.
+#[utoipa::path(
+    post, path = "/repos/{namespace}/{name}/integrations/{id}/resources/link",
+    operation_id = "post_repos_namespace_name_integrations_id_resources_link",
+    summary = "Link an existing remote resource",
+    tag = "Deployments",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = uuid::Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = RepositoryIntegrationResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn link_remote_resource(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, integration_id)): AxumPath<(String, String, uuid::Uuid)>,
     headers: HeaderMap,
     jar: CookieJar,
-    Json(request): Json<RemoteMutationRequest>,
+    Json(request): Json<RemoteMutationRequest<LinkMutation>>,
 ) -> Result<Json<RepositoryIntegrationResponse>, ApiError> {
     let (actor, repository_row) = state
         .authenticated_repository(
@@ -841,8 +1022,7 @@ pub async fn link_remote_resource(
     if !provider.repository_setup {
         return Err(ApiError::not_found());
     }
-    let body: LinkMutation = serde_json::from_value(request.body)
-        .map_err(|error| ApiError::bad_request(format!("Invalid request: {error}")))?;
+    let body = request.decode()?;
     let link = provider
         .integration
         .link_remote(LinkRemoteRequest {
@@ -875,12 +1055,29 @@ pub async fn link_remote_resource(
 
 /// Create a new resource on the remote, wire it to this repository, and store
 /// the resulting link.
+#[utoipa::path(
+    post, path = "/repos/{namespace}/{name}/integrations/{id}/resources",
+    operation_id = "post_repos_namespace_name_integrations_id_resources",
+    summary = "Create a remote resource and link it",
+    tag = "Deployments",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = uuid::Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = RepositoryIntegrationResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_remote_resource(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, integration_id)): AxumPath<(String, String, uuid::Uuid)>,
     headers: HeaderMap,
     jar: CookieJar,
-    Json(request): Json<RemoteMutationRequest>,
+    Json(request): Json<RemoteMutationRequest<CreateResourceMutation>>,
 ) -> Result<Json<RepositoryIntegrationResponse>, ApiError> {
     let (actor, repository_row) = state
         .authenticated_repository(
@@ -898,8 +1095,7 @@ pub async fn create_remote_resource(
     if !provider.repository_setup {
         return Err(ApiError::not_found());
     }
-    let body: CreateResourceMutation = serde_json::from_value(request.body)
-        .map_err(|error| ApiError::bad_request(format!("Invalid request: {error}")))?;
+    let body = request.decode()?;
     let link = provider
         .integration
         .create_remote(CreateRemoteRequest {
@@ -933,6 +1129,22 @@ pub async fn create_remote_resource(
 }
 
 /// How this repository can deploy, read from its default branch.
+#[utoipa::path(
+    get, path = "/repos/{namespace}/{name}/integrations/{id}/suggestions",
+    operation_id = "get_repos_namespace_name_integrations_id_suggestions",
+    summary = "Suggest builds for this integration",
+    tag = "Deployments",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = uuid::Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = DeploymentSuggestionsResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn deployment_suggestions(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, integration_id)): AxumPath<(String, String, uuid::Uuid)>,
@@ -957,6 +1169,21 @@ pub async fn deployment_suggestions(
 
 /// The same suggestions before any integration exists, for clients that
 /// decide how to deploy before setting one up.
+#[utoipa::path(
+    get, path = "/repos/{namespace}/{name}/deploy/suggestions",
+    operation_id = "get_repos_namespace_name_deploy_suggestions",
+    summary = "Suggest builds from the default branch's Dockerfiles and Compose files",
+    tag = "Deployments",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = DeploymentSuggestionsResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn repository_deployment_suggestions(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -1061,12 +1288,29 @@ pub(crate) struct SetupMutation {
 
 /// Create, configure, link, and optionally deploy a resource in one request,
 /// reporting each completed step.
+#[utoipa::path(
+    post, path = "/repos/{namespace}/{name}/integrations/{id}/setup",
+    operation_id = "post_repos_namespace_name_integrations_id_setup",
+    summary = "Create, configure, link, and optionally deploy a resource in one step",
+    tag = "Deployments",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = uuid::Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = SetupDeploymentResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn setup_deployment(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, integration_id)): AxumPath<(String, String, uuid::Uuid)>,
     headers: HeaderMap,
     jar: CookieJar,
-    Json(request): Json<RemoteMutationRequest>,
+    Json(request): Json<RemoteMutationRequest<SetupMutation>>,
 ) -> Result<Json<SetupDeploymentResponse>, ApiError> {
     let (actor, repository_row) = state
         .authenticated_repository(
@@ -1084,8 +1328,7 @@ pub async fn setup_deployment(
     if !provider.repository_setup {
         return Err(ApiError::not_found());
     }
-    let body: SetupMutation = serde_json::from_value(request.body)
-        .map_err(|error| ApiError::bad_request(format!("Invalid request: {error}")))?;
+    let body = request.decode()?;
     let project = match (body.project_id, body.project_name) {
         (Some(id), _) if !id.trim().is_empty() => ProjectChoice::Existing(id),
         (_, Some(name)) if !name.trim().is_empty() => ProjectChoice::New(name),
@@ -1197,12 +1440,28 @@ pub async fn setup_deployment(
 }
 
 /// The newest deployment of the linked resource.
+#[utoipa::path(
+    get, path = "/repos/{namespace}/{name}/integrations/{id}/deployment",
+    operation_id = "get_repos_namespace_name_integrations_id_deployment",
+    summary = "Get the latest deployment, with the log's end when it failed",
+    tag = "Deployments",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = uuid::Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = crate::integrations::DeploymentStatus, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn deployment_status(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, integration_id)): AxumPath<(String, String, uuid::Uuid)>,
     headers: HeaderMap,
     jar: CookieJar,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<crate::integrations::DeploymentStatus>, ApiError> {
     let (_, repository_row) = state
         .authenticated_repository(
             &headers,
@@ -1229,6 +1488,22 @@ pub async fn deployment_status(
 }
 
 /// Trigger a deployment right now without changing push delivery.
+#[utoipa::path(
+    post, path = "/repos/{namespace}/{name}/integrations/{id}/deploy",
+    operation_id = "post_repos_namespace_name_integrations_id_deploy",
+    summary = "Deploy the linked resource now",
+    tag = "Deployments",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("id" = uuid::Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = DeployResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn deploy_integration(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, integration_id)): AxumPath<(String, String, uuid::Uuid)>,
@@ -1452,6 +1727,18 @@ pub(super) async fn trigger_push(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_mutations_defer_field_validation_until_after_authorization() {
+        for body in [r#"{"unexpected":true}"#, "null", "[]"] {
+            let deferred: RemoteMutationRequest<ProjectMutation> =
+                serde_json::from_str(body).unwrap();
+            assert!(deferred.decode().is_err());
+        }
+        let deferred: RemoteMutationRequest<ProjectMutation> =
+            serde_json::from_str(r#"{"name":"example"}"#).unwrap();
+        assert_eq!(deferred.decode().unwrap().name, "example");
+    }
 
     #[test]
     fn catalog_keeps_multiple_repository_instances_for_one_connection() {

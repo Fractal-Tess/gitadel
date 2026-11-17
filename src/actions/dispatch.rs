@@ -1,12 +1,13 @@
 //! Manually dispatched runs (`on: workflow_dispatch`) and workflow listing.
 
+use crate::openapi::ContractRouterExt;
+
 use std::collections::BTreeMap;
 
 use axum::{
-    Json, Router,
+    Json,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
-    routing::{get, post},
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::{Deserialize, Serialize};
@@ -28,7 +29,7 @@ const MAX_INPUTS: usize = 25;
 const MAX_INPUT_NAME_BYTES: usize = 100;
 const MAX_INPUT_VALUE_BYTES: usize = 16 * 1024;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum InputKind {
     String,
@@ -37,7 +38,7 @@ pub(crate) enum InputKind {
     Number,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub(crate) struct DispatchInput {
     pub(crate) name: String,
     pub(crate) description: Option<String>,
@@ -224,16 +225,12 @@ pub(crate) fn resolve_inputs(
     Ok(resolved)
 }
 
-pub(crate) fn router() -> Router<ActionsState> {
-    Router::new()
-        .route(
-            "/repositories/{namespace}/{name}/actions/workflows",
-            get(list_workflows),
-        )
-        .route(
-            "/repositories/{namespace}/{name}/actions/workflows/dispatch",
-            post(dispatch),
-        )
+pub(crate) fn router() -> utoipa_axum::router::OpenApiRouter<ActionsState> {
+    utoipa_axum::router::OpenApiRouter::new()
+        .api_routes(crate::openapi::routes!(
+            crate::actions::dispatch::list_workflows
+        ))
+        .api_routes(crate::openapi::routes!(crate::actions::dispatch::dispatch))
 }
 
 /// Rejects revision syntax so a ref names exactly one branch or tag.
@@ -292,13 +289,14 @@ async fn resolve_reference(
     .ok_or_else(|| ApiError::bad_request("The branch or tag does not exist."))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct WorkflowsQuery {
     #[serde(rename = "ref")]
     reference: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct WorkflowResponse {
     path: String,
     name: String,
@@ -307,7 +305,7 @@ struct WorkflowResponse {
     error: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct WorkflowsResponse {
     reference: String,
     commit: String,
@@ -315,6 +313,23 @@ struct WorkflowsResponse {
     workflows: Vec<WorkflowResponse>,
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/actions/workflows",
+    operation_id = "get_repositories_namespace_name_actions_workflows",
+    summary = "List workflows",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        WorkflowsQuery,
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = WorkflowsResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn list_workflows(
     State(state): State<ActionsState>,
     Path((namespace, name)): Path<(String, String)>,
@@ -378,7 +393,7 @@ async fn list_workflows(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct DispatchRequest {
     /// Workflow path, such as `.forgejo/workflows/ci.yml`, or its file name.
     workflow: String,
@@ -388,6 +403,21 @@ struct DispatchRequest {
     inputs: BTreeMap<String, serde_json::Value>,
 }
 
+#[utoipa::path(
+    post, path = "/repositories/{namespace}/{name}/actions/workflows/dispatch",
+    operation_id = "post_repositories_namespace_name_actions_workflows_dispatch",
+    summary = "Dispatch",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 201, description = "Success", body = RunSummary, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn dispatch(
     State(state): State<ActionsState>,
     Path((namespace, name)): Path<(String, String)>,

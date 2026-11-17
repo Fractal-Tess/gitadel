@@ -40,13 +40,13 @@ pub(super) struct CreateMirrorRequest {
     schedule: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct UpdateMirrorRequest {
     identity_id: Option<Uuid>,
     schedule: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct MirrorResponse {
     remote_url: String,
     identity_id: Option<Uuid>,
@@ -325,6 +325,22 @@ pub(super) async fn import_initial_metadata(
         .ok_or_else(ApiError::not_found)
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/mirror",
+    operation_id = "get_repositories_namespace_name_mirror",
+    summary = "Get mirror",
+    tag = "Mirrors",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = MirrorResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn get_mirror(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -345,6 +361,22 @@ pub async fn get_mirror(
     Ok(Json(MirrorResponse::new(mirror, &state).await))
 }
 
+#[utoipa::path(
+    patch, path = "/repositories/{namespace}/{name}/mirror",
+    operation_id = "patch_repositories_namespace_name_mirror",
+    summary = "Update mirror",
+    tag = "Mirrors",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = MirrorResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_mirror(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -397,6 +429,21 @@ pub async fn update_mirror(
     Ok(Json(MirrorResponse::new(mirror, &state).await))
 }
 
+#[utoipa::path(
+    post, path = "/repositories/{namespace}/{name}/mirror/sync",
+    operation_id = "post_repositories_namespace_name_mirror_sync",
+    summary = "Sync mirror",
+    tag = "Mirrors",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = MirrorResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn sync_mirror(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -417,6 +464,21 @@ pub async fn sync_mirror(
     Ok(Json(MirrorResponse::new(mirror, &state).await))
 }
 
+#[utoipa::path(
+    delete, path = "/repositories/{namespace}/{name}/mirror",
+    operation_id = "delete_repositories_namespace_name_mirror",
+    summary = "Convert mirror",
+    tag = "Mirrors",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn convert_mirror(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,

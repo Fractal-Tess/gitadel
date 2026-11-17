@@ -12,7 +12,7 @@ import {
   type IssueLabel,
   type IssueUser,
 } from "$lib/api/issues.js";
-import {
+import { apiQuery,
   errorMessage,
   jsonBody,
   requestEmpty,
@@ -78,7 +78,7 @@ export class RepositoryIssuesState {
     this.#destroyed = true;
   }
 
-  async loadIssues(init: RequestInit = {}): Promise<void> {
+  async loadIssues(init: Omit<RequestInit, "method" | "body"> = {}): Promise<void> {
     this.issuesLoading = true;
     try {
       // A reload covers every page already on screen, so the list does not
@@ -136,7 +136,7 @@ export class RepositoryIssuesState {
       this.issuesLoadingMore = false;
     }
   }
-  async loadIssue(number: number, init: RequestInit = {}): Promise<Issue> {
+  async loadIssue(number: number, init: Omit<RequestInit, "method" | "body"> = {}): Promise<Issue> {
     const [issue, comments] = await Promise.all([
       requestJson(repositoryApi(this, `/issues/${number}`), issueSchema, init),
       requestJson(
@@ -155,7 +155,7 @@ export class RepositoryIssuesState {
     }
     return issue;
   }
-  async loadIssueLabels(init: RequestInit = {}): Promise<void> {
+  async loadIssueLabels(init: Omit<RequestInit, "method" | "body"> = {}): Promise<void> {
     const labels = await loadRepositoryIssueLabels(
       this.namespace,
       this.name,
@@ -164,7 +164,7 @@ export class RepositoryIssuesState {
     if (!init.signal?.aborted && !this.#destroyed && this.isScopeCurrent())
       this.issueLabels = labels;
   }
-  async loadAssignableUsers(init: RequestInit = {}): Promise<void> {
+  async loadAssignableUsers(init: Omit<RequestInit, "method" | "body"> = {}): Promise<void> {
     const users = await loadRepositoryAssignableUsers(
       this.namespace,
       this.name,
@@ -386,12 +386,13 @@ export class RepositoryIssuesState {
   async uploadIssueAttachment(file: File): Promise<IssueAttachment> {
     try {
       return await requestJson(
-        `${repositoryApi(this, "/issue-attachments")}?${new URLSearchParams({ name: file.name })}`,
+        repositoryApi(this, "/issue-attachments"),
         issueAttachmentSchema,
         {
           method: "PUT",
           headers: { "content-type": file.type || "application/octet-stream" },
           body: file,
+          query: apiQuery({ name: file.name }),
         },
       );
     } catch (caught) {

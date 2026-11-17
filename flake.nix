@@ -88,27 +88,54 @@
               cp -R node_modules $out/
               runHook postInstall
             '';
-            outputHash = "sha256-EY/uSDvqj7iHc2kbrVp1LWTeGe7Ii4XmO3OElzRFu5M=";
+            outputHash = "sha256-jq9rMb3EqrHZ3eYBMXM0OaGpC/YtP71t/R54Lyxg0yw=";
             outputHashAlgo = "sha256";
             outputHashMode = "recursive";
           };
+          # The exporter reads Rust/protobuf sources and embedded constants,
+          # but not the bindings it generates. SDK-only edits reuse it.
+          contractSource = lib.fileset.toSource {
+            root = ./.;
+            fileset = lib.fileset.unions [
+              ./Cargo.toml
+              ./Cargo.lock
+              ./rust-toolchain.toml
+              ./build.rs
+              ./CHANGELOG.md
+              ./src
+              ./proto
+              ./cli
+              ./frontend/static/favicon-light.png
+              ./frontend/static/favicon-dark.png
+            ];
+          };
+          contractExporter = rustPlatform.buildRustPackage (
+            commonRustAttrs // {
+              pname = "gitadel-contract-exporter";
+              src = contractSource;
+              nativeBuildInputs = buildDeps pkgs;
+              buildInputs = [ pkgs.openssl pkgs.dav1d ];
+              cargoBuildFlags = [ "--package" "gitadel" "--bin" "gitadel" "--features" "api-contract-export" ];
+            }
+          );
           frontend = pkgs.stdenv.mkDerivation {
             pname = "gitadel-frontend";
             inherit version;
-            src = ./frontend;
-            nativeBuildInputs = [ pkgs.bun ];
+            src = ./.;
+            nativeBuildInputs = [ pkgs.bun pkgs.nodejs ];
+            GITADEL_OPENAPI_EXPORTER = "${contractExporter}/bin/gitadel";
             dontConfigure = true;
             buildPhase = ''
               runHook preBuild
-              cp -R ${nodeModules}/node_modules .
-              chmod -R u+w node_modules
-              patchShebangs node_modules
-              bun node_modules/vite/bin/vite.js build
+              cp -R ${nodeModules}/node_modules frontend/
+              chmod -R u+w frontend/node_modules
+              patchShebangs frontend/node_modules
+              bun run --cwd frontend build
               runHook postBuild
             '';
             installPhase = ''
               runHook preInstall
-              cp -R build $out
+              cp -R frontend/build $out
               runHook postInstall
             '';
           };
@@ -129,7 +156,7 @@
                 rm -rf frontend/build
                 cp -R ${frontend} frontend/build
               '';
-              passthru = { inherit frontend nodeModules; };
+              passthru = { inherit frontend nodeModules contractExporter; };
               meta = {
                 description = "A minimal self-hosted Git server for archival repositories";
                 homepage = "https://github.com/Fractal-Tess/gitadel";
@@ -216,6 +243,7 @@
               pkgs.dav1d
               pkgs.git-lfs
               pkgs.bun
+              pkgs.nodejs
               pkgs.curl
               pkgs.jq
               pkgs.mkcert

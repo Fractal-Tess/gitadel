@@ -43,9 +43,7 @@ pub(super) use super::analysis::{
     activity_start_date, read_commits_authored_on, read_repository_overview,
     repository_overview_items, warm_repository_analysis,
 };
-pub use super::analysis::{activity, overview, stats};
 pub(crate) use super::markdown::render_markdown;
-pub use super::source_archive::source_archive;
 use super::{
     RepositoryState, resources,
     signature::{SshCommitSignature, verify_ssh_commit_signature},
@@ -71,7 +69,8 @@ where
     Ok(Option::<String>::deserialize(deserializer)?.filter(|value| !value.trim().is_empty()))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct BrowseQuery {
     #[serde(default, deserialize_with = "blank_as_none")]
     pub(super) rev: Option<String>,
@@ -79,7 +78,8 @@ pub struct BrowseQuery {
     pub(super) path: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct HistoryQuery {
     #[serde(default)]
     path: String,
@@ -221,6 +221,22 @@ pub struct DiffResponse {
     truncated: bool,
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/refs",
+    operation_id = "get_repositories_namespace_name_refs",
+    summary = "List branches and tags",
+    tag = "Repository content",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = RefsResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn refs(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -261,6 +277,23 @@ pub async fn refs(
     Ok(Json(response))
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/tree",
+    operation_id = "get_repositories_namespace_name_tree",
+    summary = "List a directory",
+    tag = "Repository content",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        BrowseQuery,
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = TreeResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn tree(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -539,6 +572,25 @@ fn lfs_pointer_metadata(content: &[u8]) -> Option<LfsPointerMetadata<'_>> {
     })
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/blob",
+    operation_id = "get_repositories_namespace_name_blob",
+    summary = "Read a file for display",
+    tag = "Repository content",
+    params(
+        ("If-None-Match" = Option<String>, Header, description = "Previously returned ETag"),
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        BrowseQuery,
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 304, description = "The validator still matches; no response body"),
+        (status = 200, description = "Success", body = crate::repository::browser::BlobResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn blob(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -672,6 +724,25 @@ enum BlobRead {
     Found(Box<(BlobResponse, Option<Vec<u8>>, String)>),
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/raw",
+    operation_id = "get_repositories_namespace_name_raw",
+    summary = "Download a file's contents",
+    tag = "Repository content",
+    params(
+        ("If-None-Match" = Option<String>, Header, description = "Previously returned ETag"),
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        BrowseQuery,
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 304, description = "The validator still matches; no response body"),
+        (status = 200, description = "Success", body = crate::openapi::Binary, content_type = "application/octet-stream"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn raw(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -856,6 +927,23 @@ fn not_modified(etag: &str) -> Result<Response, ApiError> {
     Ok(response)
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/history",
+    operation_id = "get_repositories_namespace_name_history",
+    summary = "List commits reachable from a revision",
+    tag = "Repository content",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        HistoryQuery,
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = HistoryResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn history(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -949,6 +1037,23 @@ pub async fn history(
     Ok(Json(response))
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/commits/{revision}",
+    operation_id = "get_repositories_namespace_name_commits_revision",
+    summary = "Get a commit",
+    tag = "Repository content",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("revision" = String, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = CommitResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn commit(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, revision)): AxumPath<(String, String, String)>,
@@ -973,6 +1078,23 @@ pub async fn commit(
     Ok(Json(response))
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/commits/{revision}/diff",
+    operation_id = "get_repositories_namespace_name_commits_revision_diff",
+    summary = "Get a commit's patch against its first parent",
+    tag = "Repository content",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("revision" = String, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = DiffResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn diff(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, revision)): AxumPath<(String, String, String)>,
@@ -1207,7 +1329,7 @@ fn commit_line_stats(
 }
 
 /// What a commit changed against its first parent.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 struct CommitLineStats {
     insertions: usize,
     deletions: usize,

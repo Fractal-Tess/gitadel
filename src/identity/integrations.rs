@@ -69,6 +69,7 @@ pub struct IntegrationResponse {
     internal_url: String,
     api_key_set: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     source: Option<SourceBindingSummary>,
 }
 
@@ -157,6 +158,7 @@ pub struct SourceConnectionResponse {
     sources: Vec<RemoteSourceResponse>,
     /// Set when this response follows a reachability check.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     check: Option<SourceCheckResponse>,
 }
 
@@ -188,6 +190,7 @@ pub struct SourceBindingStatus {
     managed: bool,
     ready: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     authorization_url: Option<String>,
     url: Option<String>,
     targets_instance: bool,
@@ -232,6 +235,20 @@ pub struct IntegrationTestResponse {
     warnings: Vec<String>,
 }
 
+#[utoipa::path(
+    get, path = "/namespaces/{slug}/integrations",
+    operation_id = "get_namespaces_slug_integrations",
+    summary = "List the namespace's connections and available providers",
+    tag = "Deployments",
+    params(
+        ("slug" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = NamespaceIntegrationsResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_integrations(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -271,6 +288,21 @@ pub async fn list_integrations(
     }))
 }
 
+#[utoipa::path(
+    post, path = "/namespaces/{slug}/integrations",
+    operation_id = "post_namespaces_slug_integrations",
+    summary = "Add a connection",
+    tag = "Deployments",
+
+    params(
+        ("slug" = String, Path),
+    ),
+    responses(
+        (status = 201, description = "Success", body = IntegrationResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_integration(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -323,6 +355,22 @@ pub async fn create_integration(
     ))
 }
 
+#[utoipa::path(
+    put, path = "/namespaces/{slug}/integrations/{id}",
+    operation_id = "put_namespaces_slug_integrations_id",
+    summary = "Update a connection",
+    tag = "Deployments",
+
+    params(
+        ("slug" = String, Path),
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = IntegrationResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_integration(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -417,6 +465,21 @@ pub async fn update_integration(
     )))
 }
 
+#[utoipa::path(
+    delete, path = "/namespaces/{slug}/integrations/{id}",
+    operation_id = "delete_namespaces_slug_integrations_id",
+    summary = "Remove a connection and the provider Gitadel created for it",
+    tag = "Deployments",
+    params(
+        ("slug" = String, Path),
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_integration(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -452,6 +515,21 @@ pub async fn delete_integration(
     Ok(StatusCode::NO_CONTENT)
 }
 /// Return one stored key only to the namespace owner and prevent caching.
+#[utoipa::path(
+    get, path = "/namespaces/{slug}/integrations/{id}/credential",
+    operation_id = "get_namespaces_slug_integrations_id_credential",
+    summary = "Reveal a connection's stored API key",
+    tag = "Deployments",
+    params(
+        ("slug" = String, Path),
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = IntegrationCredentialResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn get_integration_credential(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -475,6 +553,21 @@ pub async fn get_integration_credential(
     ))
 }
 
+#[utoipa::path(
+    get, path = "/namespaces/{slug}/integrations/{id}/source",
+    operation_id = "get_namespaces_slug_integrations_id_source",
+    summary = "Show the connection's repository source and the providers it could use",
+    tag = "Deployments",
+    params(
+        ("slug" = String, Path),
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = SourceConnectionResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn get_integration_source(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -506,6 +599,22 @@ pub async fn get_integration_source(
     )))
 }
 
+#[utoipa::path(
+    post, path = "/namespaces/{slug}/integrations/{id}/source",
+    operation_id = "post_namespaces_slug_integrations_id_source",
+    summary = "Connect a repository source, creating a provider with Gitadel-issued tokens or binding an existing one",
+    tag = "Deployments",
+
+    params(
+        ("slug" = String, Path),
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 201, description = "Success", body = SourceConnectionResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn configure_integration_source(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -697,6 +806,21 @@ pub async fn configure_integration_source(
 /// Check that Dokploy reaches Gitadel through the bound provider. When it
 /// cannot and Gitadel manages the provider, try the other addresses this
 /// instance answers on and keep the first one that works.
+#[utoipa::path(
+    post, path = "/namespaces/{slug}/integrations/{id}/source/verify",
+    operation_id = "post_namespaces_slug_integrations_id_source_verify",
+    summary = "Check that the remote reaches Gitadel through the source, trying other addresses if needed",
+    tag = "Deployments",
+    params(
+        ("slug" = String, Path),
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = SourceCheckResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn verify_integration_source(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -832,6 +956,21 @@ async fn candidate_internal_urls(public_url: &str) -> Vec<String> {
     candidates
 }
 
+#[utoipa::path(
+    delete, path = "/namespaces/{slug}/integrations/{id}/source",
+    operation_id = "delete_namespaces_slug_integrations_id_source",
+    summary = "Disconnect the repository source",
+    tag = "Deployments",
+    params(
+        ("slug" = String, Path),
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn disconnect_integration_source(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -868,6 +1007,21 @@ pub async fn disconnect_integration_source(
 }
 
 /// Verify credentials before storing a new namespace integration.
+#[utoipa::path(
+    post, path = "/namespaces/{slug}/integrations/test",
+    operation_id = "post_namespaces_slug_integrations_test",
+    summary = "Test credentials before saving a connection",
+    tag = "Deployments",
+
+    params(
+        ("slug" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = IntegrationTestResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn test_new_integration(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -884,6 +1038,21 @@ pub async fn test_new_integration(
 }
 
 /// Verify one stored credential without returning the key in the response.
+#[utoipa::path(
+    post, path = "/namespaces/{slug}/integrations/{id}/test",
+    operation_id = "post_namespaces_slug_integrations_id_test",
+    summary = "Test a saved connection",
+    tag = "Deployments",
+    params(
+        ("slug" = String, Path),
+        ("id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = IntegrationTestResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn test_integration(
     State(state): State<IdentityState>,
     headers: HeaderMap,

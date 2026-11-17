@@ -29,6 +29,6 @@ export function organizationAvatarUrl(
   updatedAt: string | null,
 ): string | null {
   return updatedAt
-    ? `/api/v1/organizations/${encodeURIComponent(slug)}/avatar?v=${encodeURIComponent(updatedAt)}`
+    ? `/api/v1/organizations/${encodeURIComponent(slug)}/avatar?v=${encodeURIComponent(updatedAt)}` as const
     : null;
 }

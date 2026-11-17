@@ -40,8 +40,8 @@ use crate::{
     storage::LfsUsage,
 };
 
-pub(super) mod legacy;
-pub(super) mod overview;
+pub(crate) mod legacy;
+pub(crate) mod overview;
 #[cfg(test)]
 mod tests;
 
@@ -133,7 +133,7 @@ impl Domain {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DomainStatus {
     name: &'static str,
     label: &'static str,
@@ -148,7 +148,7 @@ pub struct DomainStatus {
     last_migration: Option<MigrationView>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct UsageTotals {
     repository_count: u64,
     #[serde(flatten)]
@@ -232,6 +232,17 @@ async fn latest_migrations(
     ))
 }
 
+#[utoipa::path(
+    get, path = "/admin/storage/domains",
+    operation_id = "get_admin_storage_domains",
+    summary = "List domains",
+    tag = "Storage",
+    responses(
+        (status = 200, description = "Success", body = Vec<DomainStatus>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_domains(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -245,6 +256,20 @@ pub async fn list_domains(
     Ok(Json(statuses))
 }
 
+#[utoipa::path(
+    get, path = "/admin/storage/domains/{domain}",
+    operation_id = "get_admin_storage_domains_domain",
+    summary = "Domain status",
+    tag = "Storage",
+    params(
+        ("domain" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = DomainStatus, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn domain_status(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -256,7 +281,8 @@ pub async fn domain_status(
     Ok(Json(status(&state, &domain).await?))
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct RepositoryUsageQuery {
     pub search: Option<String>,
     pub owner: Option<String>,
@@ -342,7 +368,7 @@ impl TryFrom<&RepositoryUsageQuery> for UsageFilter {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RepositoryUsageRow {
     repository_id: Uuid,
     repository_name: String,
@@ -352,7 +378,7 @@ pub struct RepositoryUsageRow {
     usage: RepositoryUsage,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RepositoryUsagePage<Row = RepositoryUsageRow> {
     repositories: Vec<Row>,
     total: u64,
@@ -472,6 +498,21 @@ impl UsageFilter {
     }
 }
 
+#[utoipa::path(
+    get, path = "/admin/storage/domains/{domain}/repositories",
+    operation_id = "get_admin_storage_domains_domain_repositories",
+    summary = "Domain repositories",
+    tag = "Storage",
+    params(
+        ("domain" = String, Path),
+        RepositoryUsageQuery,
+    ),
+    responses(
+        (status = 200, description = "Success", body = RepositoryUsagePage, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn domain_repositories(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -486,7 +527,7 @@ pub async fn domain_repositories(
 
 /// Selects the destination of a migration. `local` selects the domain's
 /// local root; so does the nil `target_id`, which older clients send.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct MigrationRequest {
     target_id: Option<Uuid>,
     #[serde(default)]
@@ -516,7 +557,7 @@ impl MigrationRequest {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct MigrationStarted {
     operation_id: Uuid,
     domain: &'static str,
@@ -586,6 +627,21 @@ async fn start_migration(
     })
 }
 
+#[utoipa::path(
+    post, path = "/admin/storage/domains/{domain}/migrate",
+    operation_id = "post_admin_storage_domains_domain_migrate",
+    summary = "Migrate domain",
+    tag = "Storage",
+
+    params(
+        ("domain" = String, Path),
+    ),
+    responses(
+        (status = 202, description = "Success", body = MigrationStarted, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn migrate_domain(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -601,7 +657,7 @@ pub async fn migrate_domain(
 
 /// One migration's progress, as returned by the progress endpoint and sent by
 /// its event stream.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct MigrationView {
     operation_id: Uuid,
     domain: &'static str,
@@ -677,6 +733,21 @@ async fn find_migration(
         .ok_or_else(ApiError::not_found)
 }
 
+#[utoipa::path(
+    get, path = "/admin/storage/domains/{domain}/migrations/{operation_id}",
+    operation_id = "get_admin_storage_domains_domain_migrations_operation_id",
+    summary = "Domain migration",
+    tag = "Storage",
+    params(
+        ("domain" = String, Path),
+        ("operation_id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = MigrationView, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn domain_migration(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -689,6 +760,21 @@ pub async fn domain_migration(
     ))
 }
 
+#[utoipa::path(
+    get, path = "/admin/storage/domains/{domain}/migrations/{operation_id}/events",
+    operation_id = "get_admin_storage_domains_domain_migrations_operation_id_events",
+    summary = "Domain migration events",
+    tag = "Storage",
+    params(
+        ("domain" = String, Path),
+        ("operation_id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = String, content_type = "text/event-stream"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn domain_migration_events(
     State(state): State<IdentityState>,
     headers: HeaderMap,

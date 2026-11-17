@@ -104,14 +104,14 @@ impl MaintenanceAction {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MaintenanceOperation {
     Create,
     Restore,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MaintenancePhase {
     Scheduled,
@@ -127,7 +127,7 @@ pub enum MaintenancePhase {
     Failed,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct MaintenanceProgress {
     pub operation_id: Uuid,
     pub key: String,
@@ -213,7 +213,7 @@ impl MaintenanceProgressReporter {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct BackupObject {
     pub key: String,
     pub name: Option<String>,
@@ -222,7 +222,7 @@ pub struct BackupObject {
     pub created_at: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct BackupSchedule {
     pub schedule: String,
     pub next_backup_at: DateTime<Utc>,
@@ -239,7 +239,7 @@ pub struct S3BackupDownload {
     pub stream: DataStream,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct BackupInspection {
     pub format_version: u32,
     pub gitadel_version: Option<String>,
@@ -252,7 +252,7 @@ pub struct BackupInspection {
     pub includes_host_key: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
 struct Manifest {
     format_version: u32,
     #[serde(default)]
@@ -264,7 +264,7 @@ struct Manifest {
     files: Vec<ManifestFile>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
 struct ManifestFile {
     path: String,
     size: u64,

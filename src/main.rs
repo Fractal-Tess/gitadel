@@ -1,3 +1,5 @@
+#![cfg_attr(feature = "api-contract-export", allow(dead_code, unused_imports))]
+
 use std::io::Read;
 
 mod actions;
@@ -27,8 +29,19 @@ use clap::Parser;
 use config::{Cli, Settings};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+#[cfg(feature = "api-contract-export")]
+fn main() -> Result<()> {
+    print!("{}", openapi::json()?);
+    Ok(())
+}
+
+#[cfg(not(feature = "api-contract-export"))]
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if matches!(cli.command(), Some(config::GitadelCommand::Openapi)) {
+        print!("{}", openapi::json()?);
+        return Ok(());
+    }
     if let Some(config::GitadelCommand::ImageRender { path, thumbnail }) = cli.command() {
         return repository::image::worker(path, *thumbnail);
     }
@@ -36,6 +49,7 @@ fn main() -> Result<()> {
 }
 
 #[tokio::main]
+#[cfg(not(feature = "api-contract-export"))]
 async fn run(cli: Cli) -> Result<()> {
     tracing_subscriber::registry()
         .with(
@@ -47,6 +61,7 @@ async fn run(cli: Cli) -> Result<()> {
 
     if let Some(command) = cli.command() {
         return match command {
+            config::GitadelCommand::Openapi => unreachable!("contract export runs offline"),
             config::GitadelCommand::ImageRender { .. } => {
                 unreachable!("Image workers run before starting Tokio")
             }

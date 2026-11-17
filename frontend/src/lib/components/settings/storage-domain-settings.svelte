@@ -20,13 +20,13 @@
   import { Spinner } from "$lib/components/ui/spinner/index.js";
   import SettingsSectionHeader from "$lib/components/settings/settings-section-header.svelte";
   import IntegrationConnectionCard from "$lib/components/integrations/integration-connection-card.svelte";
-  import { errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
+  import { apiQuery, errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
   import {
     LOCAL_STORAGE_TARGET_ID,
     storageDomainMigrationSchema,
     storageDomainMigrationStartedSchema,
     storageDomainPath,
-    storageDomainRepositoriesPath,
+    storageDomainRepositoriesQuery,
     storageDomainRepositoryUsagePageSchema,
     type StorageDomainMigration,
     type StorageDomainRepositoryUsage,
@@ -191,8 +191,9 @@
     const offset = append ? (usage?.repositories.length ?? 0) : 0;
     try {
       const loaded = await requestJson(
-        storageDomainRepositoriesPath(name, current, offset),
+        storageDomainPath(name, "repositories"),
         storageDomainRepositoryUsagePageSchema,
+        { query: apiQuery(storageDomainRepositoriesQuery(current, offset)) },
       );
       if (version !== usageRequestVersion || app.authorizationScope !== scope)
         return;

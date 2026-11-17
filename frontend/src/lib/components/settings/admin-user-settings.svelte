@@ -12,7 +12,7 @@
     adminUserSchema,
     type AdminUser,
   } from "$lib/api/admin-users.js";
-  import {
+  import { apiQuery,
     errorMessage,
     requestEmpty,
     requestJson,
@@ -56,16 +56,17 @@
   const pageEnd = $derived(Math.min(offset + users.length, total));
 
   $effect(() => {
-    const parameters = new URLSearchParams({
+    const parameters = {
       q: query,
-      limit: String(pageSize),
-      offset: String(offset),
-    });
+      limit: pageSize,
+      offset,
+    };
     void reloadVersion;
     const controller = new AbortController();
     loading = true;
-    requestJson(`/api/v1/admin/users?${parameters}`, adminUserPageSchema, {
+    requestJson("/api/v1/admin/users", adminUserPageSchema, {
       signal: controller.signal,
+      query: apiQuery(parameters),
     })
       .then((page) => {
         users = page.users;

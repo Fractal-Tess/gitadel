@@ -447,6 +447,23 @@ pub(super) async fn cached_image(content: Vec<u8>, path: String) -> Result<Cache
     Ok(result)
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/image",
+    operation_id = "get_repositories_namespace_name_image",
+    summary = "Render an image file as PNG",
+    tag = "Repository content",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        BrowseQuery,
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = crate::openapi::Binary, content_type = "image/png"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub(super) async fn preview(
     State(state): State<RepositoryState>,
     Path((namespace, name)): Path<(String, String)>,

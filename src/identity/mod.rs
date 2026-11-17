@@ -1,5 +1,8 @@
+use crate::openapi::ContractRouterExt;
+
+use utoipa_axum::router::UtoipaMethodRouterExt;
 mod admin;
-mod admin_storage;
+pub(crate) mod admin_storage;
 pub(crate) mod auth;
 pub(crate) mod avatar;
 pub mod commit_emails;
@@ -42,7 +45,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{delete, get, post, put},
+    routing::{get, post},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -262,12 +265,12 @@ pub struct ApiError {
     message: String,
 }
 
-#[derive(Serialize)]
-struct ErrorEnvelope {
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct ErrorEnvelope {
     error: ErrorBody,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct ErrorBody {
     code: &'static str,
     message: String,
@@ -1173,335 +1176,342 @@ pub async fn bootstrap_admin(
 }
 
 pub fn router() -> Router<IdentityState> {
-    Router::new()
-        .route("/auth/status", get(auth::status))
-        .route("/auth/oidc/{provider_id}/start", get(sso::start))
-        .route("/auth/oidc/{provider_id}/callback", get(sso::callback))
-        .route(
-            "/admin/authentication",
-            get(sso::admin_configuration).put(sso::update_configuration),
-        )
-        .route(
-            "/admin/authentication/providers",
-            get(sso::list_providers).post(sso::create_provider),
-        )
-        .route(
-            "/admin/authentication/providers/{provider_id}",
-            put(sso::update_provider).delete(sso::delete_provider),
-        )
-        .route("/instance", get(admin::public_instance_settings))
-        .route("/admin/smtp", get(email::smtp_status))
-        .route("/admin/smtp/test", post(email::send_test_email))
-        .route(
-            "/me/email",
-            get(email::get_email)
-                .put(email::set_email)
-                .delete(email::delete_email),
-        )
-        .route("/me/email/verification", post(email::resend_verification))
-        .route("/auth/email/verify", post(email::verify_email))
-        .route(
-            "/me/notifications",
-            get(notifications::get_notifications).put(notifications::update_notifications),
-        )
-        .route("/auth/password-reset", post(email::request_password_reset))
-        .route(
-            "/auth/password-reset/confirm",
-            post(email::confirm_password_reset),
-        )
-        .route(
-            "/instance/favicon/{theme}",
-            get(admin::public_instance_favicon),
-        )
-        .route(
-            "/admin/backup/providers",
-            get(admin::list_backup_providers).post(admin::create_backup_provider),
-        )
-        .route(
-            "/admin/backup/providers/test",
-            post(admin::test_backup_provider),
-        )
-        .route(
-            "/admin/backup/providers/{provider_id}",
-            put(admin::update_backup_provider).delete(admin::delete_backup_provider),
-        )
-        .route(
-            "/admin/backup/providers/{provider_id}/schedule",
-            put(admin::update_backup_schedule),
-        )
-        .route(
-            "/admin/backup/providers/{provider_id}/backups",
-            get(admin::list_backups).post(admin::create_backup),
-        )
-        .route(
-            "/admin/backup/providers/{provider_id}/backups/object",
-            get(admin::download_backup).delete(admin::delete_backup),
-        )
-        .route(
-            "/admin/backups/progress/{operation_id}",
-            get(admin::backup_progress),
-        )
-        .route(
-            "/admin/backup/providers/{provider_id}/backups/preflight",
-            post(admin::preflight_restore),
-        )
-        .route(
-            "/admin/backup/providers/{provider_id}/backups/restore",
-            post(admin::restore_backup),
-        )
-        .route(
-            "/admin/storage/targets",
-            get(admin::list_storage_targets).post(admin::create_storage_target),
-        )
-        .route(
-            "/admin/storage/targets/test",
-            post(admin::test_storage_target),
-        )
-        .route(
-            "/admin/storage/overview",
-            get(admin_storage::overview::storage_overview),
-        )
-        .route("/admin/storage/domains", get(admin_storage::list_domains))
-        .route(
-            "/admin/storage/domains/{domain}",
-            get(admin_storage::domain_status),
-        )
-        .route(
-            "/admin/storage/domains/{domain}/repositories",
-            get(admin_storage::domain_repositories),
-        )
-        .route(
-            "/admin/storage/domains/{domain}/migrate",
-            post(admin_storage::migrate_domain),
-        )
-        .route(
-            "/admin/storage/domains/{domain}/migrations/{operation_id}",
-            get(admin_storage::domain_migration),
-        )
-        .route(
-            "/admin/storage/domains/{domain}/migrations/{operation_id}/events",
-            get(admin_storage::domain_migration_events),
-        )
+    contract_router().into()
+}
+
+pub fn contract_router() -> utoipa_axum::router::OpenApiRouter<IdentityState> {
+    utoipa_axum::router::OpenApiRouter::new()
+        .api_routes(crate::openapi::routes!(crate::identity::auth::status))
+        .api_routes(crate::openapi::routes!(crate::identity::sso::start))
+        .api_routes(crate::openapi::routes!(crate::identity::sso::callback))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::sso::admin_configuration,
+            crate::identity::sso::update_configuration
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::sso::list_providers,
+            crate::identity::sso::create_provider
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::sso::update_provider,
+            crate::identity::sso::delete_provider
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin::public_instance_settings
+        ))
+        .api_routes(crate::openapi::routes!(crate::identity::email::smtp_status))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::email::send_test_email
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::email::get_email,
+            crate::identity::email::set_email,
+            crate::identity::email::delete_email
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::email::resend_verification
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::email::verify_email
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::notifications::get_notifications,
+            crate::identity::notifications::update_notifications
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::email::request_password_reset
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::email::confirm_password_reset
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin::public_instance_favicon
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin::list_backup_providers,
+            crate::identity::admin::create_backup_provider
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin::test_backup_provider
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin::update_backup_provider,
+            crate::identity::admin::delete_backup_provider
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin::update_backup_schedule
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin::list_backups,
+            crate::identity::admin::create_backup
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin::download_backup,
+            crate::identity::admin::delete_backup
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin::backup_progress
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin::preflight_restore
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin::restore_backup
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin::list_storage_targets,
+            crate::identity::admin::create_storage_target
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin::test_storage_target
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin_storage::overview::storage_overview
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin_storage::list_domains
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin_storage::domain_status
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin_storage::domain_repositories
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin_storage::migrate_domain
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin_storage::domain_migration
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin_storage::domain_migration_events
+        ))
         // Deprecated per-domain aliases of the routes above; remove after one
         // release.
-        .route(
-            "/admin/storage/lfs/status",
-            get(admin_storage::legacy::lfs_status),
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin_storage::legacy::lfs_status
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin_storage::legacy::lfs_repositories
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin_storage::legacy::lfs_migrate
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin_storage::legacy::lfs_progress
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin_storage::legacy::registry_status
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin_storage::legacy::registry_repositories
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin_storage::legacy::registry_migrate
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin_storage::legacy::registry_events
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin::delete_storage_target
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin::test_saved_storage_target
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin::measure_storage_target
+        ))
+        .api_routes(crate::openapi::routes!(crate::identity::auth::register))
+        .api_routes(crate::openapi::routes!(crate::identity::auth::setup))
+        .api_routes(crate::openapi::routes!(crate::identity::auth::login))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::auth::finish_two_factor_login
+        ))
+        .api_routes(crate::openapi::routes!(crate::identity::auth::logout))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::avatar::public_avatar
+        ))
+        .api_routes(
+            crate::openapi::routes!(
+                crate::identity::avatar::update_avatar,
+                crate::identity::avatar::delete_avatar
+            )
+            .layer(DefaultBodyLimit::max(avatar::MAX_AVATAR_REQUEST_BYTES)),
         )
-        .route(
-            "/admin/storage/lfs/repositories",
-            get(admin_storage::legacy::lfs_repositories),
+        .api_routes(crate::openapi::routes!(
+            crate::identity::auth::update_username
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::auth::update_repository_preferences
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::auth::update_theme_preference
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::auth::update_motion_preference
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::commit_emails::get_identity,
+            crate::identity::commit_emails::update_identity
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::commit_emails::add_email
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::commit_emails::remove_email
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::commit_emails::resend_verification
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::auth::update_password
+        ))
+        .api_routes(crate::openapi::routes!(crate::identity::two_factor::status))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::two_factor::start_enrollment
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::two_factor::confirm_enrollment
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::two_factor::regenerate_recovery_codes
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::two_factor::disable
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::auth::start_passkey_login
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::auth::finish_passkey_login
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::auth::list_passkeys
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::auth::delete_passkey
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::auth::start_passkey_registration
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::auth::finish_passkey_registration
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::users::list_invitations,
+            crate::identity::auth::create_invitation
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::users::revoke_invitation
+        ))
+        .api_routes(crate::openapi::routes!(crate::identity::users::list_users))
+        .api_routes(crate::openapi::routes!(crate::identity::users::delete_user))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::users::disable_user
+        ))
+        .api_routes(crate::openapi::routes!(crate::identity::users::enable_user))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::users::reset_two_factor
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::resources::list_ssh_keys,
+            crate::identity::resources::create_ssh_key
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::resources::delete_ssh_key
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::resources::list_tokens,
+            crate::identity::resources::create_token
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::resources::revoke_token
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::oauth::list_applications,
+            crate::identity::oauth::create_application
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::oauth::delete_application
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::oauth::list_authorizations
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::oauth::revoke_authorization
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::resources::list_organizations,
+            crate::identity::resources::create_organization
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::resources::update_organization,
+            crate::identity::resources::delete_organization
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::resources::get_namespace
+        ))
+        .api_routes(
+            crate::openapi::routes!(
+                crate::identity::avatar::public_organization_avatar,
+                crate::identity::avatar::update_organization_avatar,
+                crate::identity::avatar::delete_organization_avatar
+            )
+            .layer(DefaultBodyLimit::max(avatar::MAX_AVATAR_REQUEST_BYTES)),
         )
-        .route(
-            "/admin/storage/migrations",
-            post(admin_storage::legacy::lfs_migrate),
+        .api_routes(crate::openapi::routes!(
+            crate::identity::resources::list_members,
+            crate::identity::resources::add_member
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::resources::list_member_suggestions
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::resources::remove_member
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::resources::list_audit
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin::get_instance_settings,
+            crate::identity::admin::update_instance_settings
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::admin::get_integrity_settings,
+            crate::identity::admin::update_integrity_settings
+        ))
+        .api_routes(
+            crate::openapi::routes!(
+                crate::identity::admin::update_instance_favicon,
+                crate::identity::admin::delete_instance_favicon
+            )
+            .layer(DefaultBodyLimit::max(admin::MAX_FAVICON_BYTES)),
         )
-        .route(
-            "/admin/storage/progress/{operation_id}",
-            get(admin_storage::legacy::lfs_progress),
-        )
-        .route(
-            "/admin/storage/registry/status",
-            get(admin_storage::legacy::registry_status),
-        )
-        .route(
-            "/admin/storage/registry/repositories",
-            get(admin_storage::legacy::registry_repositories),
-        )
-        .route(
-            "/admin/storage/registry/migrate",
-            post(admin_storage::legacy::registry_migrate),
-        )
-        .route(
-            "/admin/storage/registry/migrations/{operation_id}/events",
-            get(admin_storage::legacy::registry_events),
-        )
-        .route(
-            "/admin/storage/targets/{target_id}",
-            delete(admin::delete_storage_target),
-        )
-        .route(
-            "/admin/storage/targets/{target_id}/test",
-            post(admin::test_saved_storage_target),
-        )
-        .route(
-            "/admin/storage/targets/{target_id}/usage",
-            post(admin::measure_storage_target),
-        )
-        .route("/register", post(auth::register))
-        .route("/setup", post(auth::setup))
-        .route("/auth/login", post(auth::login))
-        .route(
-            "/auth/login/two-factor",
-            post(auth::finish_two_factor_login),
-        )
-        .route("/auth/logout", post(auth::logout))
-        .route("/users/{user_id}/avatar", get(avatar::public_avatar))
-        .route(
-            "/me/avatar",
-            put(avatar::update_avatar)
-                .delete(avatar::delete_avatar)
-                .layer(DefaultBodyLimit::max(avatar::MAX_AVATAR_REQUEST_BYTES)),
-        )
-        .route("/me/username", put(auth::update_username))
-        .route(
-            "/me/repository-preferences",
-            put(auth::update_repository_preferences),
-        )
-        .route("/me/theme-preference", put(auth::update_theme_preference))
-        .route("/me/motion-preference", put(auth::update_motion_preference))
-        .route(
-            "/me/commit-identity",
-            get(commit_emails::get_identity).put(commit_emails::update_identity),
-        )
-        .route("/me/commit-emails", post(commit_emails::add_email))
-        .route(
-            "/me/commit-emails/{email}",
-            delete(commit_emails::remove_email),
-        )
-        .route(
-            "/me/commit-emails/{email}/verification",
-            post(commit_emails::resend_verification),
-        )
-        .route("/me/password", put(auth::update_password))
-        .route("/me/two-factor", get(two_factor::status))
-        .route("/me/two-factor/enroll", post(two_factor::start_enrollment))
-        .route(
-            "/me/two-factor/confirm",
-            post(two_factor::confirm_enrollment),
-        )
-        .route(
-            "/me/two-factor/recovery-codes",
-            post(two_factor::regenerate_recovery_codes),
-        )
-        .route("/me/two-factor/disable", post(two_factor::disable))
-        .route(
-            "/auth/passkeys/login/start",
-            post(auth::start_passkey_login),
-        )
-        .route(
-            "/auth/passkeys/login/finish",
-            post(auth::finish_passkey_login),
-        )
-        .route("/me/passkeys", get(auth::list_passkeys))
-        .route("/me/passkeys/{id}", delete(auth::delete_passkey))
-        .route(
-            "/me/passkeys/register/start",
-            post(auth::start_passkey_registration),
-        )
-        .route(
-            "/me/passkeys/register/finish",
-            post(auth::finish_passkey_registration),
-        )
-        .route(
-            "/invitations",
-            get(users::list_invitations).post(auth::create_invitation),
-        )
-        .route("/invitations/{id}", delete(users::revoke_invitation))
-        .route("/admin/users", get(users::list_users))
-        .route("/admin/users/{username}", delete(users::delete_user))
-        .route("/admin/users/{username}/disable", post(users::disable_user))
-        .route("/admin/users/{username}/enable", post(users::enable_user))
-        .route(
-            "/admin/users/{username}/two-factor",
-            delete(users::reset_two_factor),
-        )
-        .route(
-            "/me/ssh-keys",
-            get(resources::list_ssh_keys).post(resources::create_ssh_key),
-        )
-        .route("/me/ssh-keys/{id}", delete(resources::delete_ssh_key))
-        .route(
-            "/me/tokens",
-            get(resources::list_tokens).post(resources::create_token),
-        )
-        .route("/me/tokens/{id}", delete(resources::revoke_token))
-        .route(
-            "/me/oauth-applications",
-            get(oauth::list_applications).post(oauth::create_application),
-        )
-        .route(
-            "/me/oauth-applications/{id}",
-            delete(oauth::delete_application),
-        )
-        .route("/me/authorizations", get(oauth::list_authorizations))
-        .route(
-            "/me/authorizations/{client_id}",
-            delete(oauth::revoke_authorization),
-        )
-        .route(
-            "/organizations",
-            get(resources::list_organizations).post(resources::create_organization),
-        )
-        .route(
-            "/organizations/{slug}",
-            put(resources::update_organization).delete(resources::delete_organization),
-        )
-        .route("/namespaces/{slug}", get(resources::get_namespace))
-        .route(
-            "/organizations/{slug}/avatar",
-            get(avatar::public_organization_avatar)
-                .put(avatar::update_organization_avatar)
-                .delete(avatar::delete_organization_avatar)
-                .layer(DefaultBodyLimit::max(avatar::MAX_AVATAR_REQUEST_BYTES)),
-        )
-        .route(
-            "/organizations/{slug}/members",
-            get(resources::list_members).post(resources::add_member),
-        )
-        .route(
-            "/organizations/{slug}/member-suggestions",
-            get(resources::list_member_suggestions),
-        )
-        .route(
-            "/organizations/{slug}/members/{username}",
-            delete(resources::remove_member),
-        )
-        .route("/audit", get(resources::list_audit))
-        .route(
-            "/admin/instance",
-            get(admin::get_instance_settings).put(admin::update_instance_settings),
-        )
-        .route(
-            "/admin/integrity",
-            get(admin::get_integrity_settings).put(admin::update_integrity_settings),
-        )
-        .route(
-            "/admin/instance/favicon/{theme}",
-            put(admin::update_instance_favicon)
-                .delete(admin::delete_instance_favicon)
-                .layer(DefaultBodyLimit::max(admin::MAX_FAVICON_BYTES)),
-        )
-        .route(
-            "/namespaces/{slug}/integrations",
-            get(integrations::list_integrations).post(integrations::create_integration),
-        )
-        .route(
-            "/namespaces/{slug}/integrations/test",
-            post(integrations::test_new_integration),
-        )
-        .route(
-            "/namespaces/{slug}/integrations/{id}",
-            put(integrations::update_integration).delete(integrations::delete_integration),
-        )
-        .route(
-            "/namespaces/{slug}/integrations/{id}/credential",
-            get(integrations::get_integration_credential),
-        )
-        .route(
-            "/namespaces/{slug}/integrations/{id}/test",
-            post(integrations::test_integration),
-        )
-        .route(
-            "/namespaces/{slug}/integrations/{id}/source",
-            get(integrations::get_integration_source)
-                .post(integrations::configure_integration_source)
-                .delete(integrations::disconnect_integration_source),
-        )
-        .route(
-            "/namespaces/{slug}/integrations/{id}/source/verify",
-            post(integrations::verify_integration_source),
-        )
+        .api_routes(crate::openapi::routes!(
+            crate::identity::integrations::list_integrations,
+            crate::identity::integrations::create_integration
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::integrations::test_new_integration
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::integrations::update_integration,
+            crate::identity::integrations::delete_integration
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::integrations::get_integration_credential
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::integrations::test_integration
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::integrations::get_integration_source,
+            crate::identity::integrations::configure_integration_source,
+            crate::identity::integrations::disconnect_integration_source
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::identity::integrations::verify_integration_source
+        ))
         .merge(mirror_identities::router())
 }
 
@@ -1616,7 +1626,8 @@ impl From<user::Model> for UserResponse {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams, utoipa::ToSchema)]
+#[into_params(parameter_in = Query)]
 pub struct Pagination {
     pub limit: Option<u64>,
 }

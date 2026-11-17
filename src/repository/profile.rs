@@ -156,6 +156,21 @@ fn merge_activity(total: &mut BTreeMap<NaiveDate, usize>, repository: BTreeMap<N
 
 /// Commits per day over the last year across the namespace's repositories that
 /// the viewer can read. Mirrors are left out: their history is someone else's.
+#[utoipa::path(
+    get, path = "/namespaces/{slug}/activity",
+    operation_id = "get_namespaces_slug_activity",
+    summary = "Get a namespace's contribution activity",
+    tag = "Namespaces",
+    params(
+        ("slug" = String, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = NamespaceActivityResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn activity(
     State(state): State<RepositoryState>,
     AxumPath(slug): AxumPath<String>,
@@ -213,6 +228,22 @@ pub async fn activity(
 
 /// The commits behind one day of the activity graph, grouped by repository.
 /// Reads the same repositories as [`activity`], so the two always agree.
+#[utoipa::path(
+    get, path = "/namespaces/{slug}/activity/{date}",
+    operation_id = "get_namespaces_slug_activity_date",
+    summary = "Get a namespace's activity on one day",
+    tag = "Namespaces",
+    params(
+        ("slug" = String, Path),
+        ("date" = NaiveDate, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = NamespaceDayResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn activity_day(
     State(state): State<RepositoryState>,
     AxumPath((slug, date)): AxumPath<(String, NaiveDate)>,
@@ -319,6 +350,21 @@ async fn pinned_repositories(
     .await
 }
 
+#[utoipa::path(
+    get, path = "/namespaces/{slug}/pins",
+    operation_id = "get_namespaces_slug_pins",
+    summary = "List a namespace's pinned repositories",
+    tag = "Namespaces",
+    params(
+        ("slug" = String, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = PinnedRepositoriesResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_pins(
     State(state): State<RepositoryState>,
     AxumPath(slug): AxumPath<String>,
@@ -360,6 +406,21 @@ fn validate_pins(requested: &[Uuid], allowed: &HashSet<Uuid>) -> Result<(), ApiE
 
 /// Replaces the namespace's pins with `repository_ids`, in the order given.
 /// Only the account or organization owner may.
+#[utoipa::path(
+    put, path = "/namespaces/{slug}/pins",
+    operation_id = "put_namespaces_slug_pins",
+    summary = "Replace a namespace's pinned repositories",
+    tag = "Namespaces",
+
+    params(
+        ("slug" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = PinnedRepositoriesResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn set_pins(
     State(state): State<RepositoryState>,
     AxumPath(slug): AxumPath<String>,

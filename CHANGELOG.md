@@ -4,6 +4,14 @@ All notable changes to Gitadel are recorded here. This project follows [Semantic
 
 ## [Unreleased]
 
+### Changed
+
+- Generate the REST contract from registered Axum handlers and concrete Rust
+  DTOs, with pinned Hey API TypeScript bindings. Frontend builds and production
+  packaging now reject contract drift and incompatible frontend types.
+- Add offline contract export with `gitadel openapi`, plus `just api-generate`
+  and `just api-check`. See API-CONTRACT.md for the workflow and coverage limits.
+
 ## [0.24.0] - 2026-11-14
 
 ### Added

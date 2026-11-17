@@ -64,8 +64,8 @@
     void load();
   });
 
-  function identitiesPath(slug: string): string {
-    return `/api/v1/namespaces/${encodeURIComponent(slug)}/mirror-identities`;
+  function identitiesPath(slug: string) {
+    return `/api/v1/namespaces/${encodeURIComponent(slug)}/mirror-identities` as const;
   }
 
   async function load(): Promise<void> {
@@ -118,20 +118,14 @@
     saving = true;
     formError = null;
     try {
-      const identity = await requestJson(
-        editing
-          ? `${identitiesPath(currentTarget.slug)}/${encodeURIComponent(editing.identity.id)}`
-          : identitiesPath(currentTarget.slug),
-        mirrorIdentitySchema,
-        {
-          method: editing ? "PUT" : "POST",
-          body: jsonBody({
-            name,
-            server_url: serverUrl,
-            ...((!editing || token.trim()) && { token }),
-          }),
-        },
-      );
+      const base = { name, server_url: serverUrl };
+      const identity = editing
+        ? await requestJson(`${identitiesPath(currentTarget.slug)}/${encodeURIComponent(editing.identity.id)}`, mirrorIdentitySchema, {
+            method: "PUT", body: jsonBody({ ...base, ...(token.trim() && { token }) }),
+          })
+        : await requestJson(identitiesPath(currentTarget.slug), mirrorIdentitySchema, {
+            method: "POST", body: jsonBody({ ...base, token }),
+          });
       identities[currentTarget.slug] = editing
         ? (identities[currentTarget.slug] ?? []).map((current) =>
             current.id === identity.id ? identity : current,

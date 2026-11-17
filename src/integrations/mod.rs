@@ -6,6 +6,7 @@
 //! event dispatch and the HTTP APIs do not contain provider-specific matches.
 
 mod dokploy;
+pub(crate) use dokploy::{Catalog, CreatedEnvironment, DeploymentStatus, ProjectSummary};
 
 use serde_json::Value;
 
@@ -303,17 +304,20 @@ pub trait Integration: Send + Sync {
         config: Option<&Value>,
     ) -> Result<(), String>;
 
-    async fn remote_resources(&self, request: RemoteResourcesRequest<'_>) -> Result<Value, String>;
+    async fn remote_resources(
+        &self,
+        request: RemoteResourcesRequest<'_>,
+    ) -> Result<Catalog, String>;
 
     async fn create_remote_project(
         &self,
         request: CreateProjectRequest<'_>,
-    ) -> Result<Value, String>;
+    ) -> Result<ProjectSummary, String>;
 
     async fn create_remote_environment(
         &self,
         request: CreateEnvironmentRequest<'_>,
-    ) -> Result<Value, String>;
+    ) -> Result<CreatedEnvironment, String>;
 
     async fn link_remote(&self, request: LinkRemoteRequest<'_>) -> Result<Value, String>;
 
@@ -331,7 +335,7 @@ pub trait Integration: Send + Sync {
         &self,
         credential: Credential<'_>,
         resource: &str,
-    ) -> Result<Value, String>;
+    ) -> Result<DeploymentStatus, String>;
 }
 
 #[cfg(test)]

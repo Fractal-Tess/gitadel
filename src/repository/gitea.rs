@@ -15,7 +15,8 @@ use crate::{
     identity::{ApiError, SCOPE_REPOSITORY_READ},
 };
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct GiteaPagination {
     page: Option<usize>,
     limit: Option<usize>,
@@ -51,6 +52,20 @@ pub struct GiteaRepositoryResponse {
     archived: bool,
 }
 
+#[utoipa::path(
+    get, path = "/user/repos",
+    operation_id = "get_user_repos",
+    summary = "List the current user's repositories, Gitea-compatible",
+    tag = "Account",
+    params(
+        GiteaPagination,
+    ),
+    responses(
+        (status = 200, description = "Success", body = Vec<GiteaRepositoryResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_user_repositories(
     State(state): State<RepositoryState>,
     headers: HeaderMap,
@@ -98,6 +113,22 @@ pub struct GiteaBranchCommitResponse {
     id: String,
 }
 
+#[utoipa::path(
+    get, path = "/repos/{namespace}/{name}/branches",
+    operation_id = "get_repos_namespace_name_branches",
+    summary = "List branches (Gitea compatible)",
+    tag = "Gitea compatibility",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        GiteaPagination,
+    ),
+    responses(
+        (status = 200, description = "Success", body = Vec<GiteaBranchResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_branches(
     State(state): State<RepositoryState>,
     Path((namespace, name)): Path<(String, String)>,

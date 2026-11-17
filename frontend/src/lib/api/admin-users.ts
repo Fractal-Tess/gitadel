@@ -26,6 +26,8 @@ export type AdminUser = z.infer<typeof adminUserSchema>;
 export type AdminUserPage = z.infer<typeof adminUserPageSchema>;
 export type PendingInvitation = z.infer<typeof pendingInvitationSchema>;
 
-export function adminUserApi(username: string, action = ""): string {
-  return `/api/v1/admin/users/${encodeURIComponent(username)}${action}`;
+export function adminUserApi(username: string): `/api/v1/admin/users/${string}`;
+export function adminUserApi<const P extends string>(username: string, action: P): `/api/v1/admin/users/${string}${P}`;
+export function adminUserApi(username: string, action = "") {
+  return `/api/v1/admin/users/${encodeURIComponent(username)}${action}` as const;
 }

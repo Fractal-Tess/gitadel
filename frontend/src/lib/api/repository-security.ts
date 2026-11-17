@@ -28,4 +28,5 @@ export type ProtectionRule = z.infer<typeof protectionRuleSchema>;
 export type ProtectionRuleInput = Partial<
   Omit<ProtectionRule, "id" | "created_at" | "updated_at">
 >;
+export type ProtectionRuleUpdate = Omit<ProtectionRuleInput, "kind">;
 export type DeployKey = z.infer<typeof deployKeySchema>;

@@ -35,6 +35,22 @@ pub(crate) struct RegistryReferenceResponse {
     pub updated_at: Option<String>,
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/registry",
+    operation_id = "get_repositories_namespace_name_registry",
+    summary = "List the repository's container images",
+    tag = "Repositories",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = RegistryResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub(crate) async fn browse(
     State(state): State<RepositoryState>,
     Path((namespace, name)): Path<(String, String)>,

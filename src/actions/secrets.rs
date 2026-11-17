@@ -5,13 +5,14 @@
 //! API only ever returns their names.
 //! Repository values override namespace values with the same name.
 
+use crate::openapi::ContractRouterExt;
+
 use std::collections::{BTreeMap, HashMap};
 
 use axum::{
-    Json, Router,
+    Json,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    routing::{get, put},
 };
 use axum_extra::extract::cookie::CookieJar;
 use chrono::Utc;
@@ -157,55 +158,51 @@ pub(crate) async fn job_values<C: ConnectionTrait>(
     })
 }
 
-pub(crate) fn router() -> Router<ActionsState> {
-    Router::new()
-        .route(
-            "/repositories/{namespace}/{name}/actions/secrets",
-            get(list_repository_secrets),
-        )
-        .route(
-            "/repositories/{namespace}/{name}/actions/secrets/{secret}",
-            put(set_repository_secret).delete(delete_repository_secret),
-        )
-        .route(
-            "/repositories/{namespace}/{name}/actions/variables",
-            get(list_repository_variables),
-        )
-        .route(
-            "/repositories/{namespace}/{name}/actions/variables/{variable}",
-            put(set_repository_variable).delete(delete_repository_variable),
-        )
-        .route(
-            "/namespaces/{namespace}/actions/secrets",
-            get(list_namespace_secrets),
-        )
-        .route(
-            "/namespaces/{namespace}/actions/secrets/{secret}",
-            put(set_namespace_secret).delete(delete_namespace_secret),
-        )
-        .route(
-            "/namespaces/{namespace}/actions/variables",
-            get(list_namespace_variables),
-        )
-        .route(
-            "/namespaces/{namespace}/actions/variables/{variable}",
-            put(set_namespace_variable).delete(delete_namespace_variable),
-        )
+pub(crate) fn router() -> utoipa_axum::router::OpenApiRouter<ActionsState> {
+    utoipa_axum::router::OpenApiRouter::new()
+        .api_routes(crate::openapi::routes!(
+            crate::actions::secrets::list_repository_secrets
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::actions::secrets::set_repository_secret,
+            crate::actions::secrets::delete_repository_secret
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::actions::secrets::list_repository_variables
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::actions::secrets::set_repository_variable,
+            crate::actions::secrets::delete_repository_variable
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::actions::secrets::list_namespace_secrets
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::actions::secrets::set_namespace_secret,
+            crate::actions::secrets::delete_namespace_secret
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::actions::secrets::list_namespace_variables
+        ))
+        .api_routes(crate::openapi::routes!(
+            crate::actions::secrets::set_namespace_variable,
+            crate::actions::secrets::delete_namespace_variable
+        ))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct SecretResponse {
     name: String,
     created_at: chrono::DateTime<Utc>,
     updated_at: chrono::DateTime<Utc>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct SecretsResponse {
     secrets: Vec<SecretResponse>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct VariableResponse {
     name: String,
     value: String,
@@ -213,12 +210,12 @@ struct VariableResponse {
     updated_at: chrono::DateTime<Utc>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct VariablesResponse {
     variables: Vec<VariableResponse>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct ValueRequest {
     value: String,
 }
@@ -513,6 +510,22 @@ fn scope_columns(scope: &Scope) -> (Option<Uuid>, Option<String>) {
     }
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/actions/secrets",
+    operation_id = "get_repositories_namespace_name_actions_secrets",
+    summary = "List repository secrets",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = SecretsResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn list_repository_secrets(
     State(state): State<ActionsState>,
     Path((namespace, name)): Path<(String, String)>,
@@ -524,6 +537,22 @@ async fn list_repository_secrets(
     Ok(Json(list_secrets(&state, &scope).await?))
 }
 
+#[utoipa::path(
+    put, path = "/repositories/{namespace}/{name}/actions/secrets/{secret}",
+    operation_id = "put_repositories_namespace_name_actions_secrets_secret",
+    summary = "Set repository secret",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("secret" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = SecretResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn set_repository_secret(
     State(state): State<ActionsState>,
     Path((namespace, name, secret)): Path<(String, String, String)>,
@@ -538,6 +567,22 @@ async fn set_repository_secret(
     ))
 }
 
+#[utoipa::path(
+    delete, path = "/repositories/{namespace}/{name}/actions/secrets/{secret}",
+    operation_id = "delete_repositories_namespace_name_actions_secrets_secret",
+    summary = "Delete repository secret",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("secret" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn delete_repository_secret(
     State(state): State<ActionsState>,
     Path((namespace, name, secret)): Path<(String, String, String)>,
@@ -549,6 +594,22 @@ async fn delete_repository_secret(
     delete_secret(&state, &actor, &scope, &target, &secret).await
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/actions/variables",
+    operation_id = "get_repositories_namespace_name_actions_variables",
+    summary = "List repository variables",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = VariablesResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn list_repository_variables(
     State(state): State<ActionsState>,
     Path((namespace, name)): Path<(String, String)>,
@@ -560,6 +621,22 @@ async fn list_repository_variables(
     Ok(Json(list_variables(&state, &scope).await?))
 }
 
+#[utoipa::path(
+    put, path = "/repositories/{namespace}/{name}/actions/variables/{variable}",
+    operation_id = "put_repositories_namespace_name_actions_variables_variable",
+    summary = "Set repository variable",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("variable" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = VariableResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn set_repository_variable(
     State(state): State<ActionsState>,
     Path((namespace, name, variable)): Path<(String, String, String)>,
@@ -574,6 +651,22 @@ async fn set_repository_variable(
     ))
 }
 
+#[utoipa::path(
+    delete, path = "/repositories/{namespace}/{name}/actions/variables/{variable}",
+    operation_id = "delete_repositories_namespace_name_actions_variables_variable",
+    summary = "Delete repository variable",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("variable" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn delete_repository_variable(
     State(state): State<ActionsState>,
     Path((namespace, name, variable)): Path<(String, String, String)>,
@@ -585,6 +678,20 @@ async fn delete_repository_variable(
     delete_variable(&state, &actor, &scope, &target, &variable).await
 }
 
+#[utoipa::path(
+    get, path = "/namespaces/{namespace}/actions/secrets",
+    operation_id = "get_namespaces_namespace_actions_secrets",
+    summary = "List namespace secrets",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = SecretsResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn list_namespace_secrets(
     State(state): State<ActionsState>,
     Path(namespace): Path<String>,
@@ -595,6 +702,21 @@ async fn list_namespace_secrets(
     Ok(Json(list_secrets(&state, &scope).await?))
 }
 
+#[utoipa::path(
+    put, path = "/namespaces/{namespace}/actions/secrets/{secret}",
+    operation_id = "put_namespaces_namespace_actions_secrets_secret",
+    summary = "Set namespace secret",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+        ("secret" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = SecretResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn set_namespace_secret(
     State(state): State<ActionsState>,
     Path((namespace, secret)): Path<(String, String)>,
@@ -609,6 +731,21 @@ async fn set_namespace_secret(
     ))
 }
 
+#[utoipa::path(
+    delete, path = "/namespaces/{namespace}/actions/secrets/{secret}",
+    operation_id = "delete_namespaces_namespace_actions_secrets_secret",
+    summary = "Delete namespace secret",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+        ("secret" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn delete_namespace_secret(
     State(state): State<ActionsState>,
     Path((namespace, secret)): Path<(String, String)>,
@@ -620,6 +757,20 @@ async fn delete_namespace_secret(
     delete_secret(&state, &actor, &scope, &target, &secret).await
 }
 
+#[utoipa::path(
+    get, path = "/namespaces/{namespace}/actions/variables",
+    operation_id = "get_namespaces_namespace_actions_variables",
+    summary = "List namespace variables",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = VariablesResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn list_namespace_variables(
     State(state): State<ActionsState>,
     Path(namespace): Path<String>,
@@ -630,6 +781,21 @@ async fn list_namespace_variables(
     Ok(Json(list_variables(&state, &scope).await?))
 }
 
+#[utoipa::path(
+    put, path = "/namespaces/{namespace}/actions/variables/{variable}",
+    operation_id = "put_namespaces_namespace_actions_variables_variable",
+    summary = "Set namespace variable",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+        ("variable" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = VariableResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn set_namespace_variable(
     State(state): State<ActionsState>,
     Path((namespace, variable)): Path<(String, String)>,
@@ -644,6 +810,21 @@ async fn set_namespace_variable(
     ))
 }
 
+#[utoipa::path(
+    delete, path = "/namespaces/{namespace}/actions/variables/{variable}",
+    operation_id = "delete_namespaces_namespace_actions_variables_variable",
+    summary = "Delete namespace variable",
+    tag = "Actions",
+    params(
+        ("namespace" = String, Path),
+        ("variable" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 async fn delete_namespace_variable(
     State(state): State<ActionsState>,
     Path((namespace, variable)): Path<(String, String)>,

@@ -230,7 +230,7 @@ function resolveRepositoryReference(source: MarkdownSource, reference: string) {
 }
 
 function rewriteMarkdownReferences(node: HTMLElement, source: MarkdownSource) {
-  const api = `/api/v1/repositories/${encodeURIComponent(source.namespace)}/${encodeURIComponent(source.name)}`;
+  const api = `/api/v1/repositories/${encodeURIComponent(source.namespace)}/${encodeURIComponent(source.name)}` as const;
   const repository = `/${encodeURIComponent(source.namespace)}/${encodeURIComponent(source.name)}`;
 
   for (const image of node.querySelectorAll<HTMLImageElement>("img[src]")) {

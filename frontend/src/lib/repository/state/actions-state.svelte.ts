@@ -12,7 +12,7 @@ import {
   type ActionRuns,
   type ActionWorkflows,
 } from "$lib/api/actions.js";
-import { errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
+import { apiQuery, errorMessage, jsonBody, requestJson } from "$lib/api/transport.js";
 import { loadRepositoryActionRuns } from "$lib/repository/repository-data-cache.js";
 import type { RepositoryFeatureContext } from "./shared.js";
 import { repositoryActionsApi } from "./shared.js";
@@ -85,7 +85,7 @@ export class RepositoryActionsState {
     this.#actionLogRequestSequence += 1;
   }
 
-  async loadActions(init: RequestInit = {}, polling = false): Promise<void> {
+  async loadActions(init: Omit<RequestInit, "method" | "body"> = {}, polling = false): Promise<void> {
     const selection = this.getActionSelection();
     if (!polling) this.actionsLoading = true;
     let actionRuns: ActionRuns | null = null;
@@ -136,7 +136,7 @@ export class RepositoryActionsState {
     }
   }
 
-  async loadActionArtifacts(init: RequestInit = {}): Promise<void> {
+  async loadActionArtifacts(init: Omit<RequestInit, "method" | "body"> = {}): Promise<void> {
     const runId = this.getActionSelection().runId;
     if (!runId) return;
     this.actionArtifactsLoading = true;
@@ -167,17 +167,17 @@ export class RepositoryActionsState {
 
   async loadActionStatuses(
     oids: string[],
-    init: RequestInit = {},
+    init: Omit<RequestInit, "method" | "body"> = {},
   ): Promise<void> {
     if (!oids.length) return;
     try {
-      const parameters = new URLSearchParams({
+      const parameters = {
         oids: oids.slice(0, 50).join(","),
-      });
+      };
       const response = await requestJson(
-        `${repositoryActionsApi(this, "/statuses")}?${parameters}`,
+        repositoryActionsApi(this, "/statuses"),
         actionStatusesSchema,
-        init,
+        { ...init, query: apiQuery(parameters) },
       );
       if (!this.#destroyed && this.isScopeCurrent())
         this.actionCommitStatuses = Object.fromEntries(
@@ -212,7 +212,7 @@ export class RepositoryActionsState {
     void this.loadActionLogFor(current.runId, jobId);
   }
 
-  async loadActionLog(init: RequestInit = {}): Promise<void> {
+  async loadActionLog(init: Omit<RequestInit, "method" | "body"> = {}): Promise<void> {
     const selection = this.getActionSelection();
     await this.loadActionLogFor(selection.runId, selection.jobId, init);
   }
@@ -220,23 +220,19 @@ export class RepositoryActionsState {
   private async loadActionLogFor(
     runId: string | null,
     jobId: number | null,
-    init: RequestInit = {},
+    init: Omit<RequestInit, "method" | "body"> = {},
   ): Promise<void> {
     if (!runId || !jobId) return;
     const requestSequence = ++this.#actionLogRequestSequence;
     this.actionLogsLoading = true;
     try {
-      const parameters = new URLSearchParams();
-      if (this.actionLogs?.next_cursor)
-        parameters.set("cursor", this.actionLogs.next_cursor);
-      const suffix = parameters.size ? `?${parameters}` : "";
       const delta = await requestJson(
         repositoryActionsApi(
           this,
-          `/runs/${encodeURIComponent(runId)}/jobs/${jobId}/logs${suffix}`,
+          `/runs/${encodeURIComponent(runId)}/jobs/${jobId}/logs`,
         ),
         actionLogsSchema,
-        init,
+        { ...init, query: apiQuery({ cursor: this.actionLogs?.next_cursor || undefined }) },
       );
       const current = this.getActionSelection();
       if (
@@ -303,12 +299,10 @@ export class RepositoryActionsState {
     this.workflowsLoading = true;
     this.workflowsError = null;
     try {
-      const suffix = reference
-        ? `?${new URLSearchParams({ ref: reference })}`
-        : "";
       const workflows = await requestJson(
-        `${repositoryActionsApi(this, "/workflows")}${suffix}`,
+        repositoryActionsApi(this, "/workflows"),
         actionWorkflowsSchema,
+        { query: apiQuery({ ref: reference || undefined }) },
       );
       if (!this.#destroyed && this.isScopeCurrent()) this.workflows = workflows;
     } catch (caught) {

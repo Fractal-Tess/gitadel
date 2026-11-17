@@ -103,6 +103,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum GitadelCommand {
+    /// Export the registered REST contract to stdout without opening instance data.
+    Openapi,
     #[command(hide = true)]
     ImageRender {
         path: String,
@@ -504,8 +506,9 @@ impl Default for ActionsSettings {
     }
 }
 
-#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize, utoipa::ToSchema)]
 pub struct S3Settings {
+    #[schema(value_type = String, format = "uri")]
     pub endpoint: Url,
     pub bucket: String,
     pub access_key: String,

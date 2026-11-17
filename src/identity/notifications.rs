@@ -69,6 +69,17 @@ pub struct NotificationSettingsResponse {
     preferences: NotificationPreferences,
 }
 
+#[utoipa::path(
+    get, path = "/me/notifications",
+    operation_id = "get_me_notifications",
+    summary = "Get email notification preferences",
+    tag = "Account",
+    responses(
+        (status = 200, description = "Success", body = NotificationSettingsResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn get_notifications(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -81,6 +92,18 @@ pub async fn get_notifications(
     }))
 }
 
+#[utoipa::path(
+    put, path = "/me/notifications",
+    operation_id = "put_me_notifications",
+    summary = "Update email notification preferences",
+    tag = "Account",
+
+    responses(
+        (status = 200, description = "Success", body = NotificationSettingsResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_notifications(
     State(state): State<IdentityState>,
     headers: HeaderMap,

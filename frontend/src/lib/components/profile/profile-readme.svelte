@@ -11,7 +11,7 @@
     repositorySchema,
     treeSchema,
   } from "$lib/api/repositories.js";
-  import { requestJson } from "$lib/api/transport.js";
+  import { apiQuery, requestJson } from "$lib/api/transport.js";
   import { trustedHtml } from "$lib/repository/format.js";
   import { useAppState } from "$lib/state/app-state.svelte.js";
 
@@ -19,7 +19,7 @@
 
   const app = useAppState();
   const api = $derived(
-    `/api/v1/repositories/${encodeURIComponent(namespace)}/${encodeURIComponent(namespace)}`,
+    `/api/v1/repositories/${encodeURIComponent(namespace)}/${encodeURIComponent(namespace)}` as const,
   );
 
   type Readme = {
@@ -34,17 +34,17 @@
     const init = { signal };
     const repository = await requestJson(api, repositorySchema, init);
     if (!repository.default_branch) return null;
-    const query = new URLSearchParams({ rev: repository.default_branch });
-    const tree = await requestJson(`${api}/tree?${query}`, treeSchema, init);
+    const query = { rev: repository.default_branch };
+    const tree = await requestJson(`${api}/tree`, treeSchema, { ...init, query: apiQuery(query) });
     const entry = tree.entries.find(
       (candidate) =>
         candidate.kind === "blob" && /^readme(?:\.[^.]+)?$/i.test(candidate.name),
     );
     if (!entry) return null;
     const blob = await requestJson(
-      `${api}/blob?${new URLSearchParams({ rev: tree.commit_oid, path: entry.path })}`,
+      `${api}/blob`,
       blobSchema,
-      init,
+      { ...init, query: apiQuery({ rev: tree.commit_oid, path: entry.path }) },
     );
     if (!blob.rendered_html) return null;
     return {

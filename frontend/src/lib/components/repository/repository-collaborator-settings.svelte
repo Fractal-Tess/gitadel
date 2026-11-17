@@ -93,7 +93,7 @@
   async function changeRole(collaborator: Collaborator, next: CollaboratorRole) {
     if (collaborator.role === next) return;
     pendingUsername = collaborator.username;
-    const path = `${endpoint}/${encodeURIComponent(collaborator.username)}`;
+    const path = `${endpoint}/${encodeURIComponent(collaborator.username)}` as const;
     try {
       await requestEmpty(path, { method: "DELETE" });
       const updated = await requestJson(endpoint, collaboratorSchema, {

@@ -30,7 +30,7 @@ use crate::{
     identity::ApiError,
 };
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Deserialize, utoipa::ToSchema)]
 pub enum SourceArchiveFormat {
     #[serde(rename = "zip")]
     Zip,
@@ -54,13 +54,31 @@ impl SourceArchiveFormat {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct SourceArchiveQuery {
     #[serde(default, deserialize_with = "blank_as_none")]
     rev: Option<String>,
     format: SourceArchiveFormat,
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/source",
+    operation_id = "get_repositories_namespace_name_source",
+    summary = "Download a source archive",
+    tag = "Repository content",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        SourceArchiveQuery,
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = crate::openapi::Binary, content_type = "application/octet-stream"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn source_archive(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,

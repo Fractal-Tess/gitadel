@@ -49,6 +49,8 @@ export const webhookDeliverySchema = z.object({
   duration_ms: z.number().int(),
   payload: z.unknown(),
   response_body: z.string().nullable(),
+  attempts: z.number().int().nonnegative(),
+  next_attempt_at: z.string().nullable().optional(),
 });
 
 export type Webhook = z.infer<typeof webhookSchema>;

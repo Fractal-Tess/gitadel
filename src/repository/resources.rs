@@ -98,7 +98,8 @@ impl RepositoryResponse {
 const MAX_REPOSITORY_QUERY_CHARS: usize = 100;
 
 /// Narrows a repository list in SQL, beside the visibility predicate.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct RepositoryFilter {
     /// Case-insensitive substring of the namespace, name, description, or
     /// `namespace/name` path.
@@ -153,6 +154,21 @@ fn like_anywhere(query: &str) -> LikeExpr {
     LikeExpr::new(pattern).escape('\\')
 }
 
+#[utoipa::path(
+    get, path = "/repositories",
+    operation_id = "get_repositories",
+    summary = "List the repositories the caller can read",
+    tag = "Repositories",
+    params(
+        RepositoryFilter,
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = Vec<RepositoryResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_repositories(
     State(state): State<RepositoryState>,
     headers: HeaderMap,
@@ -373,12 +389,24 @@ pub(super) struct CreateRepositoryOptions {
     pub(super) mirror: Option<mirrors::CreateMirrorRequest>,
 }
 
+#[utoipa::path(
+    post, path = "/repositories",
+    operation_id = "post_repositories",
+    summary = "Create a repository",
+    tag = "Repositories",
+
+    responses(
+        (status = 201, description = "Success", body = crate::repository::resources::RepositoryResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_repository(
     State(state): State<RepositoryState>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(request): Json<CreateRepositoryRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let actor = state
         .identity()
         .authenticate(&headers, &jar, SCOPE_WRITE)
@@ -953,6 +981,22 @@ impl RepositoryState {
     }
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}",
+    operation_id = "get_repositories_namespace_name",
+    summary = "Get a repository",
+    tag = "Repositories",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = RepositoryResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn get_repository(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -1011,6 +1055,22 @@ pub struct UpdateRepositoryControlRequest {
     namespace: Option<String>,
 }
 
+#[utoipa::path(
+    patch, path = "/repositories/{namespace}/{name}/control",
+    operation_id = "patch_repositories_namespace_name_control",
+    summary = "Rename, move, or reconfigure a repository",
+    tag = "Repositories",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = RepositoryResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_repository_control(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -1122,6 +1182,21 @@ pub async fn update_repository_control(
     )))
 }
 
+#[utoipa::path(
+    post, path = "/repositories/{namespace}/{name}/archive",
+    operation_id = "post_repositories_namespace_name_archive",
+    summary = "Archive a repository",
+    tag = "Repositories",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn archive_repository(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -1131,6 +1206,21 @@ pub async fn archive_repository(
     update_archive_state(&state, &headers, &jar, &namespace, &name, true).await
 }
 
+#[utoipa::path(
+    delete, path = "/repositories/{namespace}/{name}/archive",
+    operation_id = "delete_repositories_namespace_name_archive",
+    summary = "Unarchive a repository",
+    tag = "Repositories",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn unarchive_repository(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -1140,6 +1230,21 @@ pub async fn unarchive_repository(
     update_archive_state(&state, &headers, &jar, &namespace, &name, false).await
 }
 
+#[utoipa::path(
+    post, path = "/repositories/{namespace}/{name}/delete",
+    operation_id = "post_repositories_namespace_name_delete",
+    summary = "Delete a repository",
+    tag = "Repositories",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_repository(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -1460,6 +1565,21 @@ pub(super) fn select_advertised_or_default_branch(
     select_default_branch(repository, advertised)
 }
 
+#[utoipa::path(
+    put, path = "/repositories/{namespace}/{name}/favorite",
+    operation_id = "put_repositories_namespace_name_favorite",
+    summary = "Add a repository to the caller's favorites",
+    tag = "Repositories",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn favorite_repository(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -1492,6 +1612,21 @@ pub async fn favorite_repository(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    delete, path = "/repositories/{namespace}/{name}/favorite",
+    operation_id = "delete_repositories_namespace_name_favorite",
+    summary = "Remove a repository from the caller's favorites",
+    tag = "Repositories",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn unfavorite_repository(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -1521,6 +1656,21 @@ pub struct CollaboratorResponse {
     created_at: chrono::DateTime<Utc>,
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/collaborators",
+    operation_id = "get_repositories_namespace_name_collaborators",
+    summary = "List the repository's collaborators",
+    tag = "Collaborators",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = Vec<CollaboratorResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_collaborators(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -1565,13 +1715,29 @@ pub struct AddCollaboratorRequest {
     role: String,
 }
 
+#[utoipa::path(
+    post, path = "/repositories/{namespace}/{name}/collaborators",
+    operation_id = "post_repositories_namespace_name_collaborators",
+    summary = "Add a collaborator",
+    tag = "Collaborators",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 201, description = "Success", body = crate::repository::resources::CollaboratorResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn add_collaborator(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(request): Json<AddCollaboratorRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let (actor, repository) = state
         .authenticated_repository(
             &headers,
@@ -1640,6 +1806,22 @@ pub async fn add_collaborator(
     ))
 }
 
+#[utoipa::path(
+    delete, path = "/repositories/{namespace}/{name}/collaborators/{username}",
+    operation_id = "delete_repositories_namespace_name_collaborators_username",
+    summary = "Remove a collaborator",
+    tag = "Collaborators",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("username" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn remove_collaborator(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, username)): AxumPath<(String, String, String)>,

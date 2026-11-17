@@ -24,8 +24,8 @@ type BackupSettingsData = {
 type CacheEntry = { expiresAt: number; promise: Promise<BackupSettingsData> };
 const cache = new Map<string, CacheEntry>();
 
-function providerPath(id: string): string {
-  return `/api/v1/admin/backup/providers/${encodeURIComponent(id)}`;
+function providerPath(id: string): `/api/v1/admin/backup/providers/${string}` {
+  return `/api/v1/admin/backup/providers/${encodeURIComponent(id)}` as const;
 }
 async function fetchBackupSettings(): Promise<BackupSettingsData> {
   const loaded = await requestJson("/api/v1/admin/backup/providers", backupProvidersSchema);

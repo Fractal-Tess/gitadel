@@ -9,7 +9,7 @@ import {
   clearRepositoryDataCache,
 } from "$lib/repository/repository-data-cache.js";
 import { clearRepositoryPreload } from "$lib/repository/repository-preload.js";
-import {
+import { apiQuery,
   ApiFailure,
   errorMessage,
   jsonBody,
@@ -587,8 +587,9 @@ export class RepositoryPageState {
           const tree =
             this.browser.commitCount == null
               ? await requestJson(
-                  `${repositoryApi(this, "/tree")}?${new URLSearchParams({ rev: revision })}`,
+                  repositoryApi(this, "/tree"),
                   treeSchema,
+                  { query: apiQuery({ rev: revision }) },
                 ).catch(() => null)
               : null;
           if (
@@ -659,7 +660,7 @@ export class RepositoryPageState {
     window.history.pushState(
       {},
       "",
-      `/${this.namespace}/${this.name}${search ? `?${search}` : ""}`,
+      `/${this.namespace}/${this.name}${search ? `?${search}` as const : ""}`,
     );
   }
 }

@@ -153,10 +153,10 @@
     });
   }
 
-  function ssoHref(providerId: string): string {
+  function ssoHref(providerId: string) {
     const returnTo = safeReturnTo(page.url.searchParams.get("returnTo"));
     const query = new URLSearchParams({ returnTo });
-    return `/api/v1/auth/oidc/${encodeURIComponent(providerId)}/start?${query}`;
+    return `/api/v1/auth/oidc/${encodeURIComponent(providerId)}/start?${query}` as const;
   }
 </script>
 

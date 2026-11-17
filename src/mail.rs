@@ -33,7 +33,7 @@ pub struct Email {
 }
 
 /// Non-secret view of the configuration, for the administration page.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct SmtpSummary {
     pub host: String,
     pub port: u16,

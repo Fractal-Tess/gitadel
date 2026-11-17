@@ -27,7 +27,7 @@ use super::{
 };
 use crate::{
     entity::{email_token, session, user, user_email},
-    mail::{Email, SmtpSummary, parse_address},
+    mail::{Email, parse_address},
 };
 
 const PURPOSE_VERIFY: &str = "verify";
@@ -54,37 +54,77 @@ fn require_mail(state: &IdentityState) -> Result<(), ApiError> {
 // ---------------------------------------------------------------------------
 // Administration
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct SmtpStatusResponse {
     configured: bool,
-    #[serde(flatten)]
-    summary: Option<SmtpSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    tls: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    username: Option<Option<String>>,
 }
 
+#[utoipa::path(
+    get, path = "/admin/smtp",
+    operation_id = "get_admin_smtp",
+    summary = "Smtp status",
+    tag = "Administration",
+    responses(
+        (status = 200, description = "Success", body = SmtpStatusResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn smtp_status(
     State(state): State<IdentityState>,
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<SmtpStatusResponse>, ApiError> {
     require_admin(&state, &headers, &jar, SCOPE_READ).await?;
+    let summary = state.mailer().summary();
     Ok(Json(SmtpStatusResponse {
         configured: state.mailer().is_enabled(),
-        summary: state.mailer().summary().cloned(),
+        host: summary.map(|s| s.host.clone()),
+        port: summary.map(|s| s.port),
+        tls: summary.map(|s| s.tls.to_owned()),
+        from: summary.map(|s| s.from.clone()),
+        username: summary.map(|s| s.username.clone()),
     }))
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, utoipa::ToSchema)]
 pub struct TestEmailRequest {
     to: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct TestEmailResponse {
     delivered_to: String,
 }
 
 /// Send one message synchronously so the administrator sees the relay's
 /// answer. This is the only email path that waits for delivery.
+#[utoipa::path(
+    post, path = "/admin/smtp/test",
+    operation_id = "post_admin_smtp_test",
+    summary = "Send test email",
+    tag = "Administration",
+    request_body = Option<TestEmailRequest>,
+    responses(
+        (status = 200, description = "Success", body = TestEmailResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn send_test_email(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -201,6 +241,17 @@ async fn email_status(
     })
 }
 
+#[utoipa::path(
+    get, path = "/me/email",
+    operation_id = "get_me_email",
+    summary = "Get the account email address",
+    tag = "Account",
+    responses(
+        (status = 200, description = "Success", body = EmailStatusResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn get_email(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -218,6 +269,18 @@ pub struct SetEmailRequest {
     current_password: Option<String>,
 }
 
+#[utoipa::path(
+    put, path = "/me/email",
+    operation_id = "put_me_email",
+    summary = "Set the account email address",
+    tag = "Account",
+
+    responses(
+        (status = 200, description = "Success", body = EmailStatusResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn set_email(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -301,6 +364,17 @@ pub async fn set_email(
     Ok(Json(email_status(&state, actor.user.id).await?))
 }
 
+#[utoipa::path(
+    post, path = "/me/email/verification",
+    operation_id = "post_me_email_verification",
+    summary = "Resend the account email verification",
+    tag = "Account",
+    responses(
+        (status = 202, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn resend_verification(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -334,6 +408,17 @@ pub async fn resend_verification(
     Ok(StatusCode::ACCEPTED)
 }
 
+#[utoipa::path(
+    delete, path = "/me/email",
+    operation_id = "delete_me_email",
+    summary = "Remove the account email address",
+    tag = "Account",
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_email(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -367,7 +452,7 @@ pub async fn delete_email(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct TokenRequest {
     token: String,
 }
@@ -376,6 +461,19 @@ pub struct TokenRequest {
 ///
 /// Account addresses and commit addresses share the link format and this
 /// endpoint; the token's purpose tells them apart.
+#[utoipa::path(
+    post, path = "/auth/email/verify",
+    operation_id = "post_auth_email_verify",
+    summary = "Verify email",
+    tag = "Authentication",
+
+    security(),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn verify_email(
     State(state): State<IdentityState>,
     Json(request): Json<TokenRequest>,
@@ -417,18 +515,31 @@ pub async fn verify_email(
 // ---------------------------------------------------------------------------
 // Password reset
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct PasswordResetRequest {
     /// Username or verified email address.
     login: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct PasswordResetAccepted {
     message: &'static str,
 }
 
 /// Start a reset. The response never reveals whether an account matched.
+#[utoipa::path(
+    post, path = "/auth/password-reset",
+    operation_id = "post_auth_password_reset",
+    summary = "Request password reset",
+    tag = "Authentication",
+
+    security(),
+    responses(
+        (status = 202, description = "Success", body = PasswordResetAccepted, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn request_password_reset(
     State(state): State<IdentityState>,
     Json(request): Json<PasswordResetRequest>,
@@ -489,12 +600,25 @@ pub async fn request_password_reset(
     ))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct PasswordResetConfirmRequest {
     token: String,
     password: String,
 }
 
+#[utoipa::path(
+    post, path = "/auth/password-reset/confirm",
+    operation_id = "post_auth_password_reset_confirm",
+    summary = "Confirm password reset",
+    tag = "Authentication",
+
+    security(),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn confirm_password_reset(
     State(state): State<IdentityState>,
     Json(request): Json<PasswordResetConfirmRequest>,

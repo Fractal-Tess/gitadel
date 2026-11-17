@@ -60,7 +60,7 @@ impl TryFrom<&str> for FaviconTheme {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct InstanceSettingsResponse {
     site_name: String,
     site_description: Option<String>,
@@ -77,13 +77,13 @@ impl From<instance::Model> for InstanceSettingsResponse {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct UpdateInstanceSettingsRequest {
     site_name: String,
     site_description: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct IntegritySettingsResponse {
     enabled: bool,
     schedule: String,
@@ -91,7 +91,7 @@ pub struct IntegritySettingsResponse {
     last_result: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct UpdateIntegritySettingsRequest {
     enabled: bool,
     schedule: String,
@@ -118,6 +118,17 @@ async fn integrity_settings_response(
     })
 }
 
+#[utoipa::path(
+    get, path = "/admin/integrity",
+    operation_id = "get_admin_integrity",
+    summary = "Get integrity settings",
+    tag = "Administration",
+    responses(
+        (status = 200, description = "Success", body = IntegritySettingsResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn get_integrity_settings(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -127,6 +138,18 @@ pub async fn get_integrity_settings(
     Ok(Json(integrity_settings_response(&state).await?))
 }
 
+#[utoipa::path(
+    put, path = "/admin/integrity",
+    operation_id = "put_admin_integrity",
+    summary = "Update integrity settings",
+    tag = "Administration",
+
+    responses(
+        (status = 200, description = "Success", body = IntegritySettingsResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_integrity_settings(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -176,6 +199,18 @@ pub async fn update_integrity_settings(
     Ok(Json(integrity_settings_response(&state).await?))
 }
 
+#[utoipa::path(
+    get, path = "/instance",
+    operation_id = "get_instance",
+    summary = "Public instance settings",
+    tag = "Instance",
+    security(),
+    responses(
+        (status = 200, description = "Success", body = InstanceSettingsResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn public_instance_settings(
     State(state): State<IdentityState>,
 ) -> Result<Json<InstanceSettingsResponse>, ApiError> {
@@ -186,6 +221,17 @@ pub async fn public_instance_settings(
     Ok(Json(settings.into()))
 }
 
+#[utoipa::path(
+    get, path = "/admin/instance",
+    operation_id = "get_admin_instance",
+    summary = "Get instance settings",
+    tag = "Administration",
+    responses(
+        (status = 200, description = "Success", body = InstanceSettingsResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn get_instance_settings(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -199,6 +245,18 @@ pub async fn get_instance_settings(
     Ok(Json(settings.into()))
 }
 
+#[utoipa::path(
+    put, path = "/admin/instance",
+    operation_id = "put_admin_instance",
+    summary = "Update instance settings",
+    tag = "Administration",
+
+    responses(
+        (status = 200, description = "Success", body = InstanceSettingsResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_instance_settings(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -250,6 +308,21 @@ pub async fn update_instance_settings(
     Ok(Json(settings.into()))
 }
 
+#[utoipa::path(
+    get, path = "/instance/favicon/{theme}",
+    operation_id = "get_instance_favicon_theme",
+    summary = "Public instance favicon",
+    tag = "Instance",
+    params(
+        ("theme" = String, Path),
+    ),
+    security(),
+    responses(
+        (status = 200, description = "Success", body = crate::openapi::Binary, content_type = "image/png"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn public_instance_favicon(
     State(state): State<IdentityState>,
     Path(theme): Path<String>,
@@ -278,6 +351,21 @@ pub async fn public_instance_favicon(
     Ok(response)
 }
 
+#[utoipa::path(
+    put, path = "/admin/instance/favicon/{theme}",
+    operation_id = "put_admin_instance_favicon_theme",
+    summary = "Update instance favicon",
+    tag = "Administration",
+    request_body(content = crate::openapi::Binary, content_type = "application/octet-stream"),
+    params(
+        ("theme" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_instance_favicon(
     State(state): State<IdentityState>,
     Path(theme): Path<String>,
@@ -338,6 +426,20 @@ pub async fn update_instance_favicon(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    delete, path = "/admin/instance/favicon/{theme}",
+    operation_id = "delete_admin_instance_favicon_theme",
+    summary = "Delete instance favicon",
+    tag = "Administration",
+    params(
+        ("theme" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_instance_favicon(
     State(state): State<IdentityState>,
     Path(theme): Path<String>,
@@ -371,20 +473,20 @@ fn favicon_asset(theme: FaviconTheme) -> (&'static str, &'static [u8]) {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct BackupProviderCatalogItem {
     slug: BackupProviderKind,
     name: &'static str,
     description: &'static str,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct BackupProvidersResponse {
     providers: Vec<BackupProviderCatalogItem>,
     connections: Vec<BackupProviderResponse>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct BackupProviderResponse {
     id: Uuid,
     name: String,
@@ -401,7 +503,7 @@ pub struct BackupProviderResponse {
     next_backup_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct UpdateBackupProviderRequest {
     id: Option<Uuid>,
     name: String,
@@ -416,30 +518,30 @@ pub struct UpdateBackupProviderRequest {
     test_token: Option<Uuid>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct UpdateBackupScheduleRequest {
     schedule: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct BackupProviderTestResponse {
     test_token: Uuid,
     message: &'static str,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct CreateBackupRequest {
     name: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct BackupScheduledResponse {
     key: String,
     operation_id: Uuid,
     message: &'static str,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct RestorePreflightResponse {
     token: Uuid,
     key: String,
@@ -449,28 +551,31 @@ pub struct RestorePreflightResponse {
     available_free_space: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct RestorePreflightRequest {
     key: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct BackupObjectRequest {
     key: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct RestoreBackupRequest {
     token: Uuid,
     password: String,
     create_safety_backup: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct StorageTargetRequest {
     name: Option<String>,
     kind: String,
+    #[schema(value_type = Option<String>)]
     path: Option<PathBuf>,
+    #[schema(value_type = Option<String>, format = "uri")]
     endpoint: Option<Url>,
     bucket: Option<String>,
     access_key: Option<String>,
@@ -529,11 +634,22 @@ fn required_storage_value(
         .ok_or_else(|| ApiError::bad_request(message))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct StorageTargetTestResponse {
     message: &'static str,
 }
 
+#[utoipa::path(
+    get, path = "/admin/storage/targets",
+    operation_id = "get_admin_storage_targets",
+    summary = "List storage targets",
+    tag = "Storage",
+    responses(
+        (status = 200, description = "Success", body = Vec<StorageTargetView>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_storage_targets(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -553,6 +669,20 @@ pub async fn list_storage_targets(
 /// figure on every card covers LFS only, so this is what an administrator runs
 /// when they need to account for backup archives or objects left behind by an
 /// earlier migration.
+#[utoipa::path(
+    post, path = "/admin/storage/targets/{target_id}/usage",
+    operation_id = "post_admin_storage_targets_target_id_usage",
+    summary = "Measure storage target",
+    tag = "Storage",
+    params(
+        ("target_id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = MeasuredUsage, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn measure_storage_target(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -578,6 +708,18 @@ pub async fn measure_storage_target(
     Ok(Json(usage))
 }
 
+#[utoipa::path(
+    post, path = "/admin/storage/targets/test",
+    operation_id = "post_admin_storage_targets_test",
+    summary = "Test storage target",
+    tag = "Storage",
+
+    responses(
+        (status = 200, description = "Success", body = StorageTargetTestResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn test_storage_target(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -593,6 +735,20 @@ pub async fn test_storage_target(
     }))
 }
 
+#[utoipa::path(
+    post, path = "/admin/storage/targets/{target_id}/test",
+    operation_id = "post_admin_storage_targets_target_id_test",
+    summary = "Test saved storage target",
+    tag = "Storage",
+    params(
+        ("target_id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = StorageTargetTestResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn test_saved_storage_target(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -611,6 +767,18 @@ pub async fn test_saved_storage_target(
     }))
 }
 
+#[utoipa::path(
+    post, path = "/admin/storage/targets",
+    operation_id = "post_admin_storage_targets",
+    summary = "Create storage target",
+    tag = "Storage",
+
+    responses(
+        (status = 201, description = "Success", body = StorageTargetView, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_storage_target(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -638,6 +806,20 @@ pub async fn create_storage_target(
     Ok((StatusCode::CREATED, Json(target)))
 }
 
+#[utoipa::path(
+    delete, path = "/admin/storage/targets/{target_id}",
+    operation_id = "delete_admin_storage_targets_target_id",
+    summary = "Delete storage target",
+    tag = "Storage",
+    params(
+        ("target_id" = Uuid, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_storage_target(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -661,6 +843,17 @@ pub async fn delete_storage_target(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get, path = "/admin/backup/providers",
+    operation_id = "get_admin_backup_providers",
+    summary = "List backup providers",
+    tag = "Backups",
+    responses(
+        (status = 200, description = "Success", body = BackupProvidersResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_backup_providers(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -701,6 +894,18 @@ pub async fn list_backup_providers(
     }))
 }
 
+#[utoipa::path(
+    post, path = "/admin/backup/providers/test",
+    operation_id = "post_admin_backup_providers_test",
+    summary = "Test backup provider",
+    tag = "Backups",
+
+    responses(
+        (status = 200, description = "Success", body = BackupProviderTestResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn test_backup_provider(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -729,6 +934,18 @@ pub async fn test_backup_provider(
     }))
 }
 
+#[utoipa::path(
+    post, path = "/admin/backup/providers",
+    operation_id = "post_admin_backup_providers",
+    summary = "Create backup provider",
+    tag = "Backups",
+
+    responses(
+        (status = 201, description = "Success", body = BackupProviderResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_backup_provider(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -768,6 +985,21 @@ pub async fn create_backup_provider(
     ))
 }
 
+#[utoipa::path(
+    put, path = "/admin/backup/providers/{provider_id}",
+    operation_id = "put_admin_backup_providers_provider_id",
+    summary = "Update backup provider",
+    tag = "Backups",
+
+    params(
+        ("provider_id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = BackupProviderResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_backup_provider(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -812,6 +1044,20 @@ pub async fn update_backup_provider(
     Ok(Json(backup_provider_response(existing, schedule)))
 }
 
+#[utoipa::path(
+    delete, path = "/admin/backup/providers/{provider_id}",
+    operation_id = "delete_admin_backup_providers_provider_id",
+    summary = "Delete backup provider",
+    tag = "Backups",
+    params(
+        ("provider_id" = Uuid, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_backup_provider(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -848,6 +1094,21 @@ pub async fn delete_backup_provider(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    put, path = "/admin/backup/providers/{provider_id}/schedule",
+    operation_id = "put_admin_backup_providers_provider_id_schedule",
+    summary = "Update backup schedule",
+    tag = "Backups",
+
+    params(
+        ("provider_id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = BackupProviderResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_backup_schedule(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -896,6 +1157,20 @@ pub async fn update_backup_schedule(
     Ok(Json(backup_provider_response(provider, schedule)))
 }
 
+#[utoipa::path(
+    get, path = "/admin/backup/providers/{provider_id}/backups",
+    operation_id = "get_admin_backup_providers_provider_id_backups",
+    summary = "List backups",
+    tag = "Backups",
+    params(
+        ("provider_id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = Vec<archive::BackupObject>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_backups(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -910,6 +1185,21 @@ pub async fn list_backups(
     Ok(Json(backups))
 }
 
+#[utoipa::path(
+    get, path = "/admin/backup/providers/{provider_id}/backups/object",
+    operation_id = "get_admin_backup_providers_provider_id_backups_object",
+    summary = "Download backup",
+    tag = "Backups",
+    params(
+        ("provider_id" = Uuid, Path),
+        BackupObjectRequest,
+    ),
+    responses(
+        (status = 200, description = "Success", body = crate::openapi::Binary, content_type = "application/octet-stream"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn download_backup(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -959,6 +1249,21 @@ pub async fn download_backup(
     Ok(response)
 }
 
+#[utoipa::path(
+    delete, path = "/admin/backup/providers/{provider_id}/backups/object",
+    operation_id = "delete_admin_backup_providers_provider_id_backups_object",
+    summary = "Delete backup",
+    tag = "Backups",
+    params(
+        ("provider_id" = Uuid, Path),
+        BackupObjectRequest,
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_backup(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -977,6 +1282,20 @@ pub async fn delete_backup(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get, path = "/admin/backups/progress/{operation_id}",
+    operation_id = "get_admin_backups_progress_operation_id",
+    summary = "Backup progress",
+    tag = "Backups",
+    params(
+        ("operation_id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = String, content_type = "text/event-stream"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn backup_progress(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -992,6 +1311,21 @@ pub async fn backup_progress(
     Ok(Sse::new(events))
 }
 
+#[utoipa::path(
+    post, path = "/admin/backup/providers/{provider_id}/backups",
+    operation_id = "post_admin_backup_providers_provider_id_backups",
+    summary = "Create backup",
+    tag = "Backups",
+
+    params(
+        ("provider_id" = Uuid, Path),
+    ),
+    responses(
+        (status = 202, description = "Success", body = BackupScheduledResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_backup(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -1027,6 +1361,21 @@ pub async fn create_backup(
     ))
 }
 
+#[utoipa::path(
+    post, path = "/admin/backup/providers/{provider_id}/backups/preflight",
+    operation_id = "post_admin_backup_providers_provider_id_backups_preflight",
+    summary = "Preflight restore",
+    tag = "Backups",
+
+    params(
+        ("provider_id" = Uuid, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = RestorePreflightResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn preflight_restore(
     State(state): State<IdentityState>,
     headers: HeaderMap,
@@ -1067,6 +1416,21 @@ pub async fn preflight_restore(
     }))
 }
 
+#[utoipa::path(
+    post, path = "/admin/backup/providers/{provider_id}/backups/restore",
+    operation_id = "post_admin_backup_providers_provider_id_backups_restore",
+    summary = "Restore backup",
+    tag = "Backups",
+
+    params(
+        ("provider_id" = Uuid, Path),
+    ),
+    responses(
+        (status = 202, description = "Success", body = BackupScheduledResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn restore_backup(
     State(state): State<IdentityState>,
     headers: HeaderMap,

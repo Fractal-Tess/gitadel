@@ -31,6 +31,10 @@ codegen-units = 1
 panic = "unwind"
 strip = "symbols"
 
+[features]
+# Produces only an offline contract exporter; it cannot start a service.
+api-contract-export = []
+
 [dependencies]
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
 ammonia = "4.2.0"
@@ -110,10 +114,12 @@ zstd = "0.14.0"
 axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls"] }
 rustls = { version = "0.23.45", default-features = false, features = ["aws-lc-rs"] }
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
-utoipa = { version = "6.0.0", features = ["chrono", "uuid"] }
+utoipa = { version = "=6.0.0", features = ["chrono", "uuid", "axum_extras"] }
+utoipa-axum = "=0.3.0"
 
 
 [build-dependencies]
+sha2 = "0.10.9"
 pbjson-build = "0.9.0"
 prost-build = "0.14.4"
 protoc-bin-vendored = "3.2.0"

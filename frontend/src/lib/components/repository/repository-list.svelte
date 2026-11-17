@@ -127,7 +127,7 @@
     repository: RepositoryOverviewItem,
     format: "zip" | "tar.gz",
   ): string {
-    const path = `/api/v1/repositories/${encodeURIComponent(repository.namespace)}/${encodeURIComponent(repository.name)}/source`;
+    const path = `/api/v1/repositories/${encodeURIComponent(repository.namespace)}/${encodeURIComponent(repository.name)}/source` as const;
     return `${path}?${new URLSearchParams({ rev: repository.default_branch ?? "HEAD", format })}`;
   }
 

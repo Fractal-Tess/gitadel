@@ -22,6 +22,14 @@ install:
 frontend-build:
     bun run --cwd frontend build
 
+# Regenerate the offline OpenAPI contract and pinned TypeScript SDK.
+api-generate:
+    bash scripts/api-contract.sh generate
+
+# Reject Rust/OpenAPI/SDK drift without starting an instance.
+api-check:
+    bash scripts/api-contract.sh check
+
 # Build the frontend, server, and CLI client.
 build: frontend-build
     cargo build --workspace

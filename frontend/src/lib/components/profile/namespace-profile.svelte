@@ -43,7 +43,7 @@
 
   $effect(() => {
     void app.authorizationScope;
-    const base = `/api/v1/namespaces/${encodeURIComponent(namespace)}`;
+    const base = `/api/v1/namespaces/${encodeURIComponent(namespace)}` as const;
     const controller = new AbortController();
     const init = { signal: controller.signal };
     activity = null;

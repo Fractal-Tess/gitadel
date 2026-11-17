@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { ApiFailure, requestJson } from "$lib/api/transport.js";
+import { apiQuery, ApiFailure, requestJson } from "$lib/api/transport.js";
 import { authStatusSchema } from "$lib/api/auth.js";
 import {
   blobSchema,
@@ -33,8 +33,10 @@ function scopedRepositoryKey(
 ): string {
   return `${authorizationCacheScopeKey(scope)}\0${repositoryKey(namespace, name)}`;
 }
-function repositoryApi(namespace: string, name: string, path = ""): string {
-  return `/api/v1/repositories/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}${path}`;
+function repositoryApi(namespace: string, name: string): `/api/v1/repositories/${string}/${string}`;
+function repositoryApi<const P extends string>(namespace: string, name: string, path: P): `/api/v1/repositories/${string}/${string}${P}`;
+function repositoryApi(namespace: string, name: string, path = "") {
+  return `/api/v1/repositories/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}${path}` as const;
 }
 
 async function fetchBootstrap(namespace: string, name: string) {
@@ -58,11 +60,11 @@ async function fetchOverview(
   revision: string,
 ) {
   const api = repositoryApi(namespace, name);
-  const query = new URLSearchParams({ rev: revision });
+  const query = { rev: revision };
   try {
     const [tree, stats] = await Promise.all([
-      requestJson(`${api}/tree?${query}`, treeSchema),
-      requestJson(`${api}/stats?${query}`, z.array(languageStatSchema)),
+      requestJson(`${api}/tree`, treeSchema, { query: apiQuery(query) }),
+      requestJson(`${api}/stats`, z.array(languageStatSchema), { query: apiQuery(query) }),
     ]);
     const readmeEntry = tree.entries.find(
       (entry) =>
@@ -70,8 +72,9 @@ async function fetchOverview(
     );
     const readme = readmeEntry
       ? await requestJson(
-          `${api}/blob?${new URLSearchParams({ rev: revision, path: readmeEntry.path })}`,
+          `${api}/blob`,
           blobSchema,
+          { query: apiQuery({ rev: revision, path: readmeEntry.path }) },
         )
       : null;
     return { tree, stats, readme, emptyRepository: false };

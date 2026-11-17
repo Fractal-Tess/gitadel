@@ -1,0 +1,16 @@
+Cargo.toml
+Cargo.lock
+build.rs
+scripts/api-contract.sh
+src
+api/inputs.txt
+api/openapi.json
+frontend/src
+frontend/tests
+frontend/package.json
+frontend/bun.lock
+frontend/openapi-ts.config.ts
+frontend/tsconfig.json
+frontend/svelte.config.js
+frontend/vite.config.ts
+frontend/scripts

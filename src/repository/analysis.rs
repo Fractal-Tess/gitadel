@@ -46,7 +46,8 @@ pub(super) const MAX_REPOSITORY_ACTIVITY_DAYS: u16 = 365;
 const DEFAULT_OVERVIEW_PER_PAGE: usize = 20;
 const MAX_OVERVIEW_PER_PAGE: usize = 50;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct OverviewQuery {
     #[serde(default = "default_page")]
     page: usize,
@@ -56,7 +57,8 @@ pub struct OverviewQuery {
     namespace: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ActivityQuery {
     #[serde(default = "default_repository_activity_days")]
     days: u16,
@@ -121,7 +123,7 @@ struct ActivityDayResponse {
 /// The cached form is keyed on the branch tips and holds every day from
 /// `since` on, so it stays valid until a branch moves. Callers get the
 /// [`window`](Self::window) they asked for, cut from it at read time.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub(super) struct GitOverview {
     branch_count: usize,
     head: Option<String>,
@@ -173,7 +175,7 @@ impl GitOverview {
 
 /// Commits in one repository on one day by one author address, and the SSH key
 /// that validly signed them, if any.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 pub(super) struct AuthorActivity {
     pub(super) date: NaiveDate,
     pub(super) email: String,
@@ -326,6 +328,21 @@ pub(super) async fn repository_overview_items(
         .ok_or_else(|| ApiError::internal("repository overview task did not return a result"))
 }
 
+#[utoipa::path(
+    get, path = "/repositories/overview",
+    operation_id = "get_repositories_overview",
+    summary = "List repositories with branch, language, and activity summaries",
+    tag = "Repositories",
+    params(
+        OverviewQuery,
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = RepositoryOverviewResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn overview(
     State(state): State<RepositoryState>,
     headers: HeaderMap,
@@ -367,6 +384,23 @@ pub async fn overview(
     }))
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/activity",
+    operation_id = "get_repositories_namespace_name_activity",
+    summary = "Count the repository's commits per day",
+    tag = "Repository content",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ActivityQuery,
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = ActivityResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn activity(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -384,6 +418,23 @@ pub async fn activity(
     Ok(Json(activity_response(start_date, end_date, activity)))
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/stats",
+    operation_id = "get_repositories_namespace_name_stats",
+    summary = "Count lines of code per language",
+    tag = "Repository content",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        BrowseQuery,
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = Vec<LanguageStatResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn stats(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -705,7 +756,7 @@ pub struct DayCommitResponse {
 
 /// A [`DayCommitResponse`] as cached: with the authorship a profile filters
 /// on, which the API response leaves out.
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
 struct CachedDayCommit {
     oid: String,
     title: String,

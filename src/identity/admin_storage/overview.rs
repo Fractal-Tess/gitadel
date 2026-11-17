@@ -16,7 +16,7 @@ use serde::Serialize;
 use super::super::{ApiError, IdentityState, SCOPE_READ, require_admin};
 use crate::blob_store::targets::{self, StorageTargetView};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct StorageOverview {
     volumes: Vec<Volume>,
     categories: Vec<Category>,
@@ -27,7 +27,7 @@ pub struct StorageOverview {
 /// everything on it, Gitadel included; space the filesystem keeps back for
 /// root is neither used nor available, so it is reported on its own instead
 /// of making the other figures fail to add up.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 struct Volume {
     id: String,
     mount_point: Option<String>,
@@ -38,7 +38,7 @@ struct Volume {
     gitadel_bytes: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 struct Category {
     key: &'static str,
     label: &'static str,
@@ -49,6 +49,17 @@ struct Category {
     volume_id: Option<String>,
 }
 
+#[utoipa::path(
+    get, path = "/admin/storage/overview",
+    operation_id = "get_admin_storage_overview",
+    summary = "Storage overview",
+    tag = "Storage",
+    responses(
+        (status = 200, description = "Success", body = StorageOverview, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn storage_overview(
     State(state): State<IdentityState>,
     headers: HeaderMap,

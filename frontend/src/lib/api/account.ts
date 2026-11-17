@@ -66,6 +66,6 @@ export type AuthorizedApplication = z.infer<typeof authorizedApplicationSchema>;
 
 export function avatarUrl(userId: string, updatedAt: string | null) {
   return updatedAt
-    ? `/api/v1/users/${userId}/avatar?v=${encodeURIComponent(updatedAt)}`
+    ? `/api/v1/users/${userId}/avatar?v=${encodeURIComponent(updatedAt)}` as const
     : null;
 }

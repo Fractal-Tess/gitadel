@@ -63,7 +63,7 @@ export class RepositoryWebhooksState {
     for (const timer of this.#timers) window.clearTimeout(timer);
     this.#timers = [];
   }
-  async loadWebhooks(init: RequestInit): Promise<void> {
+  async loadWebhooks(init: Omit<RequestInit, "method" | "body">): Promise<void> {
     if (!this.canManage() || (this.webhooksLoaded && init.signal)) return;
     this.webhooksLoading = true;
     try {

@@ -109,6 +109,22 @@ struct Discovery {
     partial: bool,
 }
 
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/icon",
+    operation_id = "get_repositories_namespace_name_icon",
+    summary = "Download the repository icon",
+    tag = "Repositories",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = crate::openapi::Binary, content_type = "image/png"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn public_icon(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -124,6 +140,22 @@ pub async fn public_icon(
     image_response(icon.content)
 }
 
+#[utoipa::path(
+    put, path = "/repositories/{namespace}/{name}/icon",
+    operation_id = "put_repositories_namespace_name_icon",
+    summary = "Upload a repository icon",
+    tag = "Repositories",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn update_icon(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -172,6 +204,21 @@ pub async fn update_icon(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    delete, path = "/repositories/{namespace}/{name}/icon",
+    operation_id = "delete_repositories_namespace_name_icon",
+    summary = "Remove the repository icon",
+    tag = "Repositories",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 204, description = "Success"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn delete_icon(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -213,6 +260,22 @@ pub async fn delete_icon(
 
 /// Returns the current candidate set. Repository read permission is required,
 /// including for private repositories; candidate blobs are never public.
+#[utoipa::path(
+    get, path = "/repositories/{namespace}/{name}/icon/candidates",
+    operation_id = "get_repositories_namespace_name_icon_candidates",
+    summary = "List icon candidates found in the repository",
+    tag = "Repositories",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = IconCandidatesResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn icon_candidates(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,
@@ -223,6 +286,22 @@ pub async fn icon_candidates(
     Ok(Json(load_candidates(&state, &repository).await?))
 }
 
+#[utoipa::path(
+    put, path = "/repositories/{namespace}/{name}/icon/selection",
+    operation_id = "put_repositories_namespace_name_icon_selection",
+    summary = "Choose how the repository icon is selected",
+    tag = "Repositories",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+    ),
+    responses(
+        (status = 200, description = "Success", body = IconCandidatesResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn select_icon(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name)): AxumPath<(String, String)>,

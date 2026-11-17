@@ -81,13 +81,30 @@ pub struct CombinedStatusResponse {
     url: String,
 }
 
+#[utoipa::path(
+    post, path = "/repos/{namespace}/{name}/statuses/{sha}",
+    operation_id = "post_repos_namespace_name_statuses_sha",
+    summary = "Set a commit status",
+    tag = "Commit statuses",
+
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("sha" = String, Path),
+    ),
+    responses(
+        (status = 201, description = "Success", body = crate::repository::statuses::StatusResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn create_status(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, revision)): AxumPath<(String, String, String)>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(request): Json<CreateStatusRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<impl IntoResponse + crate::openapi::TypedResponse, ApiError> {
     let (repository, creator_id) =
         writable_repository(&state, &headers, &jar, &namespace, &name).await?;
     let status_state = request.state.trim().to_ascii_lowercase();
@@ -166,6 +183,23 @@ pub async fn create_status(
     Ok((StatusCode::CREATED, Json(response)))
 }
 
+#[utoipa::path(
+    get, path = "/repos/{namespace}/{name}/statuses/{sha}",
+    operation_id = "get_repos_namespace_name_statuses_sha",
+    summary = "List a commit's statuses by SHA",
+    tag = "Commit statuses",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("sha" = String, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = Vec<StatusResponse>, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn list_statuses(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, revision)): AxumPath<(String, String, String)>,
@@ -178,6 +212,23 @@ pub async fn list_statuses(
     status_responses(&state, &repository, rows).await.map(Json)
 }
 
+#[utoipa::path(
+    get, path = "/repos/{namespace}/{name}/commits/{revision}/status",
+    operation_id = "get_repos_namespace_name_commits_revision_status",
+    summary = "Get a commit's combined status",
+    tag = "Commit statuses",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("revision" = String, Path),
+    ),
+    security((), ("token" = []), ("session" = [])),
+    responses(
+        (status = 200, description = "Success", body = CombinedStatusResponse, content_type = "application/json"),
+        (status = "4XX", description = "Invalid input, authentication, permissions, missing resource or conflict", body = crate::identity::ErrorEnvelope),
+        (status = "5XX", description = "Server or upstream failure", body = crate::identity::ErrorEnvelope)
+    )
+)]
 pub async fn combined_status(
     State(state): State<RepositoryState>,
     AxumPath((namespace, name, revision)): AxumPath<(String, String, String)>,

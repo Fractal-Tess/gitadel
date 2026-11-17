@@ -4,7 +4,7 @@ import {
   releaseSchema,
   type Release,
 } from "$lib/api/releases.js";
-import {
+import { apiQuery,
   errorMessage,
   jsonBody,
   requestEmpty,
@@ -55,7 +55,7 @@ export class RepositoryReleasesState {
       this.setError(errorMessage(caught));
     }
   }
-  async loadReleases(init: RequestInit): Promise<void> {
+  async loadReleases(init: Omit<RequestInit, "method" | "body">): Promise<void> {
     if (this.releasesLoading || (this.releasesLoaded && init.signal)) return;
     this.releasesLoading = true;
     this.releasesLoadFailed = false;
@@ -142,7 +142,7 @@ export class RepositoryReleasesState {
         try {
           for (const file of files) {
             const asset = await requestJson(
-              `${repositoryApi(this, `/releases/${release.id}/assets`)}?${new URLSearchParams({ name: file.name })}`,
+              repositoryApi(this, `/releases/${release.id}/assets`),
               releaseAssetSchema,
               {
                 method: "PUT",
@@ -150,6 +150,7 @@ export class RepositoryReleasesState {
                   "content-type": file.type || "application/octet-stream",
                 },
                 body: file,
+                query: apiQuery({ name: file.name }),
               },
             );
             if (!this.isScopeCurrent()) return release;
@@ -210,7 +211,7 @@ export class RepositoryReleasesState {
     try {
       for (const file of files)
         await requestJson(
-          `${repositoryApi(this, `/releases/${releaseId}/assets`)}?${new URLSearchParams({ name: file.name })}`,
+          repositoryApi(this, `/releases/${releaseId}/assets`),
           releaseAssetSchema,
           {
             method: "PUT",
@@ -218,6 +219,7 @@ export class RepositoryReleasesState {
               "content-type": file.type || "application/octet-stream",
             },
             body: file,
+            query: apiQuery({ name: file.name }),
           },
         );
       if (!this.isScopeCurrent()) return;
