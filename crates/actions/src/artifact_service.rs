@@ -626,7 +626,7 @@ mod direct_boundaries_tests {
         let service = ArtifactService::new(&database, &directory.0, &settings);
         let actions = crate::ActionsService::new(
             database.clone(),
-            gitadel_repositories::content::RepositoryContent::new(PathBuf::from("unused")),
+            gitadel_git::content::RepositoryContent::new(PathBuf::from("unused")),
             settings.clone(),
             gitadel_secrets::SecretCipher::from_material(b"test host key").unwrap(),
             directory.0.clone(),

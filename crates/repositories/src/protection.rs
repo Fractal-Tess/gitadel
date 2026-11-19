@@ -47,7 +47,7 @@ impl RuleKind {
     }
 }
 
-pub use crate::git_service::RefCheck;
+pub use gitadel_git::git_service::RefCheck;
 
 #[derive(Clone, Debug)]
 struct GuardRule {
@@ -154,7 +154,7 @@ impl RefGuard {
     }
 }
 
-impl crate::git_service::RefPolicy for RefGuard {
+impl gitadel_git::git_service::RefPolicy for RefGuard {
     fn check(&self, name: &str, old_is_null: bool, new_is_null: bool) -> RefCheck {
         RefGuard::check(self, name, old_is_null, new_is_null)
     }
@@ -283,6 +283,8 @@ fn validate_pattern(value: &str) -> Result<String, IdentityError> {
     Ok(value.to_owned())
 }
 
+#[derive(serde::Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ProtectionRuleResponse {
     pub id: Uuid,
     pub kind: &'static str,

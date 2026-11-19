@@ -1,11 +1,10 @@
 //! Issue, comment, label and attachment operations.
-use crate::{
-    issue_effects::{self as webhook_events, ChangeAction, IssueAction, IssueEffects},
-    markdown::render_markdown,
-};
+use crate::issue_effects::{self as webhook_events, ChangeAction, IssueAction, IssueEffects};
 use chrono::{Duration, Utc};
 use futures_util::TryStreamExt as _;
-use gitadel_core::{audit::AuditContext, filesystem::create_private_directory_async};
+use gitadel_core::{
+    audit::AuditContext, filesystem::create_private_directory_async, markdown::render_markdown,
+};
 use gitadel_db::entity::{
     issue_attachment, issue_comment, issue_label, issue_label_assignment, namespace,
     organization_member, repository, repository_collaborator, repository_issue, user,

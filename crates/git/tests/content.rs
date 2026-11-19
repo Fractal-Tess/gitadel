@@ -1,4 +1,4 @@
-use gitadel_repositories::{
+use gitadel_git::{
     Error, analysis, archive, branches, browser,
     files::{self, FileWrite},
     git_service::{self, RefCheck, RefPolicy},

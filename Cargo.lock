@@ -2467,6 +2467,7 @@ dependencies = [
  "gitadel-instance",
  "gitadel-integrations",
  "gitadel-mail",
+ "gitadel-registry",
  "gitadel-repositories",
  "gitadel-secrets",
  "gitadel-storage",
@@ -2491,8 +2492,8 @@ dependencies = [
  "gitadel-config",
  "gitadel-core",
  "gitadel-db",
+ "gitadel-git",
  "gitadel-identity",
- "gitadel-repositories",
  "gitadel-secrets",
  "globset",
  "hex",
@@ -2514,8 +2515,6 @@ dependencies = [
 name = "gitadel-api"
 version = "0.24.0"
 dependencies = [
- "aes-gcm",
- "ammonia",
  "anyhow",
  "argon2",
  "async-trait",
@@ -2525,79 +2524,57 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "chrono",
- "clap",
- "comrak",
  "config",
- "cron",
- "fs2",
  "futures-util",
  "gitadel-actions",
  "gitadel-backups",
  "gitadel-config",
  "gitadel-core",
  "gitadel-db",
+ "gitadel-git",
  "gitadel-identity",
  "gitadel-instance",
  "gitadel-integrations",
+ "gitadel-issues",
  "gitadel-mail",
+ "gitadel-registry",
  "gitadel-repositories",
  "gitadel-secrets",
  "gitadel-storage",
- "globset",
  "hex",
- "hmac 0.13.0",
  "image",
  "lettre",
  "libc",
  "mime_guess",
- "openidconnect",
  "pbjson",
  "pbjson-build",
  "pbjson-types",
- "png",
  "prost",
  "prost-build",
  "protoc-bin-vendored",
- "qrcode",
- "quick-xml 0.42.0",
  "rand 0.10.3",
  "regex",
  "reqwest 0.13.5",
  "resvg",
  "russh",
- "rust-s3",
  "rustls",
  "sea-orm",
  "sea-orm-migration",
- "semver",
  "serde",
  "serde_json",
- "sha1",
  "sha2 0.10.9",
  "sha2 0.11.0",
  "shlex",
  "sley",
- "sley-archive",
  "sley-config",
  "sley-core",
  "sley-diff-merge",
- "sley-formats",
- "sley-fsck",
  "sley-gc",
- "sley-odb",
- "sley-protocol",
- "sley-refs",
- "sley-remote",
  "sley-rev",
- "sley-transport",
- "sley-worktree",
  "subtle",
- "tar",
  "time",
- "tokei",
  "tokio",
  "tokio-util",
- "toml 1.1.6+spec-1.1.0",
  "tower",
  "tower-http 0.7.1",
  "tracing",
@@ -2609,7 +2586,6 @@ dependencies = [
  "walkdir",
  "webauthn-rs",
  "yaml_serde",
- "zstd",
 ]
 
 [[package]]
@@ -2623,6 +2599,7 @@ dependencies = [
  "gitadel-core",
  "gitadel-db",
  "gitadel-identity",
+ "gitadel-registry",
  "gitadel-storage",
  "hex",
  "rust-s3",
@@ -2675,7 +2652,9 @@ dependencies = [
 name = "gitadel-core"
 version = "0.24.0"
 dependencies = [
+ "ammonia",
  "chrono",
+ "comrak",
  "cron",
  "reqwest 0.13.5",
  "tokio",
@@ -2692,6 +2671,27 @@ dependencies = [
  "gitadel-core",
  "sea-orm",
  "sea-orm-migration",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "gitadel-git"
+version = "0.24.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "gitadel-core",
+ "russh",
+ "sley",
+ "sley-archive",
+ "sley-config",
+ "sley-core",
+ "sley-fsck",
+ "sley-odb",
+ "sley-protocol",
+ "sley-remote",
+ "tokei",
  "tokio",
  "uuid",
 ]
@@ -2768,6 +2768,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "gitadel-issues"
+version = "0.24.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "futures-util",
+ "gitadel-core",
+ "gitadel-db",
+ "gitadel-identity",
+ "sea-orm",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "gitadel-mail"
 version = "0.24.0"
 dependencies = [
@@ -2782,18 +2800,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "gitadel-registry"
+version = "0.24.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "bytes",
+ "chrono",
+ "futures-util",
+ "gitadel-config",
+ "gitadel-core",
+ "gitadel-db",
+ "gitadel-identity",
+ "gitadel-storage",
+ "hex",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "tracing",
+ "utoipa",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
 name = "gitadel-repositories"
 version = "0.24.0"
 dependencies = [
- "ammonia",
  "anyhow",
  "async-trait",
  "bytes",
  "chrono",
- "comrak",
  "futures-util",
  "gitadel-core",
  "gitadel-db",
+ "gitadel-git",
  "gitadel-identity",
  "gitadel-secrets",
  "gitadel-storage",
@@ -2806,22 +2850,20 @@ dependencies = [
  "sha1",
  "sha2 0.11.0",
  "sley",
- "sley-archive",
  "sley-config",
  "sley-core",
  "sley-diff-merge",
  "sley-fsck",
- "sley-odb",
  "sley-protocol",
  "sley-refs",
  "sley-remote",
  "sley-rev",
  "sley-transport",
- "tokei",
  "tokio",
  "tokio-util",
  "tracing",
  "url",
+ "utoipa",
  "uuid",
 ]
 
@@ -2849,7 +2891,6 @@ version = "0.24.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "axum",
  "chrono",
  "fs2",
  "futures-util",

@@ -47,9 +47,14 @@ pub async fn storage_overview(
     let settings = state.runtime_settings()?;
     let storage = &settings.storage;
     let measured = state.measured_storage().await;
-    let target_views = targets::list(state.database(), &storage.lfs_root, &measured)
-        .await
-        .map_err(ServiceError::internal)?;
+    let target_views = targets::list(
+        state.database(),
+        &storage.lfs_root,
+        &measured,
+        state.registry_domain(),
+    )
+    .await
+    .map_err(ServiceError::internal)?;
 
     let mut located = Vec::new();
     located.push((

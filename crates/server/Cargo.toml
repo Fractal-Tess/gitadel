@@ -18,6 +18,7 @@ gitadel-api.workspace = true
 gitadel-config.workspace = true
 gitadel-db.workspace = true
 gitadel-storage.workspace = true
+gitadel-registry.workspace = true
 gitadel-core.workspace = true
 gitadel-identity.workspace = true
 gitadel-instance.workspace = true

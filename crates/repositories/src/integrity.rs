@@ -1,35 +1,69 @@
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
 
-use super::RepositoryState;
-use crate::{
-    entity::{
-        instance, issue_attachment, lfs_object, release_asset, repository, repository_release,
-    },
-    schedule,
-};
+use crate::content::RepositoryContent;
 use anyhow::{Context as _, Result, bail, ensure};
 use chrono::Utc;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use gitadel_core::{audit::AuditContext, schedule};
+use gitadel_db::entity::{
+    instance, issue_attachment, lfs_object, release_asset, repository, repository_release,
+};
+use gitadel_storage::blob_store::{DomainStorage, lfs_object_key};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use sley_core::{AtomicCancel, CancelFlag, ObjectFormat};
-use tokio::{fs, task, time};
+use tokio::{fs, sync::watch, time};
+use tokio_util::task::TaskTracker;
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const SCHEDULER_RETRY: Duration = Duration::from_secs(60);
 
-pub async fn serve_integrity_scheduler(state: RepositoryState) -> Result<()> {
-    let mut settings_changed = state.identity().subscribe_integrity_settings();
+#[derive(Clone)]
+pub struct IntegrityService {
+    database: DatabaseConnection,
+    content: RepositoryContent,
+    lfs_root: PathBuf,
+    lfs_storage: Arc<DomainStorage>,
+    workers: TaskTracker,
+}
 
+impl IntegrityService {
+    pub fn new(
+        database: DatabaseConnection,
+        repository_root: PathBuf,
+        lfs_root: PathBuf,
+        lfs_storage: Arc<DomainStorage>,
+    ) -> Self {
+        Self {
+            database,
+            content: RepositoryContent::new(repository_root),
+            lfs_root,
+            lfs_storage,
+            workers: TaskTracker::new(),
+        }
+    }
+
+    /// Wait for any native check left by a cancelled scheduler before restore.
+    pub async fn drain(&self) {
+        self.workers.close();
+        self.workers.wait().await;
+    }
+
+    fn attachment_root(&self, repository: &repository::Model) -> PathBuf {
+        self.lfs_root.join(repository.storage_key.to_string())
+    }
+}
+
+pub async fn serve_integrity_scheduler(
+    state: IntegrityService,
+    mut settings_changed: watch::Receiver<u64>,
+) -> Result<()> {
     loop {
         // A failed tick must not end this future: the server treats that as
         // fatal. Only a closed settings channel is unrecoverable.
-        let settings = match instance::Entity::find_by_id(1)
-            .one(state.identity().database())
-            .await
-        {
+        let settings = match instance::Entity::find_by_id(1).one(&state.database).await {
             Ok(Some(settings)) => settings,
             Ok(None) => {
                 tracing::error!("instance settings row is missing; retrying integrity schedule");
@@ -97,10 +131,10 @@ async fn retry_or_settings_change(
     }
 }
 
-pub(crate) async fn check_all(state: &RepositoryState) -> Result<(usize, usize)> {
+async fn check_all(state: &IntegrityService) -> Result<(usize, usize)> {
     let repositories = repository::Entity::find()
         .filter(repository::Column::DeletedAt.is_null())
-        .all(state.identity().database())
+        .all(&state.database)
         .await
         .context("could not load repositories for integrity check")?;
     let checked = repositories.len();
@@ -118,31 +152,44 @@ pub(crate) async fn check_all(state: &RepositoryState) -> Result<(usize, usize)>
         }
     }
 
-    state
-        .identity()
-        .audit(
-            None,
-            "repository.integrity.check",
-            Some(format!("{checked} checked, {failed} failed")),
-        )
-        .await
-        .context("could not record repository integrity result")?;
+    gitadel_db::audit::record(
+        &state.database,
+        None,
+        "repository.integrity.check",
+        Some(format!("{checked} checked, {failed} failed")),
+        AuditContext::default(),
+    )
+    .await
+    .context("could not record repository integrity result")?;
     tracing::info!(checked, failed, "repository integrity check completed");
     Ok((checked, failed))
 }
 
-async fn check_repository(state: &RepositoryState, repository: &repository::Model) -> Result<()> {
-    check_git_repository(&state.repository_path(repository)).await?;
+async fn check_repository(state: &IntegrityService, repository: &repository::Model) -> Result<()> {
+    check_git_repository(
+        &state.content.repository_path(repository.storage_key),
+        &state.workers,
+    )
+    .await?;
     check_lfs_objects(state, repository).await?;
     check_release_assets(state, repository).await?;
     check_issue_attachments(state, repository).await
 }
 
-async fn check_git_repository(path: &Path) -> Result<()> {
+struct CancelNativeCheck(Arc<AtomicCancel>);
+
+impl Drop for CancelNativeCheck {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+async fn check_git_repository(path: &Path, workers: &TaskTracker) -> Result<()> {
     let path = path.to_owned();
     let cancel = Arc::new(AtomicCancel::new());
     let worker_cancel = Arc::clone(&cancel);
-    let mut worker = task::spawn_blocking(move || -> Result<()> {
+    let _cancel_on_drop = CancelNativeCheck(cancel.clone());
+    let mut worker = workers.spawn_blocking(move || -> Result<()> {
         let format = if path.join("config").is_file() {
             sley_config::read_repo_config(&path, None)
                 .and_then(|config| config.repository_object_format())
@@ -200,19 +247,19 @@ async fn check_git_repository(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-async fn check_lfs_objects(state: &RepositoryState, repository: &repository::Model) -> Result<()> {
+async fn check_lfs_objects(state: &IntegrityService, repository: &repository::Model) -> Result<()> {
     let objects = lfs_object::Entity::find()
         .filter(lfs_object::Column::RepositoryId.eq(repository.id))
-        .all(state.identity().database())
+        .all(&state.database)
         .await
         .context("could not load LFS objects")?;
 
     for object in objects {
-        let key = state
-            .lfs_object_key(repository, &object.oid)
+        let key = lfs_object_key(repository.storage_key, &object.oid)
             .with_context(|| format!("invalid LFS object ID {}", object.oid))?;
         let metadata = state
-            .lfs_store()
+            .lfs_storage
+            .store()
             .stat(&key)
             .await
             .with_context(|| format!("could not inspect LFS object {}", object.oid))?
@@ -227,7 +274,8 @@ async fn check_lfs_objects(state: &RepositoryState, repository: &repository::Mod
             expected_size
         );
         let mut reader = state
-            .lfs_store()
+            .lfs_storage
+            .store()
             .read(&key)
             .await
             .with_context(|| format!("could not read LFS object {}", object.oid))?;
@@ -244,24 +292,24 @@ async fn check_lfs_objects(state: &RepositoryState, repository: &repository::Mod
 }
 
 async fn check_release_assets(
-    state: &RepositoryState,
+    state: &IntegrityService,
     repository: &repository::Model,
 ) -> Result<()> {
     let releases = repository_release::Entity::find()
         .filter(repository_release::Column::RepositoryId.eq(repository.id))
-        .all(state.identity().database())
+        .all(&state.database)
         .await
         .context("could not load releases")?;
 
     for release in releases {
         let assets = release_asset::Entity::find()
             .filter(release_asset::Column::ReleaseId.eq(release.id))
-            .all(state.identity().database())
+            .all(&state.database)
             .await
             .with_context(|| format!("could not load assets for release {}", release.id))?;
         for asset in assets {
             let path = state
-                .lfs_repository_path(repository)
+                .attachment_root(repository)
                 .join("releases")
                 .join(release.id.to_string())
                 .join(asset.id.to_string());
@@ -272,18 +320,18 @@ async fn check_release_assets(
 }
 
 async fn check_issue_attachments(
-    state: &RepositoryState,
+    state: &IntegrityService,
     repository: &repository::Model,
 ) -> Result<()> {
     let attachments = issue_attachment::Entity::find()
         .filter(issue_attachment::Column::RepositoryId.eq(repository.id))
-        .all(state.identity().database())
+        .all(&state.database)
         .await
         .context("could not load issue attachments")?;
 
     for attachment in attachments {
         let path = state
-            .lfs_repository_path(repository)
+            .attachment_root(repository)
             .join("issue-attachments")
             .join(attachment.id.to_string());
         check_stored_file(&path, attachment.size_bytes, "issue attachment").await?;
@@ -345,17 +393,27 @@ mod tests {
         std::fs::create_dir(directory.path().join("refs")).unwrap();
         std::fs::write(directory.path().join("HEAD"), b"ref: refs/heads/main\n").unwrap();
 
-        check_git_repository(directory.path()).await.unwrap();
+        check_git_repository(directory.path(), &TaskTracker::new())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn integrity_check_rejects_incomplete_repository_layouts() {
         let directory = TestDirectory::new();
-        assert!(check_git_repository(directory.path()).await.is_err());
+        assert!(
+            check_git_repository(directory.path(), &TaskTracker::new())
+                .await
+                .is_err()
+        );
 
         std::fs::create_dir(directory.path().join("refs")).unwrap();
         std::fs::write(directory.path().join("HEAD"), b"ref: refs/heads/main\n").unwrap();
-        assert!(check_git_repository(directory.path()).await.is_err());
+        assert!(
+            check_git_repository(directory.path(), &TaskTracker::new())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

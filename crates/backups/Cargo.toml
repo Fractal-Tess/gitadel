@@ -15,6 +15,7 @@ gitadel-config.workspace = true
 gitadel-core.workspace = true
 gitadel-db.workspace = true
 gitadel-storage.workspace = true
+gitadel-registry.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 fs2.workspace = true

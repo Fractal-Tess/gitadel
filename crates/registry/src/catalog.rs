@@ -60,8 +60,7 @@ pub async fn catalog_page_for_actor(
             cursor = row.try_get::<String>("", "image")?;
             // Rows written by an older layout may not name a pullable image.
             if names.len() <= size
-                && (cursor.contains('/')
-                    && gitadel_storage::registry::valid_image_path_components(&cursor))
+                && (cursor.contains('/') && crate::valid_image_path_components(&cursor))
             {
                 names.push(cursor.clone());
             }

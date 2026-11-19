@@ -221,9 +221,15 @@ pub async fn serve(
     let lfs = gitadel_storage::lfs::start(&database, &settings.storage)
         .await
         .context("could not initialize LFS storage")?;
-    let registry = gitadel_storage::registry::storage::start(&database, &settings.storage)
+    let registry = gitadel_registry::storage::start(&database, &settings.storage)
         .await
         .context("could not initialize registry storage")?;
+    let integrity = gitadel_repositories::integrity::IntegrityService::new(
+        database.clone(),
+        settings.storage.repository_root.clone(),
+        settings.storage.lfs_root.clone(),
+        lfs.clone(),
+    );
     let backup_runtime = Arc::new(gitadel_backups::service::BackupRuntime::new(
         database.clone(),
         Some(runtime_settings.clone()),
@@ -234,8 +240,10 @@ pub async fn serve(
         Some(runtime_settings.clone()),
         Some(lfs),
         Some(registry.clone()),
+        &gitadel_registry::storage::RegistryDomain,
+        &gitadel_registry::usage::RegistryUsageProvider,
     ));
-    let (integrity_settings_version, _) = tokio::sync::watch::channel(0);
+    let (integrity_settings_version, integrity_settings_changed) = tokio::sync::watch::channel(0);
     let identity_state = IdentityState::from_services(
         database,
         auth_runtime.clone(),
@@ -264,17 +272,19 @@ pub async fn serve(
     )
     .await
     .context("could not initialize repository storage")?;
-    gitadel_api::recover_imports(&repository_state)
+    gitadel_repositories::imports::recover_interrupted(identity_state.database())
         .await
         .context("could not recover interrupted repository imports")?;
     gitadel_api::purge_soft_deleted_repositories(&repository_state)
         .await
         .context("could not remove previously deleted repositories")?;
+    let actions_shutdown = CancellationToken::new();
     let actions_state = ActionsState::new(
         repository_state.clone(),
         settings.actions.clone(),
         cipher.as_ref().clone(),
-    );
+    )
+    .with_shutdown(actions_shutdown.clone());
     actions_state
         .service()
         .bootstrap_system_runner()
@@ -327,12 +337,14 @@ pub async fn serve(
         shutdown_task.abort();
         result.context("web server stopped unexpectedly")
     });
-    let mut mirror_scheduler = tokio::spawn(gitadel_api::serve_mirror_scheduler(
+    let mut mirror_scheduler = tokio::spawn(crate::workers::serve_mirror_scheduler(
         repository_state.clone(),
     ));
-    let mut integrity_scheduler = tokio::spawn(gitadel_api::serve_integrity_scheduler(
-        repository_state.clone(),
-    ));
+    let mut integrity_scheduler =
+        tokio::spawn(gitadel_repositories::integrity::serve_integrity_scheduler(
+            integrity.clone(),
+            integrity_settings_changed,
+        ));
     // Only logs, never fails: it is stopped with the rest rather than joined.
     let audit_retention = tokio::spawn(gitadel_instance::service::serve_audit_retention(
         identity_state.database().clone(),
@@ -341,8 +353,10 @@ pub async fn serve(
     let mut backup_scheduler = tokio::spawn(gitadel_backups::scheduler::serve_backup_scheduler(
         identity_state.backup_runtime.clone(),
     ));
-    let mut actions_scheduler =
-        tokio::spawn(gitadel_api::serve_actions_scheduler(actions_state.clone()));
+    let mut actions_scheduler = tokio::spawn(crate::workers::serve_actions_scheduler(
+        actions_state.service().clone(),
+        actions_shutdown.clone(),
+    ));
     let mut ssh = tokio::spawn(gitadel_api::serve_ssh(
         settings.ssh,
         repository_state.clone(),
@@ -377,7 +391,7 @@ pub async fn serve(
         result = &mut integrity_scheduler => completed_service(result, CompletedService::IntegrityScheduler),
         Some(action) = maintenance_receiver.recv() => {
             shutdown.cancel();
-            abort_services(Some(CompletedService::Http), &workers, || actions_state.cancel());
+            abort_services(Some(CompletedService::Http), &workers, || actions_shutdown.cancel());
             let http_completed =
                 tokio::time::timeout(Duration::from_secs(5), &mut http).await.is_ok();
             if !http_completed {
@@ -390,7 +404,7 @@ pub async fn serve(
         }
     };
     if !matches!(&outcome, Ok(ServerExit::Maintenance(_))) {
-        abort_services(completed, &workers, || actions_state.cancel());
+        abort_services(completed, &workers, || actions_shutdown.cancel());
     }
     audit_retention.abort();
     let _ = audit_retention.await;
@@ -410,6 +424,7 @@ pub async fn serve(
     let drain_repository_tasks = async {
         let _ = (&mut warmup).await;
         repository_state.wait_for_tasks().await;
+        integrity.drain().await;
     };
     if matches!(&outcome, Ok(ServerExit::Maintenance(_))) {
         // Maintenance rewrites the data the tasks work on, so it must not

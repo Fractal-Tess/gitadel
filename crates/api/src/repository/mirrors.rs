@@ -1,4 +1,4 @@
-use std::{collections::HashSet, path::Path, sync::Arc, time::Duration};
+use std::path::Path;
 
 use axum::{
     Json,
@@ -7,12 +7,17 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use chrono::{DateTime, Utc};
+use gitadel_repositories::mirrors::{
+    MAX_ERROR_LENGTH, MirrorCompletion, finish_synchronization, record_preflight_failure, truncate,
+};
+pub(super) use gitadel_repositories::mirrors::{
+    MirrorBusySet, cleanup_lfs_staging, cleanup_temporary_files,
+};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set,
     TransactionTrait, sea_query::Query,
 };
 use serde::{Deserialize, Serialize};
-use tokio::fs;
 use url::Url;
 use uuid::Uuid;
 
@@ -29,9 +34,6 @@ use crate::{
 
 const MAX_REMOTE_URL_LENGTH: usize = 2_048;
 const MAX_SCHEDULE_LENGTH: usize = 255;
-const MAX_ERROR_LENGTH: usize = 2_048;
-const TEMPORARY_FILE_MAX_AGE: Duration = Duration::from_secs(12 * 60);
-const LFS_IMPORT_STAGING_PREFIX: &str = ".gitadel-import-";
 
 #[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct CreateMirrorRequest {
@@ -603,42 +605,6 @@ async fn convert_inner(
     Ok(())
 }
 
-/// Repositories with a mirror operation in flight.
-#[derive(Clone, Default)]
-pub(super) struct MirrorBusySet(Arc<std::sync::Mutex<HashSet<Uuid>>>);
-
-impl MirrorBusySet {
-    fn ids(&self) -> std::sync::MutexGuard<'_, HashSet<Uuid>> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    pub(super) fn contains(&self, repository_id: Uuid) -> bool {
-        self.ids().contains(&repository_id)
-    }
-
-    /// Marks the repository busy until the returned claim is dropped, which
-    /// also covers a handler future cancelled in the middle of the operation.
-    pub(super) fn claim(&self, repository_id: Uuid) -> Option<MirrorBusy> {
-        self.ids().insert(repository_id).then(|| MirrorBusy {
-            set: self.clone(),
-            repository_id,
-        })
-    }
-}
-
-pub(super) struct MirrorBusy {
-    set: MirrorBusySet,
-    repository_id: Uuid,
-}
-
-impl Drop for MirrorBusy {
-    fn drop(&mut self) {
-        self.set.ids().remove(&self.repository_id);
-    }
-}
-
 /// The outcome of asking for a synchronization.
 pub(super) enum Synchronization {
     Completed(Box<repository_mirror::Model>),
@@ -691,7 +657,13 @@ async fn synchronize_inner(
             // Record the failure and move the schedule on exactly as a failed
             // fetch does; otherwise the scheduler would retry the mirror on
             // every tick without ever showing why.
-            record_preflight_failure(state, mirror, attempted_at, &error).await;
+            record_preflight_failure(
+                state.identity().database(),
+                mirror,
+                attempted_at,
+                &error.to_string(),
+            )
+            .await;
             return Err(error);
         }
     };
@@ -723,55 +695,23 @@ async fn synchronize_inner(
         ),
         _ => None,
     };
-    let completed_at = Utc::now();
-    let next_sync_at = next_sync_after(&mirror, completed_at);
-    let mut active = mirror.into_active_model();
-    active.last_attempted_at = Set(Some(attempted_at));
-    active.next_sync_at = Set(next_sync_at);
-    active.updated_at = Set(completed_at);
-    match &sync_result {
-        Ok(()) => {
-            active.last_synced_at = Set(Some(completed_at));
-            active.last_error = Set(None);
-        }
-        Err(error) => {
-            active.last_error = Set(Some(truncate(&error.to_string(), MAX_ERROR_LENGTH)));
-        }
-    }
-    if let Some(metadata_result) = &metadata_result {
-        match metadata_result {
-            Ok(()) => {
-                active.metadata_last_synced_at = Set(Some(completed_at));
-                active.metadata_error = Set(None);
-            }
-            Err(error) => {
-                active.metadata_error = Set(Some(truncate(&error.to_string(), MAX_ERROR_LENGTH)));
-            }
-        }
-    }
-
-    let transaction = state.identity().database().begin().await?;
-    let mirror = active.update(&transaction).await?;
-    if sync_result.is_ok() {
-        repository::Entity::update_many()
-            .col_expr(
-                repository::Column::UpdatedAt,
-                sea_orm::sea_query::Expr::value(completed_at),
-            )
-            .filter(repository::Column::Id.eq(repository.id))
-            .exec(&transaction)
-            .await?;
-        state
-            .identity()
-            .audit_on(
-                &transaction,
-                actor_user_id,
-                "repository.mirror.sync",
-                Some(format!("{}/{}", repository.namespace, repository.name)),
-            )
-            .await?;
-    }
-    transaction.commit().await?;
+    let mirror = finish_synchronization(
+        state.identity().database(),
+        repository,
+        mirror,
+        MirrorCompletion {
+            attempted_at,
+            git: sync_result.as_ref().copied().map_err(ToString::to_string),
+            metadata: metadata_result
+                .as_ref()
+                .map(|result| result.as_ref().copied().map_err(ToString::to_string)),
+        },
+        actor_user_id,
+        gitadel_core::audit::AuditContext {
+            remote_address: crate::identity::remote_address(),
+        },
+    )
+    .await?;
     state.invalidate_repository_size(repository.id).await;
     sync_result.map_err(|error| ApiError::bad_request(format!("Mirror sync failed: {error}")))?;
     state.queue_repository_analysis(repository.id).await;
@@ -822,50 +762,6 @@ async fn preflight(
         authentication,
         native_auth,
     })
-}
-
-/// The mirror's next scheduled run after `after`. A stored expression that no
-/// longer parses yields no next run rather than leaving the mirror due on
-/// every scheduler tick.
-fn next_sync_after(
-    mirror: &repository_mirror::Model,
-    after: DateTime<Utc>,
-) -> Option<DateTime<Utc>> {
-    let expression = mirror.schedule.as_deref()?;
-    match schedule::next_occurrence(expression, after) {
-        Ok(next) => Some(next),
-        Err(error) => {
-            tracing::error!(
-                %error,
-                repository_id = %mirror.repository_id,
-                "mirror schedule is invalid; scheduled synchronization is paused"
-            );
-            None
-        }
-    }
-}
-
-async fn record_preflight_failure(
-    state: &RepositoryState,
-    mirror: repository_mirror::Model,
-    attempted_at: DateTime<Utc>,
-    error: &ApiError,
-) {
-    let repository_id = mirror.repository_id;
-    let now = Utc::now();
-    let next_sync_at = next_sync_after(&mirror, now);
-    let mut active = mirror.into_active_model();
-    active.last_attempted_at = Set(Some(attempted_at));
-    active.next_sync_at = Set(next_sync_at);
-    active.updated_at = Set(now);
-    active.last_error = Set(Some(truncate(&error.to_string(), MAX_ERROR_LENGTH)));
-    if let Err(update_error) = active.update(state.identity().database()).await {
-        tracing::error!(
-            error = %update_error,
-            %repository_id,
-            "could not record mirror synchronization failure"
-        );
-    }
 }
 
 async fn find_mirror(
@@ -1152,60 +1048,6 @@ fn normalize_schedule(
     let next = schedule::next_occurrence(&schedule, after)
         .map_err(|error| ApiError::bad_request(format!("Mirror schedule {error}.")))?;
     Ok((Some(schedule), Some(next)))
-}
-
-pub(super) async fn cleanup_temporary_files(directory: &Path) -> Result<(), std::io::Error> {
-    let mut entries = tokio::fs::read_dir(directory).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        let is_mirror_credential = name.starts_with(".gitadel-mirror-")
-            && (name.ends_with(".key") || name.ends_with(".known-hosts"));
-        let metadata = entry.metadata().await?;
-        let is_stale = metadata
-            .modified()?
-            .elapsed()
-            .is_ok_and(|age| age > TEMPORARY_FILE_MAX_AGE);
-        if is_mirror_credential && metadata.is_file() && is_stale {
-            tokio::fs::remove_file(entry.path()).await?;
-        }
-    }
-    Ok(())
-}
-
-pub(super) async fn cleanup_lfs_staging(directory: &Path) -> Result<(), std::io::Error> {
-    let mut entries = fs::read_dir(directory).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if !name.starts_with(LFS_IMPORT_STAGING_PREFIX) {
-            continue;
-        }
-        let metadata = entry.metadata().await?;
-        let is_stale = metadata
-            .modified()?
-            .elapsed()
-            .is_ok_and(|age| age > TEMPORARY_FILE_MAX_AGE);
-        if metadata.is_dir() && is_stale {
-            fs::remove_dir_all(entry.path()).await?;
-        }
-    }
-    Ok(())
-}
-
-fn truncate(value: &str, maximum: usize) -> String {
-    if value.len() <= maximum {
-        return value.to_owned();
-    }
-    let mut end = maximum;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_owned()
 }
 
 #[cfg(test)]

@@ -5,7 +5,6 @@
 
 pub mod blob_store;
 pub mod lfs;
-pub mod registry;
 
 use gitadel_config as config;
 use gitadel_core::filesystem;

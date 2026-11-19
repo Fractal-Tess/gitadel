@@ -1,12 +1,10 @@
+#[cfg(test)]
 use super::ActionsState;
 pub(crate) use gitadel_actions::runs::*;
 
-pub(crate) async fn maintain(state: &ActionsState) -> anyhow::Result<()> {
-    gitadel_actions::runs::maintain(state.repository().identity().database(), |run_id| {
-        super::events::spawn_run_completed(state.repository(), run_id);
-    })
-    .await?;
-    Ok(())
+#[cfg(test)]
+async fn maintain(state: &ActionsState) -> Result<(), sea_orm::DbErr> {
+    state.service().maintain().await
 }
 
 #[cfg(test)]

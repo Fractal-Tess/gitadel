@@ -1,4 +1,4 @@
-pub(crate) use gitadel_repositories::git_service::*;
+pub(crate) use gitadel_git::git_service::*;
 
 #[cfg(test)]
 mod tests {

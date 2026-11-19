@@ -7,14 +7,13 @@ pub(crate) mod protocol;
 pub(crate) mod rerun;
 pub(crate) mod runners;
 pub(crate) mod runs;
-pub(crate) mod schedule;
 pub(crate) mod secrets;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) mod tokens;
 pub(crate) mod workflow;
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use axum::Router;
 use tokio_util::sync::CancellationToken;
@@ -38,7 +37,7 @@ impl ActionsState {
     ) -> Self {
         let service = gitadel_actions::ActionsService::new(
             repository.identity().database().clone(),
-            gitadel_repositories::content::RepositoryContent::new(
+            gitadel_git::content::RepositoryContent::new(
                 repository.repository_root().to_path_buf(),
             ),
             settings,
@@ -57,6 +56,11 @@ impl ActionsState {
             service: Arc::new(service),
             shutdown: CancellationToken::new(),
         }
+    }
+    /// Use the same server-owned shutdown signal for worker ticks and job long polls.
+    pub fn with_shutdown(mut self, shutdown: CancellationToken) -> Self {
+        self.shutdown = shutdown;
+        self
     }
     pub fn service(&self) -> &gitadel_actions::ActionsService {
         &self.service
@@ -97,10 +101,6 @@ impl ActionsState {
     pub(crate) fn api_router(&self) -> Router {
         contract_router().with_state(self.clone()).into()
     }
-
-    pub fn cancel(&self) {
-        self.shutdown.cancel();
-    }
 }
 
 pub(crate) fn contract_router() -> utoipa_axum::router::OpenApiRouter<ActionsState> {
@@ -111,40 +111,6 @@ pub(crate) fn contract_router() -> utoipa_axum::router::OpenApiRouter<ActionsSta
 
 pub async fn bootstrap_system_runner(state: &ActionsState) -> anyhow::Result<()> {
     state.service().bootstrap_system_runner().await
-}
-
-/// Scheduler ticks between full schedule scans (15 s x 20 = 5 minutes).
-const SCHEDULE_SCAN_TICKS: u32 = 20;
-
-pub async fn serve_actions_scheduler(state: ActionsState) -> anyhow::Result<()> {
-    let mut interval = tokio::time::interval(Duration::from_secs(15));
-    let mut ticks = 0u32;
-    loop {
-        tokio::select! {
-            () = state.shutdown.cancelled() => return Ok(()),
-            _ = interval.tick() => {
-                // A transient database error must not end this future: the
-                // server treats that as fatal. The next tick retries.
-                if let Err(error) = runs::maintain(&state).await {
-                    tracing::error!(%error, "actions run maintenance failed");
-                }
-                if let Err(error) = artifacts::cleanup(&state).await {
-                    tracing::warn!(%error, "actions artifact cleanup failed");
-                }
-                // Default branches can also move without a push (settings,
-                // mirrors, restores), so rescan periodically.
-                if ticks.is_multiple_of(SCHEDULE_SCAN_TICKS)
-                    && let Err(error) = schedule::sync_all(&state).await
-                {
-                    tracing::warn!(%error, "actions schedule scan failed");
-                }
-                ticks = ticks.wrapping_add(1);
-                if let Err(error) = schedule::fire_due(&state).await {
-                    tracing::warn!(%error, "actions schedule dispatch failed");
-                }
-            }
-        }
-    }
 }
 
 // pbjson-build emits formatting borrows that are valid but trip current Clippy.

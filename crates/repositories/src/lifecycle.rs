@@ -409,7 +409,7 @@ impl LifecycleService {
                 "Default branch is not a valid branch name.",
             ));
         }
-        let path = self.content.repository_path(repository);
+        let path = self.content.repository_path(repository.storage_key);
         let reference = format!("refs/heads/{branch}");
         let reference_for_read = reference.clone();
         read_git(path, move |git| {
@@ -445,7 +445,7 @@ impl LifecycleService {
                 "Default branch is not a valid branch name.",
             ));
         }
-        let path = self.content.repository_path(repository);
+        let path = self.content.repository_path(repository.storage_key);
         let reference = format!("refs/heads/{branch}");
         let reference_for_read = reference.clone();
         read_git(path, move |git| {
@@ -521,7 +521,7 @@ pub fn validate_repository_name(value: &str) -> Result<String, IdentityError> {
     Ok(name.to_owned())
 }
 
-use crate::branches::valid_branch_name;
+use gitadel_git::branches::valid_branch_name;
 
 const RESERVED_REPOSITORY_NAMES: &[&str] = &[
     "integrations",

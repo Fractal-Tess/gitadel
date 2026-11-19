@@ -1,6 +1,6 @@
 //! Storage administration handles and target workflows.
 use crate::blob_store::{
-    DomainStorage,
+    DomainStorage, DomainUsage, StorageDomain,
     targets::{self, MeasuredUsage, StorageTargetConfiguration, StorageTargetView},
 };
 use gitadel_config::{S3Settings, Settings};
@@ -17,6 +17,8 @@ pub struct StorageRuntime {
     pub lfs_storage: Arc<RwLock<Option<Arc<DomainStorage>>>>,
     pub registry_storage: Arc<RwLock<Option<Arc<DomainStorage>>>>,
     measured_storage: Arc<Mutex<HashMap<Uuid, MeasuredUsage>>>,
+    registry_domain: &'static dyn StorageDomain,
+    registry_usage: &'static dyn DomainUsage,
 }
 impl StorageRuntime {
     pub fn new(
@@ -24,6 +26,8 @@ impl StorageRuntime {
         settings: Option<Arc<Settings>>,
         lfs: Option<Arc<DomainStorage>>,
         registry: Option<Arc<DomainStorage>>,
+        registry_domain: &'static dyn StorageDomain,
+        registry_usage: &'static dyn DomainUsage,
     ) -> Self {
         Self {
             database,
@@ -31,6 +35,8 @@ impl StorageRuntime {
             lfs_storage: Arc::new(RwLock::new(lfs)),
             registry_storage: Arc::new(RwLock::new(registry)),
             measured_storage: Default::default(),
+            registry_domain,
+            registry_usage,
         }
     }
     pub fn service(&self, audit: AuditContext) -> StorageService<'_> {
@@ -53,6 +59,14 @@ impl StorageRuntime {
     }
     pub async fn registry_storage(&self) -> Option<Arc<DomainStorage>> {
         self.registry_storage.read().await.clone()
+    }
+
+    pub(crate) fn registry_domain(&self) -> &dyn StorageDomain {
+        self.registry_domain
+    }
+
+    pub(crate) fn registry_usage(&self) -> &dyn DomainUsage {
+        self.registry_usage
     }
 }
 pub struct StorageService<'a> {
@@ -176,9 +190,14 @@ pub async fn list_storage_targets(
         .await?;
     let settings = state.runtime_settings()?;
     let measured = state.measured_storage().await;
-    targets::list(state.database(), &settings.storage.lfs_root, &measured)
-        .await
-        .map_err(ServiceError::internal)
+    targets::list(
+        state.database(),
+        &settings.storage.lfs_root,
+        &measured,
+        state.registry_domain(),
+    )
+    .await
+    .map_err(ServiceError::internal)
 }
 pub async fn measure_storage_target(
     state: &StorageService<'_>,
@@ -309,7 +328,14 @@ mod tests {
             .authenticate_session_principal(&raw)
             .await
             .unwrap();
-        let runtime = StorageRuntime::new(database, None, None, None);
+        let runtime = StorageRuntime::new(
+            database,
+            None,
+            None,
+            None,
+            &crate::lfs::LfsDomain,
+            &crate::lfs::LfsUsage,
+        );
         let result = test_storage_target(
             &runtime.service(AuditContext::default()),
             &principal,

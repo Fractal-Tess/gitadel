@@ -17,11 +17,11 @@ use uuid::Uuid;
 use crate::{
     config::S3Settings,
     entity::{storage_domain_state, storage_migration, storage_target},
-    registry::storage::RegistryDomain,
 };
 
 use super::{
     BlobDigest, BlobStore, FilesystemBlobStore, ObjectKey, ObjectPrefix, S3BlobStore,
+    StorageDomain,
     manager::{self, active_target_id},
 };
 
@@ -180,6 +180,7 @@ pub async fn list(
     database: &DatabaseConnection,
     fallback_path: &std::path::Path,
     measured: &std::collections::HashMap<Uuid, MeasuredUsage>,
+    registry_domain: &dyn StorageDomain,
 ) -> Result<Vec<StorageTargetView>> {
     let active = active_target_id(database, "lfs").await?;
     let registry_active = active_target_id(database, "registry").await?;
@@ -191,7 +192,7 @@ pub async fn list(
         let (_, configuration) = find(database, id).await?;
         let store = configuration.open().await?;
         verify_ownership(store.as_ref(), id).await?;
-        let objects = manager::inventory(database, &RegistryDomain, store.as_ref()).await?;
+        let objects = manager::inventory(database, registry_domain, store.as_ref()).await?;
         registry_object_count = objects.len() as u64;
         for object in objects {
             registry_bytes = registry_bytes
@@ -865,9 +866,14 @@ mod tests {
         };
         let local = scratch.directory("local");
 
-        let views = list(&database, &local, &HashMap::from([(target, measured)]))
-            .await
-            .unwrap();
+        let views = list(
+            &database,
+            &local,
+            &HashMap::from([(target, measured)]),
+            &crate::lfs::LfsDomain,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(views.len(), 2);
         let fallback = &views[0];
@@ -890,7 +896,9 @@ mod tests {
         );
 
         activate(&database, "lfs", Some(target)).await;
-        let views = list(&database, &local, &HashMap::new()).await.unwrap();
+        let views = list(&database, &local, &HashMap::new(), &crate::lfs::LfsDomain)
+            .await
+            .unwrap();
         assert!(!views[0].active);
         assert!(views[1].active);
         assert!(views[1].usage.measured.is_none());

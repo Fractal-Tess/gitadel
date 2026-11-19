@@ -12,8 +12,10 @@ use axum::{
     response::IntoResponse,
 };
 use axum_extra::extract::cookie::CookieJar;
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use chrono::Utc;
+pub use gitadel_repositories::protection::ProtectionRuleResponse;
+use serde::Deserialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -46,21 +48,6 @@ fn service(state: &RepositoryState) -> gitadel_repositories::protection::Protect
         },
     )
 }
-#[derive(Serialize, ToSchema)]
-pub struct ProtectionRuleResponse {
-    id: Uuid,
-    kind: &'static str,
-    pattern: String,
-    block_force_push: bool,
-    block_deletion: bool,
-    block_update: bool,
-    restrict_pushes: bool,
-    admins_bypass: bool,
-    allowed_users: Vec<String>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
 #[derive(Deserialize, ToSchema)]
 pub struct CreateProtectionRuleRequest {
     kind: String,
@@ -122,10 +109,7 @@ pub async fn list_rules(
                 &crate::repository::principal(&headers, &jar)?,
                 repository.id,
             )
-            .await?
-            .into_iter()
-            .map(Into::into)
-            .collect(),
+            .await?,
     ))
 }
 #[utoipa::path(
@@ -163,7 +147,7 @@ pub async fn create_rule(
         .await?;
     Ok((
         StatusCode::CREATED,
-        Json(ProtectionRuleResponse::from(
+        Json(
             service(&state)
                 .create_rule(
                     &crate::repository::principal(&headers, &jar)?,
@@ -171,7 +155,7 @@ pub async fn create_rule(
                     request.into(),
                 )
                 .await?,
-        )),
+        ),
     ))
 }
 #[utoipa::path(
@@ -216,8 +200,7 @@ pub async fn update_rule(
                 id,
                 request.into(),
             )
-            .await?
-            .into(),
+            .await?,
     ))
 }
 #[utoipa::path(
@@ -279,24 +262,6 @@ pub(crate) fn test_rule(
         admins_bypass: true,
         created_at: now,
         updated_at: now,
-    }
-}
-
-impl From<gitadel_repositories::protection::ProtectionRuleResponse> for ProtectionRuleResponse {
-    fn from(value: gitadel_repositories::protection::ProtectionRuleResponse) -> Self {
-        Self {
-            id: value.id,
-            kind: value.kind,
-            pattern: value.pattern,
-            block_force_push: value.block_force_push,
-            block_deletion: value.block_deletion,
-            block_update: value.block_update,
-            restrict_pushes: value.restrict_pushes,
-            admins_bypass: value.admins_bypass,
-            allowed_users: value.allowed_users,
-            created_at: value.created_at,
-            updated_at: value.updated_at,
-        }
     }
 }
 

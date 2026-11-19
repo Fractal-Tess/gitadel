@@ -15,7 +15,7 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use chrono::{DateTime, Utc};
-use gitadel_repositories::browser::lfs_pointer_metadata;
+use gitadel_git::browser::lfs_pointer_metadata;
 use sea_orm::{
     ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, sea_query::OnConflict,
 };
@@ -311,8 +311,7 @@ pub async fn tree(
     let path = state.repository_path(&repository);
     let count_path = path.clone();
     let (mut response, commit_oid) = read_git(path, move |git| {
-        let (tree, commit_oid) =
-            gitadel_repositories::browser::read_tree(git, revision, requested_path)?;
+        let (tree, commit_oid) = gitadel_git::browser::read_tree(git, revision, requested_path)?;
         Ok((
             TreeResponse {
                 revision: tree.revision,
@@ -398,7 +397,7 @@ fn read_submodule_metadata(
     git: &GitRepository,
     tree: ObjectId,
 ) -> sley::Result<HashMap<String, SubmoduleResponse>> {
-    gitadel_repositories::browser::read_submodule_metadata(git, tree).map(|metadata| {
+    gitadel_git::browser::read_submodule_metadata(git, tree).map(|metadata| {
         metadata
             .into_iter()
             .map(|(path, submodule)| (path, submodule.into()))
@@ -410,10 +409,10 @@ fn read_submodule_metadata(
 const MAX_GITMODULES_BYTES: usize = 128 * 1024;
 
 #[cfg(test)]
-use gitadel_repositories::browser::LfsPointerMetadata;
+use gitadel_git::browser::LfsPointerMetadata;
 
-impl From<gitadel_repositories::browser::Submodule> for SubmoduleResponse {
-    fn from(submodule: gitadel_repositories::browser::Submodule) -> Self {
+impl From<gitadel_git::browser::Submodule> for SubmoduleResponse {
+    fn from(submodule: gitadel_git::browser::Submodule) -> Self {
         Self {
             name: submodule.name,
             url: submodule.url,
@@ -614,7 +613,7 @@ pub async fn raw(
     // Resolve the blob before reading it: its id is the validator, so a
     // client that already holds these bytes costs no blob read at all.
     let (blob_oid, size) = read_git(repository_path.clone(), move |git| {
-        gitadel_repositories::browser::resolve_blob(git, &revision, &requested_path)
+        gitadel_git::browser::resolve_blob(git, &revision, &requested_path)
     })
     .await?;
     let etag = format!("\"{}\"", blob_oid.to_hex());
@@ -1108,7 +1107,7 @@ pub(super) async fn readable_repository(
     Ok(repository)
 }
 
-pub(super) use gitadel_repositories::browser::count_reachable_commits;
+pub(super) use gitadel_git::browser::count_reachable_commits;
 
 pub(crate) async fn read_git<T, F>(path: PathBuf, operation: F) -> Result<T, ApiError>
 where
@@ -1119,7 +1118,7 @@ where
 }
 
 pub(super) fn normalize_browse_path(path: &str) -> Result<String, ApiError> {
-    gitadel_repositories::browser::normalize_browse_path(path).map_err(super::service_error)
+    gitadel_git::browser::normalize_browse_path(path).map_err(super::service_error)
 }
 
 fn commit_line_stats(

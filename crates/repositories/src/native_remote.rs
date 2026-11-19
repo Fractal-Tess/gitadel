@@ -904,7 +904,7 @@ pub async fn initialize(
         {
             outcome.head_symref = discovered_head;
         }
-        let branch = crate::branches::select_default_branch(
+        let branch = gitadel_git::branches::select_default_branch(
             &repository,
             branch_from_head(outcome.head_symref.as_deref()),
         )

@@ -19,7 +19,7 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use chrono::Utc;
-use gitadel_repositories::branches::select_default_branch;
+use gitadel_git::branches::select_default_branch;
 use sea_orm::sea_query::{Condition, Expr, LikeExpr, OnConflict};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, IntoActiveModel,

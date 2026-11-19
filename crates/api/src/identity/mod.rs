@@ -374,6 +374,8 @@ impl IdentityState {
             runtime_settings.clone(),
             None,
             None,
+            &gitadel_registry::storage::RegistryDomain,
+            &gitadel_registry::usage::RegistryUsageProvider,
         ));
         Ok(Self {
             storage_runtime,
@@ -444,10 +446,6 @@ impl IdentityState {
 
     pub(crate) async fn lfs_storage(&self) -> Option<Arc<DomainStorage>> {
         self.storage_runtime.lfs_storage().await
-    }
-
-    pub(crate) fn subscribe_integrity_settings(&self) -> watch::Receiver<u64> {
-        self.integrity_settings_version.subscribe()
     }
 
     pub fn public_url(&self) -> &Url {

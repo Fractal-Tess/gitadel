@@ -25,8 +25,8 @@ use crate::{
     config::DatabaseSettings,
     database,
     entity::repository,
-    test_support,
 };
+use gitadel_db::test_support;
 
 /// A migrated database in `root` with an owner.
 pub(crate) async fn database(root: &Path) -> (DatabaseConnection, Uuid) {

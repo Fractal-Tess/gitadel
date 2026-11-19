@@ -1,1 +1,1 @@
-pub(crate) use gitadel_repositories::markdown::*;
+pub(crate) use gitadel_core::markdown::*;

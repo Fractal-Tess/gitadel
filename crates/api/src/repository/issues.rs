@@ -976,8 +976,8 @@ fn ascii_download_name(value: &str) -> String {
     }
 }
 
-fn service(state: &RepositoryState) -> gitadel_repositories::issues::IssueService<'_> {
-    gitadel_repositories::issues::IssueService::new(
+fn service(state: &RepositoryState) -> gitadel_issues::issues::IssueService<'_> {
+    gitadel_issues::issues::IssueService::new(
         state.identity().database(),
         state.lfs_root.as_ref(),
         std::sync::Arc::new(LegacyIssueEffects(state.clone())),
@@ -988,13 +988,13 @@ fn service(state: &RepositoryState) -> gitadel_repositories::issues::IssueServic
 }
 struct LegacyIssueEffects(RepositoryState);
 #[async_trait::async_trait]
-impl gitadel_repositories::issue_effects::IssueEffects for LegacyIssueEffects {
+impl gitadel_issues::issue_effects::IssueEffects for LegacyIssueEffects {
     async fn issue(
         &self,
         repository: &repository::Model,
         actor: &user::Model,
         issue: &repository_issue::Model,
-        action: gitadel_repositories::issue_effects::IssueAction,
+        action: gitadel_issues::issue_effects::IssueAction,
         extra: serde_json::Value,
     ) {
         webhook_events::issue(&self.0, repository, actor, issue, action, extra).await;
@@ -1005,7 +1005,7 @@ impl gitadel_repositories::issue_effects::IssueEffects for LegacyIssueEffects {
         actor: &user::Model,
         issue: &repository_issue::Model,
         comment: &issue_comment::Model,
-        action: gitadel_repositories::issue_effects::ChangeAction,
+        action: gitadel_issues::issue_effects::ChangeAction,
         previous_body: Option<&str>,
     ) {
         webhook_events::issue_comment(
@@ -1057,11 +1057,11 @@ impl gitadel_repositories::issue_effects::IssueEffects for LegacyIssueEffects {
     }
 }
 pub(super) async fn cleanup_expired_attachments(state: &RepositoryState) -> Result<(), ApiError> {
-    Ok(gitadel_repositories::issues::cleanup_expired_attachments(&service(state)).await?)
+    Ok(gitadel_issues::issues::cleanup_expired_attachments(&service(state)).await?)
 }
 
-impl From<gitadel_repositories::issues::IssueUserResponse> for IssueUserResponse {
-    fn from(value: gitadel_repositories::issues::IssueUserResponse) -> Self {
+impl From<gitadel_issues::issues::IssueUserResponse> for IssueUserResponse {
+    fn from(value: gitadel_issues::issues::IssueUserResponse) -> Self {
         Self {
             id: value.id,
             username: value.username,
@@ -1070,8 +1070,8 @@ impl From<gitadel_repositories::issues::IssueUserResponse> for IssueUserResponse
     }
 }
 
-impl From<gitadel_repositories::issues::IssueLabelResponse> for IssueLabelResponse {
-    fn from(value: gitadel_repositories::issues::IssueLabelResponse) -> Self {
+impl From<gitadel_issues::issues::IssueLabelResponse> for IssueLabelResponse {
+    fn from(value: gitadel_issues::issues::IssueLabelResponse) -> Self {
         Self {
             id: value.id,
             name: value.name,
@@ -1082,10 +1082,8 @@ impl From<gitadel_repositories::issues::IssueLabelResponse> for IssueLabelRespon
     }
 }
 
-impl From<gitadel_repositories::issues::ExternalIssueAuthorResponse>
-    for ExternalIssueAuthorResponse
-{
-    fn from(value: gitadel_repositories::issues::ExternalIssueAuthorResponse) -> Self {
+impl From<gitadel_issues::issues::ExternalIssueAuthorResponse> for ExternalIssueAuthorResponse {
+    fn from(value: gitadel_issues::issues::ExternalIssueAuthorResponse) -> Self {
         Self {
             username: value.username,
             profile_url: value.profile_url,
@@ -1093,8 +1091,8 @@ impl From<gitadel_repositories::issues::ExternalIssueAuthorResponse>
     }
 }
 
-impl From<gitadel_repositories::issues::IssueResponse> for IssueResponse {
-    fn from(value: gitadel_repositories::issues::IssueResponse) -> Self {
+impl From<gitadel_issues::issues::IssueResponse> for IssueResponse {
+    fn from(value: gitadel_issues::issues::IssueResponse) -> Self {
         Self {
             id: value.id,
             number: value.number,
@@ -1117,8 +1115,8 @@ impl From<gitadel_repositories::issues::IssueResponse> for IssueResponse {
     }
 }
 
-impl From<gitadel_repositories::issues::IssueAttachmentResponse> for IssueAttachmentResponse {
-    fn from(value: gitadel_repositories::issues::IssueAttachmentResponse) -> Self {
+impl From<gitadel_issues::issues::IssueAttachmentResponse> for IssueAttachmentResponse {
+    fn from(value: gitadel_issues::issues::IssueAttachmentResponse) -> Self {
         Self {
             id: value.id,
             name: value.name,
@@ -1130,16 +1128,16 @@ impl From<gitadel_repositories::issues::IssueAttachmentResponse> for IssueAttach
     }
 }
 
-impl From<gitadel_repositories::issues::RenderedMarkdownResponse> for RenderedMarkdownResponse {
-    fn from(value: gitadel_repositories::issues::RenderedMarkdownResponse) -> Self {
+impl From<gitadel_issues::issues::RenderedMarkdownResponse> for RenderedMarkdownResponse {
+    fn from(value: gitadel_issues::issues::RenderedMarkdownResponse) -> Self {
         Self {
             rendered_html: value.rendered_html,
         }
     }
 }
 
-impl From<gitadel_repositories::issues::IssueCommentResponse> for IssueCommentResponse {
-    fn from(value: gitadel_repositories::issues::IssueCommentResponse) -> Self {
+impl From<gitadel_issues::issues::IssueCommentResponse> for IssueCommentResponse {
+    fn from(value: gitadel_issues::issues::IssueCommentResponse) -> Self {
         Self {
             id: value.id,
             body: value.body,
@@ -1154,7 +1152,7 @@ impl From<gitadel_repositories::issues::IssueCommentResponse> for IssueCommentRe
     }
 }
 
-impl From<ListIssuesQuery> for gitadel_repositories::issues::ListIssuesQuery {
+impl From<ListIssuesQuery> for gitadel_issues::issues::ListIssuesQuery {
     fn from(value: ListIssuesQuery) -> Self {
         Self {
             state: value.state,
@@ -1165,7 +1163,7 @@ impl From<ListIssuesQuery> for gitadel_repositories::issues::ListIssuesQuery {
     }
 }
 
-impl From<CreateIssueRequest> for gitadel_repositories::issues::CreateIssueRequest {
+impl From<CreateIssueRequest> for gitadel_issues::issues::CreateIssueRequest {
     fn from(value: CreateIssueRequest) -> Self {
         Self {
             title: value.title,
@@ -1177,7 +1175,7 @@ impl From<CreateIssueRequest> for gitadel_repositories::issues::CreateIssueReque
     }
 }
 
-impl From<UpdateIssueRequest> for gitadel_repositories::issues::UpdateIssueRequest {
+impl From<UpdateIssueRequest> for gitadel_issues::issues::UpdateIssueRequest {
     fn from(value: UpdateIssueRequest) -> Self {
         Self {
             title: value.title,
@@ -1190,19 +1188,19 @@ impl From<UpdateIssueRequest> for gitadel_repositories::issues::UpdateIssueReque
     }
 }
 
-impl From<CommentRequest> for gitadel_repositories::issues::CommentRequest {
+impl From<CommentRequest> for gitadel_issues::issues::CommentRequest {
     fn from(value: CommentRequest) -> Self {
         Self { body: value.body }
     }
 }
 
-impl From<UploadAttachmentQuery> for gitadel_repositories::issues::UploadAttachmentQuery {
+impl From<UploadAttachmentQuery> for gitadel_issues::issues::UploadAttachmentQuery {
     fn from(value: UploadAttachmentQuery) -> Self {
         Self { name: value.name }
     }
 }
 
-impl From<PreviewMarkdownRequest> for gitadel_repositories::issues::PreviewMarkdownRequest {
+impl From<PreviewMarkdownRequest> for gitadel_issues::issues::PreviewMarkdownRequest {
     fn from(value: PreviewMarkdownRequest) -> Self {
         Self {
             markdown: value.markdown,
@@ -1210,7 +1208,7 @@ impl From<PreviewMarkdownRequest> for gitadel_repositories::issues::PreviewMarkd
     }
 }
 
-impl From<CreateLabelRequest> for gitadel_repositories::issues::CreateLabelRequest {
+impl From<CreateLabelRequest> for gitadel_issues::issues::CreateLabelRequest {
     fn from(value: CreateLabelRequest) -> Self {
         Self {
             name: value.name,
@@ -1220,7 +1218,7 @@ impl From<CreateLabelRequest> for gitadel_repositories::issues::CreateLabelReque
     }
 }
 
-impl From<UpdateLabelRequest> for gitadel_repositories::issues::UpdateLabelRequest {
+impl From<UpdateLabelRequest> for gitadel_issues::issues::UpdateLabelRequest {
     fn from(value: UpdateLabelRequest) -> Self {
         Self {
             name: value.name,
@@ -1230,7 +1228,7 @@ impl From<UpdateLabelRequest> for gitadel_repositories::issues::UpdateLabelReque
     }
 }
 
-pub(super) use gitadel_repositories::issues::ImportedLabel;
+pub(super) use gitadel_issues::issues::ImportedLabel;
 
 // Consumed by the repository import metadata worker.
 pub(super) async fn upsert_imported_label(
@@ -1239,16 +1237,16 @@ pub(super) async fn upsert_imported_label(
     label: ImportedLabel,
 ) -> Result<(), ApiError> {
     Ok(
-        gitadel_repositories::issues::upsert_imported_label(&service(state), repository_id, label)
+        gitadel_issues::issues::upsert_imported_label(&service(state), repository_id, label)
             .await?,
     )
 }
 
-impl From<gitadel_repositories::issues::IssueError> for ApiError {
-    fn from(error: gitadel_repositories::issues::IssueError) -> Self {
+impl From<gitadel_issues::issues::IssueError> for ApiError {
+    fn from(error: gitadel_issues::issues::IssueError) -> Self {
         match error {
-            gitadel_repositories::issues::IssueError::Identity(error) => error.into(),
-            gitadel_repositories::issues::IssueError::Quota(message) => {
+            gitadel_issues::issues::IssueError::Identity(error) => error.into(),
+            gitadel_issues::issues::IssueError::Quota(message) => {
                 ApiError::too_many_requests(message)
             }
         }

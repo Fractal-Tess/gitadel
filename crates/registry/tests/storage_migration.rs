@@ -1,22 +1,29 @@
 //! Every scenario runs once per storage domain, so LFS and the registry are
 //! held to the same migration guarantees.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
+use anyhow::Result;
+use chrono::Utc;
+use gitadel_config::Settings;
+use gitadel_db::{
+    self as database,
+    entity::{lfs_object, repository, storage_migration},
+    test_support,
+};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use sha2::{Digest as _, Sha256};
+use uuid::Uuid;
 
-use super::*;
-use crate::{
+use gitadel_registry::storage::{ObjectKind, RegistryDomain, object_key as registry_object_key};
+use gitadel_storage::{
     blob_store::{
-        BlobDigest, FilesystemBlobStore, ObjectKey, lfs_object_key,
+        BlobDigest, BlobStore, DomainStorage, FilesystemBlobStore, ObjectKey, StorageDomain,
+        lfs_object_key,
+        manager::{active_target_id, state},
         targets::{self, StorageTargetConfiguration},
     },
-    config::Settings,
-    database,
-    entity::lfs_object,
     lfs::LfsDomain,
-    registry::storage::RegistryDomain,
-    test_support,
 };
 
 fn domains() -> [Arc<dyn StorageDomain>; 2] {
@@ -149,12 +156,7 @@ fn object_key(domain: &dyn StorageDomain, storage_key: Uuid, digest: BlobDigest)
     let hex = digest.to_hex();
     match domain.name() {
         "lfs" => lfs_object_key(storage_key, &hex).unwrap(),
-        "registry" => crate::registry::storage::object_key(
-            storage_key,
-            crate::registry::storage::ObjectKind::Blob,
-            &hex,
-        )
-        .unwrap(),
+        "registry" => registry_object_key(storage_key, ObjectKind::Blob, &hex).unwrap(),
         other => panic!("no test key layout for {other}"),
     }
 }
@@ -258,7 +260,7 @@ async fn startup_fails_interrupted_migrations_of_its_own_domain_only() {
     let interrupted = fixture.migration(lfs_operation).await;
     assert_eq!(
         (interrupted.state.as_str(), interrupted.phase.as_str()),
-        (state::FAILED, phase::FAILED)
+        (state::FAILED, "failed")
     );
     assert!(interrupted.error.unwrap().contains("restarted"));
     assert_eq!(restarted.target_id(), None);

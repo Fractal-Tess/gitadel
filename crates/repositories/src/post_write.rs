@@ -118,7 +118,7 @@ impl PostWriteService {
             .all(&self.database)
             .await?;
         let deployments_enabled = effects.deployments_enabled(repository.id).await?;
-        let path = self.content.repository_path(repository);
+        let path = self.content.repository_path(repository.storage_key);
         let after = snapshot_refs(&path).await?;
         let actor = user::Entity::find_by_id(actor_id)
             .one(&self.database)
@@ -490,7 +490,7 @@ mod direct_boundaries {
         let repository = test_support::repository(&database, &owner, "project").await;
         let root = std::env::temp_dir().join(format!("gitadel-post-write-{}", Uuid::new_v4()));
         let content = RepositoryContent::new(root.clone());
-        let path = content.repository_path(&repository);
+        let path = content.repository_path(repository.storage_key);
         assert!(
             Command::new("git")
                 .args(["init", "--bare", "--quiet"])

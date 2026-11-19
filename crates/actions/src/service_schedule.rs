@@ -1,9 +1,9 @@
 //! Default-branch schedule discovery and explicitly driven claims.
+use crate::service::read_git;
 use crate::{ActionsService, discovery, schedule::parse_crons, workflow::RunTrigger};
 use chrono::Utc;
 use gitadel_db::entity::{action_schedule, action_schedule_scan, repository};
 use gitadel_identity::IdentityError;
-use gitadel_repositories::content::read_git;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -15,7 +15,7 @@ async fn default_head(
     let Some(branch) = repository.default_branch.clone() else {
         return Ok(None);
     };
-    let path = state.content.repository_path(repository);
+    let path = state.content.repository_path(repository.storage_key);
     let reference = format!("refs/heads/{branch}");
     let commit = read_git(path, move |git| {
         Ok(git

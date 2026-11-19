@@ -12,7 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 gitadel-config.workspace = true
 gitadel-core.workspace = true
-gitadel-repositories.workspace = true
+gitadel-git.workspace = true
 sley.workspace = true
 anyhow.workspace = true
 gitadel-identity.workspace = true

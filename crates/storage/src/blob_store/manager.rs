@@ -701,6 +701,3 @@ async fn save_progress(
     .update(database)
     .await?)
 }
-
-#[cfg(test)]
-mod tests;

@@ -849,7 +849,7 @@ async fn catalog(
     let parameters = parameters(query)?;
     let size = page_size(&parameters)?;
     let last = parameter(&parameters, "last").unwrap_or("");
-    let (names, more) = gitadel_repositories::registry::catalog_page(
+    let (names, more) = gitadel_registry::catalog::catalog_page(
         state.repositories.identity().database(),
         &principal,
         last,
@@ -875,7 +875,7 @@ async fn catalog(
 }
 
 #[cfg(test)]
-use gitadel_repositories::registry::catalog_page_for_actor as catalog_page;
+use gitadel_registry::catalog::catalog_page_for_actor as catalog_page;
 
 async fn referrers(
     state: &RegistryState,

@@ -10,9 +10,12 @@ Axum state, request, cookie jar, HTTP error, or generated runner protobuf.
 - `instance`: installation settings, branding, assets and administration.
 - `backups`: provider workflows, preflight proofs, backup/restore reservation,
   maintenance progress and schedule claims.
-- `storage`: storage target administration, usage, migration and registry data.
-- `repositories`: lifecycle and access, issues/releases, imports/mirrors,
-  content/diff/blame/media, caches, webhook persistence and delivery.
+- `storage`: blob stores, LFS, storage target administration and migrations.
+- `registry`: image catalog, manifests, tags, uploads and payload layout.
+- `git`: bare repository access, objects, refs, editing, archives and protocol engines.
+- `issues`: issues, labels, comments and attachments.
+- `repositories`: lifecycle and access, releases, imports, mirrors, integrity,
+  caches, webhook persistence and delivery.
 - `actions`: workflow discovery/dispatch, runner tasks, logs, secrets, artifact
   operations and their authorization.
 - `integrations`: provider clients and connection/deployment workflows.

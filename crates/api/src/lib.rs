@@ -23,13 +23,13 @@ use gitadel_mail as mail;
 use gitadel_secrets as secrets;
 use gitadel_storage::{blob_store, lfs as storage};
 
-pub use actions::{ActionsState, bootstrap_system_runner, serve_actions_scheduler};
+pub use actions::{ActionsState, bootstrap_system_runner};
 pub use archive::{acquire_storage_lock, run as run_backup};
 pub use identity::bootstrap_admin;
 pub use identity::{ApiError, IdentityState};
 pub use repository::{
-    RepositoryState, load_ssh_host_key, purge_soft_deleted_repositories, recover_imports,
-    serve_integrity_scheduler, serve_mirror_scheduler, serve_ssh,
+    RepositoryState, load_ssh_host_key, purge_soft_deleted_repositories, serve_ssh,
+    tick_repository_mirrors,
 };
 pub use server::{http_router, maintenance_router};
 

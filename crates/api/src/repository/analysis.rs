@@ -14,7 +14,7 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use chrono::{Duration, NaiveDate, Utc};
-use gitadel_repositories::analysis::{authored_on, commit_authorship};
+use gitadel_git::analysis::{authored_on, commit_authorship};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -604,8 +604,7 @@ fn walk_overview(
     default_reference: Option<&str>,
     since: NaiveDate,
 ) -> sley::Result<GitOverview> {
-    let overview =
-        gitadel_repositories::analysis::walk_overview(git, &tips.tips, default_reference, since)?;
+    let overview = gitadel_git::analysis::walk_overview(git, &tips.tips, default_reference, since)?;
     Ok(GitOverview {
         branch_count: tips.branch_count,
         head: overview.head,
@@ -910,7 +909,7 @@ fn compute_stats(
     repository: &GitRepository,
     root: ObjectId,
 ) -> sley::Result<Vec<LanguageStatResponse>> {
-    gitadel_repositories::analysis::compute_stats(repository, root).map(|stats| {
+    gitadel_git::analysis::compute_stats(repository, root).map(|stats| {
         stats
             .into_iter()
             .map(|stat| LanguageStatResponse {

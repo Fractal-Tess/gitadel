@@ -1,0 +1,26 @@
+[package]
+name = "gitadel-git"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+gitadel-core.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+russh.workspace = true
+sley.workspace = true
+sley-archive.workspace = true
+sley-config.workspace = true
+sley-core.workspace = true
+sley-fsck.workspace = true
+sley-odb.workspace = true
+sley-protocol.workspace = true
+sley-remote.workspace = true
+tokei.workspace = true
+uuid.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }

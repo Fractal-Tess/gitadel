@@ -3,6 +3,7 @@
 use std::io::Read;
 
 mod runtime;
+mod workers;
 
 use gitadel_config as config;
 use gitadel_db as database;
@@ -66,7 +67,12 @@ async fn run(cli: Cli) -> Result<()> {
                 let settings = Settings::load(&cli)?;
                 let _storage_lock =
                     gitadel_backups::archive::acquire_storage_lock(&settings.database)?;
-                storage::run(command, &settings).await
+                storage::run(
+                    command,
+                    &settings,
+                    &gitadel_registry::storage::RegistryDomain,
+                )
+                .await
             }
         };
     }

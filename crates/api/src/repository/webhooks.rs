@@ -719,9 +719,7 @@ pub(super) async fn dispatch_push(
 ) -> Result<(), ApiError> {
     let service = gitadel_repositories::post_write::PostWriteService::new(
         state.identity().database().clone(),
-        gitadel_repositories::content::RepositoryContent::new(
-            state.repository_root.as_ref().clone(),
-        ),
+        gitadel_git::content::RepositoryContent::new(state.repository_root.as_ref().clone()),
         state.webhook_outbox.clone(),
     );
     let presentation = gitadel_repositories::post_write::PushPresentation {

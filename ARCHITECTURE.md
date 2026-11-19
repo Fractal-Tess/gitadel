@@ -12,10 +12,13 @@ Keep the split at the level of existing responsibilities:
 | `db` | Database connections, entities and migrations |
 | `secrets` | Stored credential encryption |
 | `mail` | Mail transport and delivery |
-| `storage` | Blob backends, LFS and registry persistence |
+| `storage` | Blob backends, LFS, targets and shared migrations |
+| `registry` | Container image catalog, manifests, tags and uploads |
 | `identity` | Accounts, authentication and authorization |
 | `instance` | Installation settings, branding and administration |
-| `repositories` | Git operations and repository services |
+| `git` | Bare repository access, refs, objects, archives and protocol engines |
+| `repositories` | Repository lifecycle, branch policy, imports, mirrors and integrity |
+| `issues` | Issues, comments, labels, assignments and attachments |
 | `actions` | Workflow planning and execution |
 | `integrations` | External provider clients and deployment operations |
 | `backups` | Archive creation, inspection, restore and backup providers |
@@ -27,17 +30,15 @@ This is an incremental extraction. Moving the original modules into `api`
 was an intermediate step; it does not complete the responsibility split.
 Extract service operations with their tests, leaving request parsing and HTTP
 responses in `api`. Domain crates must not depend on `api` or `server`.
-Keep issues, releases and webhooks with repository services for now rather
-than creating a separate crate for every feature.
+Issues uses identity permissions and receives notification and webhook effects
+from the application. Actions reads committed workflows through Git. Registry
+provides its payload layout and usage queries to the storage manager.
 
 The current refinement and its acceptance rules are in
 [API-BOUNDARIES.md](API-BOUNDARIES.md).
 
-The current extraction moves the main credential, workflow, Git, storage,
-integration and backup operations into these libraries. API still contains
-diff/blame operations, repository cache orchestration, account administration,
-and passkey/OAuth and enrollment orchestration. These are remaining boundaries
-to refine; the workspace layout alone does not imply complete separation.
+The API still contains some diff and blame operations, repository cache
+coordination, release handlers, and provider adapters for imports and mirrors.
 
 Split oversized state objects where they cross those boundaries. Pass the
 database, storage handles and configuration a service actually needs. Use a

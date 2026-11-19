@@ -36,7 +36,7 @@ pub struct CreateFileResponse {
     pub commit: String,
 }
 
-pub(super) use gitadel_repositories::files::FileWrite;
+pub(super) use gitadel_git::files::FileWrite;
 
 #[utoipa::path(
     post, path = "/repositories/{namespace}/{name}/files",
@@ -187,7 +187,7 @@ async fn write_file_request(
 }
 
 fn validate_request(request: &CreateFileRequest) -> Result<(), ApiError> {
-    gitadel_repositories::files::validate_write(
+    gitadel_git::files::validate_write(
         &request.branch,
         &request.path,
         &request.content,
@@ -230,7 +230,7 @@ pub(super) fn write_file(
     author: &str,
     write: FileWrite,
 ) -> Result<sley::ObjectId, ApiError> {
-    gitadel_repositories::files::write_file(
+    gitadel_git::files::write_file(
         path,
         branch,
         expected_commit,

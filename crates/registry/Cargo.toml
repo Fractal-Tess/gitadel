@@ -1,0 +1,35 @@
+[package]
+name = "gitadel-registry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+gitadel-config.workspace = true
+gitadel-core.workspace = true
+gitadel-db.workspace = true
+gitadel-identity.workspace = true
+gitadel-storage.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+sea-orm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+utoipa.workspace = true
+uuid.workspace = true
+walkdir.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+gitadel-db = { workspace = true, features = ["test-support"] }
+axum.workspace = true

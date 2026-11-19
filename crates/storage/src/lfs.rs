@@ -104,10 +104,16 @@ pub async fn start(
     .await
 }
 
-pub async fn run(command: &LfsCommand, settings: &Settings) -> Result<()> {
+pub async fn run(
+    command: &LfsCommand,
+    settings: &Settings,
+    registry_domain: &dyn StorageDomain,
+) -> Result<()> {
     let database = database::connect_and_migrate(&settings.database).await?;
     let result = match command {
-        LfsCommand::Target { command } => run_target(command, &database, settings).await,
+        LfsCommand::Target { command } => {
+            run_target(command, &database, settings, registry_domain).await
+        }
         LfsCommand::Migrate {
             target_id,
             batch_size,
@@ -127,6 +133,7 @@ async fn run_target(
     command: &LfsTargetCommand,
     database: &DatabaseConnection,
     settings: &Settings,
+    registry_domain: &dyn StorageDomain,
 ) -> Result<()> {
     match command {
         LfsTargetCommand::List => {
@@ -135,8 +142,13 @@ async fn run_target(
                 serde_json::to_string_pretty(
                     // The CLI holds no scan cache, so targets report their
                     // database usage and the volume they sit on.
-                    &targets::list(database, &settings.storage.lfs_root, &Default::default())
-                        .await?,
+                    &targets::list(
+                        database,
+                        &settings.storage.lfs_root,
+                        &Default::default(),
+                        registry_domain
+                    )
+                    .await?,
                 )?
             );
         }
@@ -390,9 +402,14 @@ mod tests {
 
         // Reported usage follows the objects: cutover reattributes the bytes to
         // the destination, and the configured local path goes back to nothing.
-        let views = targets::list(&database, &settings.storage.lfs_root, &Default::default())
-            .await
-            .unwrap();
+        let views = targets::list(
+            &database,
+            &settings.storage.lfs_root,
+            &Default::default(),
+            &LfsDomain,
+        )
+        .await
+        .unwrap();
         let usage_of = |id: Uuid| views.iter().find(|view| view.id == id).unwrap().usage;
         assert_eq!(
             (

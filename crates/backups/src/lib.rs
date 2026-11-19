@@ -7,6 +7,7 @@ use gitadel_config as config;
 use gitadel_core::{filesystem, schedule};
 use gitadel_db as database;
 use gitadel_db::entity;
-use gitadel_storage::{blob_store, lfs as storage, registry};
+use gitadel_registry as registry;
+use gitadel_storage::{blob_store, lfs as storage};
 #[cfg(test)]
 mod test_support;

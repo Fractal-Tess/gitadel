@@ -1,29 +1,15 @@
-use std::time::Duration;
-
-use chrono::{DateTime, Utc};
-use sea_orm::{
-    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
-    sea_query::Query,
-};
+use chrono::Utc;
+use sea_orm::EntityTrait;
 
 use super::{RepositoryState, issues, mirrors, webhooks};
-use crate::entity::{repository, repository_mirror};
+use crate::entity::repository;
+use gitadel_repositories::mirrors::due_mirrors;
 
-const SCHEDULER_INTERVAL: Duration = Duration::from_secs(30);
 const SCHEDULER_BATCH_SIZE: u64 = 16;
-
-pub async fn serve_mirror_scheduler(state: RepositoryState) -> Result<(), anyhow::Error> {
-    let mut interval = tokio::time::interval(SCHEDULER_INTERVAL);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        interval.tick().await;
-        tick(&state).await;
-    }
-}
 
 /// One scheduler pass: periodic housekeeping, then every due mirror is handed
 /// to its own task. Failures are logged and left for the next pass.
-async fn tick(state: &RepositoryState) {
+pub async fn tick(state: &RepositoryState) {
     if let Err(error) = mirrors::cleanup_temporary_files(&state.repository_root).await {
         tracing::warn!(%error, "could not clean stale mirror credential files");
     }
@@ -72,31 +58,6 @@ async fn tick(state: &RepositoryState) {
             }
         });
     }
-}
-
-/// Up to `limit` scheduled mirrors whose next run is at or before `now`,
-/// oldest first, skipping repositories that are being deleted.
-async fn due_mirrors(
-    database: &DatabaseConnection,
-    now: DateTime<Utc>,
-    limit: u64,
-) -> Result<Vec<repository_mirror::Model>, DbErr> {
-    repository_mirror::Entity::find()
-        .filter(repository_mirror::Column::NextSyncAt.is_not_null())
-        .filter(repository_mirror::Column::NextSyncAt.lte(now))
-        .filter(
-            repository_mirror::Column::RepositoryId.in_subquery(
-                Query::select()
-                    .column(repository::Column::Id)
-                    .from(repository::Entity)
-                    .and_where(repository::Column::DeletedAt.is_null())
-                    .to_owned(),
-            ),
-        )
-        .order_by_asc(repository_mirror::Column::NextSyncAt)
-        .limit(limit)
-        .all(database)
-        .await
 }
 
 #[cfg(test)]

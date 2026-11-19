@@ -12,6 +12,9 @@ members = [
     "crates/identity",
     "crates/instance",
     "crates/repositories",
+    "crates/git",
+    "crates/issues",
+    "crates/registry",
     "crates/api",
     "crates/server",
     "crates/cli",
@@ -38,6 +41,9 @@ gitadel-actions = { path = "crates/actions" }
 gitadel-identity = { path = "crates/identity" }
 gitadel-instance = { path = "crates/instance" }
 gitadel-repositories = { path = "crates/repositories" }
+gitadel-git = { path = "crates/git" }
+gitadel-issues = { path = "crates/issues" }
+gitadel-registry = { path = "crates/registry" }
 gitadel-api = { path = "crates/api" }
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
 ammonia = "4.2.0"

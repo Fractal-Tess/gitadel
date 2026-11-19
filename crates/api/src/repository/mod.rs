@@ -24,7 +24,6 @@ pub(crate) mod image;
 mod import_metadata;
 mod imports;
 pub(crate) mod integrations;
-mod integrity;
 pub(crate) mod issues;
 mod lfs;
 #[cfg(test)]
@@ -51,8 +50,7 @@ pub(crate) mod websites;
 pub(crate) use browser::render_markdown;
 
 pub use git_http::GitHttpState;
-pub use integrity::serve_integrity_scheduler;
-pub use mirror_scheduler::serve_mirror_scheduler;
+pub use mirror_scheduler::tick as tick_repository_mirrors;
 pub use resources::purge_soft_deleted_repositories;
 pub(crate) use statuses::statuses_for_commits;
 
@@ -62,10 +60,6 @@ fn service_error(error: gitadel_repositories::Error) -> ApiError {
         gitadel_repositories::Error::Conflict(message) => ApiError::conflict(message),
         gitadel_repositories::Error::Internal(message) => ApiError::internal(message),
     }
-}
-
-pub async fn recover_imports(state: &RepositoryState) -> Result<(), ApiError> {
-    imports::recover_interrupted(state).await
 }
 
 use std::{

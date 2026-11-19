@@ -1,10 +1,10 @@
 //! Discovery and push-triggered workflow operations.
 use super::ActionsService;
+use crate::service::read_git;
 pub use crate::workflow::{RunTrigger, WorkflowDiagnostic, WorkflowPlan, enqueue_plan};
 use crate::workflow::{matches_push, validate_workflow};
 use gitadel_db::entity::{repository, user};
 use gitadel_identity::IdentityError;
-use gitadel_repositories::content::read_git;
 use sea_orm::EntityTrait;
 use serde_json::json;
 use sley::GitObjectType;
@@ -95,7 +95,7 @@ async fn workflow_commit_oid(
     if !reference.starts_with("refs/tags/") {
         return Ok(after.to_owned());
     }
-    let path = state.content.repository_path(repository);
+    let path = state.content.repository_path(repository.storage_key);
     let after = after.to_owned();
     read_git(path, move |git| {
         let oid = git.peel_to_commit_oid(git.rev_parse(&after)?)?;
@@ -110,7 +110,7 @@ pub async fn discover(
     repository: &repository::Model,
     revision: String,
 ) -> Result<Vec<Result<WorkflowPlan, WorkflowDiagnostic>>, IdentityError> {
-    let path = state.content.repository_path(repository);
+    let path = state.content.repository_path(repository.storage_key);
     let files = read_git(path, move |git| {
         let mut selected = None;
         for directory in WORKFLOW_DIRECTORIES {

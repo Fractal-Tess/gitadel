@@ -9,8 +9,12 @@ description = "Git repository operations, remote synchronization and content ser
 [lib]
 path = "src/lib.rs"
 
+[features]
+openapi = ["dep:utoipa"]
+
 [dependencies]
 gitadel-core.workspace = true
+gitadel-git.workspace = true
 gitadel-db.workspace = true
 gitadel-identity.workspace = true
 gitadel-secrets.workspace = true
@@ -20,10 +24,8 @@ gitadel-storage.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
-ammonia.workspace = true
 bytes.workspace = true
 chrono.workspace = true
-comrak.workspace = true
 futures-util.workspace = true
 hmac.workspace = true
 reqwest.workspace = true
@@ -31,22 +33,20 @@ russh.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha1.workspace = true
-tokei.workspace = true
 sley.workspace = true
 sley-rev.workspace = true
 sley-diff-merge.workspace = true
 sley-core.workspace = true
 sley-config.workspace = true
 sley-fsck.workspace = true
-sley-odb.workspace = true
 sley-protocol.workspace = true
 sley-remote.workspace = true
 sley-refs.workspace = true
 sley-transport.workspace = true
-sley-archive.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-util.workspace = true
 url = { workspace = true, features = ["serde"] }
+utoipa = { workspace = true, optional = true }
 uuid.workspace = true
 
 [dev-dependencies]

@@ -20,7 +20,7 @@ use crate::{
     identity::ApiError,
 };
 
-pub(crate) use gitadel_repositories::issue_effects::{ChangeAction, IssueAction};
+pub(crate) use gitadel_issues::issue_effects::{ChangeAction, IssueAction};
 
 /// Emit one `issues` event. `extra` is merged into the top-level payload
 /// (for example `changes`, `label`, or `assignee`).

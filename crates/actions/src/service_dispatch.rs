@@ -1,4 +1,5 @@
 //! Manual workflow discovery and dispatch, including direct-call authorization.
+use crate::service::read_git;
 use crate::{
     ActionsService, discovery,
     dispatch::{DispatchInput, parse_inputs, resolve_inputs},
@@ -12,7 +13,6 @@ use gitadel_identity::{
         RepositoryPermission as Permission, authorize_repository, can_access_repository,
     },
 };
-use gitadel_repositories::content::read_git;
 use serde_json::json;
 use std::collections::BTreeMap;
 pub struct DispatchRequest {
@@ -76,7 +76,7 @@ async fn resolve_reference(
             format!("refs/tags/{reference}"),
         ]
     };
-    let path = state.content.repository_path(repository);
+    let path = state.content.repository_path(repository.storage_key);
     read_git(path, move |git| {
         for candidate in candidates {
             if let Ok(oid) = git.rev_parse(&candidate)

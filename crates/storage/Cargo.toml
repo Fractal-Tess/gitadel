@@ -17,7 +17,6 @@ gitadel-core.workspace = true
 gitadel-db.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
-axum.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
 fs2.workspace = true

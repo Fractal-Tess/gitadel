@@ -1,1 +1,1 @@
-pub(super) use gitadel_repositories::signature::*;
+pub(super) use gitadel_git::signature::*;

@@ -14,13 +14,16 @@ The root manifest is a virtual workspace. All Rust crates live under `crates/`:
 | `db` | `gitadel-db` | Entities, migrations, and database access |
 | `secrets` | `gitadel-secrets` | Secret storage and encryption |
 | `mail` | `gitadel-mail` | Mail delivery |
-| `storage` | `gitadel-storage` | Blob stores, LFS objects, registry persistence, and migrations |
+| `storage` | `gitadel-storage` | Blob stores, LFS objects, storage targets, and shared migrations |
+| `registry` | `gitadel-registry` | Container image catalog, manifests, tags, uploads, and payload layout |
 | `backups` | `gitadel-backups` | Backup archives, providers, restore, and schedule persistence |
 | `integrations` | `gitadel-integrations` | External provider clients and deployment operations |
 | `actions` | `gitadel-actions` | Workflow planning, runner operations, and run persistence |
 | `identity` | `gitadel-identity` | Authentication, account credentials, sessions, and permissions |
 | `instance` | `gitadel-instance` | Installation-wide settings, branding, and administration |
-| `repositories` | `gitadel-repositories` | Git transport, imports, content, editing, and archive services |
+| `git` | `gitadel-git` | Git primitives, editing, content, archives, and protocol engines |
+| `repositories` | `gitadel-repositories` | Repository lifecycle, policy, imports, mirrors, and integrity |
+| `issues` | `gitadel-issues` | Issues, comments, labels, assignments, and attachments |
 | `api` | `gitadel-api` | HTTP/protocol adapters, transport DTOs, routing, and REST contracts |
 | `server` | `gitadel` | Application composition, listeners, worker supervision, and executable |
 | `cli` | `gitadel-cli` | Remote client executable `gtd` |

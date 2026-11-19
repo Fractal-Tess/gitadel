@@ -1,7 +1,7 @@
 mod auth;
 mod error;
 mod http;
-pub(crate) use gitadel_storage::registry::{storage, store};
+pub(crate) use gitadel_registry::{storage, store};
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -15,7 +15,7 @@ pub(super) struct ImageName<'a> {
 }
 
 pub(super) fn parse_image_name(value: &str) -> Result<ImageName<'_>, error::RegistryError> {
-    if !gitadel_storage::registry::valid_image_path_components(value) {
+    if !gitadel_registry::valid_image_path_components(value) {
         return Err(error::RegistryError::bad_request("Invalid image name."));
     }
     let (namespace, rest) = value.split_once('/').ok_or_else(|| {

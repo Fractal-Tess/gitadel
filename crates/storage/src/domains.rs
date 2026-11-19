@@ -7,7 +7,6 @@ use crate::{
     },
     entity::{namespace, organization, repository, storage_migration},
     lfs::LfsUsage,
-    registry::usage::RegistryUsageProvider,
     service::StorageService,
 };
 use chrono::{DateTime, Utc};
@@ -109,7 +108,6 @@ pub struct DomainEntry {
     /// Kept per domain so audit history stays continuous with the actions
     /// recorded before the shared API existed.
     audit_action: &'static str,
-    usage: &'static dyn DomainUsage,
 }
 pub struct Domain {
     pub entry: &'static DomainEntry,
@@ -138,7 +136,6 @@ pub static DOMAINS: [DomainEntry; 2] = [
         label: "Git LFS",
         local_label: "Configured local storage",
         audit_action: "storage.migration.start",
-        usage: &LfsUsage,
     },
     DomainEntry {
         kind: DomainKind::Registry,
@@ -146,9 +143,16 @@ pub static DOMAINS: [DomainEntry; 2] = [
         label: "Container registry",
         local_label: "Configured local storage",
         audit_action: "registry.migration.start",
-        usage: &RegistryUsageProvider,
     },
 ];
+impl DomainEntry {
+    fn usage<'a>(&self, state: &'a StorageService<'_>) -> &'a dyn DomainUsage {
+        match self.kind {
+            DomainKind::Lfs => &LfsUsage,
+            DomainKind::Registry => state.registry_usage(),
+        }
+    }
+}
 impl Domain {
     pub async fn open(
         state: &StorageService<'_>,
@@ -172,7 +176,7 @@ impl Domain {
     ) -> Result<HashMap<Uuid, RepositoryUsage>, ServiceError> {
         let settings = state.runtime_settings()?;
         self.entry
-            .usage
+            .usage(state)
             .by_repository(UsageContext {
                 database: state.database(),
                 settings: &settings.storage,
@@ -384,8 +388,8 @@ pub async fn status(
         active_target_name,
         local_label: domain.entry.local_label,
         local_root: domain.storage.local_root().display().to_string(),
-        usage: UsageTotals::sum(domain.entry.usage.details(), usage.values()),
-        detail_fields: domain.entry.usage.details(),
+        usage: UsageTotals::sum(domain.entry.usage(state).details(), usage.values()),
+        detail_fields: domain.entry.usage(state).details(),
         active_migration,
         last_migration,
     })

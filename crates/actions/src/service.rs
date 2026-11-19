@@ -1,10 +1,24 @@
 //! Owned Actions handles and explicit runtime entry points.
 use gitadel_config::ActionsSettings;
-use gitadel_repositories::content::RepositoryContent;
+use gitadel_git::content::{ReadError, RepositoryContent};
+use gitadel_identity::IdentityError;
 use gitadel_secrets::SecretCipher;
 use sea_orm::DatabaseConnection;
 use std::{path::PathBuf, sync::Arc};
 use uuid::Uuid;
+
+pub(crate) async fn read_git<T, F>(path: PathBuf, operation: F) -> Result<T, IdentityError>
+where
+    T: Send + 'static,
+    F: FnOnce(&sley::Repository) -> sley::Result<T> + Send + 'static,
+{
+    gitadel_git::content::read_git(path, operation)
+        .await
+        .map_err(|error| match error {
+            ReadError::NotFound => IdentityError::not_found(),
+            ReadError::Internal(message) => IdentityError::internal(message),
+        })
+}
 
 /// Announce committed run transitions using the server's repository coordinator.
 /// Implementations enqueue work and do not block the triggering operation.

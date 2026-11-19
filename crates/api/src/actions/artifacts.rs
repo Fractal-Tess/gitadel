@@ -283,15 +283,6 @@ pub(crate) fn set_download_headers(response: &mut Response, row: &action_artifac
     }
 }
 
-pub(crate) async fn cleanup(state: &ActionsState) -> Result<(), sea_orm::DbErr> {
-    gitadel_actions::artifacts::cleanup(
-        database(state),
-        state.repository().actions_artifact_root(),
-        state.settings().artifact_grant_lifetime_seconds,
-    )
-    .await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

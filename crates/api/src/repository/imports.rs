@@ -24,10 +24,7 @@ use uuid::Uuid;
 use super::{RepositoryState, import_metadata, resources, validate_repository_name};
 use crate::{
     entity::{repository, repository_import, repository_import_item},
-    identity::{
-        ApiError, SCOPE_READ, SCOPE_WRITE, load_mirror_identity_secret,
-        mark_repository_identity_used,
-    },
+    identity::{ApiError, SCOPE_READ, SCOPE_WRITE, load_mirror_identity_secret},
 };
 
 const MAX_IMPORT_REPOSITORIES: usize = 500;
@@ -661,238 +658,97 @@ pub async fn cancel_import(
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub(super) async fn recover_interrupted(state: &RepositoryState) -> Result<(), ApiError> {
-    let now = Utc::now();
-    repository_import_item::Entity::update_many()
-        .col_expr(
-            repository_import_item::Column::State,
-            sea_orm::sea_query::Expr::value("credentials_required"),
+struct ImportOperations<'a> {
+    state: &'a RepositoryState,
+    authentication: super::mirrors::ImportAuthentication,
+    metadata_token: Option<String>,
+}
+
+#[async_trait::async_trait]
+impl gitadel_repositories::imports::ImportEffects for ImportOperations<'_> {
+    async fn clone_repository(
+        &self,
+        import: &repository_import::Model,
+        item: &repository_import_item::Model,
+    ) -> Result<repository::Model, String> {
+        resources::create_imported_repository(
+            self.state,
+            import.created_by,
+            resources::ImportRepositoryOptions {
+                namespace: item.target_namespace.clone(),
+                name: item.target_name.clone(),
+                description: Some(format!("Imported from {}", item.source_full_name)),
+                source_url: item.source_web_url.clone(),
+                source_instance_url: Some(import.instance_url.clone()),
+                visibility: item.target_visibility.clone(),
+                remote_url: item.source_clone_url.clone(),
+                authentication: self.authentication.clone(),
+            },
         )
-        .col_expr(
-            repository_import_item::Column::LastError,
-            sea_orm::sea_query::Expr::value(
-                "Gitadel restarted. Reconnect the source credential to resume.",
-            ),
-        )
-        .col_expr(
-            repository_import_item::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::value(now),
-        )
-        .filter(repository_import_item::Column::State.is_in(["queued", "cloning", "metadata"]))
-        .exec(state.identity().database())
-        .await?;
-    repository_import::Entity::update_many()
-        .col_expr(
-            repository_import::Column::State,
-            sea_orm::sea_query::Expr::value("credentials_required"),
-        )
-        .col_expr(
-            repository_import::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::value(now),
-        )
-        .filter(repository_import::Column::State.is_in(["queued", "running"]))
-        .exec(state.identity().database())
-        .await?;
-    Ok(())
+        .await
+        .map_err(|error| error.to_string())
+    }
+
+    async fn import_metadata(
+        &self,
+        import: &repository_import::Model,
+        item: &repository_import_item::Model,
+        repository: &repository::Model,
+    ) -> Result<Option<String>, String> {
+        match self.metadata_token.as_deref() {
+            Some(token) => import_metadata::import_repository_metadata(
+                self.state,
+                repository,
+                &import.provider,
+                &import.instance_url,
+                &item.source_id,
+                &item.source_full_name,
+                token,
+                import.created_by,
+            )
+            .await
+            .map(|report| {
+                tracing::info!(
+                    repository_id = %repository.id,
+                    labels = report.labels,
+                    releases = report.releases,
+                    assets = report.assets,
+                    skipped_assets = report.skipped_assets,
+                    "imported repository metadata"
+                );
+                (report.skipped_assets > 0).then(|| {
+                    format!(
+                        "{} release assets exceeded the 2 GiB limit and were skipped.",
+                        report.skipped_assets
+                    )
+                })
+            }),
+            None => Err(ApiError::internal("import metadata token is unavailable")),
+        }
+        .map_err(|error| error.to_string())
+    }
 }
 
 async fn run_items(
     state: RepositoryState,
-    mut import: repository_import::Model,
+    import: repository_import::Model,
     items: Vec<repository_import_item::Model>,
     authentication: super::mirrors::ImportAuthentication,
     metadata_token: Option<String>,
 ) {
-    import.state = "running".to_owned();
-    import.updated_at = Utc::now();
-    let mut active = import.clone().into_active_model();
-    active.reset(repository_import::Column::State);
-    active.reset(repository_import::Column::UpdatedAt);
-    if let Err(error) = active.update(state.identity().database()).await {
-        tracing::error!(import_id = %import.id, %error, "could not mark repository import as running");
-    }
-    for queued_item in items {
-        let Ok(Some(mut item)) = repository_import_item::Entity::find_by_id(queued_item.id)
-            .one(state.identity().database())
-            .await
-        else {
-            continue;
-        };
-        if item.state != "queued" {
-            continue;
-        }
-
-        item.attempts += 1;
-        item.state = if item.repository_id.is_some() {
-            "metadata"
-        } else {
-            "cloning"
-        }
-        .to_owned();
-        item.last_error = None;
-        item.updated_at = Utc::now();
-        let mut active = item.into_active_model();
-        active.reset(repository_import_item::Column::Attempts);
-        active.reset(repository_import_item::Column::State);
-        active.reset(repository_import_item::Column::LastError);
-        active.reset(repository_import_item::Column::UpdatedAt);
-        let Ok(mut item) = active.update(state.identity().database()).await else {
-            continue;
-        };
-
-        let repository_result = match item.repository_id {
-            Some(repository_id) => repository::Entity::find_by_id(repository_id)
-                .one(state.identity().database())
-                .await
-                .map_err(ApiError::from)
-                .and_then(|repository| {
-                    repository.ok_or_else(|| {
-                        ApiError::bad_request(
-                            "The repository created by this import no longer exists.",
-                        )
-                    })
-                }),
-            None => {
-                resources::create_imported_repository(
-                    &state,
-                    import.created_by,
-                    resources::ImportRepositoryOptions {
-                        namespace: item.target_namespace.clone(),
-                        name: item.target_name.clone(),
-                        description: Some(format!("Imported from {}", item.source_full_name)),
-                        source_url: item.source_web_url.clone(),
-                        source_instance_url: Some(import.instance_url.clone()),
-                        visibility: item.target_visibility.clone(),
-                        remote_url: item.source_clone_url.clone(),
-                        authentication: authentication.clone(),
-                    },
-                )
-                .await
-            }
-        };
-
-        let result = match repository_result {
-            Ok(repository) => {
-                item.repository_id = Some(repository.id);
-                if let Some(identity_id) = import.identity_id {
-                    let _ = mark_repository_identity_used(
-                        state.identity(),
-                        &import.target_namespace,
-                        identity_id,
-                        Utc::now(),
-                    )
-                    .await;
-                }
-                item.state = "metadata".to_owned();
-                item.updated_at = Utc::now();
-                let mut active = item.clone().into_active_model();
-                active.reset(repository_import_item::Column::RepositoryId);
-                active.reset(repository_import_item::Column::State);
-                active.reset(repository_import_item::Column::UpdatedAt);
-                match active.update(state.identity().database()).await {
-                    Ok(saved) => {
-                        item = saved;
-                        if import.provider == "direct" {
-                            Ok(None)
-                        } else {
-                            match metadata_token.as_deref() {
-                                Some(token) => import_metadata::import_repository_metadata(
-                                    &state,
-                                    &repository,
-                                    &import.provider,
-                                    &import.instance_url,
-                                    &item.source_id,
-                                    &item.source_full_name,
-                                    token,
-                                    import.created_by,
-                                )
-                                .await
-                                .map(|report| {
-                                    tracing::info!(
-                                        repository_id = %repository.id,
-                                        labels = report.labels,
-                                        releases = report.releases,
-                                        assets = report.assets,
-                                        skipped_assets = report.skipped_assets,
-                                        "imported repository metadata"
-                                    );
-                                    (report.skipped_assets > 0).then(|| {
-                                        format!(
-                                            "{} release assets exceeded the 2 GiB limit and were skipped.",
-                                            report.skipped_assets
-                                        )
-                                    })
-                                }),
-                                None => Err(ApiError::internal(
-                                    "import metadata token is unavailable",
-                                )),
-                            }
-                        }
-                    }
-                    Err(error) => Err(ApiError::from(error)),
-                }
-            }
-            Err(error) => Err(error),
-        };
-
-        let item_id = item.id;
-        let mut active = item.into_active_model();
-        active.updated_at = Set(Utc::now());
-        match result {
-            Ok(warning) => {
-                active.state = Set("completed".to_owned());
-                active.last_error = Set(warning);
-            }
-            Err(error) => {
-                active.state = Set("failed".to_owned());
-                active.last_error = Set(Some(error.to_string()));
-            }
-        }
-        if let Err(error) = active.update(state.identity().database()).await {
-            tracing::error!(import_id = %import.id, %item_id, %error, "could not record repository import item result");
-        }
-    }
-    let all = match repository_import_item::Entity::find()
-        .filter(repository_import_item::Column::ImportId.eq(import.id))
-        .all(state.identity().database())
-        .await
-    {
-        Ok(items) => items,
-        Err(error) => {
-            tracing::error!(import_id = %import.id, %error, "could not finalize repository import");
-            import.state = "completed_with_errors".to_owned();
-            import.updated_at = Utc::now();
-            let import_id = import.id;
-            let mut active = import.into_active_model();
-            active.reset(repository_import::Column::State);
-            active.reset(repository_import::Column::UpdatedAt);
-            if let Err(error) = active.update(state.identity().database()).await {
-                tracing::error!(%import_id, %error, "could not record repository import state");
-            }
-            return;
-        }
+    let effects = ImportOperations {
+        state: &state,
+        authentication,
+        metadata_token,
     };
-    import.state = if all.iter().all(|item| item.state == "completed") {
-        "completed"
-    } else if all.iter().any(|item| item.state == "failed") {
-        "completed_with_errors"
-    } else if all.iter().any(|item| item.state == "credentials_required") {
-        "credentials_required"
-    } else if all.iter().any(|item| item.state == "cancelled") {
-        "cancelled"
-    } else {
-        "completed_with_errors"
-    }
-    .to_owned();
-    import.updated_at = Utc::now();
-    let import_id = import.id;
-    let final_state = import.state.clone();
-    let mut active = import.into_active_model();
-    active.reset(repository_import::Column::State);
-    active.reset(repository_import::Column::UpdatedAt);
-    if let Err(error) = active.update(state.identity().database()).await {
-        tracing::error!(%import_id, state = %final_state, %error, "could not record final repository import state");
-    }
+    gitadel_repositories::imports::run_items(
+        state.identity().database(),
+        &state.identity().auth_service(),
+        import,
+        items,
+        &effects,
+    )
+    .await;
 }
 
 async fn discover_remote(

@@ -149,7 +149,7 @@ pub async fn source_archive(
     source_archive_response(&cache_path, &archive_name, query.format).await
 }
 
-use gitadel_repositories::archive::prune_archive_cache;
+use gitadel_git::archive::prune_archive_cache;
 
 #[allow(clippy::too_many_arguments)]
 fn write_archive_file(
@@ -162,10 +162,10 @@ fn write_archive_file(
     prefix: String,
 ) -> anyhow::Result<()> {
     let format = match archive_format {
-        SourceArchiveFormat::Zip => gitadel_repositories::archive::ArchiveFormat::Zip,
-        SourceArchiveFormat::TarGz => gitadel_repositories::archive::ArchiveFormat::TarGz,
+        SourceArchiveFormat::Zip => gitadel_git::archive::ArchiveFormat::Zip,
+        SourceArchiveFormat::TarGz => gitadel_git::archive::ArchiveFormat::TarGz,
     };
-    gitadel_repositories::archive::write_archive_file(
+    gitadel_git::archive::write_archive_file(
         repository_path,
         output_path,
         format,
