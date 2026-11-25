@@ -1,0 +1,88 @@
+name: Mobile builds
+
+on:
+  push:
+    tags:
+      - "mobile-*"
+
+permissions:
+  contents: read
+
+env:
+  BUN_VERSION: 1.4.2
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: android
+            runner: ubuntu-24.04
+            asset: gitadel-android-debug.apk
+          - platform: ios
+            runner: macos-26
+            asset: gitadel-ios-simulator.zip
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Bun
+        run: |
+          curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}"
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Generate and sync Android project
+        if: matrix.platform == 'android'
+        run: |
+          bun run check
+          bun run build:assets
+          bun run cap add android
+          cmp build/index.html android/app/src/main/assets/public/index.html
+
+      - name: Build and verify Android APK
+        if: matrix.platform == 'android'
+        run: |
+          export JAVA_HOME="$JAVA_HOME_21_X64"
+          export PATH="$JAVA_HOME/bin:$PATH"
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+          android/gradlew -p android --no-daemon assembleDebug
+          apk=android/app/build/outputs/apk/debug/app-debug.apk
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify "$apk"
+          unzip -p "$apk" assets/public/index.html | cmp build/index.html -
+          cp "$apk" gitadel-android-debug.apk
+
+      - name: Generate and sync iOS project
+        if: matrix.platform == 'ios'
+        run: |
+          bun run check
+          bun run build:assets
+          bun run cap add ios --packagemanager SPM
+          cmp build/index.html ios/App/App/public/index.html
+
+      - name: Build and package iOS Simulator app
+        if: matrix.platform == 'ios'
+        run: |
+          xcodebuild -project ios/App/App.xcodeproj -scheme App \
+            -configuration Debug -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath ios/build CODE_SIGNING_ALLOWED=NO build
+          app=ios/build/Build/Products/Debug-iphonesimulator/App.app
+          test -x "$app/App"
+          cmp build/index.html "$app/public/index.html"
+          ditto -c -k --keepParent "$app" gitadel-ios-simulator.zip
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.platform }}
+          path: frontend/${{ matrix.asset }}
+          if-no-files-found: error

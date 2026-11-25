@@ -8,6 +8,7 @@
     "dev": "vite dev",
     "build": "bun scripts/checked-build.ts",
     "build:assets": "vite build",
+    "mobile:sync": "bun run check && bun run build:assets && cap sync",
     "api:sdk": "svelte-kit sync && openapi-ts && bun scripts/api-contracts.ts",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "bun test",
@@ -15,6 +16,7 @@
     "preview": "vite preview"
   },
   "devDependencies": {
+    "@capacitor/cli": "8.6.2",
     "@hey-api/openapi-ts": "0.99.0",
     "@internationalized/date": "^3.12.4",
     "@lucide/svelte": "^1.47.0",
@@ -41,6 +43,9 @@
     "vite": "8.3.0"
   },
   "dependencies": {
+    "@capacitor/android": "8.6.2",
+    "@capacitor/core": "8.6.2",
+    "@capacitor/ios": "8.6.2",
     "@fontsource-variable/geist": "^5.3.0",
     "@fontsource-variable/geist-mono": "^5.3.0",
     "@icons-pack/svelte-simple-icons": "^7.2.0",
